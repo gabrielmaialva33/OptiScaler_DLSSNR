@@ -324,7 +324,9 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     }
 
     // DXVK check, it's here because of upscaler time calculations
-    if (IdentifyGpu::getPrimaryGpu().usesDxvk)
+    // When the Vulkan hooks were skipped (Linux marker file) there is no Vulkan overlay, so take the
+    // regular path below which draws the D3D overlay.
+    if (IdentifyGpu::getPrimaryGpu().usesDxvk && !State::Instance().vulkanHooksSkipped)
     {
         if (pPresentParameters == nullptr)
             presentResult = pSwapChain->Present(SyncInterval, Flags);
