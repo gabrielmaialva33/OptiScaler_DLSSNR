@@ -247,6 +247,10 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
             // Disabled to prevent unnecessary object release
             // MenuOverlayVk::DestroyVulkanObjects(false);
 
+            // Before HookDevice, so the first present already knows which queues exist. vkd3d-proton
+            // creates several devices, so this is recorded per device rather than globally.
+            MenuOverlayVk::NoteDeviceQueues(*pDevice, &localCreteInfo);
+
             _PD = physicalDevice;
             LOG_DEBUG("_PD captured: {0:X}", (UINT64) _PD);
             _device = *pDevice;

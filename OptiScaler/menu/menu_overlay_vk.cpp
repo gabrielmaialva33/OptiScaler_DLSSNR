@@ -9,6 +9,10 @@
 #include <imgui/imgui_impl_vulkan.h>
 #include <imgui/imgui_impl_win32.h>
 
+#include <algorithm>
+#include <unordered_map>
+#include <vector>
+
 // Vulkan overlay code adopted from here:
 // https://gist.github.com/mem99/0ec31ca302927457f86b1d6756aaa8c4
 // Need to check resize & recreate fixes
@@ -25,7 +29,146 @@ struct ImGui_ImplVulkanH_Frame* _ImVulkan_Frames = VK_NULL_HANDLE;
 static VkSemaphore* _ImVulkan_Semaphores = VK_NULL_HANDLE;
 static VkRenderPass _vkRenderPass = VK_NULL_HANDLE;
 static uint32_t _scImageCount;
-static ULONG64 _frameCount;
+
+// Queue families each device was created with, recorded from vkCreateDevice.
+//
+// vkGetDeviceQueue on a family or index the device never created is undefined behaviour, and
+// vkCreateDevice is the only place that knows. Keyed by device on purpose: vkd3d-proton creates
+// several devices during startup, so a single family-to-count map would answer for whichever device
+// happened to be created last and could hand out an index the swapchain's device does not have.
+// Entries are never removed; the count is the handful of devices an application creates.
+static std::unordered_map<VkDevice, std::unordered_map<uint32_t, uint32_t>> _deviceQueueCounts;
+static std::mutex _deviceQueueCountsMutex;
+
+// Every VkQueue of the device, mapped to the family it came from, plus that device's family
+// properties. A command buffer may only be submitted to a queue of its pool's family, so the present
+// hook needs the family of whatever queue it is handed.
+static std::unordered_map<VkQueue, uint32_t> _queueFamilyOfQueue;
+static std::vector<VkQueueFamilyProperties> _familyProps;
+
+// The family the overlay's command pools were created from. vkd3d-proton does not present on the
+// first graphics queue, so this is corrected to the presenting queue's family on first use.
+static uint32_t _overlayQueueFamily = UINT32_MAX;
+
+// Whether an overlay submit actually armed the fence of each frame. Waiting unconditionally made a
+// single failed submit leave its fence unsignalled, and every later frame then paid the full timeout.
+static bool _frameFencePending[8] = {};
+
+static uint32_t CreatedQueueCount(VkDevice device, uint32_t family)
+{
+    std::scoped_lock lock(_deviceQueueCountsMutex);
+
+    auto device_it = _deviceQueueCounts.find(device);
+
+    if (device_it == _deviceQueueCounts.end())
+        return 0u;
+
+    auto it = device_it->second.find(family);
+    return it == device_it->second.end() ? 0u : it->second;
+}
+
+static bool FamilyOfQueue(VkQueue queue, uint32_t* family)
+{
+    auto it = _queueFamilyOfQueue.find(queue);
+
+    if (it == _queueFamilyOfQueue.end())
+        return false;
+
+    *family = it->second;
+    return true;
+}
+
+// Move the overlay's command pools to another queue family.
+//
+// The family is fixed at pool creation and cannot be changed, so the pools and their command buffers
+// are rebuilt. Called from the present hook the first time the presenting queue turns out to belong to
+// a family other than the one guessed at swapchain creation.
+static bool RebuildCommandPoolsForFamily(uint32_t family)
+{
+    VkDevice device = _ImVulkan_Info.Device;
+
+    if (device == VK_NULL_HANDLE || _ImVulkan_Frames == nullptr)
+        return false;
+
+    // Nothing of ours may still be running when its pool is destroyed.
+    auto idleResult = vkDeviceWaitIdle(device);
+
+    if (idleResult != VK_SUCCESS)
+    {
+        LOG_ERROR("vkDeviceWaitIdle error: {0:X}", (UINT) idleResult);
+        return false;
+    }
+
+    for (uint32_t i = 0; i < _scImageCount; i++)
+    {
+        ImGui_ImplVulkanH_Frame* fd = &_ImVulkan_Frames[i];
+
+        if (fd->CommandBuffer != VK_NULL_HANDLE && fd->CommandPool != VK_NULL_HANDLE)
+            vkFreeCommandBuffers(device, fd->CommandPool, 1, &fd->CommandBuffer);
+
+        fd->CommandBuffer = VK_NULL_HANDLE;
+
+        if (fd->CommandPool != VK_NULL_HANDLE)
+            vkDestroyCommandPool(device, fd->CommandPool, VK_NULL_HANDLE);
+
+        fd->CommandPool = VK_NULL_HANDLE;
+
+        VkCommandPoolCreateInfo poolInfo = {};
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        poolInfo.queueFamilyIndex = family;
+
+        auto poolResult = vkCreateCommandPool(device, &poolInfo, NULL, &fd->CommandPool);
+
+        if (poolResult != VK_SUCCESS)
+        {
+            LOG_ERROR("vkCreateCommandPool error: {0:X}", (UINT) poolResult);
+            return false;
+        }
+
+        VkCommandBufferAllocateInfo bufferInfo = {};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        bufferInfo.commandPool = fd->CommandPool;
+        bufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        bufferInfo.commandBufferCount = 1;
+
+        auto bufferResult = vkAllocateCommandBuffers(device, &bufferInfo, &fd->CommandBuffer);
+
+        if (bufferResult != VK_SUCCESS)
+        {
+            LOG_ERROR("vkAllocateCommandBuffers error: {0:X}", (UINT) bufferResult);
+            return false;
+        }
+    }
+
+    // The device is idle, so nothing is armed any more.
+    for (auto& pending : _frameFencePending)
+        pending = false;
+
+    _overlayQueueFamily = family;
+    _ImVulkan_Info.QueueFamily = family;
+
+    return true;
+}
+
+void MenuOverlayVk::NoteDeviceQueues(VkDevice device, const VkDeviceCreateInfo* pCreateInfo)
+{
+    if (device == VK_NULL_HANDLE || pCreateInfo == nullptr || pCreateInfo->pQueueCreateInfos == nullptr)
+        return;
+
+    std::scoped_lock lock(_deviceQueueCountsMutex);
+    auto& families = _deviceQueueCounts[device];
+    families.clear();
+
+    for (uint32_t i = 0; i < pCreateInfo->queueCreateInfoCount; i++)
+    {
+        const auto& qci = pCreateInfo->pQueueCreateInfos[i];
+        auto& slot = families[qci.queueFamilyIndex];
+        slot = std::max(slot, qci.queueCount);
+    }
+
+    LOG_DEBUG("recorded {0} queue families for device {1:X}", families.size(), (UINT64) device);
+}
 
 static void SetVkObjectName(VkDevice device, VkInstance instance, VkObjectType objectType, uint64_t objectHandle,
                             const char* name)
@@ -94,13 +237,29 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         return;
     }
 
-    VkImage images[8];
+    // images[] is a fixed eight and every per-image array below follows _scImageCount, so a swapchain
+    // with more images than that would run past the end of all of them.
+    constexpr uint32_t kMaxSwapchainImages = 8;
+
+    if (_scImageCount > kMaxSwapchainImages)
+    {
+        LOG_WARN("swapchain reports {0} images, the overlay can track {1}; the menu is skipped on the rest",
+                 _scImageCount, kMaxSwapchainImages);
+        _scImageCount = kMaxSwapchainImages;
+    }
+
+    VkImage images[kMaxSwapchainImages];
     result = vkGetSwapchainImagesKHR(device, *pSwapchain, &_scImageCount, images);
-    if (result != VK_SUCCESS)
+
+    // VK_INCOMPLETE only reports that the clamp above took effect.
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE)
     {
         LOG_ERROR("vkGetSwapchainImagesKHR error: {0:X}", (UINT) result);
         return;
     }
+
+    for (uint32_t i = 0; i < kMaxSwapchainImages; i++)
+        _frameFencePending[i] = false;
 
     // Alloc ImGui frame structure/semaphores for every image.
     // For convenience, I am using ImGui_ImplVulkanH_Frame in imgui_impl_vulkan.h
@@ -111,38 +270,102 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     }
 
     // Select queue family.
+    //
+    // It has to be a graphics family the application actually created queues for, because the family's
+    // queues are enumerated below and vkGetDeviceQueue on one the device never created is undefined
+    // behaviour.
+    constexpr uint32_t kMaxQueueFamilies = 8;
+
     uint32_t queueFamily = 0;
+    uint32_t count = 0;
+    VkQueueFamilyProperties queues[kMaxQueueFamilies];
+
     {
-        // get count
-        uint32_t count = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(pd, &count, NULL);
 
-        // get queues
-        if (count > 0)
+        if (count == 0)
         {
-            VkQueueFamilyProperties queues[8];
-            vkGetPhysicalDeviceQueueFamilyProperties(pd, &count, queues);
+            LOG_WARN("PD Queue property count is 0!");
+            return;
+        }
 
-            // find graphic queue
+        if (count > kMaxQueueFamilies)
+            count = kMaxQueueFamilies;
+
+        vkGetPhysicalDeviceQueueFamilyProperties(pd, &count, queues);
+
+        bool found = false;
+
+        for (uint32_t i = 0; i < count; i++)
+        {
+            if ((queues[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0 || CreatedQueueCount(device, i) == 0)
+                continue;
+
+            queueFamily = i;
+            found = true;
+            break;
+        }
+
+        // The device was created before the overlay could record its queues, or through a path that
+        // does not pass our hook. Fall back to the first graphics family and to queue zero alone,
+        // which is what this code did before the check existed.
+        if (!found)
+        {
             for (uint32_t i = 0; i < count; i++)
             {
                 if (queues[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
                 {
                     queueFamily = i;
+                    found = true;
+                    LOG_WARN("no recorded queue count for a graphics family, assuming family {0} queue 0", i);
                     break;
                 }
             }
         }
-        else
+
+        if (!found)
         {
-            LOG_WARN("PD Queue property count is 0!");
+            LOG_WARN("no graphics queue family available for the overlay");
             return;
         }
     }
 
-    // Get device queue
-    VkQueue queue;
+    // Map every queue of the device to its family, so the present hook can identify the queue it is
+    // handed and move the command pools to that family when it belongs to another one.
+    _queueFamilyOfQueue.clear();
+    _familyProps.assign(queues, queues + count);
+    _overlayQueueFamily = queueFamily;
+
+    for (uint32_t f = 0; f < count; f++)
+    {
+        uint32_t created = CreatedQueueCount(device, f);
+
+        // Only ask for queues the device was created with; the fallback above knows nothing, so it
+        // may look at queue zero of its chosen family alone.
+        if (created == 0)
+            created = (f == queueFamily) ? 1 : 0;
+
+        for (uint32_t i = 0; i < created; i++)
+        {
+            VkQueue q = VK_NULL_HANDLE;
+            vkGetDeviceQueue(device, f, i, &q);
+
+            if (q != VK_NULL_HANDLE)
+                _queueFamilyOfQueue[q] = f;
+        }
+    }
+
+    VkQueue queue = VK_NULL_HANDLE;
     vkGetDeviceQueue(device, queueFamily, 0, &queue);
+
+    if (queue == VK_NULL_HANDLE)
+    {
+        LOG_WARN("vkGetDeviceQueue returned no queue for family {0}", queueFamily);
+        return;
+    }
+
+    LOG_DEBUG("overlay uses queue family {0}, mapped {1} queues across {2} families", queueFamily,
+              _queueFamilyOfQueue.size(), count);
 
     // Create the render pool
     VkDescriptorPool pool = VK_NULL_HANDLE;
@@ -480,7 +703,10 @@ void MenuOverlayVk::DestroyVulkanObjects(bool shutdown)
             fd->BackbufferView = VK_NULL_HANDLE;
         }
 
-        if (fd->BackbufferView != VK_NULL_HANDLE)
+        // Guarded by Framebuffer, not by BackbufferView: the block above has just set BackbufferView
+        // to null, so this condition was never true and every framebuffer leaked on swapchain
+        // recreation.
+        if (fd->Framebuffer != VK_NULL_HANDLE)
         {
             vkDestroyFramebuffer(_ImVulkan_Info.Device, fd->Framebuffer, VK_NULL_HANDLE);
             fd->Framebuffer = VK_NULL_HANDLE;
@@ -494,6 +720,13 @@ void MenuOverlayVk::DestroyVulkanObjects(bool shutdown)
     }
 
     _ImVulkan_Info = {};
+
+    _queueFamilyOfQueue.clear();
+    _familyProps.clear();
+    _overlayQueueFamily = UINT32_MAX;
+
+    for (auto& pending : _frameFencePending)
+        pending = false;
 
     _vkCleanMutex.unlock();
 }
@@ -511,104 +744,211 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     if (pPresentInfo->swapchainCount == 0)
         return false;
 
-    // std::lock_guard<std::mutex> lock(_vkPresentMutex);
+    // Streamline's DLSS-G pacer presents from a thread of its own while the game's render thread also
+    // presents, so two threads reach this function at once. ImGui has a single global context and no
+    // internal locking, and the per-image frame data below is shared, so the whole body is serialised.
+    //
+    // _vkCleanMutex is taken second and always in this order: it keeps a teardown from running the
+    // destructors underneath a present already in flight. Nothing takes these two the other way round.
+    std::scoped_lock presentLock(_vkPresentMutex);
+    std::scoped_lock cleanLock(_vkCleanMutex);
+
+    // The teardown may have run while this thread waited for the locks.
+    if (!_vulkanObjectsCreated || _ImVulkan_Info.Device == VK_NULL_HANDLE)
+        return true;
+
     LOG_DEBUG("rendering menu, swapchain count: {0}", pPresentInfo->swapchainCount);
 
     ImGuiIO& io = ImGui::GetIO();
     (void) io;
     io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
 
-    _frameCount++;
+    ImGui_ImplVulkan_NewFrame();
+
+    if (State::Instance().delayMenuRenderBy > 0)
+        State::Instance().delayMenuRenderBy--;
+
+    if (!MenuOverlayBase::RenderMenu())
+        return true;
+
+    // From here on RenderMenu has produced a frame, and ImGui::Render must be called exactly once on
+    // every path out of this function.
+    if (State::Instance().delayMenuRenderBy != 0)
+    {
+        ImGui::Render();
+        return true;
+    }
+
+    const uint32_t idx = pPresentInfo->pImageIndices[0];
+
+    if (idx >= _scImageCount)
+    {
+        LOG_WARN("present image index {0} is outside the {1} frames the overlay created", idx, _scImageCount);
+        ImGui::Render();
+        return true;
+    }
+
+    // A command buffer may only be submitted to a queue of the family its pool was created from, and
+    // the semaphore hand-over below only holds if the overlay and the present run on one queue.
+    // vkd3d-proton does not present on the first graphics queue, so when the presenting queue belongs
+    // to another family the pools are moved to it rather than the menu being dropped. Submitting
+    // across families is what cost a device: it left the fence unsignalled and ended in DEVICE_LOST.
+    uint32_t presentFamily = UINT32_MAX;
+
+    if (!FamilyOfQueue(queue, &presentFamily))
+    {
+        static bool warnedUnknown = false;
+
+        if (!warnedUnknown)
+        {
+            warnedUnknown = true;
+            LOG_WARN("presenting queue {0:X} is not one of the device's queues, menu disabled on it", (UINT64) queue);
+        }
+
+        ImGui::Render();
+        return true;
+    }
+
+    if (presentFamily != _overlayQueueFamily)
+    {
+        const bool graphics = presentFamily < _familyProps.size() &&
+                              (_familyProps[presentFamily].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
+
+        if (!graphics)
+        {
+            static bool warnedNonGraphics = false;
+
+            if (!warnedNonGraphics)
+            {
+                warnedNonGraphics = true;
+                LOG_WARN("present happens on queue family {0} (flags {1:X}), which cannot run a render pass; "
+                         "the Vulkan overlay is not possible on this swapchain",
+                         presentFamily,
+                         presentFamily < _familyProps.size() ? (UINT) _familyProps[presentFamily].queueFlags : 0u);
+            }
+
+            ImGui::Render();
+            return true;
+        }
+
+        LOG_WARN("present happens on queue family {0}, not {1}; moving the overlay's command pools to it",
+                 presentFamily, _overlayQueueFamily);
+
+        if (!RebuildCommandPoolsForFamily(presentFamily))
+        {
+            LOG_ERROR("could not move the overlay's command pools to family {0}, menu disabled", presentFamily);
+            ImGui::Render();
+            return true;
+        }
+
+        _ImVulkan_Info.Queue = queue;
+        LOG_WARN("overlay now records on queue family {0}", presentFamily);
+    }
+
+    // The overlay takes over whatever the present was going to wait on, and the present waits on the
+    // overlay instead, so every semaphore keeps exactly one signal and one wait. pWaitDstStageMask
+    // needs one entry per wait semaphore and none of them may be zero, so the array is sized to the
+    // real count; dropping any of the game's semaphores would leave them unwaited, so an unexpectedly
+    // long list skips the menu instead.
+    constexpr uint32_t kMaxWaitSemaphores = 16;
+
+    if (pPresentInfo->waitSemaphoreCount > kMaxWaitSemaphores)
+    {
+        LOG_WARN("present waits on {0} semaphores, more than the {1} the overlay can take over",
+                 pPresentInfo->waitSemaphoreCount, kMaxWaitSemaphores);
+        ImGui::Render();
+        return true;
+    }
+
+    ImGui_ImplVulkanH_Frame* fd = &_ImVulkan_Frames[idx];
+
+    // Only wait on a fence an overlay submit actually armed.
+    //
+    // Bounded: an unsignalled fence (a present race with Streamline DLSS-G under vkd3d-proton, say)
+    // must not hang the present thread forever. Skip the menu for this frame instead.
+    if (_frameFencePending[idx])
+    {
+        auto fenceResult = vkWaitForFences(_ImVulkan_Info.Device, 1, &fd->Fence, VK_TRUE, 1000000000ull);
+
+        if (fenceResult != VK_SUCCESS)
+        {
+            LOG_WARN("vkWaitForFences returned {0:X}, skipping menu render this frame", (UINT) fenceResult);
+            ImGui::Render();
+            return true;
+        }
+
+        _frameFencePending[idx] = false;
+    }
+
+    vkResetFences(_ImVulkan_Info.Device, 1, &fd->Fence);
 
     {
-        auto semaphoreIndex = _frameCount % _scImageCount;
-
-        ImGui_ImplVulkan_NewFrame();
-
-        if (State::Instance().delayMenuRenderBy > 0)
-            State::Instance().delayMenuRenderBy--;
-
-        if (MenuOverlayBase::RenderMenu())
-        {
-            if (State::Instance().delayMenuRenderBy == 0)
-            {
-                uint32_t idx = pPresentInfo->pImageIndices[0];
-                ImGui_ImplVulkanH_Frame* fd = &_ImVulkan_Frames[idx];
-
-                // Bounded wait: an unsignaled fence (e.g. a present race with Streamline DLSS-G under
-                // vkd3d-proton) must not hang the present thread forever. Skip the menu this frame instead.
-                auto fenceResult = vkWaitForFences(_ImVulkan_Info.Device, 1, &fd->Fence, VK_TRUE, 1000000000ull);
-
-                if (fenceResult != VK_SUCCESS)
-                {
-                    LOG_WARN("vkWaitForFences returned {0:X}, skipping menu render this frame", (UINT) fenceResult);
-                    ImGui::Render();
-                    return true;
-                }
-
-                vkResetFences(_ImVulkan_Info.Device, 1, &fd->Fence);
-
-                {
-                    vkResetCommandPool(_ImVulkan_Info.Device, fd->CommandPool, 0);
-                    VkCommandBufferBeginInfo info = {};
-                    info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-                    info.flags |= VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-                    vkBeginCommandBuffer(fd->CommandBuffer, &info);
-                }
-
-                {
-                    VkRenderPassBeginInfo info = {};
-                    info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-                    info.renderPass = _vkRenderPass;
-                    info.framebuffer = fd->Framebuffer;
-                    info.renderArea.extent.width = static_cast<uint32_t>(ImGui::GetIO().DisplaySize.x);
-                    info.renderArea.extent.height = static_cast<uint32_t>(ImGui::GetIO().DisplaySize.y);
-                    vkCmdBeginRenderPass(fd->CommandBuffer, &info, VK_SUBPASS_CONTENTS_INLINE);
-                }
-
-                ImGui::Render();
-                ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), fd->CommandBuffer);
-
-                // Submit command buffer
-                vkCmdEndRenderPass(fd->CommandBuffer);
-                auto ecbResult = vkEndCommandBuffer(fd->CommandBuffer);
-                if (ecbResult != VK_SUCCESS)
-                {
-                    LOG_ERROR("vkQueueSubmit error: {0:X}", (UINT) ecbResult);
-                    return false;
-                }
-
-                // Submit queue and semaphores
-                LOG_DEBUG("waitSemaphoreCount: {0}", pPresentInfo->waitSemaphoreCount);
-                VkPipelineStageFlags waitStages[8] = { VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT };
-
-                VkSubmitInfo submit_info = {};
-                submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-                submit_info.commandBufferCount = 1;
-                submit_info.pCommandBuffers = &fd->CommandBuffer;
-                submit_info.pWaitDstStageMask = waitStages;
-                submit_info.waitSemaphoreCount = pPresentInfo->waitSemaphoreCount;
-                submit_info.pWaitSemaphores = pPresentInfo->pWaitSemaphores;
-                submit_info.signalSemaphoreCount = 1;
-                submit_info.pSignalSemaphores = &_ImVulkan_Semaphores[semaphoreIndex];
-
-                auto qResult = vkQueueSubmit(_ImVulkan_Info.Queue, 1, &submit_info, fd->Fence);
-                if (qResult != VK_SUCCESS)
-                {
-                    LOG_ERROR("vkQueueSubmit error: {0:X}", (UINT) qResult);
-                    return false;
-                }
-
-                pPresentInfo->waitSemaphoreCount = 1;
-                pPresentInfo->pWaitSemaphores = &_ImVulkan_Semaphores[semaphoreIndex];
-            }
-            else
-            {
-                // To make RenderMenu happy as it expects this
-                ImGui::Render();
-            }
-        }
+        vkResetCommandPool(_ImVulkan_Info.Device, fd->CommandPool, 0);
+        VkCommandBufferBeginInfo info = {};
+        info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        info.flags |= VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(fd->CommandBuffer, &info);
     }
+
+    {
+        VkRenderPassBeginInfo info = {};
+        info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        info.renderPass = _vkRenderPass;
+        info.framebuffer = fd->Framebuffer;
+        info.renderArea.extent.width = static_cast<uint32_t>(ImGui::GetIO().DisplaySize.x);
+        info.renderArea.extent.height = static_cast<uint32_t>(ImGui::GetIO().DisplaySize.y);
+        vkCmdBeginRenderPass(fd->CommandBuffer, &info, VK_SUBPASS_CONTENTS_INLINE);
+    }
+
+    ImGui::Render();
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), fd->CommandBuffer);
+
+    vkCmdEndRenderPass(fd->CommandBuffer);
+    auto ecbResult = vkEndCommandBuffer(fd->CommandBuffer);
+
+    if (ecbResult != VK_SUCCESS)
+    {
+        // The present itself is still valid: nothing has been taken from it yet. Let it through
+        // without the menu rather than failing the frame.
+        LOG_ERROR("vkEndCommandBuffer error: {0:X}", (UINT) ecbResult);
+        return true;
+    }
+
+    LOG_DEBUG("waitSemaphoreCount: {0}", pPresentInfo->waitSemaphoreCount);
+
+    VkPipelineStageFlags waitStages[kMaxWaitSemaphores];
+
+    for (uint32_t i = 0; i < pPresentInfo->waitSemaphoreCount; i++)
+        waitStages[i] = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+    // Indexed by swapchain image, the same index as the fence and the command buffer above. Cycling
+    // this on a frame counter instead let the index come round again while an earlier present was
+    // still waiting on that semaphore, which is a hang with no diagnostic.
+    VkSemaphore signalSemaphore = _ImVulkan_Semaphores[idx];
+
+    VkSubmitInfo submit_info = {};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &fd->CommandBuffer;
+    submit_info.pWaitDstStageMask = waitStages;
+    submit_info.waitSemaphoreCount = pPresentInfo->waitSemaphoreCount;
+    submit_info.pWaitSemaphores = pPresentInfo->pWaitSemaphores;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &signalSemaphore;
+
+    // On the queue that is presenting, not on the one captured at swapchain creation.
+    auto qResult = vkQueueSubmit(queue, 1, &submit_info, fd->Fence);
+
+    if (qResult != VK_SUCCESS)
+    {
+        LOG_ERROR("vkQueueSubmit error: {0:X}", (UINT) qResult);
+        return true;
+    }
+
+    _frameFencePending[idx] = true;
+
+    pPresentInfo->waitSemaphoreCount = 1;
+    pPresentInfo->pWaitSemaphores = &_ImVulkan_Semaphores[idx];
 
     return true;
 }
