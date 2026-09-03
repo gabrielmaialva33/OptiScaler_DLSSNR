@@ -941,8 +941,27 @@ static void CheckWorkingMode()
 
     if (vulkanModule != nullptr)
     {
-        LOG_DEBUG("Hooking vulkan-1.dll");
-        VulkanHooks::Hook(vulkanModule);
+        // Linux/Proton: allow skipping the Vulkan hooks (and with them the Vulkan overlay path) via a
+        // marker file next to the OptiScaler dll, so the D3D overlay path is used instead. Avoids
+        // present races with Streamline DLSS-G under vkd3d-proton.
+        bool skipVulkanHooks = false;
+
+        if (State::Instance().isRunningOnLinux)
+        {
+            std::error_code ec;
+            auto marker = Util::DllPath().parent_path() / L"optiscaler_skip_vulkan_hooks";
+            skipVulkanHooks = std::filesystem::exists(marker, ec);
+        }
+
+        if (skipVulkanHooks)
+        {
+            LOG_WARN("Skipping vulkan-1.dll hooks, optiscaler_skip_vulkan_hooks marker found");
+        }
+        else
+        {
+            LOG_DEBUG("Hooking vulkan-1.dll");
+            VulkanHooks::Hook(vulkanModule);
+        }
     }
 
     // NVAPI
