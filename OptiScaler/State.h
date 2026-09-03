@@ -268,6 +268,7 @@ class State
     bool vulkanCreatingSC = false;
     bool creatingD3DDevice = false;
     bool vulkanSkipHooks = false;
+    bool vulkanHooksSkipped = false; // Linux: Vulkan hooks disabled via marker file, use D3D overlay path
     VkInstance VulkanInstance = nullptr;
 
     // Framegraph
