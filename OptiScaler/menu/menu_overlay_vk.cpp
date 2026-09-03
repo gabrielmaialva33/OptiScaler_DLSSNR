@@ -535,7 +535,17 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
                 uint32_t idx = pPresentInfo->pImageIndices[0];
                 ImGui_ImplVulkanH_Frame* fd = &_ImVulkan_Frames[idx];
 
-                vkWaitForFences(_ImVulkan_Info.Device, 1, &fd->Fence, VK_TRUE, UINT64_MAX);
+                // Bounded wait: an unsignaled fence (e.g. a present race with Streamline DLSS-G under
+                // vkd3d-proton) must not hang the present thread forever. Skip the menu this frame instead.
+                auto fenceResult = vkWaitForFences(_ImVulkan_Info.Device, 1, &fd->Fence, VK_TRUE, 1000000000ull);
+
+                if (fenceResult != VK_SUCCESS)
+                {
+                    LOG_WARN("vkWaitForFences returned {0:X}, skipping menu render this frame", (UINT) fenceResult);
+                    ImGui::Render();
+                    return true;
+                }
+
                 vkResetFences(_ImVulkan_Info.Device, 1, &fd->Fence);
 
                 {
