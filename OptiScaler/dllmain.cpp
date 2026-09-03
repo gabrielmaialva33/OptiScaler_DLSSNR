@@ -956,6 +956,7 @@ static void CheckWorkingMode()
         if (skipVulkanHooks)
         {
             LOG_WARN("Skipping vulkan-1.dll hooks, optiscaler_skip_vulkan_hooks marker found");
+            State::Instance().vulkanHooksSkipped = true;
         }
         else
         {
