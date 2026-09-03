@@ -164,6 +164,22 @@ struct alignas(256) DlssNrConstants
     // two captures at different exposures then differ by the exposure, whatever the edit did. This
     // is the user's own multiplier, which holds still while the meter works.
     float DebugScale;
+
+    // The reversible-proxy mode. 0 soft knee + our composition (default), 1 unclipped Neutwo proxy +
+    // our composition, 2 Neutwo proxy + pure-inverse replace (model's answer straight back, no
+    // composition). Trailing field, mirroring the shader's cbuffer, so the layout stays a flat run of
+    // 4-byte scalars that C++ and HLSL agree on.
+    uint32_t ReversibleMode;
+
+    // 0 = output the clean upscaler frame (the pass still runs, so Hold frame keeps a frozen frame
+    // to A/B against), 1 = apply the model's edit. Trailing scalar, mirrored in the shader cbuffer.
+    uint32_t ApplyModel;
+
+    // D3D12 source-1 zero-latency exposure. UseGameExposure = 1 makes the shader read the game's live
+    // exposure texture (bound at t4) instead of the CPU-resolved white point; ExposurePreMul is
+    // preExposure * trim, so the live white point is ExposurePreMul / exposure. Mirrored in the cbuffer.
+    uint32_t UseGameExposure;
+    float ExposurePreMul;
 };
 
 class DlssNr_Common

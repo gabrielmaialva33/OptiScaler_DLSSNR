@@ -44,12 +44,13 @@ static void HelpMarker(const char* tip)
 // that are just shader constants (detail, colour, paper white) do not use this -- they can afford to
 // apply live.
 static bool DeferredSlider(const char* label, CustomOptional<float>* opt, float mn, float mx,
-                           const char* fmt = "%.2f")
+                           float def, const char* fmt = "%.2f")
 {
     static std::unordered_map<std::string, float> pending;
 
     auto it = pending.find(label);
     float value = it != pending.end() ? it->second : opt->value_or_default();
+    bool changed = false;
 
     if (ImGui::SliderFloat(label, &value, mn, mx, fmt))
         pending[label] = value;
@@ -62,11 +63,21 @@ static bool DeferredSlider(const char* label, CustomOptional<float>* opt, float 
         {
             *opt = std::clamp(committed->second, mn, mx);
             pending.erase(committed);
-            return true;
+            changed = true;
         }
     }
 
-    return false;
+    ImGui::SameLine();
+
+    const std::string resetId = std::string("Reset##") + label;
+    if (ImGui::SmallButton(resetId.c_str()))
+    {
+        *opt = def;
+        pending.erase(std::string(label));   // drop any in-flight drag so the reset actually sticks
+        changed = true;
+    }
+
+    return changed;
 }
 
 void RenderMenu(Config* config, float menuResScale)
@@ -92,6 +103,15 @@ void RenderMenu(Config* config, float menuResScale)
         // The toggle can be bound to a key, and nobody would think to look for it under Keybinds
         // unless told. Dimmed, because it is a note rather than a setting.
         ImGui::TextDisabled("Can be toggled with a key -- bind it under Keybinds, \"Neural Rendering\".");
+
+        bool applyModel = config->DlssNrApplyModel.value_or_default();
+        if (ImGui::Checkbox("Apply the model", &applyModel))
+            config->DlssNrApplyModel = applyModel;
+
+        HelpMarker("Whether the model's edit is applied. Off shows the clean upscaler frame while the"
+                       "\npass keeps running -- so with Hold frame (under Compare) you can freeze a"
+                       "\nframe and toggle this to see the same frozen frame with and without Neural"
+                       "\nRendering. Leave it on for normal use.");
 
         // Either backend. The two keep separate state, and on a native Vulkan game the D3D12 side
         // is never touched -- so asking only that one reports "waiting for the upscaler" over a pass
@@ -130,15 +150,21 @@ void RenderMenu(Config* config, float menuResScale)
             // of them is running.
             const auto ms = vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime();
 
+            // With "Apply the model" off the pass STILL RUNS (so Hold-frame A/B can toggle its edit on
+            // a frozen frame) -- it only outputs the clean frame. So the cost is real, and saying so
+            // stops the reading looking like a bug. Enable Neural Rendering off is what zeroes it.
+            const char* runSuffix =
+                !config->DlssNrApplyModel.value_or_default() ? "  (model running, edit hidden)" : "";
+
             if (ms.has_value())
-                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running%s - %.2f ms per frame",
-                                   vulkan ? " natively on Vulkan" : "", ms.value());
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running%s - %.2f ms per frame%s",
+                                   vulkan ? " natively on Vulkan" : "", ms.value(), runSuffix);
             else if (vulkan)
                 // Measured but not yet read: the first few frames are still in the query ring.
-                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running natively on Vulkan - %llu frames",
-                                   DlssNr::FramesVk());
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running natively on Vulkan - %llu frames%s",
+                                   DlssNr::FramesVk(), runSuffix);
             else
-                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running.");
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running.%s", runSuffix);
 
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
@@ -167,13 +193,36 @@ void RenderMenu(Config* config, float menuResScale)
                                ? pendingScale
                                : (int) lroundf(config->DlssNrWorkingScale.value_or_default() * 100.0f);
 
-        if (ImGui::SliderInt("Model resolution", &scalePercent, 25, 100, "%d%%"))
+        if (ImGui::SliderInt("Model resolution", &scalePercent, 25, 200, "%d%%"))
             pendingScale = scalePercent;
 
         if (ImGui::IsItemDeactivatedAfterEdit() && pendingScale >= 0)
         {
-            config->DlssNrWorkingScale = std::clamp(pendingScale, 25, 100) / 100.0f;
+            config->DlssNrWorkingScale = std::clamp(pendingScale, 25, 200) / 100.0f;
             pendingScale = -1;
+        }
+
+        if (scalePercent > 100)
+            ImGui::TextDisabled("Supersampling %.2fx: the model runs ABOVE native, then\n"
+                                "is sampled back down. Experimental, and costly -- time grows with the area.",
+                                scalePercent / 100.0f);
+
+        if (scalePercent > 100)
+        {
+            static const char* dsNames[] = { "FSR1", "Bicubic", "Catmull-Rom", "Lanczos2",
+                                             "Lanczos3", "Kaiser2", "Kaiser3", "MAGIC" };
+            int ds = (int) config->DlssNrScalingDownscaler.value_or_default();
+            if (ds < 0 || ds >= IM_ARRAYSIZE(dsNames))
+                ds = (int) Scaler::Lanczos3;
+
+            if (ImGui::Combo("Downscaler (NR)", &ds, dsNames, IM_ARRAYSIZE(dsNames)))
+                config->DlssNrScalingDownscaler = (Scaler) ds;
+
+            HelpMarker("The filter that averages the model's above-native answer back to display size --"
+                           "\nthis is what turns supersampling into LESS noise rather than more. Sharper"
+                           "\nfilters (Lanczos3, Kaiser3) keep the most detail; softer ones (Bicubic,"
+                           "\nCatmull-Rom) are gentler on ringing. Independent of the Output Scaling"
+                           "\ndownscaler, so the two can differ and run at the same time.");
         }
 
         HelpMarker("What fraction of the frame the model works at. Cost falls with the square of"
@@ -186,8 +235,9 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nThe frame itself stays at full detail whatever this says -- only the"
                        "\nmodel's own work is done small.");
 
-        // Only meaningful below 100%: at the same rate the residual collapses to the model's own
-        // picture and the two modes are identical, so the control says so by going grey.
+        // Meaningful only when the model runs BELOW the frame's size. At 100% -- and above, where
+        // supersampling composites its down-legged answer at native -- the residual collapses to the
+        // model's own picture and the two modes are identical, so the control says so by going grey.
         {
             const bool reduced = config->DlssNrWorkingScale.value_or_default() < 0.999f;
 
@@ -212,7 +262,8 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nMatched residual carries up only the model's difference and lays it on the"
                        "\nframe's own proxy, so both pictures being compared are full size and the only"
                        "\nthing that came from the small raster is the edit itself."
-                       "\n\nNo effect at 100%: there is no residual to carry and the two are identical."
+                       "\n\nNo effect at 100% or above: there is no residual to carry and the two are"
+                       "\nidentical (supersampling brings its answer down to frame size before this)."
                        "\n\nFrom hhkbble's multi-pass work on this fork.");
         }
 
@@ -221,6 +272,10 @@ void RenderMenu(Config* config, float menuResScale)
         float transfer = config->DlssNrTransferStrength.value_or_default();
         if (ImGui::SliderFloat("Detail strength", &transfer, 0.0f, 2.0f, "%.2f"))
             config->DlssNrTransferStrength = transfer;
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset##detail"))
+            config->DlssNrTransferStrength = 1.0f;
 
         HelpMarker("How far the frame moves toward the model's picture."
                        "\n\nThe model's answer is not added to the frame -- it is a complete picture of its"
@@ -234,8 +289,12 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nand it decides what to do with it.");
 
         float colour = config->DlssNrColourStrength.value_or_default();
-        if (ImGui::SliderFloat("Colour strength", &colour, 0.0f, 1.0f, "%.2f"))
+        if (ImGui::SliderFloat("Colour strength", &colour, 0.0f, 4.0f, "%.2f"))
             config->DlssNrColourStrength = colour;
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset##colour"))
+            config->DlssNrColourStrength = 1.0f;
 
         HelpMarker("Whether the model's colour arrives with its light."
                        "\n\n0 keeps the game's own hue exactly -- every pixel is the original colour with"
@@ -244,7 +303,42 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nAP1 so nothing unreachable is asked for."
                        "\n\nThis cannot shift hue on its own: it interpolates between two finished"
                        "\npictures rather than adding a colour difference to one, which is what used to"
-                       "\nlet a warm subject come back green.");
+                       "\nlet a warm subject come back green."
+                       "\n\nAbove 1 it OVER-SATURATES: the colour keeps its hue but grows more vivid,"
+                       "\nand rolls off at the edge of what the display can show rather than clipping"
+                       "\ninto a flat blown patch. 1 is the model's own colour; push past it for punch.");
+
+        // Experimental. 0 off (soft knee), 1 Neutwo + our composition, 2 Neutwo + pure-inverse replace,
+        // 3 hybrid+composed, 4 hybrid+replace (identity midtones + unclipped highlights). Always shown.
+        static const char* reversibleNames[] = { "Off (soft knee)", "Neutwo proxy + composed",
+                                                 "Neutwo proxy + replace", "Hybrid proxy + composed",
+                                                 "Hybrid proxy + replace" };
+        int reversible = (int) config->DlssNrReversibleMode.value_or_default();
+        if (reversible < 0 || reversible > 4)
+            reversible = 0;
+        if (ImGui::Combo("Reversible proxy (experimental)", &reversible, reversibleNames,
+                         IM_ARRAYSIZE(reversibleNames)))
+            config->DlssNrReversibleMode = (uint32_t) reversible;
+
+        HelpMarker("What the model is shown, and how its answer comes back."
+                       "\n\nOff (soft knee): the default. It rolls highlights off so hard the model"
+                       "\ncannot resolve detail in them -- fine in soft-lit scenes, weak in bright ones."
+                       "\n\nNeutwo composed: an unclipped curve so the model sees highlight detail, then"
+                       "\neverything above (Detail/Colour strength, highlight guard, palette). It wins in"
+                       "\nbright scenes, but the curve compresses MIDTONES too, so in soft-lit content it"
+                       "\ncan be worse than Off. It also shifts paper white -- re-check it when you switch."
+                       "\n\nHybrid composed: the best of both, and the one to use. Identity in the"
+                       "\nmidtones -- as good as Off there -- and the unclipped roll only in the"
+                       "\nhighlights, so it recovers the detail Off crushes without giving up the"
+                       "\nmidtones Neutwo does. It barely shifts paper white."
+                       "\n\nReplace: the raw model straight back through the exact inverse, none of the"
+                       "\ncomposition -- no guard, no palette, no strengths. Gorgeous where there are no"
+                       "\nbright lights, but they FLASH in motion. A reference, not a daily setting."
+                       "\n\nHybrid replace: the raw model like Replace, but on the hybrid curve -- the"
+                       "\ndecode is identity in the midtones, so the flashing is confined to genuine"
+                       "\nbright highlights instead of everywhere. Most of Replace's detail, far more"
+                       "\nstable. If you love the Replace look but the flicker bothers you, use this."
+                       "\n\nOff is byte-identical to before.");
 
         ImGui::SeparatorText("Model");
 
@@ -278,17 +372,17 @@ void RenderMenu(Config* config, float menuResScale)
                    "\n\nRead when the model is built, so a change rebuilds it after a moment. The"
                    "\nnames come from community testing; NVIDIA ships no names in the binaries.");
 
-        DeferredSlider("Intensity", &config->DlssNrIntensity, 0.0f, 2.0f);
+        DeferredSlider("Intensity", &config->DlssNrIntensity, 0.0f, 2.0f, 1.0f);
 
         HelpMarker("The model's own strength control, applied inside it. Distinct from detail"
                        "\nstrength above, which scales the result afterwards.");
 
-        DeferredSlider("Local structure", &config->DlssNrLocalStructure, 0.0f, 2.0f);
+        DeferredSlider("Local structure", &config->DlssNrLocalStructure, 0.0f, 2.0f, 1.0f);
 
-        DeferredSlider("Local tone", &config->DlssNrLocalTone, 0.0f, 2.0f);
+        DeferredSlider("Local tone", &config->DlssNrLocalTone, 0.0f, 2.0f, 1.0f);
 
 
-        DeferredSlider("Skin structure", &config->DlssNrSkinStructure, -1.0f, 2.0f);
+        DeferredSlider("Skin structure", &config->DlssNrSkinStructure, -1.0f, 2.0f, -1.0f);
 
         HelpMarker("-1 means follow local structure, and is the model's own default -- it is not a"
                        "\nstrength of zero. 0 and above set skin independently of the rest of the frame.");
@@ -409,14 +503,8 @@ void RenderMenu(Config* config, float menuResScale)
                     ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
                                        "Found one. Set paper white below until the picture looks "
                                        "right, then press Anchor here.");
-                else
-                {
-                    const float w = DlssNr::ExposureScan::AnchoredWhitePoint(
-                        anchorNow, config->DlssNrScanInverted.value_or_default(),
-                        config->DlssNrScanTrim.value_or_default());
-                    ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
-                                       "Anchored. Scan %.5f  ->  white point %.2f", anchorNow, w);
-                }
+                // Once anchored, the scan -> white point readout sits above the sliders below; it is
+                // not repeated up here.
             }
             else if (haveExposure)
             {
@@ -480,50 +568,82 @@ void RenderMenu(Config* config, float menuResScale)
 
         if (wpSource == 2)
         {
-            // The scanned source is calibrated by the anchor table below. The slider here is the
-            // paper white: it edits the selected row's white point, or -- with nothing selected --
-            // the live value the next Anchor press will capture.
             const bool editingRow = selectedAnchor >= 0 && selectedAnchor < (int) anchors.size();
 
-            float pw = editingRow ? anchors[selectedAnchor].white
-                                  : config->DlssNrWhitePointScale.value_or_default();
-
-            char lbl[48];
-            if (editingRow)
-                snprintf(lbl, sizeof(lbl), "Paper white (editing point %d)", selectedAnchor + 1);
-            else
-                snprintf(lbl, sizeof(lbl), "Paper white");
-
-            if (ImGui::SliderFloat(lbl, &pw, 0.25f, 2000.0f, "%.2fx", ImGuiSliderFlags_Logarithmic))
+            // The single scan -> white point readout, above the sliders it explains.
+            if (!anchors.empty())
             {
-                if (editingRow)
+                const float liveScan = DlssNr::ExposureScan::BestValue();
+
+                if (liveScan > 0.0f)
                 {
-                    DlssNr::ExposureScan::AnchorSetWhite(selectedAnchor, pw);
-                    config->DlssNrScanAnchors = DlssNr::ExposureScan::SerializeAnchors();
+                    const float w = DlssNr::ExposureScan::AnchoredWhitePoint(
+                        liveScan, config->DlssNrScanInverted.value_or_default(),
+                        config->DlssNrScanTrim.value_or_default());
+
+                    ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
+                                       "Scan %.5f  ->  white point %.2f   (%u point%s)", liveScan, w,
+                                       (unsigned) anchors.size(), anchors.size() == 1 ? "" : "s");
                 }
-                else
-                    config->DlssNrWhitePointScale = pw;
             }
 
-            HelpMarker("The white point for the selected calibration point, or -- with no row"
-                           "\nselected -- the value the next Anchor press captures."
-                           "\n\nSet it until the picture looks right here, then Anchor. Move to very"
-                           "\ndifferent light and do it again: two points fix the buffer's real"
-                           "\nrelationship and the white point holds between them. Click a row below"
-                           "\nto come back and adjust that point; click it again to let go.");
+            // Paper white shows only when there is a point to set: before the first anchor, or when a
+            // row is selected to edit. Once points exist and none is selected, the white point is fixed
+            // by the anchors and only the trim adjusts the live picture -- so the trim takes the
+            // slider's place, the same shape as the game-exposure source.
+            const bool showPaperWhite = anchors.empty() || editingRow;
 
-            // A global multiplier on the interpolated result, kept for parity with the other
-            // sources. The points themselves are the real control here, so this stays near 1.
-            float trim = config->DlssNrScanTrim.value_or_default();
+            if (showPaperWhite)
+            {
+                float pw = editingRow ? anchors[selectedAnchor].white
+                                      : config->DlssNrWhitePointScale.value_or_default();
 
-            if (ImGui::SliderFloat("Trim (x the scan)", &trim, 0.25f, 4.0f, "%.2fx",
-                                   ImGuiSliderFlags_Logarithmic))
-                config->DlssNrScanTrim = std::clamp(trim, 0.25f, 4.0f);
+                char lbl[48];
+                if (editingRow)
+                    snprintf(lbl, sizeof(lbl), "Paper white (editing point %d)", selectedAnchor + 1);
+                else
+                    snprintf(lbl, sizeof(lbl), "Paper white");
 
-            ImGui::SameLine();
+                if (ImGui::SliderFloat(lbl, &pw, 0.25f, 2000.0f, "%.2fx", ImGuiSliderFlags_Logarithmic))
+                {
+                    if (editingRow)
+                    {
+                        DlssNr::ExposureScan::AnchorSetWhite(selectedAnchor, pw);
+                        config->DlssNrScanAnchors = DlssNr::ExposureScan::SerializeAnchors();
+                    }
+                    else
+                        config->DlssNrWhitePointScale = pw;
+                }
 
-            if (ImGui::SmallButton("Reset##scantrim"))
-                config->DlssNrScanTrim = 1.0f;
+                HelpMarker("The white point for the selected calibration point, or -- with no row"
+                               "\nselected -- the value the next Anchor press captures."
+                               "\n\nSet it until the picture looks right here, then Anchor. Move to very"
+                               "\ndifferent light and do it again: two points fix the buffer's real"
+                               "\nrelationship and the white point holds between them. Click a row below"
+                               "\nto come back and adjust that point; click it again to let go.");
+            }
+
+            // The trim multiplies the interpolated result, and in the steady state it is the control
+            // that stands in for paper white: adjust it until the picture looks right in the current
+            // light, then Anchor bakes that trimmed value into a new point and resets the trim to 1.
+            if (!anchors.empty())
+            {
+                float trim = config->DlssNrScanTrim.value_or_default();
+
+                if (ImGui::SliderFloat("Trim (x the scan)", &trim, 0.25f, 4.0f, "%.2fx",
+                                       ImGuiSliderFlags_Logarithmic))
+                    config->DlssNrScanTrim = std::clamp(trim, 0.25f, 4.0f);
+
+                ImGui::SameLine();
+
+                if (ImGui::SmallButton("Reset##scantrim"))
+                    config->DlssNrScanTrim = 1.0f;
+
+                HelpMarker("A multiplier on the scan's white point, and the control you adjust between"
+                               "\nanchor points: dial it until the picture looks right in the current"
+                               "\nlight, then press Anchor here -- it captures the trimmed value as a new"
+                               "\npoint and resets the trim to 1.");
+            }
         }
         else if (wpSource == 1)
         {
@@ -598,6 +718,23 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nAt strength zero the frame is still bit-identical whatever this says.");
         }
 
+        // Highlight guard, directly under the white point / trim -- it bounds the model's edit and
+        // belongs with the exposure controls it works alongside.
+        float maxRatio = config->DlssNrMaxRatio.value_or_default();
+        if (ImGui::SliderFloat("Highlight guard", &maxRatio, 1.0f, 8.0f, "%.1fx"))
+            config->DlssNrMaxRatio = maxRatio;
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset##guard"))
+            config->DlssNrMaxRatio = 2.0f;
+
+        HelpMarker("The most the pass may move any pixel, as a multiple of what it already was, in"
+                       "\nboth directions -- a pixel may not be brightened past this nor darkened past"
+                       "\nits reciprocal. Lights are where the model has least to say and rescaling its"
+                       "\nanswer does the most damage; 2x leaves detail intact while stopping a strip"
+                       "\nlight turning into a string of coloured cells. Raise it only if bright areas"
+                       "\nlook clipped.");
+
         // Directly under the white point, because that is the number it moves and the number the
         // anchor captures. It used to sit under Inspect, a whole section away from the slider it
         // reads, which left "Anchor here" looking like a control for something else entirely.
@@ -663,17 +800,34 @@ void RenderMenu(Config* config, float menuResScale)
 
                 if (ImGui::Button("Anchor here"))
                 {
-                    if (DlssNr::ExposureScan::AnchorAdd(
-                            live, std::max(0.01f, config->DlssNrWhitePointScale.value_or_default())))
+                    // What to capture. Before the first point, the paper white above (an absolute value
+                    // with the wide range a fresh game needs). After that, the EFFECTIVE white point the
+                    // picture is showing right now -- the interpolated value times the Trim the user just
+                    // dialed in -- so a second point in different light captures the trimmed look, not a
+                    // frozen paper white (which would make two equal whites and a flat, non-tracking
+                    // curve). The trim is reset afterwards: the new point, which the picture now passes
+                    // through exactly, must not be multiplied by it a second time.
+                    const float captureWhite =
+                        anchors.empty()
+                            ? std::max(0.01f, config->DlssNrWhitePointScale.value_or_default())
+                            : std::max(0.01f, DlssNr::ExposureScan::AnchoredWhitePoint(
+                                                  live, config->DlssNrScanInverted.value_or_default(),
+                                                  config->DlssNrScanTrim.value_or_default()));
+
+                    if (DlssNr::ExposureScan::AnchorAdd(live, captureWhite))
                     {
                         config->DlssNrScanAnchors = DlssNr::ExposureScan::SerializeAnchors();
+                        config->DlssNrScanTrim = 1.0f;
                         selectedAnchor = -1;
                     }
                 }
 
                 ImGui::EndDisabled();
 
-                HelpMarker("Set the paper white above until the picture looks right, then press this."
+                HelpMarker("Make the picture look right, then press this -- it captures the current look"
+                               "\nas a point. For the first point use the Paper white slider above; for"
+                               "\nevery point after, move to different light and use the Trim, which the"
+                               "\nAnchor then bakes into a new point."
                                "\n\nThe first press calibrates one point -- the white point then"
                                "\nfollows the scan by ratio from there, as before. Walk into very"
                                "\ndifferent light, set paper white again, and press it again: the"
@@ -757,16 +911,7 @@ void RenderMenu(Config* config, float menuResScale)
                                    "\ndifferent light and this is decided for you, so it disappears.");
                 }
 
-                if (isSource && live > 0.0f && !anchors.empty())
-                {
-                    const float w = DlssNr::ExposureScan::AnchoredWhitePoint(
-                        live, config->DlssNrScanInverted.value_or_default(),
-                        config->DlssNrScanTrim.value_or_default());
-
-                    ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
-                                       "Scan %.5f  ->  white point %.2f   (%u point%s)", live, w,
-                                       (unsigned) anchors.size(), anchors.size() == 1 ? "" : "s");
-                }
+                // The scan -> white point readout is shown above the sliders now, not here.
 
                 // Everything below is read-out rather than control: what the scan is looking at and
                 // how to tell whether it found the right thing. Folded away because the two decisions
@@ -812,57 +957,27 @@ void RenderMenu(Config* config, float menuResScale)
             }
         }
 
-        float maxRatio = config->DlssNrMaxRatio.value_or_default();
-        if (ImGui::SliderFloat("Highlight guard", &maxRatio, 1.0f, 8.0f, "%.1fx"))
-            config->DlssNrMaxRatio = maxRatio;
-
-        HelpMarker("The most the pass may move any pixel, as a multiple of what it already was --"
-                       "\nin both directions. A pixel may not be brightened past this, nor darkened"
-                       "\npast its reciprocal."
-                       "\n\nLights are where the model has least to say and where rescaling its answer"
-                       "\ninto the frame does the most damage: an early version turned every strip light"
-                       "\nin the scene into a string of coloured cells. 2x leaves detail intact while"
-                       "\nmaking that failure impossible. Raise it only if bright areas look clipped."
-                       "\n\nDarkening was once left uncapped, and the guard itself only bound the"
-                       "\ncolour-strength-zero end of the blend -- so at the default strength it bound"
-                       "\nnothing at all. Nioh 3 is why both are fixed: in a scene dark enough that the"
-                       "\nsoft knee never fires, the composition reduces to the model's own picture,"
-                       "\nand it collapsed the frame's red by more than half, once per frame, while an"
-                       "\nupward-only guard on an unreachable branch watched it happen.");
 
         }
 
-        ImGui::SeparatorText("Inspect");
+        ImGui::SeparatorText("Compare");
 
-        // The depth and motion diagnostics used to sit here and are now ini-only:
-        // ConstantDepth, FreezeDepth, FreezeMotion and MvScaleAbuse.
-        //
-        // They answered their question and the answer is in the notes: motion vectors are read
-        // strongly -- 32x on the scale visibly degrades the picture -- and depth is read weakly.
-        // What is left is four controls that can only make a game look worse, in a panel people
-        // open to make it look better, next to the sliders they actually came for.
-        //
-        // Nothing is deleted. Anyone repeating the measurement sets the key and gets the same
-        // instrument, and the reason for keeping the code is that the depth reading was taken
-        // while the exaggeration slider was still at 32x and deserves a clean re-run.
+        // Freeze the frame the model works on, so a setting change re-renders it in place -- the only
+        // clean way to A/B our own settings (a moving scene confounds every other comparison). See
+        // design/frame-hold.md.
+        bool held = config->DlssNrHoldFrame.value_or_default();
+        if (ImGui::Checkbox("Hold frame", &held))
+            config->DlssNrHoldFrame = held;
 
-
-        if (DlssNr::CaptureInProgress())
-        {
-            ImGui::TextDisabled("Capturing...");
-        }
-        else if (ImGui::Button("Capture 8 frames"))
-        {
-            DlssNr::RequestCapture(8);
-        }
-
-        HelpMarker("Writes eight consecutive frames twice: as the upscaler produced them, and again"
-                       "\nonce the model's edit was applied."
-                       "\n\nSame frames, same run, one variable -- which is what comparing two video"
-                       "\ncaptures can never be, since they have different camera paths and a codec in"
-                       "\nbetween that discards exactly the fine temporal detail in question."
-                       "\n\nRaw, into a dlssnr-capture folder beside OptiScaler. Bounded to eight frames,"
-                       "\nand each run overwrites the last.");
+        HelpMarker("Freezes the frame the model works on. While held, change paper white, the"
+                       "\nstrengths, the reversible mode, the model preset -- anything below the"
+                       "\nupscaler -- and only that setting moves; the scene does not."
+                       "\n\nWhat it CANNOT show: DLSS/FSR/XeSS upscaler presets or anything upstream"
+                       "\n(the upscaler is not re-run on a held frame), and the game's own HUD and"
+                       "\npost-processing, which run after this pass and keep updating. The white"
+                       "\npoint stops being measured and holds its value while frozen, so it cannot"
+                       "\ndrift and confound the comparison."
+                       "\n\nHide the menu and it stays held. Untoggle to resume.");
 
         static const char* compareNames[] = { "Off", "Side by side", "Wipe" };
         int compare = (int) config->DlssNrCompare.value_or_default();

@@ -276,6 +276,20 @@ class Config
     CustomOptional<float> DlssNrTransferStrength { 1.0f };
     CustomOptional<float> DlssNrColourStrength { 1.0f };
 
+    // The RenoDX reversible proxy mode. 0 = today's soft-knee encode + our composition (default,
+    // byte-identical); 1 = unclipped Neutwo proxy + our composition; 2 = Neutwo proxy + pure-inverse
+    // replace. An in-game A/B and a way back. Default 0 = byte-identical to before.
+    CustomOptional<uint32_t> DlssNrReversibleMode { 0 };
+
+    // Whether the model's edit is applied. Off keeps the pass running (so Hold frame works) but shows
+    // the clean upscaler frame -- for A/B'ing NR on/off on a frozen frame. Default true.
+    CustomOptional<bool> DlssNrApplyModel { true };
+
+    // Frame hold: freeze the NR pass's input so a live setting change re-renders the SAME frame -- the
+    // only clean way to A/B our settings. A live testing toggle, not really a saved preference; off by
+    // default. See dlssnr/design/frame-hold.md.
+    CustomOptional<bool> DlssNrHoldFrame { false };
+
 
     // The most the pass may multiply or divide a pixel by. A detail pass has no business restyling a
     // light source, whatever the model returns.
@@ -339,6 +353,11 @@ class Config
     // only the model's contribution is computed small and enlarged, so the picture underneath is
     // untouched whatever this is set to. 1.0 is full resolution and behaves exactly as before.
     CustomOptional<float> DlssNrWorkingScale { 1.0f };
+
+    // Filter used for NR supersampling (working scale > 1): the model runs above native, and this is
+    // the downscaler that averages its answer back to native. Independent of OutputScalingDownscaler
+    // so NR and Output Scaling can run different filters at once. Lanczos3 is the sharp default.
+    CustomOptional<Scaler> DlssNrScalingDownscaler { Scaler::Lanczos3 };
 
     // Ask the driver's own nvngx.dll whether it will dispatch Neural Rendering, once per session.
     //

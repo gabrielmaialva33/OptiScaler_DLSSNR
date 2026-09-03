@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstring>
 #include "precompile/DlssNr_Shader.h"
+#include "../output_scaling/OS_Dx12.h"
 
 namespace
 {
@@ -209,6 +210,30 @@ struct NrState
 
     // The frame shrunk for the model, when it is working below full resolution.
     ID3D12Resource* colorSmall = nullptr;
+
+    // Supersampling (working scale > 1): the Output Scaling upsampler used to enlarge the proxy to the
+    // model's larger-than-native working size with a real filter instead of the box minifier. Created
+    // lazily on the first super-native frame, released in Shutdown; sizes from the resources each call,
+    // so a resolution change needs no rebuild.
+    OS_Dx12* superUp = nullptr;
+
+    // Supersampling down-leg: the native-sized buffer the Nx model answer is averaged into, and the
+    // downscaler that does it. With superUp this lands the super-native answer at native for a 1:1
+    // composite (no aliased minify). nrScaler is the filter both were built with, so a changed
+    // DlssNrScalingDownscaler rebuilds them.
+    ID3D12Resource* outputNative = nullptr;
+    OS_Dx12* superDown = nullptr;
+    Scaler nrScaler = Scaler::Count;
+
+    // Frame hold (design/frame-hold.md): a persistent copy of the output taken on hold-on and restored
+    // over the live output before the encode reads it while held, so a setting change re-renders the
+    // same frame. heldWhitePoint is the snapshot used while held -- measurement is suspended.
+    ID3D12Resource* heldColor = nullptr;
+    bool heldActive = false;
+    unsigned int heldWidth = 0;
+    unsigned int heldHeight = 0;
+    DXGI_FORMAT heldFormat = DXGI_FORMAT_UNKNOWN;
+    float heldWhitePoint = 1.0f;
 
     unsigned int workWidth = 0;
     unsigned int workHeight = 0;
@@ -1624,9 +1649,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     // What the model works at. The frame and its edit stay full resolution; only the model's input and
-    // answer shrink, and the resolve enlarges the answer while compositing.
+    // answer change size, and the resolve enlarges (or minifies) the answer while compositing. Below 1
+    // the model runs reduced and cheaper; above 1 it SUPERSAMPLES -- the proxy is upscaled to a larger
+    // working size so the model denoises a super-native input, which the resolve then samples back down.
+    // Capped at 2x: cost grows with the area and NGX acceptance above native is what this probe tests.
     float workScale = cfg.DlssNrWorkingScale.value_or_default();
-    workScale = workScale < 0.25f ? 0.25f : (workScale > 1.0f ? 1.0f : workScale);
+    workScale = workScale < 0.25f ? 0.25f : (workScale > 2.0f ? 2.0f : workScale);
     const auto workWidth = (unsigned int) (width * workScale + 0.5f);
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);
     const bool reduced = workWidth != width || workHeight != height;
@@ -1659,6 +1687,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ParkNrResource(g_nr.colorCopy);
             ParkNrResource(g_nr.hdrCopy);
             ParkNrResource(g_nr.colorSmall);
+            ParkNrResource(g_nr.outputNative);
         }
     }
 
@@ -1673,6 +1702,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (reduced && g_nr.colorSmall == nullptr)
         g_nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
+
+    // The down-leg target is native (the answer is brought back to frame size before the resolve).
+    if (workScale > 1.0f && g_nr.outputNative == nullptr)
+        g_nr.outputNative = CreateScratch(device, desc.Format, width, height);
 
     if (g_nr.meter == nullptr)
     {
@@ -1912,7 +1945,92 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     g_nr.gamePreExposure = frame.PreExposure;
 
-    const float whitePoint = ResolveWhitePoint(cfg, isHdrBuffer);
+    float whitePoint = ResolveWhitePoint(cfg, isHdrBuffer);
+
+    // Zero-latency exposure (D3D12, source 1): when the game hands us a live exposure texture, the
+    // white point is recomputed in-shader every frame from it (ExposurePreMul / exposure) instead of
+    // the 3-4 frame CPU meter readback. whitePoint above still rides along in gWhitePoint as the
+    // fallback the shader uses if the live sample is missing or absurd. Bound at t4 (InPrevEdit) below.
+    ID3D12Resource* exposureTex = nullptr;
+    uint32_t useGameExposure = 0;
+    float exposurePreMul = 0.0f;
+
+    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && frame.ExposureTexture != nullptr)
+    {
+        exposureTex = (ID3D12Resource*) frame.ExposureTexture;
+        useGameExposure = 1;
+        const float trim = std::clamp(cfg.DlssNrWhitePointTrim.value_or_default(), 0.25f, 4.0f);
+        exposurePreMul = g_nr.gamePreExposure * trim;
+    }
+
+    // Frame hold. Freeze the encode's input so a live setting change re-renders the same frame. This
+    // is self-contained on purpose: it copies the output aside on hold-on and copies it BACK over the
+    // live output before the encode reads it while held, so the encode's own path and barriers below
+    // are untouched and the default (hold off) is byte-identical. See design/frame-hold.md.
+    //
+    // `target` is UAV here (normalised at entry, restored by the meter block above). The held copy is
+    // left in COPY_SOURCE after capture and stays there for every restore.
+    {
+        const bool hold = cfg.DlssNrHoldFrame.value_or_default();
+
+        if (hold)
+        {
+            const D3D12_RESOURCE_DESC td = target->GetDesc();
+            const bool needCapture = !g_nr.heldActive || g_nr.heldColor == nullptr ||
+                                     (unsigned int) td.Width != g_nr.heldWidth ||
+                                     td.Height != g_nr.heldHeight || td.Format != g_nr.heldFormat;
+
+            if (needCapture)
+            {
+                // Hold-on (or the output changed shape under a hold): capture THIS frame, do not
+                // restore -- target already holds the frame to freeze, and the pass runs on it.
+                if (g_nr.heldColor != nullptr)
+                    ParkNrResource(g_nr.heldColor);
+
+                g_nr.heldColor = CreateScratch(device, td.Format, (unsigned int) td.Width, td.Height);
+
+                if (g_nr.heldColor != nullptr)
+                {
+                    Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    Barrier(cmdList, g_nr.heldColor, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            D3D12_RESOURCE_STATE_COPY_DEST);
+                    cmdList->CopyResource(g_nr.heldColor, target);
+                    Barrier(cmdList, g_nr.heldColor, D3D12_RESOURCE_STATE_COPY_DEST,
+                            D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    Barrier(cmdList, target, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+                    g_nr.heldActive = true;
+                    g_nr.heldWidth = (unsigned int) td.Width;
+                    g_nr.heldHeight = td.Height;
+                    g_nr.heldFormat = td.Format;
+                    g_nr.heldWhitePoint = whitePoint;
+                }
+            }
+            else
+            {
+                // Held: restore the frozen frame onto the live output before the encode reads it.
+                Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_COPY_DEST);
+                cmdList->CopyResource(target, g_nr.heldColor);
+                Barrier(cmdList, target, D3D12_RESOURCE_STATE_COPY_DEST,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+
+            // Suspend white-point measurement while held: use the snapshot so it cannot drift and
+            // confound the comparison. (No-op on the capture frame, where the snapshot IS whitePoint.)
+            if (g_nr.heldActive)
+                whitePoint = g_nr.heldWhitePoint;
+        }
+        else if (g_nr.heldActive)
+        {
+            // Released: let go of the frozen frame and resume live input next frame.
+            if (g_nr.heldColor != nullptr)
+                ParkNrResource(g_nr.heldColor);
+            g_nr.heldActive = false;
+        }
+    }
 
     DlssNrConstants encodeParams {};
     encodeParams.Mode = DlssNrMode_Encode;
@@ -1920,6 +2038,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // the resolve adds the model's edit back at full scale.
     encodeParams.Passthrough = isHdrBuffer ? 0u : 1u;
     encodeParams.WhitePoint = whitePoint;
+    encodeParams.UseGameExposure = useGameExposure;
+    encodeParams.ExposurePreMul = exposurePreMul;
+    encodeParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
     // Match only takes effect once a fit exists; until then the table is empty and the shader would
     // read a curve of zeros, so it falls back to the plain proxy.
     encodeParams.Width = width;
@@ -1927,7 +2048,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    DispatchPass(cmdList, encodeParams, target, nullptr, nullptr, nullptr, nullptr,
+    DispatchPass(cmdList, encodeParams, target, nullptr, nullptr, nullptr, exposureTex,
                         g_nr.colorCopy, g_nr.hdrCopy);
 
     Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -1948,14 +2069,64 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (reduced && g_nr.colorSmall != nullptr)
     {
-        DlssNrConstants down {};
-        down.Mode = DlssNrMode_Downsample;
-        down.Width = workWidth;
-        down.Height = workHeight;
-        DispatchPass(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr,
-                            g_nr.colorSmall, nullptr);
-        Barrier(cmdList, g_nr.colorSmall, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        bool built = false;
+
+        if (workScale > 1.0f)
+        {
+            // Supersample: enlarge the proxy to the larger working size with a real upscaling filter
+            // (the Output Scaling upsampler) so the model sees a clean super-native input, rather than
+            // the box minifier which only makes sense going down. colorCopy is NON_PIXEL_SHADER_RESOURCE
+            // from the encode (SRV-ready); colorSmall is UNORDERED_ACCESS from last frame's resolve.
+            // (Re)build the supersample scalers when missing or when the NR downscaler changed (the
+            // filter is baked at construction). Both use NR's own DlssNrScalingDownscaler, independent
+            // of Output Scaling, so the two can run different filters at once. superDown is built here
+            // and used after the model (the down-leg below).
+            const Scaler nrScaler = cfg.DlssNrScalingDownscaler.value_or_default();
+            if (g_nr.nrScaler != nrScaler)
+            {
+                if (g_nr.superUp != nullptr)   { delete g_nr.superUp;   g_nr.superUp = nullptr; }
+                if (g_nr.superDown != nullptr) { delete g_nr.superDown; g_nr.superDown = nullptr; }
+                g_nr.nrScaler = nrScaler;
+            }
+            if (g_nr.superUp == nullptr)
+                g_nr.superUp = new OS_Dx12("DLSS-NR supersample up", device, true, nrScaler);
+            if (g_nr.superDown == nullptr)
+                g_nr.superDown = new OS_Dx12("DLSS-NR supersample down", device, false, nrScaler);
+
+            if (g_nr.superUp != nullptr &&
+                g_nr.superUp->Dispatch(cmdList, g_nr.colorCopy, g_nr.colorSmall))
+            {
+                Barrier(cmdList, g_nr.colorSmall, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                built = true;
+            }
+        }
+
+        if (!built)
+        {
+            if (workScale > 1.0f)
+            {
+                // Wanted to supersample but the upscaler was not available -- warn once; the box path
+                // below can only enlarge blockily, so the user should know the clean path is off.
+                static bool warnedSuper = false;
+                if (!warnedSuper)
+                {
+                    warnedSuper = true;
+                    LOG_WARN("DLSS-NR supersample: upscaler unavailable, falling back to a blocky enlarge.");
+                }
+            }
+
+            // Sub-native (or the upsampler could not be built): box-resample the proxy to the work size.
+            DlssNrConstants down {};
+            down.Mode = DlssNrMode_Downsample;
+            down.Width = workWidth;
+            down.Height = workHeight;
+            DispatchPass(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr,
+                                g_nr.colorSmall, nullptr);
+            Barrier(cmdList, g_nr.colorSmall, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+
         modelInput = g_nr.colorSmall;
     }
 
@@ -2028,6 +2199,20 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     g_nr.reset = false;
 
+    // Supersampling probe: report the model working ABOVE native so a test log tells us whether NGX even
+    // accepts a super-native evaluate and what it returns. Once per working-size change, or on any error.
+    if (workWidth > width || workHeight > height)
+    {
+        static unsigned int lastSuper = 0;
+        if (lastSuper != workWidth || result != 1)
+        {
+            lastSuper = workWidth;
+            LOG_INFO("DLSS-NR SUPERSAMPLE: model at {}x{} = {:.2f}x native {}x{}, evaluate result {} ({})",
+                     workWidth, workHeight, (float) workWidth / (float) width, width, height, result,
+                     NgxResultName((unsigned int) result));
+        }
+    }
+
     // Once, a few seconds in, so it lands after the values have been written at least once.
     static bool tuningReported = false;
 
@@ -2077,6 +2262,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         DlssNrConstants resolveParams {};
         resolveParams.Mode = DlssNrMode_Resolve;
         resolveParams.WhitePoint = whitePoint;
+        resolveParams.UseGameExposure = useGameExposure;
+        resolveParams.ExposurePreMul = exposurePreMul;
         resolveParams.Width = width;
         resolveParams.Height = height;
         resolveParams.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
@@ -2086,6 +2273,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         resolveParams.Transfer = cfg.DlssNrTransfer.value_or_default();
         resolveParams.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
         resolveParams.Passthrough = isHdrBuffer ? 0u : 1u;
+        resolveParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
+        resolveParams.ApplyModel = cfg.DlssNrApplyModel.value_or_default() ? 1u : 0u;
         resolveParams.CompareMode = cfg.DlssNrCompare.value_or_default();
         resolveParams.CompareSplit = cfg.DlssNrCompareSplit.value_or_default();
         resolveParams.CompareZoom = std::max(1.0f, cfg.DlssNrCompareZoom.value_or_default());
@@ -2151,10 +2340,33 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        DispatchPass(cmdList, resolveParams, modelInput, g_nr.output, g_nr.hdrCopy, motionIn,
-                            nullptr, target, nullptr);
+
+        // Supersampling down-leg. Average the Nx model answer back to native with the chosen filter, so
+        // the resolve composites a native answer against the native proxy 1:1 -- a real area resample,
+        // not the single bilinear tap the Nx answer would otherwise get in the resolve (which aliases
+        // the model's detail into noise, the "noisier above 100%" the probe showed). On success the
+        // resolve reads the native proxy (colorCopy) and native answer (outputNative); on failure it
+        // falls back to the Nx pair. g_nr.output is NPSR here; outputNative is UAV from last frame.
+        bool superDownOk = false;
+        if (workScale > 1.0f && g_nr.superDown != nullptr && g_nr.outputNative != nullptr &&
+            g_nr.superDown->Dispatch(cmdList, g_nr.output, g_nr.outputNative))
+        {
+            Barrier(cmdList, g_nr.outputNative, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            superDownOk = true;
+        }
+
+        ID3D12Resource* resolveProxy = superDownOk ? g_nr.colorCopy : modelInput;
+        ID3D12Resource* resolveAnswer = superDownOk ? g_nr.outputNative : g_nr.output;
+
+        DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, motionIn,
+                            exposureTex, target, nullptr);
         Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        if (superDownOk)
+            Barrier(cmdList, g_nr.outputNative, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         // On-demand capture works in this path too: the staging copy still holds the frame as the
         // upscaler produced it, and the edited frame is the output itself. The write happens a few
@@ -2682,6 +2894,31 @@ void Shutdown()
         g_nr.colorSmall->Release();
         g_nr.colorSmall = nullptr;
     }
+
+    if (g_nr.superUp != nullptr)
+    {
+        delete g_nr.superUp;
+        g_nr.superUp = nullptr;
+    }
+
+    if (g_nr.superDown != nullptr)
+    {
+        delete g_nr.superDown;
+        g_nr.superDown = nullptr;
+    }
+
+    if (g_nr.outputNative != nullptr)
+    {
+        g_nr.outputNative->Release();
+        g_nr.outputNative = nullptr;
+    }
+
+    if (g_nr.heldColor != nullptr)
+    {
+        g_nr.heldColor->Release();
+        g_nr.heldColor = nullptr;
+    }
+    g_nr.heldActive = false;
 
     if (g_nr.meter != nullptr)
     {
