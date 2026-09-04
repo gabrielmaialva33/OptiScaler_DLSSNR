@@ -446,9 +446,12 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     }
 
     // DXVK check, it's here because of upscaler time calculations
-    // When the Vulkan hooks were skipped (Linux marker file) there is no Vulkan overlay, so take the
-    // regular path below which draws the D3D overlay.
-    if (IdentifyGpu::getPrimaryGpu().usesDxvk && !State::Instance().vulkanHooksSkipped)
+    //
+    // D3D11 only. vkd3d-proton sets usesDxvk as well, and a D3D12 title returning here leaves
+    // MenuOverlayVk as the only ImGui backend: it submits on a queue of its own into the present path
+    // Streamline owns, which removes the device. Falling through reaches MenuOverlayDx::Present, which
+    // draws on the game's queue.
+    if (IdentifyGpu::getPrimaryGpu().usesDxvk && isD3D11 && !State::Instance().vulkanHooksSkipped)
     {
         if (pPresentParameters == nullptr)
             presentResult = pSwapChain->Present(SyncInterval, Flags);

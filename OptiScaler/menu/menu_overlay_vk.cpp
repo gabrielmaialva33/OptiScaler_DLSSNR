@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <vector>
+#include <misc/IdentifyGpu.h>
 
 // Vulkan overlay code adopted from here:
 // https://gist.github.com/mem99/0ec31ca302927457f86b1d6756aaa8c4
@@ -24,6 +25,17 @@ static bool _vulkanDeviceLost = false;
 static bool _vulkanBackendInited = false;
 static std::mutex _vkCleanMutex;
 static std::mutex _vkPresentMutex;
+
+// Returns true when the DXGI swapchain wrapping is active and drawing via D3D12/D3D11. On Proton
+// (vkd3d-proton) the Vulkan swapchain hook also sees the presentation, but MenuOverlayDx draws the
+// menu on the game's own queue. Drawing from both or tearing down the DX backend from the Vulkan
+// path removes the device.
+static bool DxOverlayOwnsBackend()
+{
+    auto& gpu = IdentifyGpu::getPrimaryGpu();
+    // DXVK (D3D11 on Vulkan) relies on MenuOverlayVk; vkd3d-proton (D3D12 on Vulkan) uses MenuOverlayDx.
+    return gpu.usesDxvk && !State::Instance().isD3D11 && State::Instance().swapchainApi == API::DX12;
+}
 
 // The caller holds _vkPresentMutex and _vkCleanMutex, in that order.
 static bool DestroyVulkanObjectsLocked(bool shutdown);
@@ -175,6 +187,17 @@ void MenuOverlayVk::NoteDeviceQueues(VkDevice device, const VkDeviceCreateInfo* 
     LOG_DEBUG("recorded {0} queue families for device {1:X}", families.size(), (UINT64) device);
 }
 
+static void DestroyVulkanObjectsLocked(bool shutdown);
+
+// These hooks see vkd3d-proton's presents as well as a native Vulkan game's. swapchainApi is DX12
+// only once a wrapped DXGI swapchain has presented from a D3D12 queue, which under Proton means
+// vkd3d-proton; MenuOverlayDx draws those titles on the game's own queue. Ordering holds: the game's
+// first Present sets swapchainApi before vkd3d creates the VkSwapchain inside it.
+static bool DxOverlayOwnsBackend()
+{
+    return State::Instance().swapchainApi == API::DX12 && IdentifyGpu::getPrimaryGpu().usesDxvk;
+}
+
 static void SetVkObjectName(VkDevice device, VkInstance instance, VkObjectType objectType, uint64_t objectHandle,
                             const char* name)
 {
@@ -193,6 +216,16 @@ static void SetVkObjectName(VkDevice device, VkInstance instance, VkObjectType o
     vkSetDebugUtilsObjectNameEXT(device, &info);
 }
 
+// ImGui_ImplVulkan_InitInfo::CheckVkResultFn. The backend calls it on every result, successes
+// included; filter or the async logger's 8192-slot blocking queue stalls the present thread.
+static void CheckVkResult(VkResult result)
+{
+    if (result == VK_SUCCESS)
+        return;
+
+    LOG_ERROR("ImGui Vulkan backend error: {0:X}", (UINT) result);
+}
+
 static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance instance, HWND hwnd,
                                 const VkSwapchainCreateInfoKHR* pCreateInfo, VkSwapchainKHR* pSwapchain)
 {
@@ -206,6 +239,14 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         return;
     }
 
+    // Below the teardown, so a swapchain recreate still releases the objects of the old one. ImGui
+    // holds one renderer backend at a time in io.BackendRendererUserData; leaving it unclaimed is what
+    // lets MenuOverlayDx take it.
+    if (DxOverlayOwnsBackend())
+    {
+        LOG_DEBUG("vkd3d-proton D3D12 swapchain, MenuOverlayDx draws the overlay");
+        return;
+    }
     // Initialize ImGui
     if (!MenuOverlayBase::IsInited() || MenuOverlayBase::Handle() != hwnd)
     {
@@ -215,6 +256,11 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         LOG_DEBUG("MenuOverlayBase::Init");
         MenuOverlayBase::Init(hwnd, false);
     }
+
+    // Starts here, not above: MenuOverlayBase::Init reaches D3D12 device creation, which re-enters the
+    // Vulkan hooks and DestroyVulkanObjects on this thread. Everything below is Vulkan object creation
+    // and the ImGui backend, with no path back into the hooks.
+    std::lock_guard<std::mutex> lock(_vkCleanMutex);
 
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize.x = static_cast<float>(pCreateInfo->imageExtent.width);
@@ -610,6 +656,7 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         _ImVulkan_Info.ImageCount = _scImageCount;
         _ImVulkan_Info.Allocator = NULL;
         _ImVulkan_Info.RenderPass = _vkRenderPass;
+        _ImVulkan_Info.CheckVkResultFn = CheckVkResult;
 
         bool initResult = ImGui_ImplVulkan_Init(&_ImVulkan_Info);
         _vulkanBackendInited = ImGui::GetIO().BackendRendererUserData != nullptr;
@@ -670,11 +717,16 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     }
 
     _vulkanObjectsCreated = true;
+    State::Instance().menuOverlayIsVulkan = true;
     LOG_FUNC_RESULT(_vulkanObjectsCreated);
 }
 
+// Caller holds _vkCleanMutex and _vkPresentMutex.
 static bool DestroyVulkanObjectsLocked(bool shutdown)
 {
+    State::Instance().menuOverlayIsVulkan = false;
+
+    // _ImVulkan_Info is zeroed at the tail under this lock; read it here, not before.
     if (_ImVulkan_Info.Device == VK_NULL_HANDLE)
         return !_vulkanDeviceLost;
 
@@ -732,9 +784,6 @@ static bool DestroyVulkanObjectsLocked(bool shutdown)
             fd->BackbufferView = VK_NULL_HANDLE;
         }
 
-        // Guarded by Framebuffer, not by BackbufferView: the block above has just set BackbufferView
-        // to null, so this condition was never true and every framebuffer leaked on swapchain
-        // recreation.
         if (fd->Framebuffer != VK_NULL_HANDLE)
         {
             vkDestroyFramebuffer(_ImVulkan_Info.Device, fd->Framebuffer, VK_NULL_HANDLE);
@@ -1028,12 +1077,16 @@ void MenuOverlayVk::CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInst
     if (_ImVulkan_Info.Device != VK_NULL_HANDLE && !DestroyVulkanObjectsLocked(false))
         return;
 
-    if (MenuOverlayBase::Handle() != hwnd)
+    // The predicate also guards the shutdown below: where MenuOverlayDx owns ImGui, the renderer
+    // backend behind io.BackendRendererUserData is a DX one and ImGui_ImplVulkan_Shutdown would free
+    // it as if it were Vulkan. CreateVulkanObjects still runs, to release objects of its own.
+    if (MenuOverlayBase::Handle() != hwnd && !DxOverlayOwnsBackend())
     {
         LOG_DEBUG("MenuOverlayBase::Handle() != _hwnd");
 
         if (MenuOverlayBase::IsInited())
         {
+            ImGui_ImplVulkan_Shutdown(false);
             LOG_DEBUG("MenuOverlayBase::Shutdown();");
             MenuOverlayBase::Shutdown();
         }
