@@ -1133,17 +1133,80 @@ bool IsTypeless(DXGI_FORMAT f) { return TypedGuideFormat(f) != f; }
 // Creates a typed twin of a guide buffer, matching everything but the format.
 ID3D12Resource* CreateGuideClone(ID3D12Device* device, ID3D12Resource* source)
 {
-    D3D12_RESOURCE_DESC desc = source->GetDesc();
-    desc.Format = TypedGuideFormat(desc.Format);
-    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    const D3D12_RESOURCE_DESC src = source->GetDesc();
+
+    // More than one candidate, because the obvious typed member of a family is not always a format a
+    // resource may be created with. R32_FLOAT_X8X24_TYPELESS is the case that forced this: it is the
+    // right way to VIEW an R32G8X24_TYPELESS depth buffer and CreateCommittedResource refuses it, so
+    // the single-candidate version could never clone a depth buffer of that family at all. Ordered
+    // most faithful first; each failure is logged with its HRESULT so a new game's format does not
+    // have to be guessed at again.
+    DXGI_FORMAT candidates[4] = {};
+    uint32_t count = 0;
+    candidates[count++] = TypedGuideFormat(src.Format);
+
+    switch (src.Format)
+    {
+    case DXGI_FORMAT_R32G8X24_TYPELESS:
+        candidates[count++] = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        candidates[count++] = DXGI_FORMAT_R32_FLOAT;
+        break;
+    case DXGI_FORMAT_R24G8_TYPELESS:
+        candidates[count++] = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        candidates[count++] = DXGI_FORMAT_R32_FLOAT;
+        break;
+    case DXGI_FORMAT_R32_TYPELESS:
+        candidates[count++] = DXGI_FORMAT_D32_FLOAT;
+        break;
+    case DXGI_FORMAT_R16_TYPELESS:
+        candidates[count++] = DXGI_FORMAT_R16_FLOAT;
+        break;
+    default:
+        break;
+    }
 
     D3D12_HEAP_PROPERTIES heap {};
     heap.Type = D3D12_HEAP_TYPE_DEFAULT;
 
-    ID3D12Resource* res = nullptr;
-    device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
-                                    nullptr, IID_PPV_ARGS(&res));
-    return res;
+    for (uint32_t i = 0; i < count; i++)
+    {
+        D3D12_RESOURCE_DESC desc = src;
+        desc.Format = candidates[i];
+        desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        // Let the runtime pick the alignment rather than inheriting the source's.
+        //
+        // A guide created with D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT (0x400, Agility SDK) reports an
+        // alignment that is only legal together with that flag. The clone drops the flags, so carrying
+        // the number over made every CreateCommittedResource fail with E_INVALIDARG before the format
+        // was even considered -- which is why a candidate as ordinary as R16G16B16A16_FLOAT was refused.
+        desc.Alignment = 0;
+
+        ID3D12Resource* res = nullptr;
+        const HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                           D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                           IID_PPV_ARGS(&res));
+
+        if (SUCCEEDED(hr) && res != nullptr)
+        {
+            if (i != 0)
+                LOG_INFO("DLSS-NR guide clone: source format {} cloned as {} (candidate {} of {})",
+                         (int) src.Format, (int) candidates[i], i + 1, count);
+
+            return res;
+        }
+
+        LOG_WARN("DLSS-NR guide clone: source format {}, candidate {} ({}) refused, hr 0x{:08X}",
+                 (int) src.Format, i + 1, (int) candidates[i], (UINT) hr);
+    }
+
+    LOG_ERROR("DLSS-NR guide clone failed for every candidate. source desc: dim {} {}x{} arr {} mips {} "
+              "fmt {} samples {} layout {} flags 0x{:X} alignment {}",
+              (int) src.Dimension, (UINT64) src.Width, src.Height, src.DepthOrArraySize, src.MipLevels,
+              (int) src.Format, src.SampleDesc.Count, (int) src.Layout, (UINT) src.Flags,
+              (UINT64) src.Alignment);
+
+    return nullptr;
 }
 
 // Hands back something the model can actually read: the guide itself when it is typed, or a typed copy
@@ -1176,8 +1239,10 @@ ID3D12Resource* ReadableGuide(ID3D12Device* device, ID3D12GraphicsCommandList* c
         const D3D12_RESOURCE_DESC have = (*clone)->GetDesc();
         const D3D12_RESOURCE_DESC want = source->GetDesc();
 
-        if (have.Width != want.Width || have.Height != want.Height ||
-            have.Format != TypedGuideFormat(want.Format))
+        // Dimensions only: the clone's format is whichever candidate CreateGuideClone settled on,
+        // which is not always TypedGuideFormat's first choice. Comparing against that choice would
+        // retire and rebuild the clone on every frame. Shape is what the DRS crash was about.
+        if (have.Width != want.Width || have.Height != want.Height)
         {
             // Retired, not released: the previous copy may still be in flight on the game's queue.
             ParkNrResource(*clone);
@@ -2140,7 +2205,29 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         g_nr.failed = true;
         g_nr.reason = "the game's depth or motion vectors could not be made readable";
-        LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+
+        // Say which guide failed and why, because the two causes need opposite answers: a guide the
+        // game never supplied is not ours to fix, while a supplied one that could not be cloned is a
+        // gap in TypedGuideFormat or a resource the runtime refused to create. Without this the log
+        // said only that something was unreadable, which fits both.
+        const auto describe = [](ID3D12Resource* src, ID3D12Resource* out) -> std::string
+        {
+            if (src == nullptr)
+                return "not supplied by the game";
+
+            const auto fmt = (int) src->GetDesc().Format;
+
+            if (out != nullptr)
+                return std::format("ok (format {})", fmt);
+
+            return std::format("supplied as typeless format {}, but the typed clone could not be "
+                               "created (typed format {})",
+                               fmt, (int) TypedGuideFormat(src->GetDesc().Format));
+        };
+
+        LOG_ERROR("DLSS-NR unavailable: depth {} | motion vectors {}", describe(depth, depthIn),
+                  describe(motion, motionIn));
+
         Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
         device->Release();
         return;
