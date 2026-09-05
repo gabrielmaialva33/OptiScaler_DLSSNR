@@ -2,6 +2,9 @@
 
 #include "SysUtils.h"
 #include "State.h"
+#include "dlssnr/DlssNr_PassSettings.h"
+
+#include <mutex>
 
 #include <optional>
 #include <filesystem>
@@ -480,17 +483,26 @@ class Config
     // picture that had been tuned came back wrong for a reason nothing on screen explained.
     CustomOptional<float> DlssNrScanTrim { 1.0f };
 
-    // How many times to run the model over the same frame, each pass fed the previous one's answer.
-    //
-    // 1 is what the model was trained for and what every published number describes. Above that it
-    // is being asked to enhance its own output, which is outside its training distribution: detail
-    // compounds, and so does anything it got wrong. Two often looks richer. Four usually looks
-    // synthetic. Eight is there because somebody will want to see it.
-    //
-    // The cost is exactly linear -- the model is 98% of the frame's expense and every pass pays it
-    // again -- so 8 costs eight times, near enough. There is no shortcut and no amortisation: the
-    // passes are sequential and each one needs the last one's output.
+    // Bounded, opt-in sequential model passes. Native Vulkan uses the master single pass.
     CustomOptional<uint32_t> DlssNrPasses { 1 };
+    CustomOptional<bool> DlssNrIndividualPassSettings { false };
+
+    DlssNrPassSnapshot GetDlssNrPassSnapshot() const;
+    DlssNrResolvedPassSettings GetDlssNrPassSettings(uint32_t passIndex) const;
+    DlssNrResolvedPassSettings GetDlssNrMasterSettings() const;
+    DlssNrPassSettings GetDlssNrPassOverrides(uint32_t passIndex) const;
+    void SetDlssNrPassOverrides(uint32_t passIndex, DlssNrPassSettings settings);
+    void ClearDlssNrPassOverrides(uint32_t passIndex);
+    uint32_t GetDlssNrPassCount() const;
+    void SetDlssNrPassCount(uint32_t count);
+    void SetDlssNrIndividualPassSettings(bool enabled);
+
+    // Short transactions only. Never hold this lock while acquiring the NR renderer lock.
+    template <class T> void SetDlssNrMasterSetting(CustomOptional<T> Config::* member, T value)
+    {
+        const std::lock_guard lock(_dlssNrPassSettingsMutex);
+        this->*member = value;
+    }
 
     // Which depth convention the model is told the guide uses.
     //
@@ -929,6 +941,10 @@ class Config
     static Config* Instance();
 
   private:
+    mutable std::mutex _dlssNrPassSettingsMutex;
+    DlssNr::PassConfig::Overrides _dlssNrPassOverrides;
+    DlssNrResolvedPassSettings DlssNrMasterSettingsUnlocked() const;
+
     inline static Config* _config;
     inline static std::vector<std::string> _log;
 
