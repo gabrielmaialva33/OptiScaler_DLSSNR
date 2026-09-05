@@ -811,6 +811,28 @@ bool g_haveTrackedUsage = false;
 DlssNr::Chain::RecordingGate g_recordings;
 DlssNr::Chain::Schedule g_chainSchedule;
 DlssNr::Detail::StableExtent g_chainExtent;
+
+// The same settling rule for the default path. It needs its own instance rather than sharing
+// g_chainExtent: only one of the two runs in a session, but sharing would let a skip report the
+// wrong gate, and a diagnostic that names the wrong cause is worse than none.
+DlssNr::Detail::StableExtent g_postExtent;
+
+// StableExtent discriminates on two dimensions and one scalar, but the rebuild it guards keys on
+// more than that: resolutionChanged compares the native width and height as well as the working
+// ones. Rounding hides the difference -- at scale 0.25 a native 3440 and 3441 both land on 860 --
+// so alternating them walks past an already-settled gate and rebuilds anyway. Folding the native
+// extent and the format into the scalar makes the gate observe the whole contract the rebuild
+// reads, rather than a projection of it.
+uint32_t PostContract(unsigned int nativeWidth, unsigned int nativeHeight, uint32_t format)
+{
+    uint32_t h = 2166136261u;
+    for (uint32_t v : { (uint32_t) nativeWidth, (uint32_t) nativeHeight, format })
+    {
+        h ^= v;
+        h *= 16777619u;
+    }
+    return h;
+}
 std::atomic<unsigned int> g_activePasses { 0 };
 std::atomic<const char*> g_chainStatus { "Single pass (master settings)" };
 
@@ -2160,6 +2182,34 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return false;
     }
 
+    // The default path -- stage 0, one pass, master settings -- had no settling gate at all.
+    // chainEnabled is g_tracked && !UseProxy, and g_tracked only turns on when multi-pass is opted
+    // into, so the gate above never ran for the configuration almost everyone is using. A title that
+    // alternates extents (an offscreen portrait rendered between main-scene frames is the reported
+    // case) would rebuild the model on each alternation and retire the previous one every time.
+    //
+    // This is preventive hardening, not a fix for an observed failure: three deliberate resolution
+    // changes in a real session went through the ungated path with no model failure and no growth
+    // attributable to NR. The cost is real and is paid here -- after any extent change the model
+    // stands down for 500 ms and the frame keeps the game's own colour, which under dynamic
+    // resolution means pausing often.
+    // sourceIsTarget is the post-upscale signal: after the upscaler the pass reads and writes the
+    // same resource. Keying on it rather than on !chainEnabled matters twice. Stage 1 with a single
+    // pass also leaves chainEnabled false, so the earlier condition gated the pre-upscale path too
+    // and stacked a second 500 ms wait behind g_preExtent's on a cold start. And keying on the
+    // configured stage instead would miss the case that matters most here: when the pre-upscale
+    // scope declines -- ray reconstruction is the common one -- the after-upscale path serves that
+    // evaluate and needs the gate just as much. The driver proxy is a post-upscale path too and is
+    // deliberately included; it faces the same rebuild churn.
+    if (sourceIsTarget && !chainEnabled &&
+        !g_postExtent.Observe(workWidth, workHeight, std::chrono::steady_clock::now(),
+                              PostContract(width, (unsigned int) height, static_cast<uint32_t>(desc.Format))))
+    {
+        reportSkip("working resolution is settling (500 ms); no model reconstruction");
+        device->Release();
+        return false;
+    }
+
     if (chainEnabled && (!g_nr.feature || g_nr.width != width || g_nr.height != height || g_nr.workWidth != workWidth ||
                          g_nr.workHeight != workHeight || g_nr.passBuilt[0] != firstSettings ||
                          (g_nr.output && g_nr.output->GetDesc().Format != desc.Format)))
@@ -3238,6 +3288,7 @@ void RetryAfterFailure()
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
     g_preAllocationFailed = false;
     g_preExtent.Reset();
+    g_postExtent.Reset();
     g_nr.failed = false;
     for (auto& failed : g_nr.passFailed)
         failed = false;
@@ -4089,6 +4140,12 @@ void Shutdown()
     }
 
     g_nrRetired.clear();
+
+    // Clear the settling state with the feature it was settling for. Left behind, the next
+    // generation inherits a stability it never earned and rebuilds on its first frame -- the exact
+    // churn the gate exists to prevent. This says nothing about device replacement being safe, and
+    // does not authorise releasing anything still pending.
+    g_postExtent.Reset();
 
     if (g_nr.feature != nullptr && g_nr.release != nullptr)
         g_nr.release(g_nr.feature);
