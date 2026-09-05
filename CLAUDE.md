@@ -91,18 +91,41 @@ Vendored headers the build includes directly live in `OptiScaler/include/` and `
 
 ### Formatting
 
-CI runs clang-format 20 over `OptiScaler/` excluding `external/` and `OptiScaler/include/`. Style is in
-`.clang-format`: LLVM base, Allman braces, 4-space indent, 120 columns, `SortIncludes: false`,
-`Type* ptr` pointer alignment. clang-format is not currently installed on this workstation.
+CI runs clang-format 20 over `OptiScaler/` excluding `external/`, `OptiScaler/include/` and
+`/precompile/`. Style is in `.clang-format`: LLVM base, Allman braces, 4-space indent, 120 columns,
+`SortIncludes: false`, `Type* ptr` pointer alignment.
+
+**Use the pinned binary, not the one on `PATH`.** `PATH` has clang-format 22, which disagrees with
+CI: it reported 13 upstream files as violations that version 20 accepts.
 
 ```bash
-clang-format --dry-run --Werror $(fd -e cpp -e h . OptiScaler --exclude include)
+CF=/usr/lib/llvm20/bin/clang-format          # Arch package clang20; PATH has 22, do not use it
+for f in $(fd -e cpp -e h . OptiScaler --exclude include --exclude external); do
+    "$CF" --dry-run --Werror "$f" >/dev/null 2>&1 || echo "$f"
+done
 ```
+
+`.clang-format-ignore` at the repo root excludes the generated shader bytecode headers
+(`*_Shader.h`, `*_Shader_Dx11.h`, `*_Shader_Vk.h`). They are emitted by `create_header.py`, so
+formatting them is undone by the next shader rebuild; the CI `exclude-regex` carries `/precompile/`
+for the same reason. The tree is currently clean under version 20.
 
 ### Tests
 
-There are none. Validation is in-game (see "Test target"). For NR changes, follow the per-change-type
-review in `OptiScaler/dlssnr/design/DEVELOPMENT.md` §3 before considering a change done.
+Under `tests/`, each a self-contained directory with a `run.py` and its own README:
+`nr-before-upscale`, `nr-localization`, `nr-menu`, `nr-multipass`, `nr-pass-config`,
+`nr-submission`, `vulkan-overlay`. Run one with `python3 tests/<name>/run.py`.
+
+Know what they do **not** cover: the `nr-*` suites exercise decision logic against fakes — they do
+not execute NGX, a real D3D12 device, or a real shader, so a green suite is not evidence about GPU
+behaviour, image quality or performance. `vulkan-overlay` builds a real DLL and drives real Vulkan.
+`dlssnr-loopback` is **in progress** — a deterministic D3D12 app meant to drive the production NR
+entry points (`OptiScaler.dll` exports the whole `NVSDK_NGX_D3D12_*` set, so it can be called
+directly); so far only its README and scene shader exist, and it has no `run.py` yet.
+
+In-game validation is still required (see "Test target"). For NR changes, follow the
+per-change-type review in `OptiScaler/dlssnr/design/DEVELOPMENT.md` §3 before considering a change
+done.
 
 ## Test target
 
