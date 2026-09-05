@@ -1,0 +1,112 @@
+# OptiScaler optional pt-BR dictionary. See translations/README.md.
+# Not loaded from this directory. Activation requires OptiScaler.lang beside the DLL.
+DLSS Neural Rendering	Renderização neural DLSS
+Enable Neural Rendering	Ativar renderização neural
+Apply the model	Aplicar o modelo
+Reset	Redefinir
+Retry	Tentar novamente
+Can be toggled with a key -- bind it under Keybinds, "Neural Rendering".	Pode ser alternada por tecla: configure "Neural Rendering" em Atalhos.
+Off. The model stays loaded, so turning this back on is immediate.	Desativado. O modelo permanece carregado; reativá-lo é imediato.
+Off for this session: %s.	Desativado nesta sessão: %s.
+Waiting for the upscaler to run.	Aguardando a execução do upscaler.
+Running%s - %.2f ms per frame%s	Em execução%s - %.2f ms por quadro%s
+Running natively on Vulkan - %llu frames%s	Em execução nativa no Vulkan - %llu quadros%s
+Running.%s	Em execução.%s
+  (model running, edit hidden)	  (modelo em execução, resultado oculto)
+ natively on Vulkan	 nativamente no Vulkan
+Stage	Etapa
+After the upscaler	Depois do upscaler
+Before the upscaler (experimental)	Antes do upscaler (experimental)
+Stage: after the upscaler (native Vulkan)	Etapa: depois do upscaler (Vulkan nativo)
+Model resolution	Resolução do modelo
+Downscaler (NR)	Redutor de resolução (NR)
+Enlargement	Ampliação
+Classic	Clássica
+Matched residual	Resíduo correspondente
+How much of it lands	Intensidade do resultado
+Detail strength	Intensidade dos detalhes
+Colour strength	Intensidade das cores
+Reversible proxy (experimental)	Proxy reversível (experimental)
+Off (soft knee)	Desativado (transição suave)
+Neutwo proxy + composed	Proxy Neutwo + composição
+Neutwo proxy + replace	Proxy Neutwo + substituição
+Hybrid proxy + composed	Proxy híbrido + composição
+Hybrid proxy + replace	Proxy híbrido + substituição
+Model	Modelo
+Read when the model is built, so a change rebuilds it after a moment.	Lido na criação do modelo; uma alteração o recria após um breve intervalo.
+Default	Padrão
+Preset 1	Perfil 1
+Preset 2	Perfil 2
+Preset 3	Perfil 3
+Model preset	Perfil do modelo
+Default (standard)	Padrão
+Natural	Natural
+Cinematic	Cinematográfico
+Style	Estilo
+Intensity	Intensidade
+Local structure	Estrutura local
+Local tone	Tonalidade local
+Skin structure	Estrutura da pele
+Auto skin mask	Máscara automática de pele
+Colour	Cor
+Paper white only	Somente branco de referência
+The game's own exposure	Exposição do próprio jogo
+A buffer the scan found	Buffer encontrado pela busca
+White point from	Origem do ponto branco
+Waiting for a frame...	Aguardando um quadro...
+Reading the exposure...	Lendo a exposição...
+Trim (x the scan)	Ajuste (x valor da busca)
+Trim (x the game's exposure)	Ajuste (x exposição do jogo)
+Paper white	Branco de referência
+Highlight guard	Proteção de altas luzes
+Show the light meter on screen	Mostrar medidor de luz na tela
+Anchor here	Criar ponto aqui
+The number runs the other way	O valor varia no sentido inverso
+Advanced	Avançado
+Click a row to edit it with the slider above; click it again to deselect.	Clique em uma linha para editá-la no controle acima; clique novamente para desmarcar.
+Walk from shade into daylight. A real exposure moves.	Saia da sombra para a luz do dia. Uma exposição real varia.
+One that only ever climbs is a counter, not an exposure.	Um valor que só aumenta é um contador, não uma exposição.
+Compare	Comparar
+Hold frame	Congelar quadro
+Off	Desativado
+Side by side	Lado a lado
+Wipe	Divisão deslizante
+Swap sides	Inverter lados
+Label the sides	Identificar os lados
+Label size	Tamanho dos rótulos
+Zoom	Zoom
+Split	Posição da divisão
+Debug view	Visualização de diagnóstico
+Proxy (what the model sees)	Proxy (entrada do modelo)
+Model output (raw)	Saída bruta do modelo
+Difference (amplified)	Diferença ampliada
+Save Settings	Salvar configurações
+Close	Fechar
+Menu Scale	Escala do menu
+Keybinds	Atalhos
+Logging	Registro de eventos
+Advanced Settings	Configurações avançadas
+Menu Theme and Color	Tema e cores do menu
+FPS Overlay	Indicador de FPS
+Upscaler Inputs	Entradas do upscaler
+V-Sync Settings	Configurações de V-Sync
+Magnifier	Lupa
+Resource Barriers	Barreiras de recursos
+Root Signatures	Assinaturas raiz
+Active Quirks	Ajustes de compatibilidade ativos
+Dx11 with Dx12 Settings	Configurações de DX11 com DX12
+Vulkan with Dx12 Settings	Configurações de Vulkan com DX12
+XeSS Settings	Configurações do XeSS
+Advanced FG Settings	Configurações avançadas de geração de quadros
+Before the upscaler: edited render-resolution color supplied	Antes do upscaler: cor modificada fornecida na resolução de renderização
+Waiting for a stable render resolution (500 ms); original color retained	Aguardando resolução estável (500 ms); cor original preservada
+Synthesises detail in the upscaler's output, before frame generation sees it.\n\nNeeds two similarly named files beside OptiScaler, one character apart:\n  nvngx_dlssnr.dll       NVIDIA's model (~165 MB) -- you supply it\n  nvngx.dll_dlssnr.dll   the forwarder (~13 KB) -- ships in this package\nUndocumented and driven directly, so none of this is officially supported.	Sintetiza detalhes na imagem antes da geração de quadros.\n\nRequer dois arquivos com nomes parecidos ao lado do OptiScaler:\n  nvngx_dlssnr.dll       Modelo da NVIDIA (~165 MB), fornecido por você\n  nvngx.dll_dlssnr.dll   Encaminhador (~13 KB), incluído no pacote\nA interface não é documentada nem tem suporte oficial.
+Whether the model's edit is applied. Off shows the clean upscaler frame while the\npass keeps running -- so with Hold frame (under Compare) you can freeze a\nframe and toggle this to see the same frozen frame with and without Neural\nRendering. Leave it on for normal use.	Controla a aplicação do resultado do modelo. Desativado, mostra o quadro limpo\ndo upscaler, mas mantém o passe em execução. Com Congelar quadro (em Comparar),\npermite ver o mesmo quadro com e sem renderização neural.\nDeixe ativado no uso normal.
+Before: runs Neural Rendering on the game's render-resolution color, then\nupscales the edited copy. This may reduce GPU cost, but can introduce shimmer\nand unstable detail on moving edges. Compare the picture in motion.\n\nExperimental on D3D12 and the D3D12 bridges. Ray reconstruction, Hold frame,\nthe driver proxy, and unsupported inputs use the after-upscale path.\nChanging render dimensions pauses NR until they stay stable for 500 ms.\nThe original game color is used while the model is being built or skipped.	Antes: executa a renderização neural na cor do jogo, na resolução de renderização,\ne depois amplia a cópia modificada. Pode reduzir o custo de GPU, mas introduzir\ncintilação e instabilidade nos detalhes de bordas em movimento. Compare em movimento.\n\nExperimental no D3D12 e nas pontes para D3D12. Reconstrução de raios, quadro congelado,\nproxy do driver e entradas incompatíveis usam o caminho depois do upscaler.\nMudanças de resolução pausam NR até a resolução permanecer estável por 500 ms.\nDurante a criação do modelo ou um quadro pulado, é usada a cor original do jogo.
+Default leaves the choice to the model.\n\nNot the same scale as the super resolution or ray reconstruction presets --\nthe same number means something different here.	Padrão deixa a escolha para o modelo.\n\nEsta escala é diferente dos perfis de super-resolução ou reconstrução de raios:\no mesmo número tem outro significado aqui.
+The model's own strength control, applied inside it. Distinct from detail\nstrength above, which scales the result afterwards.	Intensidade interna do modelo. É diferente da intensidade dos detalhes\nacima, que ajusta o resultado depois do processamento.
+-1 means follow local structure, and is the model's own default -- it is not a\nstrength of zero. 0 and above set skin independently of the rest of the frame.	-1 segue a estrutura local: é o padrão do modelo, não intensidade zero.\nDe 0 em diante, ajusta a pele independentemente do restante do quadro.
+Lets the model find skin itself rather than treating the frame uniformly.	Permite que o modelo identifique a pele em vez de tratar o quadro uniformemente.
+Freezes the frame the model works on. While held, change paper white, the\nstrengths, the reversible mode, the model preset -- anything below the\nupscaler -- and only that setting moves; the scene does not.\n\nWhat it CANNOT show: DLSS/FSR/XeSS upscaler presets or anything upstream\n(the upscaler is not re-run on a held frame), and the game's own HUD and\npost-processing, which run after this pass and keep updating. The white\npoint stops being measured and holds its value while frozen, so it cannot\ndrift and confound the comparison.\n\nHide the menu and it stays held. Untoggle to resume.	Congela o quadro processado pelo modelo. Enquanto estiver congelado, altere o branco\nde referência, as intensidades, o modo reversível ou o perfil do modelo: só o ajuste\nmuda, a cena permanece igual.\n\nNão compara perfis DLSS/FSR/XeSS ou etapas anteriores: o upscaler não é executado\nnovamente. O HUD e o pós-processamento do jogo, posteriores a este passe, continuam\natualizando. A medição do ponto branco também congela para não afetar a comparação.\n\nFechar o menu mantém o quadro congelado. Desative para continuar.
+Where the wipe cuts. Left of it is the frame as the upscaler produced it,\nright of it is the frame the model edited.	Posição da divisão. À esquerda fica o quadro produzido pelo upscaler;\nà direita, o quadro modificado pelo modelo.
+Proxy is the picture handed to the model -- if that looks wrong, the white point\nis wrong and nothing downstream can be judged.\n\nDifference shows what the model actually changed, amplified twenty times and\ncentred on grey. A flat grey frame there means it is doing nothing.	Proxy é a imagem entregue ao modelo. Se estiver incorreta, o ponto branco está\nincorreto e as etapas seguintes não podem ser avaliadas.\n\nDiferença mostra a alteração do modelo, ampliada vinte vezes e centrada no cinza.\nUm quadro cinza uniforme indica que nada foi alterado.

@@ -80,6 +80,17 @@ foreach ($d in @("Licenses", "OptiScaler")) {
 
 Copy-Item $forwarder "$stage\nvngx.dll_dlssnr.dll" -Force
 
+# Optional dictionaries are source assets, not build-output discoveries. Keep them inactive:
+# the loader only reads OptiScaler.lang immediately beside the DLL, never this subdirectory.
+$translationStage = "$stage\translations\optional"
+New-Item -ItemType Directory -Force -Path $translationStage | Out-Null
+Copy-Item "$root\OptiScaler\translations\optional\pt-BR.lang" "$translationStage\pt-BR.lang" -Force
+Copy-Item "$root\OptiScaler\translations\README.md" "$stage\translations\README.md" -Force
+if (Test-Path "$stage\OptiScaler.lang") {
+    throw "REFUSING: an active localization dictionary must not ship beside the DLL"
+}
+
+
 # Logging on, in the release only.
 #
 # Upstream ships LogToFile=auto, which resolves to false, and the source ini is theirs -- changing it

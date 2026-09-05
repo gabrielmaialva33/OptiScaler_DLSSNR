@@ -1,4 +1,5 @@
 ﻿#include "pch.h"
+#include <misc/Localization.h>
 #include "menu_common.h"
 #include <dlssnr/DlssNr_ExposureScan.h>
 
@@ -2658,7 +2659,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
         if (state.api == DX11 && currentFeature->IsWithDx12())
         {
             ImGui::Spacing();
-            if (auto ch = ScopedCollapsingHeader("Dx11 with Dx12 Settings"); ch.IsHeaderOpen())
+            if (auto ch = ScopedCollapsingHeader(Localization::Label("Dx11 with Dx12 Settings")); ch.IsHeaderOpen())
             {
                 ScopedIndent indent {};
                 ImGui::Spacing();
@@ -2675,7 +2676,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
         if (state.api == Vulkan && currentFeature->IsWithDx12())
         {
             ImGui::Spacing();
-            if (auto ch = ScopedCollapsingHeader("Vulkan with Dx12 Settings"); ch.IsHeaderOpen())
+            if (auto ch = ScopedCollapsingHeader(Localization::Label("Vulkan with Dx12 Settings")); ch.IsHeaderOpen())
             {
                 ScopedIndent indent {};
                 ImGui::Spacing();
@@ -2699,7 +2700,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
         if (currentBackend == Upscaler::XeSS && !usesDlssd)
         {
             ImGui::Spacing();
-            if (auto ch = ScopedCollapsingHeader("XeSS Settings"); ch.IsHeaderOpen())
+            if (auto ch = ScopedCollapsingHeader(Localization::Label("XeSS Settings")); ch.IsHeaderOpen())
             {
                 ScopedIndent indent {};
                 ImGui::Spacing();
@@ -2989,7 +2990,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
                     ImGui::Spacing();
 
-                    if (auto ch = ScopedCollapsingHeader("FSR 3 Upscaler Manual Tuning"); ch.IsHeaderOpen())
+                    if (auto ch = ScopedCollapsingHeader(Localization::Label("FSR 3 Upscaler Manual Tuning")); ch.IsHeaderOpen())
                     {
                         ScopedIndent indent {};
                         ImGui::Spacing();
@@ -3610,7 +3611,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         {
             ImGui::Spacing();
 
-            if (auto ch = ScopedCollapsingHeader("Advanced FG Settings"); ch.IsHeaderOpen())
+            if (auto ch = ScopedCollapsingHeader(Localization::Label("Advanced FG Settings")); ch.IsHeaderOpen())
             {
                 ScopedIndent indent {};
                 ImGui::Spacing();
@@ -3874,7 +3875,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
             ImGui::Spacing();
 
-            if (auto ch = ScopedCollapsingHeader("Extended FSR FG Settings"); ch.IsHeaderOpen())
+            if (auto ch = ScopedCollapsingHeader(Localization::Label("Extended FSR FG Settings")); ch.IsHeaderOpen())
             {
                 ScopedIndent indent {};
                 ImGui::Spacing();
@@ -4174,7 +4175,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         // ShowHelpMarker("Display only XeFG generated frames");
 
         ImGui::Spacing();
-        if (auto ch = ScopedCollapsingHeader("Extended XeFG Settings"); ch.IsHeaderOpen())
+        if (auto ch = ScopedCollapsingHeader(Localization::Label("Extended XeFG Settings")); ch.IsHeaderOpen())
         {
             ImGui::Spacing();
             if (ImGui::TreeNode("Rectangle Settings"))
@@ -4430,7 +4431,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
             ImGui::Spacing();
 
-            if (auto ch = ScopedCollapsingHeader("Advanced OptiFG Settings"); ch.IsHeaderOpen())
+            if (auto ch = ScopedCollapsingHeader(Localization::Label("Advanced OptiFG Settings")); ch.IsHeaderOpen())
             {
                 ScopedIndent indent {};
 
@@ -4787,7 +4788,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
                 ImGui::Spacing();
 
-                if (auto ch = ScopedCollapsingHeader("Active DispatchFlags"); ch.IsHeaderOpen())
+                if (auto ch = ScopedCollapsingHeader(Localization::Label("Active DispatchFlags")); ch.IsHeaderOpen())
                 {
                     ScopedIndent indent {};
 
@@ -5022,7 +5023,7 @@ void MenuCommon::RenderFsrCommonSettings(RenderMenuContext& ctx)
                 config->FsrUseFsrInputValues = useFsrVales;
 
             ImGui::Spacing();
-            if (auto ch = ScopedCollapsingHeader("FoV & Camera Values"); ch.IsHeaderOpen())
+            if (auto ch = ScopedCollapsingHeader(Localization::Label("FoV & Camera Values")); ch.IsHeaderOpen())
             {
                 ScopedIndent indent {};
                 ImGui::Spacing();
@@ -5194,7 +5195,7 @@ void MenuCommon::RenderFramerateSettings(RenderMenuContext& ctx)
         }
 
         ImGui::Spacing();
-        if (auto ch = ScopedCollapsingHeader("VRR Frame Cap Calculator"); ch.IsHeaderOpen())
+        if (auto ch = ScopedCollapsingHeader(Localization::Label("VRR Frame Cap Calculator")); ch.IsHeaderOpen())
         {
             ScopedIndent indent {};
             ImGui::Spacing();
@@ -5533,7 +5534,7 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
                                "More red areas will have more sharpness applied\n"
                                "Green areas will get reduced sharpness");
 
-                if (auto ch = ScopedCollapsingHeader("Advanced DA Parameters"); ch.IsHeaderOpen())
+                if (auto ch = ScopedCollapsingHeader(Localization::Label("Advanced DA Parameters")); ch.IsHeaderOpen())
                 {
                     ScopedIndent indent {};
                     ImGui::Spacing();
@@ -5624,7 +5625,7 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
             }
 
             ImGui::Spacing();
-            if (auto ch = ScopedCollapsingHeader("Motion Adaptive Sharpness##2"); ch.IsHeaderOpen())
+            if (auto ch = ScopedCollapsingHeader(Localization::Label("Motion Adaptive Sharpness##2")); ch.IsHeaderOpen())
             {
                 ScopedIndent indent {};
                 ImGui::Spacing();
@@ -5918,7 +5919,7 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
             ImGui::EndTable();
 
             ImGui::Spacing();
-            if (auto ch = ScopedCollapsingHeader("Advanced Init Flags"); ch.IsHeaderOpen())
+            if (auto ch = ScopedCollapsingHeader(Localization::Label("Advanced Init Flags")); ch.IsHeaderOpen())
             {
                 ScopedIndent indent {};
                 ImGui::Spacing();
@@ -6017,7 +6018,7 @@ void MenuCommon::RenderMagnifierSettings(RenderMenuContext& ctx)
 
     // Magnifier -----------------------------
     ImGui::Spacing();
-    if (auto ch = ScopedCollapsingHeader("Magnifier"); ch.IsHeaderOpen())
+    if (auto ch = ScopedCollapsingHeader(Localization::Label("Magnifier")); ch.IsHeaderOpen())
     {
         ScopedIndent indent {};
         ImGui::Spacing();
@@ -6092,7 +6093,7 @@ void MenuCommon::RenderQuirksSettings(RenderMenuContext& ctx)
     if (state.detectedQuirks.size() > 0)
     {
         ImGui::Spacing();
-        if (auto ch = ScopedCollapsingHeader("Active Quirks"); ch.IsHeaderOpen())
+        if (auto ch = ScopedCollapsingHeader(Localization::Label("Active Quirks")); ch.IsHeaderOpen())
         {
             ScopedIndent indent {};
             ImGui::Spacing();
@@ -6113,7 +6114,7 @@ void MenuCommon::RenderAdvancedSettings(RenderMenuContext& ctx)
 
     // ADVANCED SETTINGS -----------------------------
     ImGui::Spacing();
-    if (auto ch = ScopedCollapsingHeader("Advanced Settings"); ch.IsHeaderOpen())
+    if (auto ch = ScopedCollapsingHeader(Localization::Label("Advanced Settings")); ch.IsHeaderOpen())
     {
         ScopedIndent indent {};
         ImGui::Spacing();
@@ -6161,7 +6162,7 @@ void MenuCommon::RenderAdvancedSettings(RenderMenuContext& ctx)
         {
             // BARRIERS -----------------------------
             ImGui::Spacing();
-            if (auto ch = ScopedCollapsingHeader("Resource Barriers"); ch.IsHeaderOpen())
+            if (auto ch = ScopedCollapsingHeader(Localization::Label("Resource Barriers")); ch.IsHeaderOpen())
             {
                 ScopedIndent indent {};
                 ImGui::Spacing();
@@ -6178,7 +6179,7 @@ void MenuCommon::RenderAdvancedSettings(RenderMenuContext& ctx)
             if (state.api == DX12)
             {
                 ImGui::Spacing();
-                if (auto ch = ScopedCollapsingHeader("Root Signatures"); ch.IsHeaderOpen())
+                if (auto ch = ScopedCollapsingHeader(Localization::Label("Root Signatures")); ch.IsHeaderOpen())
                 {
                     ScopedIndent indent {};
                     ImGui::Spacing();
@@ -6202,7 +6203,7 @@ void MenuCommon::RenderLoggingSettings(RenderMenuContext& ctx)
 
     // LOGGING -----------------------------
     ImGui::Spacing();
-    if (auto ch = ScopedCollapsingHeader("Logging"); ch.IsHeaderOpen())
+    if (auto ch = ScopedCollapsingHeader(Localization::Label("Logging")); ch.IsHeaderOpen())
     {
         ScopedIndent indent {};
         ImGui::Spacing();
@@ -6252,7 +6253,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
 
     // THEME -----------------------------
     ImGui::Spacing();
-    if (auto ch = ScopedCollapsingHeader("Menu Theme and Color"); ch.IsHeaderOpen())
+    if (auto ch = ScopedCollapsingHeader(Localization::Label("Menu Theme and Color")); ch.IsHeaderOpen())
     {
         ScopedIndent indent {};
         ImGui::Spacing();
@@ -6699,7 +6700,7 @@ void MenuCommon::RenderFpsOverlaySettings(RenderMenuContext& ctx)
 
     // FPS OVERLAY -----------------------------
     ImGui::Spacing();
-    if (auto ch = ScopedCollapsingHeader("FPS Overlay"); ch.IsHeaderOpen())
+    if (auto ch = ScopedCollapsingHeader(Localization::Label("FPS Overlay")); ch.IsHeaderOpen())
     {
         ScopedIndent indent {};
         ImGui::Spacing();
@@ -6776,7 +6777,7 @@ void MenuCommon::RenderUpscalerInputsSettings(RenderMenuContext& ctx)
     // UPSCALER INPUTS -----------------------------
     ImGui::Spacing();
     auto uiStateOpen = currentFeature == nullptr || currentFeature->IsFrozen();
-    if (auto ch = ScopedCollapsingHeader("Upscaler Inputs", uiStateOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0);
+    if (auto ch = ScopedCollapsingHeader(Localization::Label("Upscaler Inputs"), uiStateOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0);
         ch.IsHeaderOpen())
     {
         ScopedIndent indent {};
@@ -6830,7 +6831,7 @@ void MenuCommon::RenderApiAndTextureSettings(RenderMenuContext& ctx)
     {
         // V-SYNC -----------------------------
         ImGui::Spacing();
-        if (auto ch = ScopedCollapsingHeader("V-Sync Settings"); ch.IsHeaderOpen())
+        if (auto ch = ScopedCollapsingHeader(Localization::Label("V-Sync Settings")); ch.IsHeaderOpen())
         {
             ScopedIndent indent {};
             ImGui::Spacing();
@@ -6933,7 +6934,7 @@ void MenuCommon::RenderApiAndTextureSettings(RenderMenuContext& ctx)
 
         // MIPMAP BIAS & Anisotropy -----------------------------
         ImGui::Spacing();
-        if (auto ch = ScopedCollapsingHeader("Mipmap Bias", (currentFeature == nullptr || currentFeature->IsFrozen())
+        if (auto ch = ScopedCollapsingHeader(Localization::Label("Mipmap Bias"), (currentFeature == nullptr || currentFeature->IsFrozen())
                                                                 ? ImGuiTreeNodeFlags_DefaultOpen
                                                                 : 0);
             ch.IsHeaderOpen())
@@ -7055,7 +7056,7 @@ void MenuCommon::RenderApiAndTextureSettings(RenderMenuContext& ctx)
 
         ImGui::Spacing();
         if (auto ch = ScopedCollapsingHeader(
-                "Anisotropic Filtering",
+                Localization::Label("Anisotropic Filtering"),
                 (currentFeature == nullptr || currentFeature->IsFrozen()) ? ImGuiTreeNodeFlags_DefaultOpen : 0);
             ch.IsHeaderOpen())
         {
@@ -7120,7 +7121,7 @@ void MenuCommon::RenderKeybindSettings(RenderMenuContext& ctx)
     auto config = ctx.config;
 
     ImGui::Spacing();
-    if (auto ch = ScopedCollapsingHeader("Keybinds"); ch.IsHeaderOpen())
+    if (auto ch = ScopedCollapsingHeader(Localization::Label("Keybinds")); ch.IsHeaderOpen())
     {
         ScopedIndent indent {};
         ImGui::Spacing();
@@ -7320,7 +7321,7 @@ void MenuCommon::RenderMainMenuBottomBar(RenderMenuContext& ctx)
 
     const char* selectedScaleName = uiScales[_selectedScale];
 
-    if (ImGui::BeginCombo("Menu Scale", selectedScaleName))
+    if (ImGui::BeginCombo(Localization::Label("Menu Scale"), selectedScaleName))
     {
         for (int n = 0; n < std::size(uiScales); n++)
         {
@@ -7342,12 +7343,12 @@ void MenuCommon::RenderMainMenuBottomBar(RenderMenuContext& ctx)
 
     ImGui::SameLine(0.0f, 15.0f);
 
-    if (ImGui::Button("Save Settings"))
+    if (ImGui::Button(Localization::Label("Save Settings")))
         config->SaveIni();
 
     ImGui::SameLine(0.0f, 6.0f);
 
-    if (ImGui::Button("Close"))
+    if (ImGui::Button(Localization::Label("Close")))
     {
         _isVisible = false;
         hasGamepad = (io.BackendFlags | ImGuiBackendFlags_HasGamepad) > 0;
@@ -7574,7 +7575,7 @@ void MenuCommon::RenderMipmapBiasWindow(RenderMenuContext& ctx, ImGuiWindowFlags
 
             ImGui::SameLine(0.0f, spacing);
 
-            if (ImGui::Button("Close"))
+            if (ImGui::Button(Localization::Label("Close")))
                 _showMipmapCalcWindow = false;
 
             ImGui::Spacing();
@@ -7654,7 +7655,7 @@ void MenuCommon::RenderHudlessResourcesWindow(RenderMenuContext& ctx, ImGuiWindo
 
             ImGui::SameLine(0.0f, 8.0f);
 
-            if (ImGui::Button("Close##4"))
+            if (ImGui::Button(Localization::Label("Close##4")))
                 _showHudlessWindow = false;
 
             ImGui::End();
