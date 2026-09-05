@@ -65,13 +65,26 @@ def run_under_proton():
                # The harness LoadLibrary()s OptiScaler.dll by name, so no dxgi override is needed
                # for it; Proton keeps its own DXVK/vkd3d overrides.
                WINEDEBUG='-all',
-               PROTON_LOG='0')
-    (OUT / 'run/OptiScaler.log').unlink(missing_ok=True)
+               # Proton does not pass the child's stdout through; the harness writes its own
+               # dlssnr-loopback.log, and PROTON_LOG captures wine-side crashes into OUT.
+               PROTON_LOG='1', PROTON_LOG_DIR=str(OUT))
+    for stale in ('run/OptiScaler.log', 'run/dlssnr-loopback.log'):
+        (OUT / stale).unlink(missing_ok=True)
     print(f'running under {proton.parent.name}')
     p = subprocess.run([str(proton), 'run', str(OUT / 'run/dlssnr-loopback.exe'), 'OptiScaler.dll'],
                        cwd=OUT / 'run', env=env, timeout=600)
+    hlog = OUT / 'run/dlssnr-loopback.log'
+    if hlog.exists():
+        print('--- harness log ---')
+        print(hlog.read_text(errors='replace').rstrip())
     if p.returncode != 0:
-        raise SystemExit(p.returncode)
+        crash = sorted(OUT.glob('steam-*.log'), key=lambda f: f.stat().st_mtime)
+        if crash:
+            tail = [l for l in crash[-1].read_text(errors='replace').splitlines()
+                    if any(k in l.lower() for k in ('page fault', 'unhandled', 'exception', 'backtrace', 'dlssnr-loopback'))]
+            if tail:
+                print('--- proton log ---'); print('\n'.join(tail[-12:]))
+        raise SystemExit(f'harness exited {p.returncode}')
     check_nr_coverage()
     raise SystemExit(0)
 
