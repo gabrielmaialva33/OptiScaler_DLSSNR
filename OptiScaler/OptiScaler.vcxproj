@@ -866,4 +866,14 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <ItemGroup>
+    <ClInclude Include="misc\Localization.h" />
+    <ClInclude Include="dlssnr\DlssNr_Submission.h" />
+    <ClInclude Include="dlssnr\DlssNr_SubmissionModel.h" />
+    <ClInclude Include="dlssnr\DlssNr_PassSettings.h" />
+    <ClInclude Include="dlssnr\DlssNr_Exposure.h" />
+    <ClInclude Include="dlssnr\DlssNr_Chain.h" />
+    <ClCompile Include="misc\Localization.cpp" />
+    <ClCompile Include="dlssnr\DlssNr_Submission.cpp" />
+  </ItemGroup>
 </Project>
