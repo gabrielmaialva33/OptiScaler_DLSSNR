@@ -51,6 +51,25 @@ exist in the solution but CI and every script build only x64. Configurations: `D
   then rerun — it resumes incrementally and usually completes.
   Extra args land after the script's own `/p:`, so `./build-local.sh Release /p:CL_MPCount=4`
   overrides the default if you want to try a lower count.
+- **The `dlssnr_forwarder` project is where it stalls in practice**, right after `OptiScaler.dll`
+  links. Five hypotheses were tested and *disproved*: `CL_MPCount` (stalls at 16, 4, 1 and the
+  default), an orphaned Wine process, the file's own content (stalls formatted or not), a corrupted
+  intermediate (stalls after deleting `x64/Release/dlssnr_forwarder/`), and `/GL`/LTCG — an isolated
+  control passed both with `WholeProgramOptimization=true` and without it. **Root cause is unknown.**
+- **Observed recovery** (once; not proven deterministic): build the forwarder project on its own
+  with the original flags, then run the normal build, which then completes and copies both DLLs.
+
+```bash
+WINEPREFIX=~/.local/opt/msvc-wineprefix WINEDEBUG=-all ~/.local/opt/msvc/bin/x64/msbuild \
+  OptiScaler/dlssnr/forwarder/dlssnr_forwarder.vcxproj /nologo /v:normal \
+  /p:Configuration=Release /p:Platform=x64 \
+  '/p:SolutionDir=Z:\home\gabrielmaia\Projects\personal\OptiScaler_DLSSNR\' \
+  /p:CL_MPCount=4 /p:WholeProgramOptimization=true \
+  /p:PreBuildEventUseInBuild=false /p:PostBuildEventUseInBuild=false > /tmp/fwd.log 2>&1
+./build-local.sh Release /p:CL_MPCount=4 > /tmp/release.log 2>&1
+```
+
+  Evidence, manifests and logs: `~/.local/state/crimson-desert-dlss5/gpu-timing-validation/1885828a/`.
 - When killing a stalled build, **use a bracket pattern**: `pgrep -f '[M]SBuild\.exe'`. A plain
   `pgrep -f 'build-local'` matches the very shell running it, so the kill takes out your own
   command (exit 144) and leaves the stall untouched.
