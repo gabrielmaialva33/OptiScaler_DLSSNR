@@ -31,9 +31,9 @@ namespace DlssNr
 //
 // Safe to call every frame; it builds what it needs on first use and disables itself for the session if
 // anything fails, rather than retrying into a crash.
-// timingQueue is the queue this command list will be executed on, when the caller knows it.
-// State::currentCommandQueue only exists once a D3D12 swapchain has been created, which a Vulkan
-// game never does -- so without this the pass runs and never reports what it cost.
+// timingQueue remains for caller compatibility. Confirmed GPU timing observes the actual queue
+// submission through DlssNr_Submission; neither this hint nor State::currentCommandQueue is proof
+// of where this recording executed.
 //
 // preUpscaleDeclined is ScopedPreUpscale::Declined() from the scope wrapped around this same
 // evaluate, when there was one. On stage 1 this pass stands down unless that scope declined the
@@ -170,7 +170,9 @@ ExposureStatus GameExposureStatus();
 // The white point the exposure meter has settled on, or 0 if it has not taken a reading yet. For the
 // overlay, so the number in use is visible rather than inferred.
 
-// What the pass last cost on the GPU, in milliseconds, or nothing if it has not been measured yet.
+// Legacy upscaler-breakdown compatibility: returns no value. That UI has no sample provenance or
+// age fields and must not label a historical timing as current cost. Use GpuTiming::GetSnapshot()
+// for a confirmed historical sample, its immutable metadata, counters and recording age.
 std::optional<double> LastGpuTime();
 const char* BeforeUpscaleStatus();
 unsigned int ActivePassCount();

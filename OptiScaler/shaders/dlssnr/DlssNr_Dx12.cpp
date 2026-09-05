@@ -20,7 +20,7 @@
 
 #include <proxies/NVNGX_Proxy.h>
 #include <hooks/D3D12_Hooks.h>
-#include <gpu_time/GpuTime_Dx12.h>
+#include <dlssnr/DlssNr_GpuTiming.h>
 
 #include <mutex>
 #include <algorithm>
@@ -438,23 +438,99 @@ bool g_preAllocationFailed = false;
 bool g_lastBeforeUpscale = false;
 std::atomic<const char*> g_preStatus { "Waiting for a supported upscale evaluation" };
 
-// What the pass costs on the GPU, for the breakdown in the overlay.
-std::unique_ptr<GpuTime_Dx12> g_gpuTime;
+// Timing identifies the loaded model file once per process. These file attributes are an audit
+// label, not a content hash or proof that the file was unchanged while the process was running.
+std::string TimingModelIdentity()
+{
+    static const std::string identity = []
+    {
+        wchar_t buffer[32768] {};
+        const auto module = GetModuleHandleW(L"nvngx_dlssnr.dll");
+        const auto count = module ? GetModuleFileNameW(module, buffer, _countof(buffer)) : 0;
+        if (!count || count >= _countof(buffer))
+            return std::string("loaded-model-unidentified");
+        const std::filesystem::path path(buffer);
+        std::error_code sizeError, timeError;
+        const auto bytes = std::filesystem::file_size(path, sizeError);
+        const auto modified = std::filesystem::last_write_time(path, timeError);
+        version_t version {};
+        const bool hasVersion = Util::GetFileVersion(path.wstring(), &version);
+        const auto label = std::format("file-bytes={};mtime={};version={}.{}.{}.{}", sizeError ? 0 : bytes,
+                                       timeError ? 0 : modified.time_since_epoch().count(), version.major,
+                                       version.minor, version.patch, version.reserved);
+        LOG_INFO("DLSS-NR timing model-file: path={} label={} size_known={} mtime_known={} version_known={} "
+                 "identity=file-attributes-not-content-hash; hash the installed model externally before/after A/B",
+                 path.string(), label, !sizeError, !timeError, hasVersion);
+        return label;
+    }();
+    return identity;
+}
 
-// A second timer, around the model's evaluate and nothing else.
-//
-// The first one brackets the whole pass, which is the number the menu shows and the right one for
-// "what does this feature cost". It is the wrong number for deciding what to optimise: the 4.10 ms at
-// full model resolution and 2.24 ms at half were both whole-pass, and both included this pass's own
-// encode and resolve at DISPLAY resolution plus the guide copies, none of which move when the model's
-// resolution does. Fitting a fixed term to those two points therefore attributes our own unchanging
-// work to NGX overhead.
-//
-// Splitting them says how much of the pass is the model and how much is ours -- and ours is the half
-// we can actually do something about.
-std::unique_ptr<GpuTime_Dx12> g_ngxTime;
-std::optional<double> g_lastNgxTime;
-std::optional<double> g_lastGpuTime;
+// Exact text comparison gives each configuration a session-local generation. Hash is only a compact
+// lookup key; the INFO contract line carries the values and never claims cryptographic identity.
+// Legacy scalar settings are not one atomic render transaction: keep configuration fixed during A/B.
+DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSnapshot& passes, uint64_t evaluation,
+                                           uint64_t present, const char* stage, unsigned renderWidth,
+                                           unsigned renderHeight, unsigned width, unsigned height, unsigned workWidth,
+                                           unsigned workHeight, float workScale, bool reset, bool captureActive,
+                                           bool linearHdr, unsigned format)
+{
+    auto contract = std::format(
+        "stage={} render={}x{} compose={}x{} model={}x{} scale={} passes={} individual={} "
+        "apply={} hold={} white_source={} white_scale={} white_trim={} scan_trim={} scan_inverted={} "
+        "detail={} colour={} max_ratio={} transfer={} reversible={} debug={} compare={} split={} zoom={} swap={} "
+        "downscaler={} exposure_scan={} auto_capture={} linear_hdr={} compose_format={}",
+        stage, renderWidth, renderHeight, width, height, workWidth, workHeight, workScale, passes.Count,
+        passes.Individual, cfg.DlssNrApplyModel.value_or_default(), cfg.DlssNrHoldFrame.value_or_default(),
+        cfg.DlssNrWhitePointSource.value_or_default(), cfg.DlssNrWhitePointScale.value_or_default(),
+        cfg.DlssNrWhitePointTrim.value_or_default(), cfg.DlssNrScanTrim.value_or_default(),
+        cfg.DlssNrScanInverted.value_or_default(), cfg.DlssNrTransferStrength.value_or_default(),
+        cfg.DlssNrColourStrength.value_or_default(), cfg.DlssNrMaxRatio.value_or_default(),
+        cfg.DlssNrTransfer.value_or_default(), cfg.DlssNrReversibleMode.value_or_default(),
+        cfg.DlssNrDebugView.value_or_default(), cfg.DlssNrCompare.value_or_default(),
+        cfg.DlssNrCompareSplit.value_or_default(), cfg.DlssNrCompareZoom.value_or_default(),
+        cfg.DlssNrCompareSwap.value_or_default(), static_cast<unsigned>(cfg.DlssNrScalingDownscaler.value_or_default()),
+        cfg.DlssNrScanExposure.value_or_default(), cfg.DlssNrAutoCapture.value_or_default(), linearHdr, format);
+    for (unsigned i = 0; i < passes.Count; ++i)
+    {
+        const auto& pass = passes.Settings[i];
+        contract += std::format(" pass{}=[preset={},style={},intensity={},structure={},tone={},skin={},mask={}]", i + 1,
+                                pass.Preset, pass.Style, pass.Intensity, pass.LocalStructure, pass.LocalTone,
+                                pass.SkinStructure, pass.AutoMask);
+    }
+    static std::string previous;
+    static uint64_t generation = 0;
+    uint64_t hash = 14695981039346656037ull;
+    for (const unsigned char ch : contract)
+        hash = (hash ^ ch) * 1099511628211ull;
+    if (previous != contract)
+    {
+        previous = contract;
+        ++generation;
+        LOG_INFO("DLSS-NR timing contract generation={} hash={:016X}: {}", generation, hash, contract);
+    }
+    DlssNr::GpuTiming::Metadata metadata {};
+    metadata.evaluationId = evaluation;
+    metadata.presentId = present;
+    metadata.settingsGeneration = generation;
+    metadata.contractHash = hash;
+    metadata.stage = stage;
+    metadata.renderWidth = renderWidth;
+    metadata.renderHeight = renderHeight;
+    metadata.outputWidth = width;
+    metadata.outputHeight = height;
+    metadata.modelWidth = workWidth;
+    metadata.modelHeight = workHeight;
+    metadata.workingScale = workScale;
+    metadata.requestedPasses = passes.Count;
+    metadata.modelReset = reset;
+    metadata.captureActive = captureActive;
+    const auto identity = TimingModelIdentity();
+    std::snprintf(metadata.modelIdentity, sizeof(metadata.modelIdentity), "%s", identity.c_str());
+    return metadata;
+}
+
+uint64_t g_timingEvaluations = 0;
 
 // Writes matched before/after frames on request, so comparisons stop depending on video.
 capture::FrameCapture g_capture;
@@ -1895,6 +1971,20 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ? (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value()
             : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
+    // Construct before every resource/state guard: the final timestamp is recorded only after
+    // their destructors restore the caller's resources. The extra device query is measurement-only.
+    const auto timingSettings = cfg.GetDlssNrGpuTimingSettings();
+    const bool timingEnabled = timingSettings.Enabled && !cfg.DlssNrUseProxy.value_or_default();
+    ID3D12Device* timingDevice = nullptr;
+    if (timingEnabled)
+        target->GetDevice(IID_PPV_ARGS(&timingDevice));
+    DlssNr::GpuTiming::Metadata initialTiming {};
+    initialTiming.evaluationId = timingEnabled ? ++g_timingEvaluations : 0;
+    initialTiming.presentId = observedFrame;
+    DlssNr::GpuTiming::Evaluation timing(timingDevice, cmdList, initialTiming, timingEnabled, timingSettings.Interval);
+    if (timingDevice)
+        timingDevice->Release();
+
     struct RestoreOutput
     {
         ID3D12GraphicsCommandList* cmd;
@@ -2423,14 +2513,29 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // represent -- it exists precisely because the proxy is meant to clip. Normalising the highlights
     // away first leaves it nothing to give back.
 
-    if (g_gpuTime == nullptr)
-        g_gpuTime = std::make_unique<GpuTime_Dx12>(device);
-
-    if (g_ngxTime == nullptr)
-        g_ngxTime = std::make_unique<GpuTime_Dx12>(device);
-
-    if (g_gpuTime != nullptr)
-        g_gpuTime->Start(cmdList);
+    bool timingMetadataReady = !timingEnabled;
+    if (timingEnabled)
+    {
+        try
+        {
+            bool modelReset = g_nr.reset;
+            for (unsigned i = 1; i < passSnapshot.Count; ++i)
+                modelReset = modelReset || g_nr.passReset[i];
+            timing.SetMetadata(TimingMetadata(cfg, passSnapshot, initialTiming.evaluationId, observedFrame,
+                                              beforeUpscale                             ? "before"
+                                              : cfg.DlssNrStage.value_or_default() == 1 ? "after-fallback"
+                                                                                        : "after",
+                                              guideWidth, guideHeight, width, height, workWidth, workHeight, workScale,
+                                              modelReset, g_capture.isActive(), isHdrBuffer,
+                                              static_cast<unsigned>(desc.Format)));
+            timingMetadataReady = true;
+        }
+        catch (...)
+        {
+            // Metadata failure invalidates measurement only; rendering must continue unchanged.
+            timing.Reject("metadata-unavailable");
+        }
+    }
 
     // Fetch the game's exposure, where the game supplies one and the user asked for it.
     //
@@ -2797,8 +2902,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return false;
     }
 
-    if (g_ngxTime != nullptr)
-        g_ngxTime->Start(cmdList);
+    timing.ModelBegin();
 
     // Preserve the single/master call and anchor. Each extra layer has independent history.
     const auto firstCpuStart =
@@ -2828,6 +2932,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_nr.guideMvScaleX * mvToWork, g_nr.guideMvScaleY * mvToWork);
     }
 
+    timing.ModelEnd();
+
     if (chainEnabled && (g_frames % 120 == 0 || result != 1))
         LOG_INFO("DLSS-NR chain: pass 1 result=0x{:X}, dimensions={}x{}, CPU-call-ms={:.3f} (not GPU time)",
                  (unsigned) result, workWidth, workHeight,
@@ -2855,12 +2961,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             const auto& settings = passSnapshot.Settings[i];
             SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
             const auto startCpu = std::chrono::steady_clock::now();
+            timing.ModelBegin();
             const int extraResult =
                 g_nr.evaluate(cmdList, g_nr.passFeature[i], g_nr.capabilityParams, input, depthIn, motionIn, answer,
                               workWidth, workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
                               (g_nr.reset || g_nr.passReset[i]) ? 1 : 0, settings.Intensity, (int) settings.Style,
                               settings.LocalStructure, settings.LocalTone, settings.SkinStructure,
                               settings.AutoMask ? 1 : 0, g_nr.guideMvScaleX * mvToWork, g_nr.guideMvScaleY * mvToWork);
+            timing.ModelEnd();
             const double cpuMs =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startCpu).count();
             Barrier(cmdList, input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -2899,9 +3007,6 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (coverage != nullptr)
         coverage->ModelResult(result, workWidth, workHeight);
-
-    if (g_ngxTime != nullptr)
-        g_ngxTime->End(cmdList);
 
     g_nr.reset = false;
 
@@ -3105,44 +3210,6 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     hdrRead.Restore();
 
-    if (g_gpuTime != nullptr)
-    {
-        g_gpuTime->End(cmdList);
-
-        // This path records into the game's own list, so there is no queue of ours to read from.
-        // A caller that knows which queue the list goes to says so; otherwise the one the upscaler was
-        // invoked on serves. The bridges have to say, because they run on a queue of their own that
-        // State never learns about -- a Vulkan game creates no D3D12 swapchain, so nothing ever sets
-        // currentCommandQueue and the cost went unreported.
-        auto* queue =
-            timingQueue != nullptr ? timingQueue : (ID3D12CommandQueue*) State::Instance().currentCommandQueue;
-
-        if (queue != nullptr)
-        {
-            if (auto ms = g_gpuTime->ReadGpuTime(queue); ms.has_value())
-                g_lastGpuTime = ms;
-
-            if (g_ngxTime != nullptr)
-            {
-                if (auto ngx = g_ngxTime->ReadGpuTime(queue); ngx.has_value())
-                    g_lastNgxTime = ngx;
-            }
-
-            // The split, once every few hundred frames. What is worth reading is not the total but the
-            // remainder: the model's cost is NVIDIA's to set, and everything else is ours.
-            static unsigned long long lastSplitLog = 0;
-
-            if (g_lastGpuTime.has_value() && g_lastNgxTime.has_value() && g_frames - lastSplitLog > 600)
-            {
-                lastSplitLog = g_frames;
-                const double total = g_lastGpuTime.value();
-                const double ngx = g_lastNgxTime.value();
-                LOG_INFO("DLSS-NR cost: {:.2f} ms total = {:.2f} ms model + {:.2f} ms ours ({:.0f}% ours)", total, ngx,
-                         total - ngx, total > 0.0 ? 100.0 * (total - ngx) / total : 0.0);
-            }
-        }
-    }
-
     depthCloneRead.Restore();
     motionCloneRead.Restore();
 
@@ -3150,6 +3217,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // Leave the staging copy as the next frame expects to find it.
     colorRead.Restore();
+
+    // Arm, but do not record the final timestamp yet. All remaining resource/state destructors
+    // precede timing's destructor. Partial chains and failed composition never publish success.
+    if (chain.completed != passSnapshot.Count)
+        timing.Reject("partial-chain");
+    timing.FinishOnScopeExit(chain.completed,
+                             timingMetadataReady && wrote && result == 1 && chain.completed == passSnapshot.Count);
 
     // restoreOutput hands the output back in its arrival state on every exit.
     device->Release();
@@ -3381,6 +3455,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 {
     if (!Config::Instance()->DlssNrEnabled.value_or_default())
     {
+        GpuTiming::SetEnabled(false);
         ReportSkipOnce("it is switched off");
         return;
     }
@@ -3971,7 +4046,7 @@ ExposureStatus GameExposureStatus()
     return s;
 }
 
-std::optional<double> LastGpuTime() { return g_lastGpuTime; }
+std::optional<double> LastGpuTime() { return std::nullopt; }
 const char* BeforeUpscaleStatus() { return g_preStatus.load(); }
 unsigned int ActivePassCount() { return g_activePasses.load(); }
 const char* MultipassStatus() { return g_chainStatus.load(); }
@@ -4149,10 +4224,7 @@ void Shutdown()
     }
 
     g_capture.release();
-    g_gpuTime.reset();
-    g_ngxTime.reset();
-    g_lastNgxTime.reset();
-    g_lastGpuTime.reset();
+    GpuTiming::SetEnabled(false);
 
     g_compose.reset();
 }

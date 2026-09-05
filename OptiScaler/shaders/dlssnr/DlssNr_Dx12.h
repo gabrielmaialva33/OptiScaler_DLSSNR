@@ -81,8 +81,9 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // that show it the frame and bring its answer back. One call, like any other shader here.
     //
     // Sizes come from the output resource. Everything the pass cannot work out for itself is in
-    // DlssNrFrameInfo; everything the user chose stays in Config. timingQueue is the queue this list
-    // will be executed on, when the caller knows it.
+    // DlssNrFrameInfo; everything the user chose stays in Config. timingQueue is retained for caller
+    // compatibility only; confirmed timing uses the queue observed at ExecuteCommandLists, never
+    // this hint or State::currentCommandQueue.
     //
     // colour is what the model is shown and output is where the edited frame lands. They may be the
     // same resource, which is the after-upscale path: the pass reads the upscaler's output and writes
