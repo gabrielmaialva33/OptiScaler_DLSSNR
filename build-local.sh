@@ -15,10 +15,30 @@ printf '#define VER_BUILD_DATE "%s"\n'   "$date_str" > "$ROOT/OptiScaler/resourc
 printf '#define VER_BUILD_COMMIT "%s"\n' "$commit"   > "$ROOT/OptiScaler/resource_build_commit.h"
 
 cd "$ROOT"
-"$MSVC_BIN/msbuild" OptiScaler.sln /nologo /v:minimal /p:CL_MPCount=16 \
-  /p:Configuration="$CONFIG" /p:Platform=x64 \
-  /p:PreBuildEventUseInBuild=false /p:PostBuildEventUseInBuild=false \
-  "${@:2}"
+
+# Two msbuild processes, not one solution build. Under Wine the solution build stalls at the
+# transition from OptiScaler.vcxproj to dlssnr_forwarder.vcxproj (seven of eight stalls observed
+# were exactly there; the forwarder built fine on its own every time). Building the forwarder in
+# its own process first, then the DLL, removes the in-process project transition entirely.
+# The forwarder never defined MultiProcessorCompilation; the DLL does, and /MP's parent/child
+# cl.exe pair coordinates through wineserver, so it is switched off for the DLL via an imported
+# ItemDefinitionGroup (a global /p: cannot override item metadata). Serial, but it finishes.
+common=(/nologo /v:minimal /p:Configuration="$CONFIG" /p:Platform=x64
+        /p:PreBuildEventUseInBuild=false /p:PostBuildEventUseInBuild=false
+        "/p:SolutionDir=$(printf 'Z:%s\\' "$ROOT" | sed 's|/|\\|g')")
+nomp="$ROOT/x64/no-mp.targets"
+mkdir -p "$ROOT/x64"
+cat > "$nomp" <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemDefinitionGroup><ClCompile><MultiProcessorCompilation>false</MultiProcessorCompilation></ClCompile></ItemDefinitionGroup>
+</Project>
+XML
+nomp_win="$(printf 'Z:%s' "$nomp" | sed 's|/|\\|g')"
+
+"$MSVC_BIN/msbuild" OptiScaler/dlssnr/forwarder/dlssnr_forwarder.vcxproj "${common[@]}" "${@:2}"
+"$MSVC_BIN/msbuild" OptiScaler/OptiScaler.vcxproj "${common[@]}" \
+  "/p:ForceImportBeforeCppTargets=$nomp_win" "${@:2}"
 
 mkdir -p "$ROOT/x64/out"
 for f in OptiScaler.dll nvngx.dll_dlssnr.dll; do
