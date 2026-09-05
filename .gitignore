@@ -444,3 +444,10 @@ release
 
 # Winx PTY session state
 .winx/
+
+# Test suite outputs. tests/run_all.py and the per-suite run.py scripts build
+# here. artifacts/ is already caught by the NuGet rule inherited from the
+# VisualStudio template above; this states it on purpose so it survives an
+# upstream rewrite of that template.
+/tests/*/artifacts/
+tests/dlssnr-loopback/artifacts/

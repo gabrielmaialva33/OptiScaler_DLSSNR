@@ -20,6 +20,13 @@ repo), which adds Linux/Proton overlay patches on top.
   (`dlssnr/design/DEVELOPMENT.md` invariant 9).
 - **Never commit** `OptiScaler/resource_build_date.h`, `OptiScaler/resource_build_commit.h`, `x64/`,
   or `.winx/`. All are gitignored.
+- **The tree layout is upstream's, and stays that way.** The usual C++ advice (Pitchfork, the
+  Canonical Project Structure) says `src/`, `include/`, `tools/`, `docs/`. Do not apply it here.
+  731 of the 943 tracked files live under `OptiScaler/` and belong to upstream; moving them turns
+  every `git merge up/dlss-neural-rendering` into a whole-tree conflict, and this branch already
+  carries 74 commits of our own. Organise inside what this fork owns — `tests/`, `build-local.sh`,
+  `CLAUDE.md`, `.github/workflows/nr-tests.yml`, `.clang-format-ignore`, and the files listed under
+  "Linux / Proton patches" — and leave upstream's paths byte-identical.
 
 ## Build
 
@@ -131,16 +138,35 @@ for the same reason. The tree is currently clean under version 20.
 
 ### Tests
 
-Under `tests/`, each a self-contained directory with a `run.py` and its own README:
-`nr-before-upscale`, `nr-localization`, `nr-menu`, `nr-multipass`, `nr-pass-config`,
-`nr-submission`, `vulkan-overlay`. Run one with `python3 tests/<name>/run.py`.
+`tests/README.md` is the index; read it before adding or changing a suite. Twelve directories under
+`tests/`, each self-contained with its own `run.py` and README, registered in `tests/suites.toml`.
+
+```bash
+python3 tests/run_all.py            # host tier, the default; 9 suites, ~45 s
+python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
+python3 tests/run_all.py --tier all # adds the two wine suites
+python3 tests/<name>/run.py         # one suite, unchanged
+```
+
+Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the nine `nr-*`
+suites. **wine** needs the msvc-wine prefix and runs serially, because both suites contend for the
+same prefix `build-local.sh` uses: `nr-gpu-timing-d3d12`, `vulkan-overlay` (which also needs a
+graphical session and a working Vulkan loader). **wip** is `dlssnr-loopback`, registered with a
+README, a scene shader and `harness.cpp`, but still no `run.py`.
+
+`suites.toml` is a drift guard, not just a config file. A directory with no entry, or an entry with
+no directory, fails the run. That is deliberate: this list had gone stale before.
 
 Know what they do **not** cover: the `nr-*` suites exercise decision logic against fakes — they do
 not execute NGX, a real D3D12 device, or a real shader, so a green suite is not evidence about GPU
 behaviour, image quality or performance. `vulkan-overlay` builds a real DLL and drives real Vulkan.
-`dlssnr-loopback` is **in progress** — a deterministic D3D12 app meant to drive the production NR
-entry points (`OptiScaler.dll` exports the whole `NVSDK_NGX_D3D12_*` set, so it can be called
-directly); so far only its README and scene shader exist, and it has no `run.py` yet.
+`nr-before-upscale/verify-invariants.py` is an orphan by design: a one-shot evidence script pinned to
+baseline `660303ec` that no runner calls.
+
+CI: `.github/workflows/nr-tests.yml` runs the host tier on Linux for pushes and PRs that touch
+`tests/` or `OptiScaler/`. It checks out only `simpleini`, `spdlog` and `vulkan` — never
+FidelityFX-SDK. Upstream's `test.yml` is **not** a test workflow despite the name; it publishes the
+nightly release. Nothing runs the wine tier in CI; that stays local.
 
 In-game validation is still required (see "Test target"). For NR changes, follow the
 per-change-type review in `OptiScaler/dlssnr/design/DEVELOPMENT.md` §3 before considering a change
