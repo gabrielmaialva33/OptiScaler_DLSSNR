@@ -58,11 +58,17 @@ exist in the solution but CI and every script build only x64. Configurations: `D
   then rerun — it resumes incrementally and usually completes.
   Extra args land after the script's own `/p:`, so `./build-local.sh Release /p:CL_MPCount=4`
   overrides the default if you want to try a lower count.
-- **The `dlssnr_forwarder` project is where it stalls in practice**, right after `OptiScaler.dll`
-  links. Five hypotheses were tested and *disproved*: `CL_MPCount` (stalls at 16, 4, 1 and the
-  default), an orphaned Wine process, the file's own content (stalls formatted or not), a corrupted
-  intermediate (stalls after deleting `x64/Release/dlssnr_forwarder/`), and `/GL`/LTCG — an isolated
-  control passed both with `WholeProgramOptimization=true` and without it. **Root cause is unknown.**
+- **It stalls on any translation unit, not a particular one.** Five times in a row it stopped on
+  `dlssnr_forwarder.cpp` (right after `OptiScaler.dll` linked), which made the forwarder look
+  special; the sixth stall was on `FSR3_Dx12_FG.cpp` mid-compile. Five hypotheses were tested and
+  *disproved*: `CL_MPCount` (stalls at 16, 4, 1 and the default), an orphaned Wine process, the
+  file's own content (stalls formatted or not), a corrupted intermediate (stalls after deleting
+  `x64/Release/dlssnr_forwarder/`), and `/GL`/LTCG — an isolated control passed both with
+  `WholeProgramOptimization=true` and without it. **Root cause is unknown.**
+- **Never run anything else against the compiler prefix while a build is in flight.** The sixth
+  stall happened with `tests/dlssnr-loopback/run.py` compiling its harness through the same prefix
+  at the same time. That is not proven to be the cause — stalls also happen alone — but it is the
+  one condition that was added, and the wine test tier is serial for exactly this reason.
 - **Observed recovery** (once; not proven deterministic): build the forwarder project on its own
   with the original flags, then run the normal build, which then completes and copies both DLLs.
 
