@@ -28,9 +28,8 @@ cd "$ROOT"
 # the in-process transition from OptiScaler.vcxproj to dlssnr_forwarder.vcxproj; built alone it has
 # never stalled.
 common=(/nologo /v:minimal /p:CL_MPCount=16 /p:Configuration="$CONFIG" /p:Platform=x64
-        /p:PreBuildEventUseInBuild=false /p:PostBreakEventUseInBuild=false
+        /p:PreBuildEventUseInBuild=false /p:PostBuildEventUseInBuild=false
         "/p:SolutionDir=$(printf 'Z:%s\\' "$ROOT" | sed 's|/|\\|g')")
-common=("${common[@]/PostBreakEventUseInBuild/PostBuildEventUseInBuild}")
 
 # cpu_ticks <pid>: user+system jiffies, for measuring deltas. ps %CPU is an average since start
 # and reads low for a process that worked and then stalled; deltas do not lie.
@@ -41,8 +40,8 @@ cpu_ticks() { awk '{print $14+$15}' "/proc/$1/stat" 2>/dev/null || echo 0; }
 stalled() {
   local log=$1 s1 s2 t=0 a b p
   s1=$(stat -c%s "$log" 2>/dev/null || echo 0)
-  local cls; cls=$(pgrep -f '[H]ostX64.x64.CL\.exe' 2>/dev/null)
-  [ -z "$cls" ] && return 1                       # nothing compiling: linking, or done
+  local cls; cls=$(pgrep -f '[H]ostX64.x64.\(CL\|link\)\.exe' 2>/dev/null)
+  [ -z "$cls" ] && return 1                       # no compiler or linker running: done
   for p in $cls; do a=$(cpu_ticks "$p"); sleep 1; b=$(cpu_ticks "$p"); t=$((t + b - a)); done
   s2=$(stat -c%s "$log" 2>/dev/null || echo 0)
   [ "$t" -eq 0 ] && [ "$s1" = "$s2" ]
@@ -70,7 +69,7 @@ run_msbuild() {
       if [ "$dead" -ge 3 ]; then
         echo "[$label] attempt $attempt: hung; resetting wineserver and retrying" >&2
         kill -TERM "$pid" 2>/dev/null
-        for p in $(pgrep -f '[M]SBuild\.exe') $(pgrep -f '[H]ostX64.x64.CL\.exe'); do kill -TERM "$p" 2>/dev/null; done
+        for p in $(pgrep -f '[M]SBuild\.exe') $(pgrep -f '[H]ostX64.x64.\(CL\|link\)\.exe'); do kill -TERM "$p" 2>/dev/null; done
         sleep 2; wineserver -k 2>/dev/null; sleep 2
         for p in $(pgrep -x winedevice.exe) $(pgrep -x services.exe) $(pgrep -x plugplay.exe); do kill -KILL "$p" 2>/dev/null; done
         break
