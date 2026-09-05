@@ -46,6 +46,24 @@ Config::Config()
     Reload(absoluteFileName);
 }
 
+Config::DlssNrGpuTimingSettings Config::GetDlssNrGpuTimingSettings() const
+{
+    const std::lock_guard lock(_dlssNrPassSettingsMutex);
+    return { DlssNrGpuTiming.value_or_default(), std::clamp(DlssNrGpuTimingInterval.value_or_default(), 1u, 10000u) };
+}
+
+void Config::SetDlssNrGpuTimingEnabled(bool enabled)
+{
+    const std::lock_guard lock(_dlssNrPassSettingsMutex);
+    DlssNrGpuTiming = enabled;
+}
+
+void Config::SetDlssNrGpuTimingInterval(uint32_t interval)
+{
+    const std::lock_guard lock(_dlssNrPassSettingsMutex);
+    DlssNrGpuTimingInterval = std::clamp(interval, 1u, 10000u);
+}
+
 DlssNrResolvedPassSettings Config::DlssNrMasterSettingsUnlocked() const
 {
     return { DlssNrIntensity.value_or_default(), DlssNrLocalStructure.value_or_default(),
@@ -428,6 +446,10 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrWhitePointScale.set_from_config(readFloat("DlssNr", "WhitePointScale"));
             {
                 const std::lock_guard lock(_dlssNrPassSettingsMutex);
+                DlssNrGpuTiming.set_from_config(DlssNr::PassConfig::Bool(ini.GetValue("DlssNr", "GpuTiming")));
+                DlssNrGpuTimingInterval.set_from_config(
+                    DlssNr::PassConfig::UInt(ini.GetValue("DlssNr", "GpuTimingInterval"), UINT32_MAX)
+                        .transform([](uint32_t interval) { return std::clamp(interval, 1u, 10000u); }));
                 DlssNrPasses.set_from_config(DlssNr::PassConfig::Count(ini.GetValue("DlssNr", "Passes")));
                 DlssNrIndividualPassSettings.set_from_config(readBool("DlssNr", "IndividualPassSettings"));
                 // Strict parsing is scoped to NR model settings; unrelated INI readers are unchanged.
@@ -1334,6 +1356,11 @@ bool Config::SaveIni()
         {
             auto* config = Instance();
             const std::lock_guard lock(config->_dlssNrPassSettingsMutex);
+            ini.SetValue("DlssNr", "GpuTiming", GetBoolValue(config->DlssNrGpuTiming.value_for_config()).c_str());
+            ini.SetValue("DlssNr", "GpuTimingInterval",
+                         GetIntValue(config->DlssNrGpuTimingInterval.value_for_config().transform(
+                                         [](uint32_t interval) { return std::clamp(interval, 1u, 10000u); }))
+                             .c_str());
             ini.SetValue("DlssNr", "Passes",
                          GetIntValue(config->DlssNrPasses.value_for_config().transform(
                                          [](uint32_t count) { return DlssNr::PassConfig::BoundCount(count); }))

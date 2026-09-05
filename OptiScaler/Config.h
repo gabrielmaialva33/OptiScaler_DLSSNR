@@ -479,6 +479,18 @@ class Config
     CustomOptional<uint32_t> DlssNrPasses { 1 };
     CustomOptional<bool> DlssNrIndividualPassSettings { false };
 
+    // Opt-in timestamp collection. Interval counts eligible NR evaluations, not presented frames.
+    struct DlssNrGpuTimingSettings
+    {
+        bool Enabled = false;
+        uint32_t Interval = 30;
+    };
+    CustomOptional<bool> DlssNrGpuTiming { false };
+    CustomOptional<uint32_t> DlssNrGpuTimingInterval { 30 };
+    DlssNrGpuTimingSettings GetDlssNrGpuTimingSettings() const;
+    void SetDlssNrGpuTimingEnabled(bool enabled);
+    void SetDlssNrGpuTimingInterval(uint32_t interval);
+
     DlssNrPassSnapshot GetDlssNrPassSnapshot() const;
     DlssNrResolvedPassSettings GetDlssNrPassSettings(uint32_t passIndex) const;
     DlssNrResolvedPassSettings GetDlssNrMasterSettings() const;
