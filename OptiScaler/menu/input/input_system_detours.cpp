@@ -442,8 +442,15 @@ bool InstallHooks()
     if (!positionHooks && !positionIATHooks)
         positionIATHooks = InstallCursorIatHooks();
 
+    // The HID group is deliberately not installed on Linux (see the isRunningOnLinux guard above), so it
+    // must not be required here. Requiring it made HooksInstalled permanently false under Wine even with
+    // every other group attached, which had two consequences: Initialize reported failure and skipped the
+    // GameInput, XInput and DirectInput integrations, and RemoveHooks -- which returns early when this is
+    // false -- never detached anything, leaving the detours in place for the life of the process.
+    const bool hidReady = hidHooks || State::Instance().isRunningOnLinux;
+
     _state.HooksInstalled = messageHooks && keyStateHooks && getPosHooks && clipCursorHooks && message2Hooks &&
-                            hidHooks && rawHooks && windowsHooks && (positionHooks || positionIATHooks);
+                            hidReady && rawHooks && windowsHooks && (positionHooks || positionIATHooks);
 
     return _state.HooksInstalled;
 }
