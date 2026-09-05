@@ -277,6 +277,41 @@ static Frame MakeFrame(ID3D12Device* device, UINT renderW, UINT renderH, UINT ou
     return f;
 }
 
+// A window the harness owns.
+//
+// The first version had none: no swapchain is needed to drive NR, so a window looked like weight
+// without value. It is not. OptiScaler initialises its overlay input against the foreground window
+// and subclasses it, and in a windowless process that ran against a HWND belonging to something
+// else and page-faulted right after `MenuHdrCheck` -- 458 evaluations in, with NR itself healthy.
+// A game always has a window; giving the harness one removes a difference that was never the point
+// of the test.
+static HWND MakeWindow()
+{
+    WNDCLASSEXA wc {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = DefWindowProcA;
+    wc.hInstance = GetModuleHandleA(nullptr);
+    wc.lpszClassName = "DlssNrLoopback";
+    RegisterClassExA(&wc);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "dlssnr-loopback", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+                                CW_USEDEFAULT, 640, 360, nullptr, nullptr, wc.hInstance, nullptr);
+    Require(hwnd != nullptr, "CreateWindowEx");
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    return hwnd;
+}
+
+// Drain the queue so the window stays responsive; a window that never pumps is a window the
+// compositor and any subclassing hook see as hung.
+static void PumpMessages()
+{
+    MSG msg;
+    while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE))
+    {
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
+}
+
 int main(int argc, char** argv)
 {
     const char* dllPath = argc > 1 ? argv[1] : "OptiScaler.dll";
@@ -284,6 +319,8 @@ int main(int argc, char** argv)
     try
     {
         Say("dlssnr-loopback: driving the production NR path\n");
+        HWND window = MakeWindow();
+        Say("  window %p created and pumping\n", (void*) window);
 
         Com<IDXGIFactory4> factory;
         Check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
@@ -425,6 +462,7 @@ int main(int argc, char** argv)
                 fence->SetEventOnCompletion(fenceValue, fenceEvent);
                 WaitForSingleObject(fenceEvent, 5000);
                 ++evaluates;
+                PumpMessages();
                 if (!NVSDK_NGX_SUCCEED(r))
                 {
                     Say("  evaluate %ux%u refused: 0x%08X\n", step.w, step.h, (unsigned) r);
@@ -447,6 +485,7 @@ int main(int argc, char** argv)
             ngx.DestroyParameters(params);
         Say("  teardown: Shutdown\n");
         ngx.Shutdown(device);
+        DestroyWindow(window);
         CloseHandle(fenceEvent);
         Say("PASS\n");
         return 0;

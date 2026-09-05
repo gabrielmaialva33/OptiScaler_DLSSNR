@@ -127,9 +127,18 @@ def run_under_proton():
     p = subprocess.run([str(proton), 'run', str(OUT / 'run/dlssnr-loopback.exe'), 'OptiScaler.dll'],
                        cwd=OUT / 'run', env=env, timeout=600)
     hlog = OUT / 'run/dlssnr-loopback.log'
-    if hlog.exists():
+    harness = hlog.read_text(errors='replace') if hlog.exists() else ''
+    if harness:
         print('--- harness log ---')
-        print(hlog.read_text(errors='replace').rstrip())
+        print(harness.rstrip())
+
+    # A crash inside NGX shutdown is a real finding, not a broken test: everything the suite exists
+    # to exercise already ran. Report it as its own failure so it is neither masked nor confused
+    # with the NR pass not running. Games rarely call Shutdown1, which is why only this reaches it.
+    if p.returncode != 0 and 'teardown: Shutdown' in harness and 'PASS' not in harness:
+        check_nr_coverage()
+        raise SystemExit('the sweep completed, then NVSDK_NGX_D3D12_Shutdown1 crashed '
+                         f'(exit {p.returncode}); see artifacts/run/dlssnr-loopback.log')
     if p.returncode != 0:
         crash = sorted(OUT.glob('steam-*.log'), key=lambda f: f.stat().st_mtime)
         if crash:
