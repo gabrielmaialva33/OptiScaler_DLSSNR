@@ -28,33 +28,91 @@ def run(args, *, env=None, log=None, timeout=600):
                          + (f'\n  see {log}' if log else ''))
 
 
+def check_nr_coverage():
+    """Reaching EvaluateFeature is not the point; reaching the NR pass is. Without this the harness
+    reports PASS while the module it exists to exercise never ran once -- the silent pass the Vulkan
+    harness was built to rule out."""
+    log = OUT / 'run/OptiScaler.log'
+    if not log.exists():
+        raise SystemExit('ZERO COVERAGE: OptiScaler wrote no log')
+    text = log.read_text(errors='replace')
+    compositions = text.count('DLSS-NR composition')
+    if compositions == 0:
+        for line in text.splitlines():
+            if 'DLSS-NR create failed' in line or 'DLSS-NR unavailable' in line:
+                print(f'  {line.strip()}')
+        raise SystemExit('ZERO COVERAGE: the NR pass never composed a frame')
+    print(f'  NR compositions: {compositions}')
+
+
+def run_under_proton():
+    """Run the harness the way a Steam game runs: through Proton, in a compatdata prefix of its own.
+
+    Hand-mirroring what Proton provides (vkd3d-proton, dxvk-nvapi, the driver's nvngx pair and the
+    NGXCore registry key) got the NR model as far as FAIL_PlatformError and then to a page fault;
+    the model links NVAPI (45 NvAPI_ references) and expects the full environment. Proton's own
+    script assembles that environment; nothing here reproduces it by hand."""
+    steam = Path.home() / '.local/share/Steam'
+    proton = next((p for p in [steam / 'steamapps/common/Proton - Experimental/proton',
+                               steam / 'steamapps/common/Proton Hotfix/proton'] if p.exists()), None)
+    if proton is None:
+        raise SystemExit('no Proton install found under ~/.local/share/Steam/steamapps/common')
+    compat = OUT / 'protonprefix'
+    compat.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ,
+               STEAM_COMPAT_DATA_PATH=str(compat),
+               STEAM_COMPAT_CLIENT_INSTALL_PATH=str(steam),
+               # The harness LoadLibrary()s OptiScaler.dll by name, so no dxgi override is needed
+               # for it; Proton keeps its own DXVK/vkd3d overrides.
+               WINEDEBUG='-all',
+               PROTON_LOG='0')
+    (OUT / 'run/OptiScaler.log').unlink(missing_ok=True)
+    print(f'running under {proton.parent.name}')
+    p = subprocess.run([str(proton), 'run', str(OUT / 'run/dlssnr-loopback.exe'), 'OptiScaler.dll'],
+                       cwd=OUT / 'run', env=env, timeout=600)
+    if p.returncode != 0:
+        raise SystemExit(p.returncode)
+    check_nr_coverage()
+    raise SystemExit(0)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dll', default=str(ROOT / 'x64/out/OptiScaler.dll'),
                     help='OptiScaler build whose NGX exports are driven')
+    ap.add_argument('--runtime', choices=('proton', 'wine'), default='proton',
+                    help='proton (default): run under the local Proton, which sets up DXVK, '
+                         'vkd3d-proton, dxvk-nvapi and the NGXCore registry exactly as a game '
+                         'gets them. wine: bare prefix with only vkd3d-proton borrowed; reaches '
+                         'NR but its feature create fails with FAIL_PlatformError.')
+    ap.add_argument('--skip-build', action='store_true',
+                    help='reuse artifacts/run/dlssnr-loopback.exe instead of compiling')
     args = ap.parse_args()
 
     dll = Path(args.dll)
     if not dll.exists():
         raise SystemExit(f'no OptiScaler build at {dll} — run ./build-local.sh Release first')
 
-    # This runner compiles through the same msvc-wine prefix that build-local.sh uses. Two clients
-    # on one wineserver is the condition under which the build has stalled; refuse rather than race.
-    busy = subprocess.run(['pgrep', '-f', r'[M]SBuild\.exe|[b]uild-local\.sh'], capture_output=True)
-    if busy.returncode == 0:
-        raise SystemExit('a solution build is using the msvc-wine prefix; run this after it finishes')
-
     OUT.mkdir(exist_ok=True)
     (OUT / 'run').mkdir(exist_ok=True)
     shutil.copy2(dll, OUT / 'run/OptiScaler.dll')
 
     env = dict(os.environ, WINEPREFIX=str(PREFIX), WINEDEBUG='-all')
-    run([MSVC / 'cl', '/nologo', '/std:c++20', '/EHsc', '/MD', '/W4',
+    if not args.skip_build:
+      # Compiling goes through the same msvc-wine prefix that build-local.sh uses. Two clients on
+      # one wineserver is the condition under which the build has stalled; refuse rather than race.
+      # Running the built harness does not touch that prefix, so --skip-build is exempt.
+      busy = subprocess.run(['pgrep', '-f', r'[M]SBuild\.exe|[b]uild-local\.sh'], capture_output=True)
+      if busy.returncode == 0:
+          raise SystemExit('a solution build is using the msvc-wine prefix; compile after it finishes, or --skip-build')
+      run([MSVC / 'cl', '/nologo', '/std:c++20', '/EHsc', '/MD', '/W4',
          '/I' + str(ROOT / 'external/nvngx_dlss_sdk'), HERE / 'harness.cpp',
          '/Fo' + str(OUT / 'harness.obj'),
          '/Fe' + str(OUT / 'run/dlssnr-loopback.exe'),
          '/link', 'd3d12.lib', 'dxgi.lib', 'user32.lib'],
         env=dict(env, WINE_MSVC_RAW_STDOUT='1'), log=OUT / 'build.log')
+    if not (OUT / 'run/dlssnr-loopback.exe').exists():
+        raise SystemExit('no harness binary; run without --skip-build first')
 
     # NR needs the forwarder beside the DLL (the NVIDIA snippet rejects callers whose module path
     # lacks "nvngx.dll") and the model itself. Both come from the local kit, symlinked rather than
@@ -83,6 +141,9 @@ def main():
     # The harness only reads NR behaviour; it never writes into a game install.
     (OUT / 'run/OptiScaler.ini').write_text(
         '[Menu]\nOverlayMenu=false\n[DlssNr]\nEnabled=true\n[Log]\nLogToFile=true\nLogLevel=2\n')
+
+    if args.runtime == 'proton':
+        return run_under_proton()
 
     # A separate runtime prefix: the compiler prefix is configured for MSVC, not for graphics, and
     # running the app there conflates "the harness is wrong" with "this prefix has no D3D12".
@@ -115,21 +176,7 @@ def main():
                        cwd=OUT / 'run', env=renv, timeout=300)
     if p.returncode != 0:
         raise SystemExit(p.returncode)
-
-    # Reaching EvaluateFeature is not the point; reaching the NR pass is. Without this the harness
-    # reports PASS while the module it exists to exercise never ran once -- the silent pass the
-    # Vulkan harness was built to rule out, reintroduced here.
-    log = OUT / 'run/OptiScaler.log'
-    if not log.exists():
-        raise SystemExit('ZERO COVERAGE: OptiScaler wrote no log')
-    text = log.read_text(errors='replace')
-    compositions = text.count('DLSS-NR composition')
-    if compositions == 0:
-        for line in text.splitlines():
-            if 'DLSS-NR create failed' in line or 'DLSS-NR unavailable' in line:
-                print(f'  {line.strip()}')
-        raise SystemExit('ZERO COVERAGE: the NR pass never composed a frame')
-    print(f'  NR compositions: {compositions}')
+    check_nr_coverage()
     raise SystemExit(0)
 
 
