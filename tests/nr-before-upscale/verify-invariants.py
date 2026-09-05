@@ -42,4 +42,24 @@ assert re.search(r'CustomOptional<uint32_t> DlssNrStage\s*\{ 0 \}', config)
 assert 'DlssNrStage.set_from_config(readUInt("DlssNr", "Stage"))' in implementation
 assert 'ini.SetValue("DlssNr", "Stage", GetIntValue(Instance()->DlssNrStage.value_for_config()).c_str())' in implementation
 assert re.search(r'^Stage=auto$', ini[ini.index('[DlssNr]'):], re.M)
+dispatch_path = 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp'
+dispatch = (ROOT / dispatch_path).read_text()
+old_dispatch = original(dispatch_path).decode()
+
+
+def normalized(text):
+    return re.sub(r'\s+', '', re.sub(r'//[^\n]*', '', text))
+
+
+for call in ['g_nr.evaluate(', 'DispatchPass(cmdList, meterParams,',
+             'DispatchPass(cmdList, encodeParams,', 'DispatchPass(cmdList, resolveParams,']:
+    old_start = old_dispatch.index(call)
+    new_start = dispatch.index(call)
+    old_call = old_dispatch[old_start:old_dispatch.index(';', old_start)]
+    new_call = dispatch[new_start:dispatch.index(';', new_start)]
+    # On Stage=0, source and target are the same output resource.
+    assert normalized(old_call) == normalized(new_call.replace(', source,', ', target,')), call
+assert re.findall(r'(?:encodeParams|resolveParams)\.Passthrough\s*=.*?;', dispatch) == re.findall(
+    r'(?:encodeParams|resolveParams)\.Passthrough\s*=.*?;', old_dispatch)
 print(f'PASS: {len(c)} ordered 4-byte constants match HLSL; shader and both compiled headers unchanged; Stage has all four config points and defaults to 0')
+print('PASS: default model, meter, encode and resolve arguments and passthrough flags match baseline')
