@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DlssNr_SubmissionModel.h"
+#include "DlssNr_GpuTimingModel.h"
 #include <d3d12.h>
 #include <memory>
 
@@ -12,6 +13,9 @@ using Usage = Detail::Usage;
 // refuses the work. Keep one Usage per resource generation and copy it at retirement.
 bool Track(ID3D12GraphicsCommandList* list, Usage& usage);
 bool Ready(const Usage& usage);
+
+// Exact recording, single execution and actual queue frequency; also reports safe slot reuse.
+GpuTiming::Detail::Certificate TimingCertificate(const Usage& usage);
 void Prune(Usage& usage);
 
 // Completion observed so far, NOT permission to destroy: a list may execute again.

@@ -19,6 +19,7 @@ struct Epoch
     bool submitted = false;
     bool unknown = false;
     unsigned pending = 0;
+    uint64_t executions = 0; // Every observed list occurrence, including duplicates in one batch.
     std::array<uint64_t, MaxQueues> fences {};
     // Keeps COM identity alive to prevent pointer reuse; absent in host tests.
     std::shared_ptr<void> owner;
@@ -101,11 +102,24 @@ class Model
         return current;
     }
 
+    static void CountExecution(const std::shared_ptr<Epoch>& e)
+    {
+        if (!e)
+            return;
+        if (e->executions == std::numeric_limits<uint64_t>::max())
+            e->unknown = true;
+        else
+            ++e->executions;
+    }
+
     std::shared_ptr<Epoch> BeforeExecute(uintptr_t list)
     {
         auto e = Current(list);
         if (e)
+        {
             ++e->pending;
+            CountExecution(e);
+        }
         return e;
     }
 

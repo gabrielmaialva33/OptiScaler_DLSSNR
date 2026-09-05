@@ -259,6 +259,17 @@ bool Completed(const Usage& usage)
     return any;
 }
 
+GpuTiming::Detail::Certificate TimingCertificate(const Usage& usage)
+{
+    std::lock_guard lock(stateMutex);
+    const auto frequency = [](size_t queue) -> uint64_t
+    {
+        UINT64 value = 0;
+        return queues[queue].object && SUCCEEDED(queues[queue].object->GetTimestampFrequency(&value)) ? value : 0;
+    };
+    return GpuTiming::Detail::CertifyUsage(usage, FenceValue, frequency);
+}
+
 struct Batch::Impl
 {
     std::unique_lock<std::mutex> serial { submitMutex };
@@ -308,6 +319,8 @@ Batch::Batch(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* li
             duplicate |= impl->epochs[j] == e;
         if (!duplicate)
             impl->epochs[impl->count++] = model.BeforeExecute(key);
+        else
+            Detail::Model::CountExecution(e); // One batch can contain the same recording more than once.
     }
 }
 
