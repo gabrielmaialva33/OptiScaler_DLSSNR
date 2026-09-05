@@ -582,6 +582,10 @@ class ResTrack_Dx12
     }
 
   public:
+    // Explicit NR opt-in: does not install FG resource/descriptor hooks.
+    static bool EnableNrSubmissionTracking(ID3D12Device* device);
+    static void* NrQueueImplementation();
+    static IUnknown* NrRealObject(IUnknown* object);
     static void HookDevice(ID3D12Device* device);
     static void ReleaseHooks();
     static void ReleaseDeviceHooks();

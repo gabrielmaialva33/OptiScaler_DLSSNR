@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include <dlssnr/DlssNr_ExposureScan.h>
+#include <dlssnr/DlssNr_Submission.h>
 
 #include "ResTrack_dx12.h"
 
@@ -113,6 +114,7 @@ static PFN_ExecuteBundle o_ExecuteBundle = nullptr;
 static PFN_Close o_Close = nullptr;
 
 static PFN_ExecuteCommandLists o_ExecuteCommandLists = nullptr;
+static std::atomic<void*> nrQueueImplementation {nullptr};
 static PFN_Release o_Release = nullptr;
 
 static PFN_OMSetRenderTargets o_OMSetRenderTargets = nullptr;
@@ -639,6 +641,7 @@ void ResTrack_Dx12::hkCreateUnorderedAccessView(ID3D12Device* This, ID3D12Resour
 void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumCommandLists,
                                           ID3D12CommandList* const* ppCommandLists)
 {
+    DlssNr::Submission::Batch nrSubmission(This, NumCommandLists, ppCommandLists);
     auto fg = State::Instance().currentFG;
 
     if (fg != nullptr && fg->IsActive() && !fg->IsPaused())
@@ -696,6 +699,7 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
         if (!found.empty())
         {
             o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
+            nrSubmission.Submitted();
 
             for (size_t i = 0; i < found.size(); i++)
             {
@@ -709,6 +713,7 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
     LOG_TRACK("Done NumCommandLists: {}", NumCommandLists);
 
     o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
+    nrSubmission.Submitted();
 }
 
 #pragma region Heap hooks
@@ -1875,6 +1880,8 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
 
 void ResTrack_Dx12::HookToQueue(ID3D12Device* InDevice)
 {
+    static std::mutex queueHookMutex;
+    std::lock_guard queueHookLock(queueHookMutex);
     if (o_ExecuteCommandLists != nullptr)
         return;
 
@@ -1910,9 +1917,32 @@ void ResTrack_Dx12::HookToQueue(ID3D12Device* InDevice)
             LOG_ERROR("Failed to hook CommandList methods: {:X}", detourResult);
             o_ExecuteCommandLists = nullptr;
         }
+        else
+            nrQueueImplementation.store(pVTable[10], std::memory_order_release);
 
         queue->Release();
     }
+}
+
+bool ResTrack_Dx12::EnableNrSubmissionTracking(ID3D12Device* device)
+{
+    if (!device)
+        return false;
+    HookToQueue(device);
+    return nrQueueImplementation.load(std::memory_order_acquire) != nullptr;
+}
+
+void* ResTrack_Dx12::NrQueueImplementation()
+{
+    return nrQueueImplementation.load(std::memory_order_acquire);
+}
+
+IUnknown* ResTrack_Dx12::NrRealObject(IUnknown* object)
+{
+    if (!object)
+        return nullptr;
+    IUnknown* real = nullptr;
+    return CheckForRealObject("NR submission", object, &real) ? real : object;
 }
 
 void ResTrack_Dx12::HookDevice(ID3D12Device* device)
@@ -2030,7 +2060,7 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
         DetourDetach(&(PVOID&) o_CopyDescriptorsSimple, hkCopyDescriptorsSimple);
 
     // Queue
-    if (o_ExecuteCommandLists != nullptr)
+    if (o_ExecuteCommandLists != nullptr && !DlssNr::Submission::Active())
         DetourDetach(&(PVOID&) o_ExecuteCommandLists, hkExecuteCommandLists);
 
     // CommandList
@@ -2078,7 +2108,11 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
         o_CopyDescriptorsSimple = nullptr;
 
         // Queue
-        o_ExecuteCommandLists = nullptr;
+        if (!DlssNr::Submission::Active())
+        {
+            o_ExecuteCommandLists = nullptr;
+            nrQueueImplementation.store(nullptr, std::memory_order_release);
+        }
 
         // CommandList
         o_OMSetRenderTargets = nullptr;
