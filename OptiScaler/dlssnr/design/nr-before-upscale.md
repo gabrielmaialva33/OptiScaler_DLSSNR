@@ -59,6 +59,47 @@ FG interleaving. No installation or marker changes are part of this implementati
 
 ## Adversarial review record
 
+### Coverage logging follow-up
+
+Before any game deployment, add INFO-level coverage for `before`, `after`, and
+`after-fallback` separately. Count boundary evaluations, model API successes/failures,
+recorded compositions actually selected by the boundary, skipped evaluations and
+fallback requests. Log the first observation, first applied composition, first model
+failure and a periodic summary even if every evaluation skips. Include the observed
+present id, dimensions and last skip reason. A normal Stage 1 post-path stand-down
+is not another skipped NR evaluation. Disabled NR must remain inert.
+
+These are CPU recording/selection observations, not GPU completion or displayed-pixel
+evidence. Dispatches are not frames; any present-based counters must identify their
+deduplication rule and cannot be summed across stages or outcomes. The test suite must
+reject silent zero application and distinguish model success without a selected
+composition from an applied result.
+
+### GPU lifetime boundary for the first A/B
+
+A complete fence solution exceeds this boundary/logging follow-up. The pass records
+into a caller-owned command list; signaling a queue inside the pass could signal
+before that list is submitted, and would falsely certify retirement. Correct retirement
+needs the actual submission queue and a fence value ordered after the last use of
+each retired feature/resource, including the upscaler's use of the borrowed scratch.
+All participating queues and shutdown/device-loss paths must obey that contract.
+
+No such submission tracking is added here. `TickNrRetired` counts evaluations, not
+frames or GPU completions. Multiple evaluations in one present can exhaust its 32
+ticks, and even 32 presents cannot bound delayed GPU work. `CreationFrameGate` only
+prevents evaluation on the observed creation frame; `StableExtent` only reduces
+rebuild frequency. Neither makes retirement safe by itself.
+
+Consequently, DRS/resolution/format changes, live Stage/working-scale/model-setting
+switches, repeated rebuilds and device recreation are **not approved for stress
+validation with this port**. A later stress test requires submission-ordered retirement
+or equivalent GPU-completion evidence, including delayed/multiple-list workloads.
+The proposed first smoke A/B is fixed-resolution, DRS off, FG off, with Stage selected
+before starting a separate game process for each run. Keep working scale/model settings
+fixed, preserve markers, and retain rollback binaries. This reduces rebuild exposure;
+it does not guarantee GPU safety, including startup, ordinary scratch reuse and teardown.
+No game test or installation is part of this follow-up.
+
 Reviewed by hand against DEVELOPMENT.md sections 1 and 3, before committing:
 
 | Rule/type | Evidence and limits |
