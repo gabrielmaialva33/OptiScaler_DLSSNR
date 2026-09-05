@@ -13,11 +13,17 @@ class CreationFrameGate
     bool _pending = false;
 
   public:
-    void Created(uint64_t frame) { _createdAt = frame; _pending = true; }
+    void Created(uint64_t frame)
+    {
+        _createdAt = frame;
+        _pending = true;
+    }
     bool Ready(uint64_t frame)
     {
-        if (!_pending) return true;
-        if (frame == 0 || frame <= _createdAt) return false;
+        if (!_pending)
+            return true;
+        if (frame == 0 || frame <= _createdAt)
+            return false;
         _pending = false;
         return true;
     }
@@ -67,8 +73,10 @@ template <typename Parameters, typename Resource> class ColorBinding
         _key = key;
         _haveTyped = params->Get(key, &_typed) == success;
         _haveUntyped = params->Get(key, &_untyped) == success;
-        if (!_haveTyped) _typed = nullptr;
-        if (!_haveUntyped) _untyped = nullptr;
+        if (!_haveTyped)
+            _typed = nullptr;
+        if (!_haveUntyped)
+            _untyped = nullptr;
         if (_typed && _untyped && _typed != _untyped)
             return nullptr;
         return _typed ? _typed : static_cast<Resource*>(_untyped);
@@ -76,17 +84,22 @@ template <typename Parameters, typename Resource> class ColorBinding
 
     void Swap(Resource* replacement)
     {
-        if (_haveTyped) _params->Set(_key, replacement);
-        if (_haveUntyped) _params->Set(_key, static_cast<void*>(replacement));
+        if (_haveTyped)
+            _params->Set(_key, replacement);
+        if (_haveUntyped)
+            _params->Set(_key, static_cast<void*>(replacement));
         _swapped = true;
     }
 
     void Restore()
     {
-        if (!_swapped) return;
-        if (_haveTyped) _params->Set(_key, _typed);
-        if (_haveUntyped) _params->Set(_key, _untyped);
+        if (!_swapped)
+            return;
+        if (_haveTyped)
+            _params->Set(_key, _typed);
+        if (_haveUntyped)
+            _params->Set(_key, _untyped);
         _swapped = false;
     }
 };
-}
+} // namespace DlssNr::Detail

@@ -1827,8 +1827,7 @@ void MenuCommon::RenderNrCompareTags()
         return;
 
     const bool swap = config->DlssNrCompareSwap.value_or_default();
-    const float split = mode == 1 ? 0.5f
-                                  : std::clamp(config->DlssNrCompareSplit.value_or_default(), 0.0f, 1.0f);
+    const float split = mode == 1 ? 0.5f : std::clamp(config->DlssNrCompareSplit.value_or_default(), 0.0f, 1.0f);
     const float splitX = split * screen.x;
 
     const float scale = std::clamp(config->DlssNrTagScale.value_or_default(), 0.5f, 5.0f);
@@ -1872,7 +1871,6 @@ void MenuCommon::RenderNrCompareTags()
 void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
 {
     RenderNrCompareTags();
-
 
     auto& state = ctx.state;
     auto config = ctx.config;
@@ -2990,7 +2988,8 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
                     ImGui::Spacing();
 
-                    if (auto ch = ScopedCollapsingHeader(Localization::Label("FSR 3 Upscaler Manual Tuning")); ch.IsHeaderOpen())
+                    if (auto ch = ScopedCollapsingHeader(Localization::Label("FSR 3 Upscaler Manual Tuning"));
+                        ch.IsHeaderOpen())
                     {
                         ScopedIndent indent {};
                         ImGui::Spacing();
@@ -5625,7 +5624,8 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
             }
 
             ImGui::Spacing();
-            if (auto ch = ScopedCollapsingHeader(Localization::Label("Motion Adaptive Sharpness##2")); ch.IsHeaderOpen())
+            if (auto ch = ScopedCollapsingHeader(Localization::Label("Motion Adaptive Sharpness##2"));
+                ch.IsHeaderOpen())
             {
                 ScopedIndent indent {};
                 ImGui::Spacing();
@@ -6777,7 +6777,8 @@ void MenuCommon::RenderUpscalerInputsSettings(RenderMenuContext& ctx)
     // UPSCALER INPUTS -----------------------------
     ImGui::Spacing();
     auto uiStateOpen = currentFeature == nullptr || currentFeature->IsFrozen();
-    if (auto ch = ScopedCollapsingHeader(Localization::Label("Upscaler Inputs"), uiStateOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0);
+    if (auto ch = ScopedCollapsingHeader(Localization::Label("Upscaler Inputs"),
+                                         uiStateOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0);
         ch.IsHeaderOpen())
     {
         ScopedIndent indent {};
@@ -6934,9 +6935,9 @@ void MenuCommon::RenderApiAndTextureSettings(RenderMenuContext& ctx)
 
         // MIPMAP BIAS & Anisotropy -----------------------------
         ImGui::Spacing();
-        if (auto ch = ScopedCollapsingHeader(Localization::Label("Mipmap Bias"), (currentFeature == nullptr || currentFeature->IsFrozen())
-                                                                ? ImGuiTreeNodeFlags_DefaultOpen
-                                                                : 0);
+        if (auto ch = ScopedCollapsingHeader(
+                Localization::Label("Mipmap Bias"),
+                (currentFeature == nullptr || currentFeature->IsFrozen()) ? ImGuiTreeNodeFlags_DefaultOpen : 0);
             ch.IsHeaderOpen())
         {
             ScopedIndent indent {};
@@ -7827,8 +7828,8 @@ void RenderExposureScanIndicator(float alpha)
     }
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 12.0f, vp->WorkPos.y + 12.0f),
-                            ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 12.0f, vp->WorkPos.y + 12.0f), ImGuiCond_Always,
+                            ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowBgAlpha(alpha);
 
     if (ImGui::Begin("DlssNrExposureScan", nullptr,

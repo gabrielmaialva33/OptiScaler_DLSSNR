@@ -29,17 +29,20 @@ const char* Tr(const char* source) { return ActiveDictionary().Find(source); }
 
 const char* Label(const char* source)
 {
-    if (!source || std::string_view(source).find("###") == std::string_view::npos ||
-        ActiveDictionary().Size() == 0) return source;
+    if (!source || std::string_view(source).find("###") == std::string_view::npos || ActiveDictionary().Size() == 0)
+        return source;
     static std::mutex mutex;
     static std::unordered_map<std::string, std::string> labels;
     const std::lock_guard lock(mutex);
     const auto found = labels.find(source);
-    if (found != labels.end()) return found->second.c_str();
+    if (found != labels.end())
+        return found->second.c_str();
     auto translated = ActiveDictionary().LabelValue(source);
-    if (translated == source) return source;
+    if (translated == source)
+        return source;
     // IDs used here are fixed controls. Bound storage defensively for future dynamic call sites.
-    if (labels.size() >= 4096) return source;
+    if (labels.size() >= 4096)
+        return source;
     return labels.emplace(source, std::move(translated)).first->second.c_str();
 }
-}
+} // namespace Localization

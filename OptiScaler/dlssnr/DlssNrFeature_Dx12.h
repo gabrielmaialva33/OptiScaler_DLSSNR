@@ -103,20 +103,14 @@ class ScopedPreUpscale
     bool _declined = false;
 };
 
-
-
 // Frame generation titles tag their UI layer through Streamline; a copy of it makes the HUD mask
 // exact at the finished frame. Called at tag time.
-
-
-
 
 // The settings panel, drawn inside OptiScaler's menu.
 void RenderMenu(::Config* config, float menuResScale);
 
 // Clears the session failure latch, so a failure caused by transient thrash does not cost a restart.
 void RetryAfterFailure();
-
 
 // Asks the model whether it will work on Direct3D 11 at all, once, and logs the answer.
 //
@@ -164,10 +158,10 @@ const char* FailureReason();
 // the menu can say whether turning it on would do anything here.
 struct ExposureStatus
 {
-    unsigned long long seenFrames = 0;   // evaluates observed; 0 means nothing has run yet
-    bool offeredNow = false;             // a texture on the most recent frame
-    bool everOffered = false;            // a texture on any frame so far
-    float exposure = 0.0f;               // last value read back, 0 if none
+    unsigned long long seenFrames = 0; // evaluates observed; 0 means nothing has run yet
+    bool offeredNow = false;           // a texture on the most recent frame
+    bool everOffered = false;          // a texture on any frame so far
+    float exposure = 0.0f;             // last value read back, 0 if none
     float preExposure = 1.0f;
 };
 
@@ -183,7 +177,6 @@ unsigned int ActivePassCount();
 const char* MultipassStatus();
 
 // What the white point meter last settled on, or 0 when it is not running. For the menu.
-
 
 // Writes a run of consecutive frames, each as the upscaler produced it and again after the model's edit.
 // The pair is a control: same frames, same run, one variable.

@@ -1,0 +1,6 @@
+# Generated shader bytecode headers: produced by shader_tools/create_header.py.
+# Reformatting them is undone the next time a shader is rebuilt, so they are not
+# style-gated. See CLAUDE.md, "Precompiled shaders".
+OptiScaler/shaders/*/precompile/*_Shader.h
+OptiScaler/shaders/*/precompile/*_Shader_Dx11.h
+OptiScaler/shaders/*/precompile/*_Shader_Vk.h

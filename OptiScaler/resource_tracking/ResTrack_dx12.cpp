@@ -114,7 +114,7 @@ static PFN_ExecuteBundle o_ExecuteBundle = nullptr;
 static PFN_Close o_Close = nullptr;
 
 static PFN_ExecuteCommandLists o_ExecuteCommandLists = nullptr;
-static std::atomic<void*> nrQueueImplementation {nullptr};
+static std::atomic<void*> nrQueueImplementation { nullptr };
 static PFN_Release o_Release = nullptr;
 
 static PFN_OMSetRenderTargets o_OMSetRenderTargets = nullptr;
@@ -1932,10 +1932,7 @@ bool ResTrack_Dx12::EnableNrSubmissionTracking(ID3D12Device* device)
     return nrQueueImplementation.load(std::memory_order_acquire) != nullptr;
 }
 
-void* ResTrack_Dx12::NrQueueImplementation()
-{
-    return nrQueueImplementation.load(std::memory_order_acquire);
-}
+void* ResTrack_Dx12::NrQueueImplementation() { return nrQueueImplementation.load(std::memory_order_acquire); }
 
 IUnknown* ResTrack_Dx12::NrRealObject(IUnknown* object)
 {

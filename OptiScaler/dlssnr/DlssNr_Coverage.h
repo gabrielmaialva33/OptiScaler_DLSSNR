@@ -62,4 +62,4 @@ class StageCoverage
         return false;
     }
 };
-}
+} // namespace DlssNr::Detail

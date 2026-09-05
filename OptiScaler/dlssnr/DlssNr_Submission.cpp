@@ -12,8 +12,8 @@ namespace DlssNr::Submission
 {
 namespace
 {
-std::atomic<bool> active {false};
-std::atomic<const char*> refusal {"not-enabled"};
+std::atomic<bool> active { false };
+std::atomic<const char*> refusal { "not-enabled" };
 std::mutex stateMutex;
 std::mutex installMutex;
 std::mutex submitMutex;
@@ -38,9 +38,9 @@ ID3D12Device* deviceOwner = nullptr;
 HMODULE NativeRuntimeModule(void* method)
 {
     HMODULE module = nullptr;
-    if (!method || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                      reinterpret_cast<LPCWSTR>(method), &module))
+    if (!method ||
+        !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(method), &module))
         return nullptr;
     wchar_t path[MAX_PATH] {};
     const auto length = GetModuleFileNameW(module, path, MAX_PATH);
@@ -215,7 +215,8 @@ bool Track(ID3D12GraphicsCommandList* list, Usage& usage)
         if (!epoch->owner)
         {
             list->AddRef();
-            epoch->owner = std::shared_ptr<void>(list, [](void* p) { static_cast<ID3D12GraphicsCommandList*>(p)->Release(); });
+            epoch->owner =
+                std::shared_ptr<void>(list, [](void* p) { static_cast<ID3D12GraphicsCommandList*>(p)->Release(); });
         }
         return true;
     }
@@ -260,7 +261,7 @@ bool Completed(const Usage& usage)
 
 struct Batch::Impl
 {
-    std::unique_lock<std::mutex> serial {submitMutex};
+    std::unique_lock<std::mutex> serial { submitMutex };
     std::array<std::shared_ptr<Detail::Epoch>, Detail::MaxEpochs> epochs {};
     size_t count = 0;
     size_t queue = Detail::MaxQueues;
