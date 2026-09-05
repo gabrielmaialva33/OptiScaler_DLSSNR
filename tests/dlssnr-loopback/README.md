@@ -32,9 +32,28 @@ changed the frame, not that it improved it. Visual judgement stays in-game.
 
 ## Status
 
-Stage 1 (current): device, swapchain, deterministic scene, depth, analytic motion vectors.
-Stage 2: NGX feature creation and per-frame evaluate through OptiScaler.
-Stage 3: assertions and frame dumps for run-to-run comparison.
+`python3 tests/dlssnr-loopback/run.py` builds the harness with the msvc-wine toolchain, sets up
+a disposable runtime prefix with vkd3d-proton borrowed from the local Proton install, links the NR
+kit (forwarder, model, `_nvngx.dll`) and a donor game's DLSS/Streamline DLLs beside the production
+`OptiScaler.dll`, and runs it. It refuses to start while `build-local.sh` holds the compiler prefix.
+
+What works: a real D3D12 device on the GPU, all `NVSDK_NGX_D3D12_*` exports resolved from the
+production DLL, `Init` and `CreateFeature` (DLSS super-sampling) succeeding, and thousands of
+`EvaluateFeature` calls across a scripted sweep of render extents. The NR module is reached — its
+spatial contract, guides and exposure scan all log — and the post-stage settling gate fires once on
+the cold start, as designed.
+
+**What does not work yet: the NR feature itself.** Its `CreateFeature` returns `0xBAD00002`
+(`FAIL_PlatformError`), the module latches `it already failed this session`, and no frame is ever
+composed. `_nvngx.dll` matches the driver byte for byte, and neither `nvngx_dlss.dll` nor the
+eleven Streamline DLLs change the result, so those three explanations are ruled out; the cause is
+still open. Because of this the runner **fails by design** with `ZERO COVERAGE: the NR pass never
+composed a frame` rather than passing on the upscaler alone — the same rule the Vulkan harness
+enforces. The registry entry in `tests/suites.toml` says so.
+
+Still to do, in order: find what the model needs that this process does not provide; then the
+deterministic scene (`scene.hlsl` is written, not yet wired); then frame dumps for run-to-run
+comparison.
 
 A stage that cannot reach its own instrumentation must fail loudly rather than pass quietly;
 that is the `ZERO COVERAGE` rule the Vulkan harness established and this one inherits.
