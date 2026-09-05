@@ -178,6 +178,31 @@ void RenderMenu(Config* config, float menuResScale)
         ImGui::Spacing();
         ImGui::PushItemWidth(220.0f * menuResScale);
 
+        // Native Vulkan has no pre-upscale implementation; show its effective stage as status.
+        if (vulkan)
+        {
+            ImGui::TextDisabled("Stage: after the upscaler (native Vulkan)");
+        }
+        else
+        {
+            static const char* stageNames[] = { "After the upscaler", "Before the upscaler (experimental)" };
+            int stage = config->DlssNrStage.value_or_default() == 1 ? 1 : 0;
+            if (ImGui::Combo("Stage", &stage, stageNames, IM_ARRAYSIZE(stageNames)))
+            {
+                config->DlssNrStage = static_cast<uint32_t>(stage);
+                DlssNr::RetryAfterFailure();
+            }
+            HelpMarker("Before: runs Neural Rendering on the game's render-resolution color, then"
+                       "\nupscales the edited copy. This may reduce GPU cost, but can introduce shimmer"
+                       "\nand unstable detail on moving edges. Compare the picture in motion."
+                       "\n\nExperimental on D3D12 and the D3D12 bridges. Ray reconstruction, Hold frame,"
+                       "\nthe driver proxy, and unsupported inputs use the after-upscale path."
+                       "\nChanging render dimensions pauses NR until they stay stable for 500 ms."
+                       "\nThe original game color is used while the model is being built or skipped.");
+            if (enabled && stage == 1)
+                ImGui::TextWrapped("%s", DlssNr::BeforeUpscaleStatus());
+        }
+
         // Any percentage, rather than a handful of steps somebody chose in advance. The lower bound
         // is 25%: below that the model is working on so little of the picture that its answer no
         // longer survives being enlarged onto it.
