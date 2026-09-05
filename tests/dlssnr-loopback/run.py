@@ -5,7 +5,7 @@ Reuses the already-built x64/out/OptiScaler.dll rather than rebuilding the solut
 tests the NR path through the production exports, and rebuilding here would only add a second
 place where the build can stall. Point --dll at another build to test that one instead.
 """
-import argparse, os, shutil, subprocess, sys
+import argparse, os, shutil, signal, subprocess, sys, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -26,6 +26,59 @@ def run(args, *, env=None, log=None, timeout=600):
     if p.returncode != 0:
         raise SystemExit(f'FAILED ({p.returncode}): {" ".join(args)}'
                          + (f'\n  see {log}' if log else ''))
+
+
+def _cpu_ticks(pid):
+    try:
+        f = open(f'/proc/{pid}/stat').read().split()
+        return int(f[13]) + int(f[14])
+    except Exception:
+        return 0
+
+
+def _wine_build_pids():
+    out = subprocess.run(['pgrep', '-f', r'[H]ostX64.x64.(CL|link)\.exe'], capture_output=True, text=True)
+    return [int(x) for x in out.stdout.split()]
+
+
+def run_watched(args, *, env, log, attempts=4):
+    """Run a wine-side compiler command, recovering from the msvc-wine stall.
+
+    The stall is not MSBuild's: a bare cl.exe through the msvc-wine wrapper hangs the same way,
+    every process at zero CPU while wineserver spins on a core, and it never resumes. Same shape
+    as build-local.sh's watchdog, same recovery: tear it down, reset the prefix, run again."""
+    args = list(map(str, args))
+    for attempt in range(1, attempts + 1):
+        with open(log, 'wb') as f:
+            p = subprocess.Popen(args, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
+                                 stdout=f, stderr=subprocess.STDOUT)
+            dead = 0
+            while p.poll() is None:
+                size = Path(log).stat().st_size
+                pids = _wine_build_pids()
+                before = sum(_cpu_ticks(q) for q in pids)
+                time.sleep(20)
+                after = sum(_cpu_ticks(q) for q in pids)
+                grew = Path(log).stat().st_size != size
+                if pids and after == before and not grew:
+                    dead += 1
+                    print(f'  compile attempt {attempt}: stalled sample {dead}/3')
+                else:
+                    dead = 0
+                if dead >= 3:
+                    print(f'  compile attempt {attempt}: hung; resetting wineserver and retrying')
+                    p.kill()
+                    for q in _wine_build_pids():
+                        os.kill(q, signal.SIGTERM)
+                    time.sleep(2)
+                    subprocess.run(['wineserver', '-k'], env=env)
+                    time.sleep(2)
+                    break
+            else:
+                if p.returncode == 0:
+                    return
+                raise SystemExit(f'FAILED ({p.returncode}): {" ".join(args)}\n  see {log}')
+    raise SystemExit(f'compiler hung {attempts} times; see {log}')
 
 
 def check_nr_coverage():
@@ -118,7 +171,7 @@ def main():
       busy = subprocess.run(['pgrep', '-f', r'[M]SBuild\.exe|[b]uild-local\.sh'], capture_output=True)
       if busy.returncode == 0:
           raise SystemExit('a solution build is using the msvc-wine prefix; compile after it finishes, or --skip-build')
-      run([MSVC / 'cl', '/nologo', '/std:c++20', '/EHsc', '/MD', '/W4',
+      run_watched([MSVC / 'cl', '/nologo', '/std:c++20', '/EHsc', '/MD', '/W4',
          '/I' + str(ROOT / 'external/nvngx_dlss_sdk'), HERE / 'harness.cpp',
          '/Fo' + str(OUT / 'harness.obj'),
          '/Fe' + str(OUT / 'run/dlssnr-loopback.exe'),
