@@ -718,6 +718,8 @@ void DiscoverFloatSlot(NVSDK_NGX_Parameter* params)
 bool g_tracked = false;
 bool g_legacyRecorded = false;
 DlssNr::Submission::Usage g_usage;
+bool g_haveTrackedUsage = false;
+DlssNr::Chain::RecordingGate g_recordings;
 DlssNr::Chain::Schedule g_chainSchedule;
 DlssNr::Detail::StableExtent g_chainExtent;
 std::atomic<unsigned int> g_activePasses { 0 };
@@ -731,7 +733,13 @@ void ChainStatus(const char* reason)
 
 bool RetiredCapacity();
 
-bool TrackNrRecording(ID3D12GraphicsCommandList* cmd, const Config& cfg)
+bool WantsTrackedRecording(const Config& cfg)
+{
+    const auto requested = cfg.GetDlssNrPassSnapshot();
+    return g_tracked || (!g_legacyRecorded && (requested.Count > 1 || requested.Individual));
+}
+
+bool TrackNrRecording(ID3D12GraphicsCommandList* cmd, const Config& cfg, DlssNr::Chain::RecordingLease* lease)
 {
     const auto requested = cfg.GetDlssNrPassSnapshot();
     const bool optIn = requested.Count > 1 || requested.Individual;
@@ -743,6 +751,17 @@ bool TrackNrRecording(ID3D12GraphicsCommandList* cmd, const Config& cfg)
         g_legacyRecorded = true;
         return true;
     }
+    if (!lease || !lease->Valid(g_recordings, reinterpret_cast<uintptr_t>(cmd)))
+    {
+        ChainStatus("Another NR recording scope owns the resources; new recording refused");
+        return false;
+    }
+    if (lease->Tracked()) return true; // Explicit pre scope borrowing its own recording.
+    if (!lease->MayTrack(g_haveTrackedUsage, !g_haveTrackedUsage || DlssNr::Submission::Ready(g_usage)))
+    {
+        ChainStatus("Waiting for previous NR recording Reset and all GPU fences; new recording skipped (throughput may decrease)");
+        return false;
+    }
     if (!RetiredCapacity())
     {
         ChainStatus("Retired resource limit reached: pending/unknown GPU recordings retained; rebuild refused until completion or restart");
@@ -753,6 +772,8 @@ bool TrackNrRecording(ID3D12GraphicsCommandList* cmd, const Config& cfg)
         ChainStatus(DlssNr::Submission::LastRefusal());
         return false;
     }
+    g_haveTrackedUsage = true;
+    lease->MarkTracked();
     return true;
 }
 
@@ -851,7 +872,7 @@ bool RetiredCapacity()
     TickNrRetired();
     // A rebuild can retire at most 16 objects. Refuse BEFORE recording or allocation,
     // not after unsubmitted slider/DRS changes already consumed arbitrary memory.
-    return g_nrRetired.size() < 32;
+    return DlssNr::Chain::RetirementAllowed(g_nrRetired.size());
 }
 
 // The inject point decides which buffer is being measured -- the upscaler's linear output or the
@@ -1749,7 +1770,7 @@ DlssNr_Dx12::~DlssNr_Dx12()
 bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
                            ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output,
                            const DlssNrFrameInfo& frame, ID3D12CommandQueue* timingQueue,
-                           DlssNr::Detail::CoverageSample* coverage)
+                           DlssNr::Detail::CoverageSample* coverage, DlssNr::Chain::RecordingLease* recording)
 {
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
     const Config& cfg = *Config::Instance();
@@ -1776,7 +1797,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     g_activePasses = 0;
-    if (!TrackNrRecording(cmdList, cfg))
+    std::unique_ptr<DlssNr::Chain::RecordingLease> ownedRecording;
+    if (!recording && WantsTrackedRecording(cfg))
+    {
+        ownedRecording = std::make_unique<DlssNr::Chain::RecordingLease>(g_recordings, reinterpret_cast<uintptr_t>(cmdList));
+        recording = ownedRecording.get();
+    }
+    if (!TrackNrRecording(cmdList, cfg, recording))
     {
         reportSkip(g_chainStatus.load());
         return false;
@@ -2007,6 +2034,23 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return false;
     }
 
+    if (chainEnabled && (!g_nr.feature || g_nr.width != width || g_nr.height != height ||
+        g_nr.workWidth != workWidth || g_nr.workHeight != workHeight || g_nr.passBuilt[0] != firstSettings ||
+        (g_nr.output && g_nr.output->GetDesc().Format != desc.Format)))
+    {
+        DXGI_QUERY_VIDEO_MEMORY_INFO budget {};
+        const uint64_t surfaceBytes = uint64_t(workWidth) * workHeight * 48 + uint64_t(width) * height * 48;
+        if (!VideoMemory(device, budget) || !DlssNr::Chain::Admit(budget.Budget, budget.CurrentUsage, g_nr.measuredModelBytes, surfaceBytes))
+        {
+            g_nr.failed = true;
+            g_nr.reason = "chain generation refused: insufficient or unavailable adapter headroom (retry latched)";
+            ChainStatus(g_nr.reason);
+            reportSkip(g_nr.reason);
+            device->Release();
+            return false;
+        }
+    }
+
     ReleaseSurfacesIfFormatChanged(desc.Format);
 
     const bool beforeUpscale = !sourceIsTarget;
@@ -2072,6 +2116,16 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (reduced && g_nr.colorSmall == nullptr)
         g_nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
+
+    if (chainEnabled && (g_nr.output == nullptr || g_nr.colorCopy == nullptr || g_nr.hdrCopy == nullptr ||
+                         (reduced && g_nr.colorSmall == nullptr)))
+    {
+        g_nr.failed = true;
+        g_nr.reason = "chain scratch initialization failed; retry latched";
+        reportSkip(g_nr.reason);
+        device->Release();
+        return false;
+    }
 
     // The down-leg target is native (the answer is brought back to frame size before the resolve).
     if (workScale > 1.0f && g_nr.outputNative == nullptr)
@@ -2216,7 +2270,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         for (unsigned i = 1; i < passSnapshot.Count; ++i)
         {
-            if (g_nr.passFeature[i] || g_nr.passFailed[i]) continue;
+            if (g_nr.passFailed[i]) break;
+            if (g_nr.passFeature[i]) continue;
             DXGI_QUERY_VIDEO_MEMORY_INFO budget {};
             const uint64_t bytes = uint64_t(workWidth) * workHeight * 16;
             if (!VideoMemory(device, budget) || !DlssNr::Chain::Admit(budget.Budget, budget.CurrentUsage, g_nr.measuredModelBytes, bytes))
@@ -2691,6 +2746,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_ngxTime->Start(cmdList);
 
     // Preserve the single/master call and anchor. Each extra layer has independent history.
+    const auto firstCpuStart = chainEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
     int result;
     if (!chainEnabled)
     {
@@ -2715,6 +2771,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.guideMvScaleY * mvToWork);
     }
 
+    if (chainEnabled && (g_frames % 120 == 0 || result != 1))
+        LOG_INFO("DLSS-NR chain: pass 1 result=0x{:X}, dimensions={}x{}, CPU-call-ms={:.3f} (not GPU time)",
+                 (unsigned)result, workWidth, workHeight,
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - firstCpuStart).count());
     DlssNr::Chain::Routing<ID3D12Resource*> chain(modelInput, g_nr.output, g_nr.passPing);
     if (result == 1) chain.Success();
     if (chainEnabled && result == 1)
@@ -2744,6 +2804,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             if (extraResult != 1)
             {
                 g_nr.passFailed[i] = true;
+                ParkNrFeature(g_nr.passFeature[i]);
+                for (unsigned downstream = i; downstream < 3; ++downstream) g_nr.passReset[downstream] = true;
                 LOG_INFO("DLSS-NR chain: pass {} failed result=0x{:X}, completed={}, CPU-call-ms={:.3f}; preserving previous answer",
                          i + 1, (unsigned)extraResult, chain.completed, cpuMs);
                 break;
@@ -2932,8 +2994,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             superDownOk = true;
         }
 
-        ID3D12Resource* resolveProxy = superDownOk ? g_nr.colorCopy : modelInput;
-        ID3D12Resource* resolveAnswer = superDownOk ? g_nr.outputNative : finalOutput;
+        const auto resolved = DlssNr::Chain::Resolve(g_nr.colorCopy, modelInput, g_nr.outputNative, finalOutput, superDownOk);
+        ID3D12Resource* resolveProxy = resolved.proxy;
+        ID3D12Resource* resolveAnswer = resolved.answer;
 
         {
             ReadResourceScope exposureRead(cmdList, exposureTex,
@@ -3044,6 +3107,48 @@ void RetryAfterFailure()
 // What the parameter block says about this frame, read the same way whichever side of the upscaler
 // the model runs on. Everything here is a property of how the game encodes its buffers, and both
 // paths read the block the game filled for the upscaler.
+// Diagnostic-only contract: allocation size is not evidence of the rendered subrect.
+void ReportSpatialContract(NVSDK_NGX_Parameter* params, ID3D12Resource* color, ID3D12Resource* output,
+                           bool before, unsigned int inputWidth, unsigned int inputHeight)
+{
+    struct Contract
+    {
+        uint64_t colorWidth = 0, outputWidth = 0;
+        unsigned colorHeight = 0, outputHeight = 0, subWidth = 0, subHeight = 0, modelWidth = 0, modelHeight = 0;
+        bool haveWidth = false, haveHeight = false;
+        float scale = 1.0f;
+        bool operator==(const Contract&) const = default;
+    } now;
+    if (color) { const auto desc = color->GetDesc(); now.colorWidth = desc.Width; now.colorHeight = desc.Height; }
+    if (output) { const auto desc = output->GetDesc(); now.outputWidth = desc.Width; now.outputHeight = desc.Height; }
+    now.haveWidth = params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &now.subWidth) == NVSDK_NGX_Result_Success;
+    now.haveHeight = params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &now.subHeight) == NVSDK_NGX_Result_Success;
+    now.scale = Config::Instance()->DlssNrWorkingScale.value_or_default();
+    // Match Dispatch's clamping for logging only; never feed diagnostic values back to rendering.
+    if (std::isfinite(now.scale))
+    {
+        now.scale = std::clamp(now.scale, 0.25f, 2.0f);
+        now.modelWidth = static_cast<unsigned>(inputWidth * now.scale + 0.5f);
+        now.modelHeight = static_cast<unsigned>(inputHeight * now.scale + 0.5f);
+    }
+    else now.scale = 0;
+    static std::mutex mutex;
+    static Contract previous[2];
+    static bool seen[2] {};
+    std::lock_guard<std::mutex> lock(mutex);
+    const unsigned stage = before ? 1 : 0;
+    if (seen[stage] && previous[stage] == now) return;
+    seen[stage] = true;
+    previous[stage] = now;
+    LOG_INFO("DLSS-NR spatial contract stage={}: Color-allocation={}x{}, render-subrect={}x{} (width-query={}, height-query={}), "
+             "game-output={}x{}, model-request={}x{}, WorkingScale={:.3f}", before ? "before" : "after", now.colorWidth, now.colorHeight,
+             now.subWidth, now.subHeight, now.haveWidth ? "success" : "absent/failed", now.haveHeight ? "success" : "absent/failed",
+             now.outputWidth, now.outputHeight, now.modelWidth, now.modelHeight, now.scale);
+    if (before && now.outputWidth && now.outputHeight && now.modelWidth >= now.outputWidth && now.modelHeight >= now.outputHeight)
+        LOG_INFO("DLSS-NR spatial contract: no spatial reduction before the upscaler; this does not establish DLAA. "
+                 "Check render-subrect query presence and WorkingScale; Color allocation alone cannot establish rendered resolution");
+}
+
 DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
 {
     unsigned int createFlags = 0;
@@ -3254,6 +3359,9 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     }
 
     const DlssNrFrameInfo frame = GatherFrame(params);
+    const auto contractOutput = target->GetDesc();
+    ReportSpatialContract(params, GetResource(params, NVSDK_NGX_Parameter_Color, "DLSSD.Color"), target, false,
+                          static_cast<unsigned>(contractOutput.Width), contractOutput.Height);
 
     // The upscaler's inputs are at render resolution while colour and output are at display
     // resolution; the model takes that as a subrect per resource, which the pass reads from the
@@ -3465,7 +3573,9 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     {
         std::lock_guard<std::mutex> lock(g_nrMutex);
 
-        if (!TrackNrRecording(cmdList, cfg))
+        if (WantsTrackedRecording(cfg))
+            _recording = std::make_unique<Chain::RecordingLease>(g_recordings, reinterpret_cast<uintptr_t>(cmdList));
+        if (!TrackNrRecording(cmdList, cfg, _recording.get()))
         {
             device->Release();
             report(g_chainStatus.load());
@@ -3518,6 +3628,7 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     }
 
     DlssNrFrameInfo frame = GatherFrame(params);
+    ReportSpatialContract(params, colour, GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output"), true, width, height);
     if (colour == depth || colour == motion || depth == motion ||
         (frame.ExposureTexture && (frame.ExposureTexture == colour || frame.ExposureTexture == depth ||
                                    frame.ExposureTexture == motion)))
@@ -3587,7 +3698,7 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
 
     if (g_compose != nullptr)
         wrote = g_compose->Dispatch(cmdList, colour, depth, motion, g_pre.scratch, frame, timingQueue,
-                                   &coverage.sample);
+                                   &coverage.sample, _recording.get());
 
 
     // Nothing written means nothing to swap: the copy holds stale or no picture, and the upscaler

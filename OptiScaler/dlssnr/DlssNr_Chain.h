@@ -2,9 +2,49 @@
 
 #include "DlssNr_PassSettings.h"
 #include <chrono>
+#include <atomic>
 
 namespace DlssNr::Chain
 {
+// One explicit recording scope may borrow its own lease; a new recording must wait
+// for all previous usage to be Ready, including Reset sealing against future replay.
+class RecordingLease;
+class RecordingGate
+{
+    friend class RecordingLease;
+    std::atomic<uint64_t> active { 0 };
+    uint64_t next = 0;
+    uintptr_t list = 0;
+};
+
+class RecordingLease
+{
+    RecordingGate* gate;
+    uint64_t token = 0;
+    bool tracked = false;
+  public:
+    // Begin/Validate are serialized by the renderer mutex. End may run at scope exit.
+    RecordingLease(RecordingGate& owner, uintptr_t commandList) : gate(&owner)
+    {
+        if (owner.active.load() != 0) return;
+        owner.list = commandList;
+        token = ++owner.next;
+        owner.active.store(token);
+    }
+    ~RecordingLease()
+    {
+        if (token) { auto expected = token; gate->active.compare_exchange_strong(expected, 0); }
+    }
+    RecordingLease(const RecordingLease&) = delete;
+    RecordingLease& operator=(const RecordingLease&) = delete;
+    bool Valid(RecordingGate& owner, uintptr_t list) const
+    { return gate == &owner && token != 0 && owner.active.load() == token && owner.list == list; }
+    bool Tracked() const { return tracked; }
+    bool MayTrack(bool hasPreviousUsage, bool previousReady) const
+    { return tracked || !hasPreviousUsage || previousReady; }
+    void MarkTracked() { tracked = true; }
+};
+
 // Portable scheduling/routing contract used by the renderer, independent of NGX.
 struct Schedule
 {
@@ -51,6 +91,16 @@ template<class Surface> struct Routing
     Surface Output() const { return completed % 2 == 0 ? first : second; }
     void Success() { answer = Output(); ++completed; }
 };
+
+template<class Surface> struct ResolveChoice { Surface proxy, answer; };
+template<class Surface> ResolveChoice<Surface> Resolve(Surface nativeProxy, Surface workingProxy,
+    Surface nativeAnswer, Surface workingAnswer, bool downsampled)
+{
+    return downsampled ? ResolveChoice<Surface>{nativeProxy, nativeAnswer}
+                       : ResolveChoice<Surface>{workingProxy, workingAnswer};
+}
+
+inline bool RetirementAllowed(size_t parked) { return parked < 32; }
 
 inline bool Admit(uint64_t budget, uint64_t used, uint64_t measuredModel, uint64_t textureBytes)
 {

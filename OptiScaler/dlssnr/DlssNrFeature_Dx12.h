@@ -3,6 +3,8 @@
 #include <d3d12.h>
 #include <mutex>
 #include "DlssNr_PreUpscale.h"
+#include "DlssNr_Chain.h"
+#include <memory>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <nvsdk_ngx.h>
@@ -94,6 +96,7 @@ class ScopedPreUpscale
     Detail::ColorBinding<NVSDK_NGX_Parameter, ID3D12Resource> _color;
     ID3D12Resource* _scratch = nullptr;
     std::unique_lock<std::mutex> _lock;
+    std::unique_ptr<Chain::RecordingLease> _recording;
     // The state the copy was handed to the upscaler in, to move it back out of.
     int _scratchState = 0;
     bool _swapped = false;
