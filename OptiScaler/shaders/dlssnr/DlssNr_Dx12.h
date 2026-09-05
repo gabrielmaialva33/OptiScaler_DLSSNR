@@ -18,6 +18,7 @@
 //   Resolve  proxy + model answer + untouched copy -> the frame, edited
 
 #include "DlssNr_Common.h"
+#include <dlssnr/DlssNr_Coverage.h>
 
 #include <d3d12.h>
 #include <d3dx/d3dx12.h>
@@ -94,7 +95,7 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // input color. A false return makes no promise that scratch contents form a complete frame.
     bool Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
                   ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
-                  ID3D12CommandQueue* timingQueue = nullptr);
+                  ID3D12CommandQueue* timingQueue = nullptr, DlssNr::Detail::CoverageSample* coverage = nullptr);
 
     // Records one pass. Resources that a given mode does not read may be null; a stand-in is bound in
     // their place so every descriptor in the table is valid.

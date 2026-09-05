@@ -27,6 +27,40 @@
 
 namespace
 {
+// Coverage belongs to an upscaler boundary, not to an arbitrary Dispatch call. Keep fallback
+// separate from Stage 0, and do not count the normal Stage 1 post-path stand-down as another skip.
+std::mutex g_coverageMutex;
+DlssNr::Detail::StageCoverage g_coverage[3];
+
+struct CoverageScope
+{
+    int stage; // -1 inactive, 0 after, 1 before, 2 after-fallback
+    DlssNr::Detail::CoverageSample sample;
+
+    explicit CoverageScope(int which) : stage(which)
+    {
+        if (stage >= 0)
+            sample.present = State::Instance().frameCount;
+    }
+    ~CoverageScope()
+    {
+        if (stage < 0)
+            return;
+        std::lock_guard<std::mutex> lock(g_coverageMutex);
+        auto& coverage = g_coverage[stage];
+        if (!coverage.Record(sample, std::chrono::steady_clock::now()))
+            return;
+        const auto& t = coverage.totals;
+        LOG_INFO("DLSS-NR coverage stage={} calls={} model_ok={} model_failed={} applied_recorded={} "
+                 "skipped={} fallback={} applied_present_ids={} skipped_present_ids={} present_id={} "
+                 "extent={}x{} model={}x{} last=\"{}\" evidence=CPU-recorded-not-GPU-complete",
+                 stage == 0 ? "after" : stage == 1 ? "before" : "after-fallback",
+                 t.calls, t.modelOk, t.modelFailed, t.applied, t.skipped, t.fallback,
+                 t.appliedPresents, t.skippedPresents, sample.present, sample.width, sample.height,
+                 sample.modelWidth, sample.modelHeight, sample.reason);
+    }
+};
+
 // NGX result codes, by name.
 //
 // A user's log recently read "init 0x-452FFFFF", which is an int formatted as hex and is
@@ -1623,7 +1657,8 @@ DlssNr_Dx12::~DlssNr_Dx12()
 
 bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
                            ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output,
-                           const DlssNrFrameInfo& frame, ID3D12CommandQueue* timingQueue)
+                           const DlssNrFrameInfo& frame, ID3D12CommandQueue* timingQueue,
+                           DlssNr::Detail::CoverageSample* coverage)
 {
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
     const Config& cfg = *Config::Instance();
@@ -2392,6 +2427,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             guideWidth, guideHeight, g_nr.guideDepthInverted, g_nr.reset,
             g_nr.guideMvScaleX * mvToWork, g_nr.guideMvScaleY * mvToWork);
 
+        if (coverage != nullptr)
+            coverage->ModelResult(proxyResult, workWidth, workHeight);
+
         g_nr.reset = false;
 
         if (proxyResult != 1)
@@ -2421,6 +2459,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
         cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
         g_nr.guideMvScaleY * mvToWork);
+
+    if (coverage != nullptr)
+        coverage->ModelResult(result, workWidth, workHeight);
 
     if (g_ngxTime != nullptr)
         g_ngxTime->End(cmdList);
@@ -2858,8 +2899,12 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
         return;
     }
 
+    CoverageScope coverage(Config::Instance()->DlssNrStage.value_or_default() != 1 ? 0
+                           : preUpscaleDeclined ? 2 : -1);
+
     if (cmdList == nullptr || params == nullptr)
     {
+        coverage.sample.reason = "no command list or parameter block";
         ReportSkipOnce("no command list or no parameter block");
         return;
     }
@@ -2904,6 +2949,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     // carry none of it -- so it stays quiet and tries again next frame.
     if (target == nullptr || depth == nullptr || motion == nullptr)
     {
+        coverage.sample.reason = "missing output, depth or motion vectors";
         ReportSkipOnce(target == nullptr    ? "the parameters carried no output texture"
                        : depth == nullptr   ? "the parameters carried no depth"
                                             : "the parameters carried no motion vectors");
@@ -2919,6 +2965,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 
     if (FAILED(target->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
     {
+        coverage.sample.reason = "output has no D3D12 device";
         ReportSkipOnce("the output texture belongs to no D3D12 device");
         return;
     }
@@ -2931,11 +2978,18 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 
     if (g_compose == nullptr)
     {
+        coverage.sample.reason = "composition pass unavailable";
         ReportSkipOnce("the pass could not be created");
         return;
     }
 
-    g_compose->Dispatch(cmdList, target, depth, motion, target, frame, timingQueue);
+    const auto desc = target->GetDesc();
+    coverage.sample.width = static_cast<uint32_t>(desc.Width);
+    coverage.sample.height = desc.Height;
+    coverage.sample.applied = g_compose->Dispatch(cmdList, target, depth, motion, target, frame, timingQueue,
+                                                &coverage.sample);
+    if (coverage.sample.applied)
+        coverage.sample.reason = "composition recorded into upscaler output";
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2951,12 +3005,19 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     if (!cfg.DlssNrEnabled.value_or_default() || cfg.DlssNrStage.value_or_default() != 1)
         return;
 
+    CoverageScope coverage(1);
     if (cmdList == nullptr || params == nullptr)
+    {
+        coverage.sample.reason = "no command list or parameter block";
         return;
+    }
 
     _lock = std::unique_lock<std::mutex>(g_preMutex, std::try_to_lock);
     if (!_lock.owns_lock())
+    {
+        coverage.sample.reason = "nested or concurrent scratch loan";
         return; // Nested or concurrent evaluate: never swap a scratch another scope is lending.
+    }
 
 
     // Declining hands the evaluate to the after-upscale path; a plain return does not. The
@@ -2965,13 +3026,15 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     // The answer is kept on this scope, so it can only ever reach the after-upscale call for the
     // same evaluate; see EvaluateAfterUpscale for the frame-generation interleaving that made a
     // global flag wrong.
-    const auto report = [](const char* why)
+    const auto report = [&coverage](const char* why)
     {
+        coverage.sample.reason = why;
         g_preStatus = why;
         ReportSkipOnce(why);
     };
-    auto decline = [this, &report](const char* why)
+    auto decline = [this, &report, &coverage](const char* why)
     {
+        coverage.sample.fallback = true;
         _declined = true;
         g_preStatus = why;
         report(why);
@@ -3067,6 +3130,8 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
         return;
     }
 
+    coverage.sample.width = width;
+    coverage.sample.height = height;
     const DXGI_FORMAT format = colourDesc.Format;
 
     if (IsSrgb(format) || width == 0 || height == 0)
@@ -3215,7 +3280,8 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     bool wrote = false;
 
     if (g_compose != nullptr)
-        wrote = g_compose->Dispatch(cmdList, colour, depth, motion, g_pre.scratch, frame, timingQueue);
+        wrote = g_compose->Dispatch(cmdList, colour, depth, motion, g_pre.scratch, frame, timingQueue,
+                                   &coverage.sample);
 
 
     // Nothing written means nothing to swap: the copy holds stale or no picture, and the upscaler
@@ -3234,6 +3300,8 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     _color.Swap(_scratch);
     _scratchState = (int) colourRest;
     _swapped = true;
+    coverage.sample.applied = true;
+    coverage.sample.reason = "composition recorded and edited color selected for upscaler";
     g_preStatus = "Before the upscaler: edited render-resolution color supplied";
 }
 
