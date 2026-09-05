@@ -13,6 +13,7 @@
 #include <vector>
 #include "OptiScaler/dlssnr/DlssNr_PreUpscale.h"
 #include "OptiScaler/dlssnr/DlssNr_Coverage.h"
+#include "OptiScaler/dlssnr/DlssNr_Chain.h"
 #define FMT_HEADER_ONLY
 #include "external/spdlog/include/spdlog/fmt/bundled/format.h"
 
@@ -161,6 +162,7 @@ template<typename T> struct Option : std::optional<T>
 };
 struct Config
 {
+    Option<float> DlssNrWorkingScale;
     Option<bool> DlssNrEnabled, DlssNrHoldFrame, DlssNrUseProxy;
     Option<unsigned> DlssNrStage;
     Option<int> ColorResourceBarrier, DepthResourceBarrier, MVResourceBarrier, ExposureResourceBarrier;
@@ -176,7 +178,7 @@ struct DlssNr_Dx12
     DlssNr_Dx12(const char*, ID3D12Device*) {}
     bool Dispatch(ID3D12GraphicsCommandList*, ID3D12Resource* color, ID3D12Resource* depth,
                   ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
-                  ID3D12CommandQueue*, DlssNr::Detail::CoverageSample* coverage = nullptr)
+                  ID3D12CommandQueue*, DlssNr::Detail::CoverageSample* coverage = nullptr, DlssNr::Chain::RecordingLease* = nullptr)
     {
         ++calls;
         if (coverage && modelCalled) coverage->ModelResult(modelResult, 1280, 720);
@@ -193,6 +195,17 @@ std::mutex g_preMutex, g_nrMutex;
 DlssNr::Detail::StableExtent g_preExtent;
 ID3D12Device* g_preDevice = nullptr;
 bool g_preAllocationFailed = false;
+bool trackingAccepted = true;
+unsigned trackingCalls = 0;
+std::atomic<const char*> g_chainStatus { "test submission tracking refused" };
+DlssNr::Chain::RecordingGate g_recordings;
+bool trackingOptIn = false;
+bool WantsTrackedRecording(const Config&) { return trackingOptIn; }
+bool TrackNrRecording(ID3D12GraphicsCommandList*, const Config&, DlssNr::Chain::RecordingLease*)
+{
+    ++trackingCalls;
+    return trackingAccepted;
+}
 std::atomic<const char*> g_preStatus{ "" };
 std::unique_ptr<DlssNr_Dx12> g_compose;
 void ParkNrResource(ID3D12Resource*& r) { r = nullptr; } // Device fixture owns retired resources.

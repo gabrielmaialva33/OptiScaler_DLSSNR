@@ -12,6 +12,10 @@ struct Fixture
     Fixture()
     {
         cfg = {};
+        cfg.DlssNrWorkingScale = 1.0f;
+        trackingAccepted = true;
+        trackingOptIn = false;
+        trackingCalls = 0;
         State::Instance().frameCount = 100;
         cfg.DlssNrEnabled = true;
         cfg.DlssNrStage = 1;
@@ -259,6 +263,26 @@ int main()
         wasGame = source == 1; }
       ++checks;
     }
-    assert(checks >= 54 && "ZERO COVERAGE");
+    { Fixture f;
+      trackingAccepted = false;
+      { ScopedPreUpscale p(&f.cmd, &f.params, true); assert(!p.Swapped()); }
+      assert(trackingCalls == 1 && f.params.sets == 0 && f.device.allocations == 0 && f.cmd.barriers == 0);
+      assert(DlssNr_Dx12::calls == 0); f.Restored(); ++checks; }
+    { Fixture f;
+      f.output.desc.Width = 2560; f.output.desc.Height = 1440;
+      infoLogs.clear();
+      DlssNr::ReportSpatialContract(&f.params, &f.color, &f.output, true, 1280, 720);
+      assert(infoLogs.size() == 1 && infoLogs[0].find("absent/failed") != std::string::npos);
+      DlssNr::ReportSpatialContract(&f.params, &f.color, &f.output, true, 1280, 720);
+      assert(infoLogs.size() == 1);
+      f.params.numbers[NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width] = 1280;
+      f.params.numbers[NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height] = 720;
+      DlssNr::ReportSpatialContract(&f.params, &f.color, &f.output, true, 1280, 720);
+      assert(infoLogs.size() == 2 && infoLogs.back().find("width-query=success") != std::string::npos);
+      f.cfg.DlssNrWorkingScale = 2.0f;
+      DlssNr::ReportSpatialContract(&f.params, &f.color, &f.output, true, 1280, 720);
+      assert(infoLogs.size() == 4 && infoLogs.back().find("no spatial reduction") != std::string::npos);
+      assert(f.params.sets == 0 && f.cmd.barriers == 0 && f.device.allocations == 0); ++checks; }
+    assert(checks >= 56 && "ZERO COVERAGE");
     std::printf("PASS: %u boundary cases; allocation-failure and DRS loops: 1000 each\n", checks);
 }

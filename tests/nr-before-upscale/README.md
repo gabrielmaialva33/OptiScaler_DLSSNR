@@ -102,3 +102,11 @@ of the live shader white point. A failed held-color allocation leaves color live
 Exposure texture validation is conservative: unknown/integer/depth/array/MSAA or
 non-loadable views are rejected and the existing CPU fallback is used. Readback
 completion and resource retirement are still not proven by this host suite.
+
+The multipass integration extends the boundary checks to 56 cases. A refused submission
+admission records no barrier, scratch allocation, parameter substitution or fake Dispatch.
+The actual INFO spatial-contract reporter is extracted too: it distinguishes successful
+subrect queries from absent/failed ones, suppresses unchanged contracts and warns when
+before-upscale model dimensions provide no spatial reduction, without asserting DLAA.
+The fake composition and controlled submission-admission result remain host boundaries;
+these additions do not simulate real queue execution or NGX behavior.

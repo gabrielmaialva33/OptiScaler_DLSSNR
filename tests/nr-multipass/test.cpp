@@ -32,6 +32,21 @@ int main()
         assert(route.completed == failAt);
         ++cases;
     }
+    // Composition chooses a matched native pair only after the single down-leg succeeds.
+    for (bool downsampled : {false, true})
+    {
+        struct Surface { int width, height, id; };
+        Surface nativeProxy{640,360,1}, workingProxy{1280,720,2}, nativeAnswer{640,360,3}, workingAnswer{1280,720,4};
+        auto choice = DlssNr::Chain::Resolve(&nativeProxy, &workingProxy, &nativeAnswer, &workingAnswer, downsampled);
+        assert(choice.proxy->width == choice.answer->width);
+        assert(choice.proxy->height == choice.answer->height);
+        assert(choice.answer == (downsampled ? &nativeAnswer : &workingAnswer));
+        ++cases;
+    }
+    assert(DlssNr::Chain::RetirementAllowed(0));
+    assert(DlssNr::Chain::RetirementAllowed(31));
+    assert(!DlssNr::Chain::RetirementAllowed(32));
+    assert(!DlssNr::Chain::RetirementAllowed(1000)); ++cases;
     DlssNr::Chain::Schedule schedule;
     DlssNrPassSnapshot snapshot;
     const auto start = std::chrono::steady_clock::time_point(1s);
@@ -88,5 +103,38 @@ int main()
     S::Model::AfterExecute(submitted, 0, 0, false);
     S::Model::AfterReset(failed, true);
     assert(!S::IsReady(*failed, completion)); ++cases;
+    // Production lease: only the constructor's explicit token may borrow its recording.
+    DlssNr::Chain::RecordingGate gate;
+    {
+        DlssNr::Chain::RecordingLease pre(gate, 42);
+        assert(pre.Valid(gate, 42));
+        assert(!pre.Valid(gate, 43));
+        assert(pre.MayTrack(false, false));
+        pre.MarkTracked();
+        assert(pre.MayTrack(true, false)); // Same owned pre->Dispatch scope.
+        DlssNr::Chain::RecordingLease unrelated(gate, 42);
+        assert(!unrelated.Valid(gate, 42)); // Same list is not authorization to borrow.
+        ++cases;
+    }
+    {
+        DlssNr::Chain::RecordingLease next(gate, 43);
+        assert(next.Valid(gate, 43));
+        assert(!next.MayTrack(true, false));
+        assert(next.MayTrack(true, true)); ++cases;
+    }
+    {
+        S::Model pendingModel;
+        S::Usage pendingUse;
+        completed = 0;
+        auto epoch = pendingModel.Track(44, pendingUse, completion);
+        auto queued = pendingModel.BeforeExecute(44);
+        S::Model::AfterExecute(queued, 0, 4, true);
+        DlssNr::Chain::RecordingLease next(gate, 45); // May be a different GPU queue.
+        assert(!next.MayTrack(true, S::IsReady(*epoch, completion)));
+        completed = 4;
+        assert(!next.MayTrack(true, S::IsReady(*epoch, completion))); // Completed but replayable.
+        S::Model::AfterReset(epoch, true);
+        assert(next.MayTrack(true, S::IsReady(*epoch, completion))); ++cases;
+    }
     std::cout << "PASS: " << cases << " production chain/scheduling/admission/completion cases; 1000 same-present rejects\n";
 }
