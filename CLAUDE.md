@@ -75,14 +75,26 @@ exist in the solution but CI and every script build only x64. Configurations: `D
   were still present, because the MSVC driver forks its front-end regardless of `/MP`. One earlier
   serial run of 202 TUs passed; that was a sample, not evidence. The forwarder never defines
   `MultiProcessorCompilation` at all, so `/MP` could never have explained its stalls.
+- **The forwarder stalls when built alone too.** "Seven of eight forwarder stalls were at the
+  in-process project transition, and it never stalled built alone" was written after eight
+  observations; the ninth stalled on `dlssnr_forwarder.cpp` inside its own dedicated msbuild
+  process, seven minutes at zero CPU. Splitting the build does not avoid the stall. It is still
+  worth doing — a stalled forwarder no longer strands a DLL that has already linked — but it is
+  not a fix.
 - **What `build-local.sh` does about it now.** Two msbuild processes instead of one solution
-  build — `dlssnr_forwarder.vcxproj` first, then `OptiScaler.vcxproj` — because seven of eight
-  forwarder stalls were at the in-process project transition and it has never stalled built alone.
-  Each invocation runs under a watchdog (`run_msbuild` in the script): three 30 s samples with
-  every `CL.exe`/`link.exe` at 0 CPU ticks and no log growth count as a hang, the attempt is torn
-  down, `wineserver -k` resets the prefix, and the next attempt resumes incrementally, up to five
-  times. Every manual recovery of that shape completed on the first resume, which is the evidence
-  this is built on. Per-invocation logs are `x64/build-forwarder.log` and `x64/build-optiscaler.log`;
+  build — `dlssnr_forwarder.vcxproj` first, then `OptiScaler.vcxproj` — so a stall in one does not
+  strand the other.
+  Each invocation runs under a watchdog (`run_msbuild` in the script): three 30 s samples in which
+  no process of the build — `MSBuild.exe`, the compiler front-ends, the linker — consumed any CPU
+  and the log did not grow count as a hang; the attempt is torn down, `wineserver -k` resets the
+  prefix, and the next attempt resumes incrementally, up to five times. Every manual recovery of
+  that shape completed on the first resume, which is the evidence this is built on.
+  **Two traps this already fell into.** `pgrep -f` takes an ERE, so `'\(CL\|link\)'` matches
+  literal parentheses and nothing else; that pattern shipped, and the watchdog sat silent through a
+  seven-minute stall. And the detector used to return "not stalled" whenever it saw no compiler
+  process, which fails *open*: a detector that cannot see anything reports health. It now samples
+  every build process including msbuild, and only an empty process list — the build genuinely being
+  over — counts as not-stalled. Per-invocation logs are `x64/build-forwarder.log` and `x64/build-optiscaler.log`;
   watchdog events go to stderr. The original single-invocation form is in git history.
 - **Observed recovery, by hand** (before the watchdog existed): build the forwarder project on its
   own with the original flags, then run the normal build. This is what the script now automates.
@@ -100,7 +112,9 @@ WINEPREFIX=~/.local/opt/msvc-wineprefix WINEDEBUG=-all ~/.local/opt/msvc/bin/x64
   Evidence, manifests and logs: `~/.local/state/crimson-desert-dlss5/gpu-timing-validation/1885828a/`.
 - When killing a stalled build, **use a bracket pattern**: `pgrep -f '[M]SBuild\.exe'`. A plain
   `pgrep -f 'build-local'` matches the very shell running it, so the kill takes out your own
-  command (exit 144) and leaves the stall untouched.
+  command (exit 144) and leaves the stall untouched. The bracket trick is not enough on its own
+  either: it protects against matching the *pattern text*, not against matching an ancestor
+  process. Walk `/proc/<pid>/stat` field 4 up from `$$` and skip any pid that is an ancestor.
 - **Never pipe the script** (`./build-local.sh ... | tail`). `wineserver` daemonises and inherits
   stdout, so the pipe never reaches EOF and the output stays hidden even after the build finished —
   a success looks exactly like a hang. Redirect to a file instead.
