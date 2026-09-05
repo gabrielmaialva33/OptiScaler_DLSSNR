@@ -24,6 +24,11 @@ struct Fixture
         g_compose.reset();
         DlssNr_Dx12::calls = 0;
         DlssNr_Dx12::writes = true;
+        DlssNr_Dx12::modelCalled = true;
+        DlssNr_Dx12::modelResult = 1;
+        for (auto& stage : g_coverage) stage = {};
+        for (auto& totals : g_coverageLogged) totals = {};
+        infoLogs.clear();
         Stable();
     }
     void Stable()
@@ -137,6 +142,62 @@ int main()
       for (int i = 0; i < 1000; ++i) assert(!gate.Ready(100));
       assert(!gate.Ready(0)); assert(!gate.Ready(99)); assert(gate.Ready(101));
       gate.Created(101); assert(!gate.Ready(101)); assert(gate.Ready(102)); ++checks; }
-    assert(checks >= 25 && "ZERO COVERAGE");
+    // Coverage must survive the exact failure that invalidated the earlier manual game test:
+    // repeated entries without applying any composition are explicitly ZERO_APPLIED, not success.
+    { Fixture f; g_preExtent.Reset();
+      for (int i = 0; i < 1000; ++i) { ScopedPreUpscale p(&f.cmd, &f.params, true); }
+      const auto& t = g_coverage[1].totals;
+      assert(t.calls == 1000 && t.skipped == 1000 && t.applied == 0 && t.modelOk == 0);
+      assert(t.skippedPresents == 1 && t.appliedPresents == 0);
+      assert(infoLogs.back().find("coverage=ZERO_APPLIED_IN_WINDOW") != std::string::npos);
+      assert(infoLogs.back().find("stable render resolution") != std::string::npos); ++checks; }
+    { Fixture f; DlssNr_Dx12::writes = false;
+      { ScopedPreUpscale p(&f.cmd, &f.params, true); assert(!p.Swapped()); }
+      assert(g_coverage[1].totals.modelOk == 1 && g_coverage[1].totals.applied == 0);
+      assert(infoLogs.back().find("model_ok=1 model_failed=0 applied_recorded=0") != std::string::npos); ++checks; }
+    { Fixture f;
+      { ScopedPreUpscale p(&f.cmd, &f.params, true); assert(p.Swapped()); }
+      DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
+      assert(g_coverage[1].totals.applied == 1 && g_coverage[0].totals.calls == 0 && g_coverage[2].totals.calls == 0);
+      assert(infoLogs.back().find("coverage=APPLIED_IN_WINDOW") != std::string::npos);
+      std::puts(infoLogs.back().c_str()); ++checks; }
+    { Fixture f; f.cfg.DlssNrStage = 0;
+      DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
+      assert(g_coverage[0].totals.applied == 1 && g_coverage[0].totals.modelOk == 1);
+      assert(infoLogs.back().find("stage=after calls=1") != std::string::npos); ++checks; }
+    { Fixture f; bool declined;
+      { ScopedPreUpscale p(&f.cmd, &f.params, false); declined = p.Declined(); }
+      DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, declined);
+      assert(g_coverage[1].totals.fallback == 1 && g_coverage[1].totals.applied == 0);
+      assert(g_coverage[2].totals.applied == 1 && g_coverage[0].totals.calls == 0);
+      assert(infoLogs.back().find("stage=after-fallback calls=1") != std::string::npos); ++checks; }
+    { Fixture f; DlssNr_Dx12::writes = false; DlssNr_Dx12::modelResult = -1;
+      { ScopedPreUpscale p(&f.cmd, &f.params, true); }
+      assert(g_coverage[1].totals.modelFailed == 1 && g_coverage[1].totals.applied == 0);
+      assert(infoLogs.back().find("model_ok=0 model_failed=1 applied_recorded=0") != std::string::npos); ++checks; }
+    { Fixture f; f.cfg.DlssNrEnabled = false;
+      { ScopedPreUpscale p(&f.cmd, &f.params, true); }
+      DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
+      assert(infoLogs.empty() && g_coverage[0].totals.calls == 0 && g_coverage[1].totals.calls == 0); ++checks; }
+    { Fixture f;
+      { ScopedPreUpscale p(&f.cmd, &f.params, true); }
+      DlssNr_Dx12::writes = false; DlssNr_Dx12::modelResult = -1;
+      { ScopedPreUpscale p(&f.cmd, &f.params, true); }
+      assert(g_coverage[1].totals.applied == 1 && g_coverage[1].totals.skipped == 1);
+      assert(infoLogs.back().find("window_applied=0 window_skipped=1") != std::string::npos);
+      assert(infoLogs.back().find("coverage=ZERO_APPLIED_IN_WINDOW") != std::string::npos);
+      std::puts(infoLogs.back().c_str()); ++checks; }
+    { DlssNr::Detail::StageCoverage coverage; DlssNr::Detail::CoverageSample sample;
+      auto now = steady_clock::now(); sample.present = 100;
+      assert(coverage.Record(sample, now));
+      for (int i = 0; i < 1000; ++i) assert(!coverage.Record(sample, now + milliseconds(1)));
+      assert(coverage.Record(sample, now + seconds(5))); // All-skip heartbeat is mandatory.
+      assert(coverage.totals.skippedPresents == 1);
+      sample.applied = true; sample.ModelResult(1, 1280, 720);
+      assert(coverage.Record(sample, now + seconds(5))); // First application logs immediately.
+      assert(coverage.totals.appliedPresents == 1); // Same present can occur in both buckets.
+      sample.present = 101; coverage.Record(sample, now + seconds(5));
+      assert(coverage.totals.appliedPresents == 2); ++checks; }
+    assert(checks >= 40 && "ZERO COVERAGE");
     std::printf("PASS: %u boundary cases; allocation-failure and DRS loops: 1000 each\n", checks);
 }

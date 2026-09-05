@@ -31,6 +31,7 @@ namespace
 // separate from Stage 0, and do not count the normal Stage 1 post-path stand-down as another skip.
 std::mutex g_coverageMutex;
 DlssNr::Detail::StageCoverage g_coverage[3];
+DlssNr::Detail::CoverageTotals g_coverageLogged[3];
 
 struct CoverageScope
 {
@@ -51,13 +52,19 @@ struct CoverageScope
         if (!coverage.Record(sample, std::chrono::steady_clock::now()))
             return;
         const auto& t = coverage.totals;
+        auto& previous = g_coverageLogged[stage];
         LOG_INFO("DLSS-NR coverage stage={} calls={} model_ok={} model_failed={} applied_recorded={} "
                  "skipped={} fallback={} applied_present_ids={} skipped_present_ids={} present_id={} "
-                 "extent={}x{} model={}x{} last=\"{}\" evidence=CPU-recorded-not-GPU-complete",
+                 "extent={}x{} model={}x{} window_calls={} window_model_ok={} window_applied={} "
+                 "window_skipped={} window_fallback={} coverage={} last=\"{}\" "
+                 "evidence=CPU-recorded-not-GPU-complete",
                  stage == 0 ? "after" : stage == 1 ? "before" : "after-fallback",
                  t.calls, t.modelOk, t.modelFailed, t.applied, t.skipped, t.fallback,
                  t.appliedPresents, t.skippedPresents, sample.present, sample.width, sample.height,
-                 sample.modelWidth, sample.modelHeight, sample.reason);
+                 sample.modelWidth, sample.modelHeight, t.calls - previous.calls, t.modelOk - previous.modelOk,
+                 t.applied - previous.applied, t.skipped - previous.skipped, t.fallback - previous.fallback,
+                 t.applied == previous.applied ? "ZERO_APPLIED_IN_WINDOW" : "APPLIED_IN_WINDOW", sample.reason);
+        previous = t;
     }
 };
 
@@ -1662,11 +1669,17 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 {
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
     const Config& cfg = *Config::Instance();
+    const auto reportSkip = [coverage](const char* why)
+    {
+        if (coverage != nullptr)
+            coverage->reason = why;
+        ReportSkipOnce(why);
+    };
 
     if (g_nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr ||
         motion == nullptr || output == nullptr)
     {
-        ReportSkipOnce(g_nr.failed ? "it already failed this session" : "a resource was missing");
+        reportSkip(g_nr.failed ? "it already failed this session" : "a resource was missing");
         return false;
     }
 
@@ -1717,7 +1730,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (FAILED(target->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
     {
-        ReportSkipOnce("the output texture belongs to no D3D12 device");
+        reportSkip("the output texture belongs to no D3D12 device");
         return false;
     }
 
@@ -1728,7 +1741,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                   cfg.RestoreGraphicSignature.value_or_default();
         if (needsRestore && !D3D12Hooks::CanRestoreRootSignature(cmdList))
         {
-            ReportSkipOnce("before the upscaler: command-list state could not be restored");
+            reportSkip("before the upscaler: command-list state could not be restored");
             device->Release();
             return false;
         }
@@ -2028,7 +2041,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (!sourceIsTarget && !g_preCreation.Ready(State::Instance().frameCount))
     {
-        ReportSkipOnce("before the upscaler: feature creation has not crossed a present yet");
+        reportSkip("before the upscaler: feature creation has not crossed a present yet");
         device->Release();
         return false;
     }
@@ -2104,7 +2117,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (restoreRequired && !D3D12Hooks::CanRestoreRootSignature(cmdList))
     {
-        ReportSkipOnce("the upscaler could not restore state this frame");
+        reportSkip("the upscaler could not restore state this frame");
 
         // The device reference taken at the top of this function is released on every other path out.
         // It was not released here, and this is the one path a bindless game takes every single frame
@@ -3289,8 +3302,7 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     // every frame until the model is built, and any frame the pass skips.
     if (!wrote)
     {
-        report("before the upscaler: the model wrote nothing this frame (it is being built, or "
-                       "the frame was skipped), so the upscaler was given the game's own colour");
+        report(coverage.sample.reason);
         return;
     }
 

@@ -35,3 +35,46 @@ The invariant check is specific to this shader-free port: it requires the C++
 constant list, HLSL source and both bytecode headers to match the selected baseline,
 checks ordered scalar correspondence, and verifies Stage declaration/read/save/INI.
 It does not prove byte-identical rendered frames or run the full Config persistence code.
+
+## INFO coverage for the later game A/B
+
+Use file logging at INFO (`[Log] LogToFile=true`, `LogLevel=2`); debug logging is not
+required. Search for `DLSS-NR coverage`. The three independent buckets are `before`,
+`after` (Stage 0), and `after-fallback` (Stage 1 declined). Native Vulkan is outside
+this D3D12 instrumentation. A normal Stage 1 after-pass stand-down is not counted.
+
+- `calls`: boundary evaluations, **not frames**. `calls = applied_recorded + skipped + fallback`.
+- `model_ok` / `model_failed`: model API calls that returned success/failure. Success
+  is recorded at the real NGX/proxy return, independently of the resolve result.
+- `applied_recorded`: resolve commands were recorded and the boundary selected that
+  output (pre: Color slots swapped; post: upscaler output written). This does not
+  prove queue submission, GPU completion, upscaler consumption or displayed pixels.
+- `skipped`: no selected composition and no fallback request. `fallback` counts a
+  pre-stage handoff; look for the separate after-fallback result to see what happened.
+- `applied_present_ids` / `skipped_present_ids`: advancing nonzero observed present
+  ids in each outcome bucket (fallback is included in skipped-present ids). Repeated
+  evaluations on one id count once; zero/backward ids do not count. One present may
+  be in both buckets and stages, so **do not sum these as unique game frames**.
+- `extent`, `model`, `present_id`, `last`: dimensions, observed present id and reason
+  for the evaluation producing this line. Model size is zero if no model call ran.
+- `window_*`: deltas since the previous line for this stage, including that line's
+  following evaluations up to the current one. `ZERO_APPLIED_IN_WINDOW` means no
+  composition was selected in that interval, even if an earlier interval succeeded.
+
+The first entry, first application and first model failure log immediately. Further
+entries produce a summary every five seconds, including all-skip runs. This is an
+evaluation-driven heartbeat, not a background timer: silence means no coverage
+evidence, not success. NR disabled emits no coverage and does no coverage allocation.
+
+A valid performance sample needs sustained `window_model_ok` and `window_applied`
+on the intended stage after warm-up, with skipped/fallback proportions reported.
+`model_ok > 0` with `applied_recorded = 0` is **not** NR application. Entirely missing
+coverage, zero application, or only `after-fallback` in a before-stage run invalidates
+that A/B. Use separate processes for Stage 0 and Stage 1; do not include stabilization
+intervals as faster model execution. Visual/GPU validation is still separate.
+
+The host suite now extracts the production logging scope and formats INFO lines
+using the repository's fmt implementation. It checks zero-application labeling,
+per-stage routing, model-success-without-application, failure, disabled silence,
+same-present deduplication, and the all-skip five-second heartbeat with a controlled
+clock. Model execution remains a fake; the emitted sample line is synthetic evidence.

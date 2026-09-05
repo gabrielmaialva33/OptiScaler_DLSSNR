@@ -113,10 +113,22 @@ Reviewed by hand against DEVELOPMENT.md sections 1 and 3, before committing:
 | 8, resources | No native Vulkan allocation/free code changed. New D3D12 scratch scopes restore color/guide/exposure states, reject incompatible flags/formats, serialize loans, and retire replaced scratch through the existing NR retirement mechanism. Host tests do not prove GPU completion. |
 
 The host suite executes the production allocation/scope/post-routing boundary with
-strict fake resources under ASan/UBSan: 31 cases, 1000 allocation-failure attempts
+strict fake resources under ASan/UBSan: 40 cases, 1000 allocation-failure attempts
 (one allocation), 1000 changing-resolution evaluations (zero allocations), and 1000
 same-frame gate checks (no evaluation allowed). The fake composition controls its
 write result; it does not execute `Dispatch`, HLSL, NGX or a real upscaler.
+
+The coverage follow-up also extracts the production INFO reporting scope and tests
+the real counter helper. Manual adversarial review checked: success without a resolve
+does not increment application; success followed by all-skip intervals cannot reuse
+an earlier positive status; fallback has its own post-stage bucket; the normal Stage 1
+post stand-down and disabled NR create no coverage; present counters deduplicate
+multiple evaluations without claiming GPU completion. The added optional Dispatch
+output only observes model results and skip reasons. Model/encode/resolve arguments,
+shader constants, HLSL and both bytecode headers still match baseline checks. No config,
+menu or resource lifetime behavior changes in this follow-up.
+
+See `tests/nr-before-upscale/README.md` for log fields and A/B acceptance criteria.
 
 ### Remaining integration limits
 

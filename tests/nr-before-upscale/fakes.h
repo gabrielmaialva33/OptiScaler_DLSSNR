@@ -10,10 +10,14 @@
 #include <unordered_map>
 #include <vector>
 #include "OptiScaler/dlssnr/DlssNr_PreUpscale.h"
+#include "OptiScaler/dlssnr/DlssNr_Coverage.h"
+#define FMT_HEADER_ONLY
+#include "external/spdlog/include/spdlog/fmt/bundled/format.h"
 
 // Strict host simulation of the boundary around the real ScopedPreUpscale implementation.
 // Vulkan/D3D12/NGX execution is intentionally not simulated as a performance or GPU-safety claim.
-#define LOG_INFO(...) ((void)0)
+inline std::vector<std::string> infoLogs;
+#define LOG_INFO(...) infoLogs.push_back(fmt::format(__VA_ARGS__))
 #define FAILED(x) ((x) < 0)
 #define IID_PPV_ARGS(x) (x)
 using D3D12_RESOURCE_STATES = int;
@@ -129,13 +133,16 @@ struct DlssNrFrameInfo { int OutputState = -1; void* ExposureTexture = nullptr; 
 struct DlssNr_Dx12
 {
     static inline bool writes = true;
+    static inline bool modelCalled = true;
+    static inline int modelResult = 1;
     static inline unsigned calls = 0;
     DlssNr_Dx12(const char*, ID3D12Device*) {}
     bool Dispatch(ID3D12GraphicsCommandList*, ID3D12Resource* color, ID3D12Resource* depth,
                   ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
-                  ID3D12CommandQueue*)
+                  ID3D12CommandQueue*, DlssNr::Detail::CoverageSample* coverage = nullptr)
     {
         ++calls;
+        if (coverage && modelCalled) coverage->ModelResult(modelResult, 1280, 720);
         if (color != output)
         {
             assert(color->state == 1 && depth->state == 1 && motion->state == 1 && output->state == 2);
@@ -156,6 +163,7 @@ void ReportSkipOnce(const char*) {}
 ID3D12Resource* GetResource(NVSDK_NGX_Parameter* p, const char* name, const char*)
 { ID3D12Resource* r = nullptr; p->Get(name, &r); return r; }
 using ApiUpscalerInput = int;
+const char* ApiUpscalerInputName(int) { return "test"; }
 struct State
 {
     int currentInputApiName = 0;
