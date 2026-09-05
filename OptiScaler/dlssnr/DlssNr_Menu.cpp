@@ -7,6 +7,7 @@
 
 
 #include <Config.h>
+#include <State.h>
 #include <menu/menu_common.h>
 
 #include <imgui/imgui.h>
@@ -44,41 +45,176 @@ static void HelpMarker(const char* tip)
 // live under the cursor; only the commit that triggers the rebuild waits for release. Cheap controls
 // that are just shader constants (detail, colour, paper white) do not use this -- they can afford to
 // apply live.
-static bool DeferredSlider(const char* label, CustomOptional<float>* opt, float mn, float mx,
-                           float def, const char* fmt = "%.2f")
+static bool DeferredSlider(const char* label, float* current, float mn, float mx,
+                           float def, const char* fmt = "%.2f", bool showReset = true)
 {
-    static std::unordered_map<std::string, float> pending;
+    static std::unordered_map<ImGuiID, float> pending;
+    const ImGuiID id = ImGui::GetID(label);
 
-    auto it = pending.find(label);
-    float value = it != pending.end() ? it->second : opt->value_or_default();
+    auto it = pending.find(id);
+    float value = it != pending.end() ? it->second : *current;
     bool changed = false;
 
     if (ImGui::SliderFloat(Localization::Label(label), &value, mn, mx, fmt))
-        pending[label] = value;
+        pending[id] = value;
 
     if (ImGui::IsItemDeactivatedAfterEdit())
     {
-        auto committed = pending.find(label);
+        auto committed = pending.find(id);
 
         if (committed != pending.end())
         {
-            *opt = std::clamp(committed->second, mn, mx);
+            *current = std::clamp(committed->second, mn, mx);
             pending.erase(committed);
             changed = true;
         }
     }
+
+    if (!ImGui::IsItemActive())
+        pending.erase(id);
+    if (!showReset)
+        return changed;
 
     ImGui::SameLine();
 
     const std::string resetId = std::string("Reset##") + label;
     if (ImGui::SmallButton(Localization::Label(resetId.c_str())))
     {
-        *opt = def;
-        pending.erase(std::string(label));   // drop any in-flight drag so the reset actually sticks
+        *current = def;
+        pending.erase(id);   // drop any in-flight drag so the reset actually sticks
         changed = true;
     }
 
     return changed;
+}
+
+// Every field is either a sparse override or a live master value, never an implicit copy.
+static bool PassFloat(const char* label, std::optional<float>& field, float master, float minimum)
+{
+    ImGui::PushID(label);
+    bool overrideValue = field.has_value();
+    bool changed = ImGui::Checkbox(Localization::Label("Override###override"), &overrideValue);
+    if (changed)
+        field = overrideValue ? std::optional<float>(master) : std::nullopt;
+    if (field)
+    {
+        float value = *field;
+        if (DeferredSlider(label, &value, minimum, 2.0f, master, "%.2f", false))
+        {
+            field = value;
+            changed = true;
+        }
+    }
+    else
+        ImGui::Text(Localization::Tr("%s: inherit %.2f"), Localization::Tr(label), master);
+    ImGui::PopID();
+    return changed;
+}
+
+static bool PassChoice(const char* label, std::optional<uint32_t>& field, uint32_t master,
+                       const char* const* names, int count)
+{
+    ImGui::PushID(label);
+    bool overrideValue = field.has_value();
+    bool changed = ImGui::Checkbox(Localization::Label("Override###override"), &overrideValue);
+    if (changed)
+        field = overrideValue ? std::optional<uint32_t>(master) : std::nullopt;
+    if (field)
+    {
+        int value = static_cast<int>(*field);
+        if (ImGui::Combo(label, &value, names, count))
+        {
+            field = static_cast<uint32_t>(value);
+            changed = true;
+        }
+    }
+    else
+        ImGui::Text(Localization::Tr("%s: inherit %s"), Localization::Tr(label), names[std::min(master, uint32_t(count - 1))]);
+    ImGui::PopID();
+    return changed;
+}
+
+static void RenderPassControls(Config* config, bool vulkan)
+{
+    ImGui::SeparatorText(Localization::Tr("Sequential model passes"));
+    if (vulkan || config->DlssNrUseProxy.value_or_default())
+    {
+        ImGui::TextWrapped(Localization::Tr("This backend uses one pass with master settings. "
+                                          "Sequential passes and individual settings are unavailable."));
+        return;
+    }
+
+    auto snapshot = config->GetDlssNrPassSnapshot();
+    int count = static_cast<int>(snapshot.Count);
+    if (ImGui::SliderInt(Localization::Label("Requested passes###nrPassCount"), &count, 1, 3))
+    {
+        config->SetDlssNrPassCount(static_cast<uint32_t>(count));
+        snapshot = config->GetDlssNrPassSnapshot();
+    }
+    ImGui::Text(Localization::Tr("Last evaluation: %u successful model passes"), DlssNr::ActivePassCount());
+    ImGui::TextWrapped("%s", Localization::Tr(DlssNr::MultipassStatus()));
+    HelpMarker("Each extra pass processes the previous answer and has its own model history. "
+               "Cost and VRAM grow. A failed extra pass keeps the last successful answer. "
+               "Requested passes are not proof of completed work; check the last evaluation and INFO log."
+               "\n\nEnabling this after untracked NR has already run requires restarting the application. "
+               "Retry cannot make earlier GPU work tracked. Unsupported submission paths refuse extra passes.");
+
+    bool individual = snapshot.Individual;
+    if (ImGui::Checkbox(Localization::Label("Individual pass settings###nrIndividualPassSettings"), &individual))
+        config->SetDlssNrIndividualPassSettings(individual);
+    HelpMarker("The Model controls above are the master settings. Unchecked overrides inherit their "
+               "current values. Turning individual settings off or reducing the pass count keeps saved edits.");
+    if (!individual)
+        return;
+
+    static int selected = 1;
+    selected = std::clamp(selected, 1, static_cast<int>(snapshot.Count));
+    if (snapshot.Count > 1)
+        ImGui::SliderInt(Localization::Label("Edit pass###nrEditPass"), &selected, 1, static_cast<int>(snapshot.Count));
+    else
+        ImGui::TextUnformatted(Localization::Tr("Editing pass 1"));
+    const uint32_t pass = static_cast<uint32_t>(selected - 1);
+    auto sparse = config->GetDlssNrPassOverrides(pass);
+    const auto master = config->GetDlssNrMasterSettings();
+    ImGui::PushID(selected);
+    ImGui::TextUnformatted(Localization::Tr("Uncheck Override to inherit the live master value."));
+    bool changed = false;
+    changed |= PassFloat("Intensity", sparse.Intensity, master.Intensity, 0.0f);
+    changed |= PassFloat("Local structure", sparse.LocalStructure, master.LocalStructure, 0.0f);
+    changed |= PassFloat("Local tone", sparse.LocalTone, master.LocalTone, 0.0f);
+    changed |= PassFloat("Skin structure", sparse.SkinStructure, master.SkinStructure, -1.0f);
+    const char* presets[] = { Localization::Tr("Default"), Localization::Tr("Preset 1"), Localization::Tr("Preset 2"), Localization::Tr("Preset 3") };
+    const char* styles[] = { Localization::Tr("Default (standard)"), Localization::Tr("Natural"), Localization::Tr("Cinematic") };
+    changed |= PassChoice("Model preset", sparse.Preset, master.Preset, presets, IM_ARRAYSIZE(presets));
+    changed |= PassChoice("Style", sparse.Style, master.Style, styles, IM_ARRAYSIZE(styles));
+    ImGui::PushID("autoMask");
+    bool maskOverride = sparse.AutoMask.has_value();
+    if (ImGui::Checkbox(Localization::Label("Override auto skin mask###nrMaskOverride"), &maskOverride))
+    {
+        sparse.AutoMask = maskOverride ? std::optional<bool>(master.AutoMask) : std::nullopt;
+        changed = true;
+    }
+    if (sparse.AutoMask)
+    {
+        bool mask = *sparse.AutoMask;
+        if (ImGui::Checkbox(Localization::Label("Auto skin mask###nrPassMask"), &mask))
+        {
+            sparse.AutoMask = mask;
+            changed = true;
+        }
+    }
+    else
+        ImGui::Text(Localization::Tr("Auto skin mask: inherit %s"), Localization::Tr(master.AutoMask ? "on" : "off"));
+    ImGui::PopID();
+    if (sparse != DlssNrPassSettings {} &&
+        ImGui::SmallButton(Localization::Label("Inherit all master settings###nrClearPass")))
+    {
+        sparse = {};
+        changed = true;
+    }
+    if (changed)
+        config->SetDlssNrPassOverrides(pass, sparse);
+    ImGui::PopID();
 }
 
 void RenderMenu(Config* config, float menuResScale)
@@ -371,22 +507,23 @@ void RenderMenu(Config* config, float menuResScale)
         ImGui::TextUnformatted(Localization::Tr("Read when the model is built, so a change rebuilds it after a moment."));
 
         static const char* nrPresetNames[] = { Localization::Label("Default"), Localization::Label("Preset 1"), Localization::Label("Preset 2"), Localization::Label("Preset 3") };
-        int preset = (int) config->DlssNrPreset.value_or_default();
+        auto master = config->GetDlssNrMasterSettings();
+        int preset = (int) master.Preset;
         if (ImGui::Combo(Localization::Label("Model preset"), &preset, nrPresetNames, IM_ARRAYSIZE(nrPresetNames)))
-            config->DlssNrPreset = (uint32_t) preset;
+            config->SetDlssNrMasterSetting(&Config::DlssNrPreset, (uint32_t) preset);
 
         HelpMarker("Default leaves the choice to the model."
                        "\n\nNot the same scale as the super resolution or ray reconstruction presets --"
                        "\nthe same number means something different here.");
 
         static const char* nrStyleNames[] = { Localization::Label("Default (standard)"), Localization::Label("Natural"), Localization::Label("Cinematic") };
-        int style = (int) config->DlssNrStyle.value_or_default();
+        int style = (int) master.Style;
 
         if (style > 2)
             style = 2;
 
         if (ImGui::Combo(Localization::Label("Style"), &style, nrStyleNames, IM_ARRAYSIZE(nrStyleNames)))
-            config->DlssNrStyle = (uint32_t) style;
+            config->SetDlssNrMasterSetting(&Config::DlssNrStyle, (uint32_t) style);
 
         HelpMarker("The model's own processing profiles."
                    "\n\nDefault (standard): the strongest. Boosts local contrast and deepens"
@@ -398,26 +535,36 @@ void RenderMenu(Config* config, float menuResScale)
                    "\n\nRead when the model is built, so a change rebuilds it after a moment. The"
                    "\nnames come from community testing; NVIDIA ships no names in the binaries.");
 
-        DeferredSlider("Intensity", &config->DlssNrIntensity, 0.0f, 2.0f, 1.0f);
+        if (DeferredSlider("Intensity", &master.Intensity, 0.0f, 2.0f, 1.0f))
+            config->SetDlssNrMasterSetting(&Config::DlssNrIntensity, master.Intensity);
 
         HelpMarker("The model's own strength control, applied inside it. Distinct from detail"
                        "\nstrength above, which scales the result afterwards.");
 
-        DeferredSlider("Local structure", &config->DlssNrLocalStructure, 0.0f, 2.0f, 1.0f);
+        if (DeferredSlider("Local structure", &master.LocalStructure, 0.0f, 2.0f, 1.0f))
+            config->SetDlssNrMasterSetting(&Config::DlssNrLocalStructure, master.LocalStructure);
 
-        DeferredSlider("Local tone", &config->DlssNrLocalTone, 0.0f, 2.0f, 1.0f);
+        if (DeferredSlider("Local tone", &master.LocalTone, 0.0f, 2.0f, 1.0f))
+            config->SetDlssNrMasterSetting(&Config::DlssNrLocalTone, master.LocalTone);
 
 
-        DeferredSlider("Skin structure", &config->DlssNrSkinStructure, -1.0f, 2.0f, -1.0f);
+        if (DeferredSlider("Skin structure", &master.SkinStructure, -1.0f, 2.0f, -1.0f))
+            config->SetDlssNrMasterSetting(&Config::DlssNrSkinStructure, master.SkinStructure);
 
         HelpMarker("-1 means follow local structure, and is the model's own default -- it is not a"
                        "\nstrength of zero. 0 and above set skin independently of the rest of the frame.");
 
-        bool autoMask = config->DlssNrAutoMask.value_or_default();
+        bool autoMask = master.AutoMask;
         if (ImGui::Checkbox(Localization::Label("Auto skin mask"), &autoMask))
-            config->DlssNrAutoMask = autoMask;
+            config->SetDlssNrMasterSetting(&Config::DlssNrAutoMask, autoMask);
 
         HelpMarker("Lets the model find skin itself rather than treating the frame uniformly.");
+
+        // Runtime activity alone cannot identify a native Vulkan backend before its first NR frame.
+        const auto& state = State::Instance();
+        const bool nativeVulkan = vulkan || (state.api == API::Vulkan &&
+                                  (!state.currentFeature || !state.currentFeature->IsWithDx12()));
+        RenderPassControls(config, nativeVulkan);
 
         ImGui::SeparatorText(Localization::Tr("Colour"));
 

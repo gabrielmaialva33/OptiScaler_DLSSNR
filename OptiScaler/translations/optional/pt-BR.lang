@@ -110,3 +110,19 @@ Lets the model find skin itself rather than treating the frame uniformly.	Permit
 Freezes the frame the model works on. While held, change paper white, the\nstrengths, the reversible mode, the model preset -- anything below the\nupscaler -- and only that setting moves; the scene does not.\n\nWhat it CANNOT show: DLSS/FSR/XeSS upscaler presets or anything upstream\n(the upscaler is not re-run on a held frame), and the game's own HUD and\npost-processing, which run after this pass and keep updating. The white\npoint stops being measured and holds its value while frozen, so it cannot\ndrift and confound the comparison.\n\nHide the menu and it stays held. Untoggle to resume.	Congela o quadro processado pelo modelo. Enquanto estiver congelado, altere o branco\nde referência, as intensidades, o modo reversível ou o perfil do modelo: só o ajuste\nmuda, a cena permanece igual.\n\nNão compara perfis DLSS/FSR/XeSS ou etapas anteriores: o upscaler não é executado\nnovamente. O HUD e o pós-processamento do jogo, posteriores a este passe, continuam\natualizando. A medição do ponto branco também congela para não afetar a comparação.\n\nFechar o menu mantém o quadro congelado. Desative para continuar.
 Where the wipe cuts. Left of it is the frame as the upscaler produced it,\nright of it is the frame the model edited.	Posição da divisão. À esquerda fica o quadro produzido pelo upscaler;\nà direita, o quadro modificado pelo modelo.
 Proxy is the picture handed to the model -- if that looks wrong, the white point\nis wrong and nothing downstream can be judged.\n\nDifference shows what the model actually changed, amplified twenty times and\ncentred on grey. A flat grey frame there means it is doing nothing.	Proxy é a imagem entregue ao modelo. Se estiver incorreta, o ponto branco está\nincorreto e as etapas seguintes não podem ser avaliadas.\n\nDiferença mostra a alteração do modelo, ampliada vinte vezes e centrada no cinza.\nUm quadro cinza uniforme indica que nada foi alterado.
+
+# Bounded pass editor. New interactive controls carry stable IDs.
+Sequential model passes	Passes sequenciais do modelo
+Requested passes	Passes solicitados
+Last evaluation: %u successful model passes	Última avaliação: %u passes bem-sucedidos do modelo
+Individual pass settings	Ajustes individuais por passe
+Edit pass	Editar passe
+Editing pass 1	Editando o passe 1
+Uncheck Override to inherit the live master value.	Desmarque Sobrescrever para herdar o valor atual dos ajustes gerais.
+Override	Sobrescrever
+Override auto skin mask	Sobrescrever máscara automática de pele
+Auto skin mask: inherit %s	Máscara automática de pele: herdar %s
+Inherit all master settings	Herdar todos os ajustes gerais
+%s: inherit %.2f	%s: herdar %.2f
+%s: inherit %s	%s: herdar %s
+This backend uses one pass with master settings. Sequential passes and individual settings are unavailable.	Este backend usa um passe com os ajustes gerais. Passes sequenciais e ajustes individuais estão indisponíveis.
