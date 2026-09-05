@@ -2,10 +2,10 @@
 
 Run `python3 tests/nr-timing-boundary/run.py` from the repository root. The runner extracts the
 production metadata builder and timing menu, compiles them with strict host fakes under ASan/UBSan,
-and requires all 14 cases to execute. An assertion, compilation error, sanitizer report, or missing
+and requires all 15 cases to execute. An assertion, compilation error, sanitizer report, or missing
 source anchor is failure. Production declaration records are extracted from `DlssNr_GpuTiming.h`.
 
-The executable checks configuration generations, stage and working-size changes, per-pass overrides,
+The executable checks configuration generations, stage, working-size and HDR/format changes, per-pass overrides,
 reset/capture metadata, and immutable previously captured metadata. UI cases cover unsupported native
 Vulkan/proxy paths, disabled measurement, enabling, interval edits, no confirmed sample, historical
 sample age since recording and cadence, and disabling with an old sample present. No current-frame or averaged-cost

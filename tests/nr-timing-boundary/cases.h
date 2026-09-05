@@ -3,8 +3,8 @@ int main() {
     Config cfg;
     DlssNrPassSnapshot passes;
     auto make=[&](const char* stage="after", unsigned w=3440, unsigned h=1440, float scale=1.0f,
-                  bool reset=false, bool capture=false) {
-        return TimingMetadata(cfg,passes,42,17,stage,2293,960,w,h,unsigned(w*scale),unsigned(h*scale),scale,reset,capture);
+                  bool reset=false, bool capture=false, bool hdr=true, unsigned format=10) {
+        return TimingMetadata(cfg,passes,42,17,stage,2293,960,w,h,unsigned(w*scale),unsigned(h*scale),scale,reset,capture,hdr,format);
     };
     auto a=make(), b=make();
     assert(a.settingsGeneration==b.settingsGeneration && a.contractHash==b.contractHash); ++cases;
@@ -21,6 +21,8 @@ int main() {
     assert(two.contractHash!=edited.contractHash && edited.requestedPasses==2); ++cases;
     cfg.DlssNrApplyModel.value=false; auto hidden=make();
     assert(hidden.contractHash!=edited.contractHash && std::string(hidden.modelIdentity)=="fixture-file-attributes"); ++cases;
+    auto sdr=make("after",3440,1440,1,false,false,false,28);
+    assert(sdr.contractHash!=hidden.contractHash); ++cases;
     assert(a.modelWidth==3440 && a.settingsGeneration<hidden.settingsGeneration); ++cases;
 
     using DlssNr::RenderGpuTiming;
@@ -42,6 +44,6 @@ int main() {
     assert(ImGui::Contains("not the current frame") && !ImGui::Contains("ms per frame")); ++cases;
     ImGui::toggle=0; ImGui::Clear(); RenderGpuTiming(&cfg,false);
     assert(!cfg.settings.Enabled && ImGui::sliderCalls==0 && !ImGui::Contains("Last confirmed")); ++cases;
-    assert(cases==14);
+    assert(cases==15);
     std::printf("PASS %d timing boundary metadata/UI cases\n",cases);
 }

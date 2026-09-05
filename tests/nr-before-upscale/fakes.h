@@ -229,3 +229,5 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* p)
     return f;
 }
 }
+
+namespace DlssNr::GpuTiming { inline void SetEnabled(bool) {} }
