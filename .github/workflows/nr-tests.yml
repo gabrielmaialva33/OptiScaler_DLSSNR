@@ -1,0 +1,71 @@
+# Runs the host tier of tests/ on Linux.
+#
+# Named nr-tests to keep it distinct from upstream's test.yml, which despite the
+# name runs no tests: it publishes the nightly release.
+#
+# Only the three submodules the host suites actually include are checked out.
+# external/FidelityFX-SDK is deliberately left alone; it is large, slow, and the
+# build only ever needed twelve headers from it. See CLAUDE.md.
+
+name: NR Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dlss-neural-rendering]
+    paths:
+      - 'tests/**'
+      - 'OptiScaler/**'
+      - 'OptiScaler.ini'
+      - '.github/workflows/nr-tests.yml'
+  pull_request:
+    paths:
+      - 'tests/**'
+      - 'OptiScaler/**'
+      - 'OptiScaler.ini'
+      - '.github/workflows/nr-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nr-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tier:
+    name: Host tier
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the submodules the suites include
+        run: |
+          git submodule update --init --depth 1 \
+            external/simpleini external/spdlog external/vulkan
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Toolchain versions
+        run: |
+          g++ --version | head -1
+          clang++ --version | head -1
+          python3 --version
+
+      - name: Registry check
+        run: python3 tests/run_all.py --list
+
+      - name: Run host tier
+        run: python3 tests/run_all.py --tier host --jobs 4 --log-dir "$RUNNER_TEMP/test-logs"
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: ${{ runner.temp }}/test-logs
+          retention-days: 7
