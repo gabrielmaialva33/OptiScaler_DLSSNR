@@ -40,11 +40,20 @@ exist in the solution but CI and every script build only x64. Configurations: `D
   `~/.local/opt/msvc-wineprefix` (`WINEPREFIX`). Both env vars are overridable. The `msbuild` wrapper
   there is patched to export `VCToolsInstallDir_170`.
 - No `/m`: MSBuild child nodes do not work under Wine. Parallelism comes from `/p:CL_MPCount=16`.
-- That default deadlocks on a **full rebuild**: ~8 `CL.exe` sit at 0% CPU sharing one `.rsp` while
-  `wineserver` spins on a core, and nothing progresses. Incremental builds are fine, which is why it
-  goes unnoticed. Override for a clean build: `./build-local.sh Release /p:CL_MPCount=4` (extra args
-  land after the script's own `/p:`, so the later value wins). Recover with
-  `WINEPREFIX=~/.local/opt/msvc-wineprefix wineserver -k`.
+- **The build stalls intermittently under Wine, and lowering `CL_MPCount` does not reliably fix
+  it.** Observed twice: once mid-compile with 8 `CL.exe` at `CL_MPCount=16`, once at
+  `CL_MPCount=4` with only 2 `CL.exe`, on the trivial `dlssnr_forwarder.cpp`, *after*
+  `OptiScaler.dll` had already linked. So it is not a parallelism threshold.
+  **Signature** (measure CPU *deltas*; `ps` %CPU is an average since start and reads low for a
+  process that worked then stalled): `MSBuild.exe` and `CL.exe` at ~0 ticks/s while `wineserver`
+  spins at 50-65% of a core, the redirected log stops growing, and no new `.obj` appears.
+  **Recovery**: kill the stalled PIDs, `WINEPREFIX=~/.local/opt/msvc-wineprefix wineserver -k`,
+  then rerun — it resumes incrementally and usually completes.
+  Extra args land after the script's own `/p:`, so `./build-local.sh Release /p:CL_MPCount=4`
+  overrides the default if you want to try a lower count.
+- When killing a stalled build, **use a bracket pattern**: `pgrep -f '[M]SBuild\.exe'`. A plain
+  `pgrep -f 'build-local'` matches the very shell running it, so the kill takes out your own
+  command (exit 144) and leaves the stall untouched.
 - **Never pipe the script** (`./build-local.sh ... | tail`). `wineserver` daemonises and inherits
   stdout, so the pipe never reaches EOF and the output stays hidden even after the build finished —
   a success looks exactly like a hang. Redirect to a file instead.
