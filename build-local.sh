@@ -35,16 +35,34 @@ common=(/nologo /v:minimal /p:CL_MPCount=16 /p:Configuration="$CONFIG" /p:Platfo
 # and reads low for a process that worked and then stalled; deltas do not lie.
 cpu_ticks() { awk '{print $14+$15}' "/proc/$1/stat" 2>/dev/null || echo 0; }
 
-# stalled: true when, over one sample, no cl.exe used any CPU while wineserver did, and the log
-# did not grow. Matches the bracket-quoted pattern so it never matches this script's own shell.
+# build_pids: every wine-side process of this build -- msbuild, the compiler front-ends, the
+# linker. Bracket-quoted so the pattern never matches the shell that is running this script
+# (a plain 'build-local' pattern kills your own command; that mistake cost two debugging rounds).
+# pgrep uses ERE: '\(a\|b\)' matches literal parens and never fires. It shipped that way once and
+# the watchdog silently never triggered, because the detector below then failed *open*.
+build_pids() {
+  pgrep -f '[M]SBuild\.exe'
+  pgrep -f '[H]ostX64.x64.(CL|link)\.exe'
+}
+
+# stalled: true when, over one sample, no process of this build used any CPU and the log did not
+# grow. Deliberately does NOT special-case "no compiler running": a long link, or the gap between
+# projects, still burns CPU in msbuild and still ends with the log growing. Anything that consumes
+# nothing and writes nothing for the whole sample is stuck, whatever phase it claims to be in.
 stalled() {
   local log=$1 s1 s2 t=0 a b p
   s1=$(stat -c%s "$log" 2>/dev/null || echo 0)
-  local cls; cls=$(pgrep -f '[H]ostX64.x64.\(CL\|link\)\.exe' 2>/dev/null)
-  [ -z "$cls" ] && return 1                       # no compiler or linker running: done
-  for p in $cls; do a=$(cpu_ticks "$p"); sleep 1; b=$(cpu_ticks "$p"); t=$((t + b - a)); done
+  local pids; pids=$(build_pids)
+  [ -z "$pids" ] && return 1                      # nothing of ours alive: finished, not stuck
+  for p in $pids; do a=$(cpu_ticks "$p"); done
+  sleep 1
+  for p in $pids; do b=$(cpu_ticks "$p"); done
+  for p in $pids; do t=$((t + $(cpu_ticks "$p"))); done
+  local t2=0
+  sleep 1
+  for p in $pids; do t2=$((t2 + $(cpu_ticks "$p"))); done
   s2=$(stat -c%s "$log" 2>/dev/null || echo 0)
-  [ "$t" -eq 0 ] && [ "$s1" = "$s2" ]
+  [ "$t2" -eq "$t" ] && [ "$s1" = "$s2" ]
 }
 
 # run_msbuild <label> <log> <msbuild args...>: runs msbuild under the watchdog. Three consecutive
@@ -69,7 +87,7 @@ run_msbuild() {
       if [ "$dead" -ge 3 ]; then
         echo "[$label] attempt $attempt: hung; resetting wineserver and retrying" >&2
         kill -TERM "$pid" 2>/dev/null
-        for p in $(pgrep -f '[M]SBuild\.exe') $(pgrep -f '[H]ostX64.x64.\(CL\|link\)\.exe'); do kill -TERM "$p" 2>/dev/null; done
+        for p in $(build_pids); do kill -TERM "$p" 2>/dev/null; done
         sleep 2; wineserver -k 2>/dev/null; sleep 2
         for p in $(pgrep -x winedevice.exe) $(pgrep -x services.exe) $(pgrep -x plugplay.exe); do kill -KILL "$p" 2>/dev/null; done
         break
