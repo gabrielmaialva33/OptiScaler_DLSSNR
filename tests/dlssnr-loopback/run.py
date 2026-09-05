@@ -38,6 +38,12 @@ def main():
     if not dll.exists():
         raise SystemExit(f'no OptiScaler build at {dll} — run ./build-local.sh Release first')
 
+    # This runner compiles through the same msvc-wine prefix that build-local.sh uses. Two clients
+    # on one wineserver is the condition under which the build has stalled; refuse rather than race.
+    busy = subprocess.run(['pgrep', '-f', r'[M]SBuild\.exe|[b]uild-local\.sh'], capture_output=True)
+    if busy.returncode == 0:
+        raise SystemExit('a solution build is using the msvc-wine prefix; run this after it finishes')
+
     OUT.mkdir(exist_ok=True)
     (OUT / 'run').mkdir(exist_ok=True)
     shutil.copy2(dll, OUT / 'run/OptiScaler.dll')
