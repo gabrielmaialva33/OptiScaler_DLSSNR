@@ -20,8 +20,13 @@
 static bool _isInited = false;
 
 static bool _vulkanObjectsCreated = false;
+static bool _vulkanDeviceLost = false;
+static bool _vulkanBackendInited = false;
 static std::mutex _vkCleanMutex;
 static std::mutex _vkPresentMutex;
+
+// The caller holds _vkPresentMutex and _vkCleanMutex, in that order.
+static bool DestroyVulkanObjectsLocked(bool shutdown);
 
 // imgui stuff
 struct ImGui_ImplVulkan_InitInfo _ImVulkan_Info = {};
@@ -201,18 +206,6 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         return;
     }
 
-    if (_vulkanObjectsCreated)
-    {
-        LOG_DEBUG("_vulkanObjectsCreated, releasing objects");
-
-        if (ImGui::GetIO().BackendRendererUserData != nullptr)
-            ImGui_ImplVulkan_Shutdown(false);
-
-        MenuOverlayVk::DestroyVulkanObjects(false);
-
-        _vulkanObjectsCreated = false;
-    }
-
     // Initialize ImGui
     if (!MenuOverlayBase::IsInited() || MenuOverlayBase::Handle() != hwnd)
     {
@@ -263,11 +256,36 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
 
     // Alloc ImGui frame structure/semaphores for every image.
     // For convenience, I am using ImGui_ImplVulkanH_Frame in imgui_impl_vulkan.h
-    if (!_vulkanObjectsCreated)
+    _ImVulkan_Frames = (ImGui_ImplVulkanH_Frame*) IM_ALLOC(sizeof(ImGui_ImplVulkanH_Frame) * _scImageCount);
+    _ImVulkan_Semaphores = (VkSemaphore*) IM_ALLOC(sizeof(VkSemaphore) * _scImageCount);
+
+    if (_ImVulkan_Frames == nullptr || _ImVulkan_Semaphores == nullptr)
     {
-        _ImVulkan_Frames = (ImGui_ImplVulkanH_Frame*) IM_ALLOC(sizeof(ImGui_ImplVulkanH_Frame) * _scImageCount);
-        _ImVulkan_Semaphores = (VkSemaphore*) IM_ALLOC(sizeof(VkSemaphore) * _scImageCount);
+        // No Vulkan objects have been created in these arrays yet.
+        IM_FREE(_ImVulkan_Frames);
+        IM_FREE(_ImVulkan_Semaphores);
+        _ImVulkan_Frames = nullptr;
+        _ImVulkan_Semaphores = nullptr;
+        LOG_ERROR("could not allocate Vulkan overlay frame data");
+        return;
     }
+
+    memset(_ImVulkan_Frames, 0, sizeof(ImGui_ImplVulkanH_Frame) * _scImageCount);
+    memset(_ImVulkan_Semaphores, 0, sizeof(VkSemaphore) * _scImageCount);
+
+    // Publish the owner and allocation count before any fallible Vulkan creation. Teardown must use
+    // this count, never the next swapchain's image count, including on a partial initialization.
+    _ImVulkan_Info.Device = device;
+    _ImVulkan_Info.ImageCount = _scImageCount;
+
+    struct CleanupOnFailure
+    {
+        ~CleanupOnFailure()
+        {
+            if (!_vulkanObjectsCreated)
+                DestroyVulkanObjectsLocked(false);
+        }
+    } cleanupOnFailure;
 
     // Select queue family.
     //
@@ -387,6 +405,8 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
             LOG_ERROR("vkCreateDescriptorPool error: {0:X}", (UINT) result);
             return;
         }
+
+        _ImVulkan_Info.DescriptorPool = pool;
     }
 
     // Create the render pass
@@ -592,6 +612,7 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         _ImVulkan_Info.RenderPass = _vkRenderPass;
 
         bool initResult = ImGui_ImplVulkan_Init(&_ImVulkan_Info);
+        _vulkanBackendInited = ImGui::GetIO().BackendRendererUserData != nullptr;
         LOG_DEBUG("ImGui_ImplVulkan_Init result: {}", initResult);
 
         if (!initResult)
@@ -652,30 +673,38 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     LOG_FUNC_RESULT(_vulkanObjectsCreated);
 }
 
-void MenuOverlayVk::DestroyVulkanObjects(bool shutdown)
+static bool DestroyVulkanObjectsLocked(bool shutdown)
 {
     if (_ImVulkan_Info.Device == VK_NULL_HANDLE)
-        return;
+        return !_vulkanDeviceLost;
 
     if (!shutdown)
         LOG_FUNC();
 
-    _vkCleanMutex.lock();
+    _vulkanObjectsCreated = false;
 
     auto result = vkDeviceWaitIdle(_ImVulkan_Info.Device);
     if (result != VK_SUCCESS && !shutdown)
         LOG_WARN("vkDeviceWaitIdle error: {0:X}", (UINT) result);
 
-    if (shutdown)
+    if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST)
     {
-        if (_vkRenderPass)
-            vkDestroyRenderPass(_ImVulkan_Info.Device, _vkRenderPass, VK_NULL_HANDLE);
-
-        if (_ImVulkan_Info.DescriptorPool)
-            vkDestroyDescriptorPool(_ImVulkan_Info.Device, _ImVulkan_Info.DescriptorPool, VK_NULL_HANDLE);
+        // The GPU may still be using these objects. Keep both handles and backing allocations so
+        // a later teardown can retry; creation must not overwrite them in the meantime.
+        return false;
     }
 
-    for (uint32_t i = 0; i < _ImVulkan_Info.ImageCount; i++)
+    _vulkanDeviceLost = result == VK_ERROR_DEVICE_LOST;
+
+    // ImGui also owns Vulkan objects: shut it down only after a successful drain. On device loss its
+    // backend is deliberately abandoned and this overlay stays disabled for the rest of the session.
+    if (!_vulkanDeviceLost && _vulkanBackendInited)
+    {
+        ImGui_ImplVulkan_Shutdown(false);
+        _vulkanBackendInited = false;
+    }
+
+    for (uint32_t i = 0; !_vulkanDeviceLost && i < _ImVulkan_Info.ImageCount; i++)
     {
         ImGui_ImplVulkanH_Frame* fd = &_ImVulkan_Frames[i];
 
@@ -719,6 +748,24 @@ void MenuOverlayVk::DestroyVulkanObjects(bool shutdown)
         }
     }
 
+    if (!_vulkanDeviceLost)
+    {
+        if (_vkRenderPass)
+            vkDestroyRenderPass(_ImVulkan_Info.Device, _vkRenderPass, VK_NULL_HANDLE);
+
+        if (_ImVulkan_Info.DescriptorPool)
+            vkDestroyDescriptorPool(_ImVulkan_Info.Device, _ImVulkan_Info.DescriptorPool, VK_NULL_HANDLE);
+    }
+
+    _vkRenderPass = VK_NULL_HANDLE;
+
+    // Every child handle has now been destroyed on an idle device or abandoned on a lost device.
+    // Free while the old ImageCount is still available, before clearing ownership for the next build.
+    IM_FREE(_ImVulkan_Frames);
+    IM_FREE(_ImVulkan_Semaphores);
+    _ImVulkan_Frames = nullptr;
+    _ImVulkan_Semaphores = nullptr;
+    _scImageCount = 0;
     _ImVulkan_Info = {};
 
     _queueFamilyOfQueue.clear();
@@ -728,7 +775,14 @@ void MenuOverlayVk::DestroyVulkanObjects(bool shutdown)
     for (auto& pending : _frameFencePending)
         pending = false;
 
-    _vkCleanMutex.unlock();
+    return !_vulkanDeviceLost;
+}
+
+void MenuOverlayVk::DestroyVulkanObjects(bool shutdown)
+{
+    std::scoped_lock presentLock(_vkPresentMutex);
+    std::scoped_lock cleanLock(_vkCleanMutex);
+    DestroyVulkanObjectsLocked(shutdown);
 }
 
 bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
@@ -947,8 +1001,13 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
 
     _frameFencePending[idx] = true;
 
+    // The hook calls the real present after this function releases its locks. Do not lend it storage
+    // in the swapchain arrays, which a concurrent teardown can now free. Each presenting thread keeps
+    // its own copy until its next call; GPU semaphore/pacer synchronization is otherwise unchanged.
+    static thread_local VkSemaphore presentWaitSemaphore = VK_NULL_HANDLE;
+    presentWaitSemaphore = signalSemaphore;
     pPresentInfo->waitSemaphoreCount = 1;
-    pPresentInfo->pWaitSemaphores = &_ImVulkan_Semaphores[idx];
+    pPresentInfo->pWaitSemaphores = &presentWaitSemaphore;
 
     return true;
 }
@@ -959,13 +1018,22 @@ void MenuOverlayVk::CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInst
 {
     LOG_FUNC();
 
+    std::scoped_lock presentLock(_vkPresentMutex);
+    std::scoped_lock cleanLock(_vkCleanMutex);
+
+    if (_vulkanDeviceLost)
+        return;
+
+    // Drain the old backend before changing its window/context as well as before replacing arrays.
+    if (_ImVulkan_Info.Device != VK_NULL_HANDLE && !DestroyVulkanObjectsLocked(false))
+        return;
+
     if (MenuOverlayBase::Handle() != hwnd)
     {
         LOG_DEBUG("MenuOverlayBase::Handle() != _hwnd");
 
         if (MenuOverlayBase::IsInited())
         {
-            ImGui_ImplVulkan_Shutdown(false);
             LOG_DEBUG("MenuOverlayBase::Shutdown();");
             MenuOverlayBase::Shutdown();
         }
@@ -976,7 +1044,7 @@ void MenuOverlayVk::CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInst
 
     CreateVulkanObjects(device, pd, instance, hwnd, pCreateInfo, pSwapchain);
 
-    if (_ImVulkan_Info.Device != VK_NULL_HANDLE)
+    if (_vulkanObjectsCreated)
     {
         _isInited = true;
         MenuOverlayBase::VulkanReady();
