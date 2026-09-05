@@ -43,17 +43,29 @@ production DLL, `Init` and `CreateFeature` (DLSS super-sampling) succeeding, and
 spatial contract, guides and exposure scan all log — and the post-stage settling gate fires once on
 the cold start, as designed.
 
-**What does not work yet: the NR feature itself.** Its `CreateFeature` returns `0xBAD00002`
-(`FAIL_PlatformError`), the module latches `it already failed this session`, and no frame is ever
-composed. `_nvngx.dll` matches the driver byte for byte, and neither `nvngx_dlss.dll` nor the
-eleven Streamline DLLs change the result, so those three explanations are ruled out; the cause is
-still open. Because of this the runner **fails by design** with `ZERO COVERAGE: the NR pass never
-composed a frame` rather than passing on the upscaler alone — the same rule the Vulkan harness
-enforces. The registry entry in `tests/suites.toml` says so.
+**The NR pass composes — under Proton.** `--runtime proton` (the default) runs the harness through
+the local Proton install in a compatdata prefix of its own, and the model runs: 672 applied
+evaluations, zero failures, on the first attempt. Under a bare Wine prefix (`--runtime wine`) the
+same binary reaches NR but the model's `CreateFeature` returns `0xBAD00002` (`FAIL_PlatformError`).
+Mirroring Proton by hand did not close that gap: `_nvngx.dll` matches the driver byte for byte,
+`nvngx_dlss.dll` and the eleven Streamline DLLs change nothing, and adding dxvk-nvapi plus the
+driver's `nvngx.dll` and the `NGXCore` registry key moved the failure to NGX core init and then to
+a page fault. The model links NVAPI (45 `NvAPI_` references) and expects the environment Proton
+assembles; nothing here reproduces that by hand. If NR does not compose, the runner **fails** with
+`ZERO COVERAGE: the NR pass never composed a frame` rather than passing on the upscaler alone.
 
-Still to do, in order: find what the model needs that this process does not provide; then the
-deterministic scene (`scene.hlsl` is written, not yet wired); then frame dumps for run-to-run
-comparison.
+The harness writes `dlssnr-loopback.log` beside itself, flushed per line, because Proton does not
+pass a child's stdout through and a crash discards buffered output. The runner prints it, and
+`PROTON_LOG=1` lands wine-side crash logs in `artifacts/`.
+
+What the first Proton run taught about the settling gate: it keys on the resource the pass composes
+into, the upscaler's **output**. Sweeping only the render extent never trips it — the model takes
+the guides as a subrect and was built once across five render sizes. The sweep therefore changes
+the output extent, which is what a game's resolution change does.
+
+Still to do, in order: the page fault the first Proton run ended in (the per-step log now names
+where); the deterministic scene (`scene.hlsl` is written, not yet wired); frame dumps for
+run-to-run comparison.
 
 A stage that cannot reach its own instrumentation must fail loudly rather than pass quietly;
 that is the `ZERO COVERAGE` rule the Vulkan harness established and this one inherits.

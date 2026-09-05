@@ -71,5 +71,5 @@ summary = "Builds a real DLL and drives real Vulkan to exercise overlay lifetime
 [dlssnr-loopback]
 tier = "wine"
 timeout = 600
-summary = "Drives the production NGX exports on a real D3D12 device. Currently FAILS by design: the NR feature create returns FAIL_PlatformError in this environment, so the harness reports ZERO COVERAGE rather than passing on the upscaler alone."
+summary = "Drives the production NGX exports on a real D3D12 device and reaches the NR pass. Runs under the local Proton by default (--runtime proton); the bare-wine runtime reaches NR but its feature create returns FAIL_PlatformError, and the runner reports ZERO COVERAGE rather than passing on the upscaler alone."
 

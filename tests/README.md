@@ -29,10 +29,10 @@ entry, or the next run tells you.
 | Tier | Needs | Suites |
 |---|---|---|
 | `host` | Python, `g++`, `clang++` | the nine `nr-*` suites below |
-| `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `vulkan-overlay` |
-| `wip` | registered, no runner yet | `dlssnr-loopback` |
+| `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
+| `wip` | registered, no runner yet | — |
 
-The wine tier is serial on purpose. Both suites drive the single msvc-wine
+The wine tier is serial on purpose. These suites compile through the single msvc-wine
 prefix, which is also what `build-local.sh` uses, so do not start one while a
 build is running. `CLAUDE.md` has the stall signature and the recovery.
 
