@@ -4,6 +4,7 @@
 
 #include "DlssNr.h"
 #include "DlssNr_ExposureScan.h"
+#include "DlssNr_GpuTiming.h"
 
 #include <Config.h>
 #include <State.h>
@@ -34,6 +35,65 @@ static void HelpMarker(const char* tip)
         ImGui::PopTextWrapPos();
         ImGui::EndTooltip();
     }
+}
+
+// Historical confirmed samples have their own immutable contract. Never present them as the
+// current frame's cost, or as an average of the active configuration.
+static void RenderGpuTiming(Config* config, bool nativeVulkan)
+{
+    ImGui::SeparatorText(Localization::Tr("Fence-confirmed GPU timing"));
+    if (nativeVulkan || config->DlssNrUseProxy.value_or_default())
+    {
+        GpuTiming::SetEnabled(false);
+        ImGui::TextWrapped(Localization::Tr("Confirmed timing is available on the D3D12 NR path and its bridges. "
+                                            "This backend is not instrumented."));
+        return;
+    }
+    auto settings = config->GetDlssNrGpuTimingSettings();
+    if (ImGui::Checkbox(Localization::Label("Measure NR on the GPU###nrGpuTiming"), &settings.Enabled))
+        config->SetDlssNrGpuTimingEnabled(settings.Enabled);
+    HelpMarker("Each published sample belongs to one NR evaluation and one observed queue submission. "
+               "It is read only after that submission completes and the command-list recording is sealed "
+               "against replay. No GPU wait is introduced. Unsupported or ambiguous samples are discarded."
+               "\n\nThe interval covers GPU commands inside the NR Dispatch, including copies, model calls, "
+               "composition and resource restoration. Caller-side pre-upscale preparation, the upscaler, "
+               "and frame generation are outside this interval. Queue elapsed time is not pure kernel busy time.");
+    GpuTiming::SetEnabled(settings.Enabled && config->DlssNrEnabled.value_or_default());
+    if (!settings.Enabled)
+    {
+        ImGui::TextDisabled(Localization::Tr("Measurement off. Pending samples may still be retained safely."));
+        return;
+    }
+    int interval = static_cast<int>(settings.Interval);
+    if (ImGui::SliderInt(Localization::Label("Sample every N eligible evaluations###nrGpuTimingInterval"), &interval, 1,
+                         10000))
+        config->SetDlssNrGpuTimingInterval(static_cast<uint32_t>(interval));
+    ImGui::TextWrapped(Localization::Tr("The first eligible evaluation is sampled, then every %u evaluations. "
+                                        "An evaluation is not necessarily a presentation frame."),
+                       static_cast<unsigned>(interval));
+    const auto sample = GpuTiming::GetSnapshot();
+    ImGui::Text(Localization::Tr("Accepted %llu | discarded %llu | pending %u"),
+                static_cast<unsigned long long>(sample.accepted), static_cast<unsigned long long>(sample.discarded),
+                sample.pending);
+    ImGui::TextWrapped("%s", Localization::Tr(sample.reason));
+    if (!sample.valid)
+    {
+        ImGui::TextDisabled(Localization::Tr("No confirmed GPU sample yet."));
+        return;
+    }
+    ImGui::TextWrapped(
+        Localization::Tr("Last confirmed sample: %.3f ms dispatch = %.3f ms model + %.3f ms outside model"),
+        sample.totalMs, sample.modelMs, sample.otherMs);
+    ImGui::TextWrapped(Localization::Tr("Historical sample %llu, %.1f s since recording; %s, model %ux%u, %u passes"),
+                       static_cast<unsigned long long>(sample.sampleId), sample.sampleAgeMs / 1000.0,
+                       sample.metadata.stage, sample.metadata.modelWidth, sample.metadata.modelHeight,
+                       sample.actualPasses);
+    ImGui::TextWrapped(Localization::Tr("Sample contract %llu, evaluation %llu, run %llu; interval was %u evaluations"),
+                       static_cast<unsigned long long>(sample.metadata.settingsGeneration),
+                       static_cast<unsigned long long>(sample.metadata.evaluationId),
+                       static_cast<unsigned long long>(sample.runId), sample.sampleInterval);
+    ImGui::TextWrapped(Localization::Tr("This is one historical sample, not the current frame or an average. "
+                                        "Use matching contracts in the INFO log for comparisons."));
 }
 
 // A slider that only writes its value when the handle is released.
@@ -284,12 +344,9 @@ void RenderMenu(Config* config, float menuResScale)
         }
         else
         {
-            // The cost belongs here rather than only in the upscaler's breakdown: that tooltip needs
-            // OptiScaler's own upscaler to have run, and with native DLSS passing through there is
-            // nothing in it to hang this off.
-            // Either backend's timer. They measure the same thing by different means, and only one
-            // of them is running.
-            const auto ms = vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime();
+            // Native Vulkan retains its explicitly unconfirmed legacy timer. D3D12 measurements
+            // belong to the separate panel below, which can show sample age and provenance.
+            const auto ms = vulkan ? DlssNr::LastGpuTimeVk() : std::nullopt;
 
             // With "Apply the model" off the pass STILL RUNS (so Hold-frame A/B can toggle its edit on
             // a frozen frame) -- it only outputs the clean frame. So the cost is real, and saying so
@@ -298,7 +355,8 @@ void RenderMenu(Config* config, float menuResScale)
                 !config->DlssNrApplyModel.value_or_default() ? Localization::Tr("  (model running, edit hidden)") : "";
 
             if (ms.has_value())
-                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), Localization::Tr("Running%s - %.2f ms per frame%s"),
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                                   Localization::Tr("Running%s - legacy timer %.2f ms (unconfirmed)%s"),
                                    vulkan ? Localization::Tr(" natively on Vulkan") : "", ms.value(), runSuffix);
             else if (vulkan)
                 // Measured but not yet read: the first few frames are still in the query ring.
@@ -311,11 +369,9 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::SameLine();
             ImGui::TextDisabled(Localization::Tr("(?)"));
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip(
-                    Localization::Tr("The whole pass: the staging copies and the resolve as well as the"
-                                     "\nmodel. Timing only the model would flatter the number."
-                                     "\n\nCompare it against the frame time at the bottom of this window to"
-                                     "\nsee what it is costing you."));
+                ImGui::SetTooltip(Localization::Tr("The native Vulkan timer is legacy and is not fence-confirmed."
+                                                   "\nFor D3D12, use the separate Fence-confirmed GPU timing panel."
+                                                   "\nA historical sample is not the current frame's cost."));
         }
 
         ImGui::Spacing();
@@ -579,6 +635,7 @@ void RenderMenu(Config* config, float menuResScale)
         const bool nativeVulkan =
             vulkan || (state.api == API::Vulkan && (!state.currentFeature || !state.currentFeature->IsWithDx12()));
         RenderPassControls(config, nativeVulkan);
+        RenderGpuTiming(config, nativeVulkan);
 
         ImGui::SeparatorText(Localization::Tr("Colour"));
 
