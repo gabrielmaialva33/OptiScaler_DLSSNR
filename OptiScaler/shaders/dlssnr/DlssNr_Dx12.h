@@ -78,10 +78,21 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // rebuilds it when the tuning or the resolution changes, evaluates it, and runs the compute passes
     // that show it the frame and bring its answer back. One call, like any other shader here.
     //
-    // Sizes come from the resources. Everything the pass cannot work out for itself is in
-    // DlssNrFrameInfo; everything the user chose stays in Config. colour and output may be the same
-    // resource. timingQueue is the queue this list will be executed on, when the caller knows it.
-    void Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
+    // Sizes come from the output resource. Everything the pass cannot work out for itself is in
+    // DlssNrFrameInfo; everything the user chose stays in Config. timingQueue is the queue this list
+    // will be executed on, when the caller knows it.
+    //
+    // colour is what the model is shown and output is where the edited frame lands. They may be the
+    // same resource, which is the after-upscale path: the pass reads the upscaler's output and writes
+    // it back. When they differ -- the before-upscale path -- colour is read as a shader resource in
+    // the state NGX requires of every input, NON_PIXEL_SHADER_RESOURCE, and never written; the
+    // untouched original is taken from it and the edit is written to output alone. Only the source's
+    // top-left output-sized region is read from a color larger than the output.
+    //
+    // Returns true only when the resolve wrote the output this frame. Every other way out -- the
+    // model still being built, a skipped frame, a failure -- must not be used to replace the game's
+    // input color. A false return makes no promise that scratch contents form a complete frame.
+    bool Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
                   ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
                   ID3D12CommandQueue* timingQueue = nullptr);
 

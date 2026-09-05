@@ -96,6 +96,15 @@ struct DlssNrFrameInfo
     // available and is what gets used.
     unsigned int RenderSubrectWidth = 0;
     unsigned int RenderSubrectHeight = 0;
+
+    // The resource state the output arrives in and is handed back in, as a D3D12_RESOURCE_STATES
+    // value, when the caller owns the output and knows. Negative means the output is the upscaler's
+    // and arrives in whatever state the config says the upscaler left it in.
+    //
+    // An int rather than the enum so this header stays free of Direct3D. The pre-upscale path owns
+    // its output -- a private copy of the game's colour -- and rests it in UNORDERED_ACCESS; reading
+    // the config for that copy would transition it out of a state it was never in.
+    int OutputState = -1;
 };
 
 struct alignas(256) DlssNrConstants
