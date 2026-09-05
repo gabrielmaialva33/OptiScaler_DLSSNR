@@ -40,6 +40,14 @@ exist in the solution but CI and every script build only x64. Configurations: `D
   `~/.local/opt/msvc-wineprefix` (`WINEPREFIX`). Both env vars are overridable. The `msbuild` wrapper
   there is patched to export `VCToolsInstallDir_170`.
 - No `/m`: MSBuild child nodes do not work under Wine. Parallelism comes from `/p:CL_MPCount=16`.
+- That default deadlocks on a **full rebuild**: ~8 `CL.exe` sit at 0% CPU sharing one `.rsp` while
+  `wineserver` spins on a core, and nothing progresses. Incremental builds are fine, which is why it
+  goes unnoticed. Override for a clean build: `./build-local.sh Release /p:CL_MPCount=4` (extra args
+  land after the script's own `/p:`, so the later value wins). Recover with
+  `WINEPREFIX=~/.local/opt/msvc-wineprefix wineserver -k`.
+- **Never pipe the script** (`./build-local.sh ... | tail`). `wineserver` daemonises and inherits
+  stdout, so the pipe never reaches EOF and the output stays hidden even after the build finished —
+  a success looks exactly like a hang. Redirect to a file instead.
 - The Visual Studio pre/post-build events are PowerShell and are disabled
   (`PreBuildEventUseInBuild=false`). The script writes `resource_build_date.h` and
   `resource_build_commit.h` itself. The in-game menu title shows this build id and timestamp; use it
