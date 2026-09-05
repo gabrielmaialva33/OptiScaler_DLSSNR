@@ -1,0 +1,75 @@
+# Test suite registry for tests/run_all.py.
+#
+# One entry per directory under tests/. Adding a suite means adding its entry
+# here as well, otherwise run_all.py reports it as unregistered and fails.
+#
+# tier
+#   host   Self-contained: a Linux C++ toolchain and Python are enough.
+#          Safe to run in parallel; each suite builds into its own temp dir.
+#   wine   Needs the msvc-wine prefix, and for vulkan-overlay a graphical
+#          session with a working Vulkan loader. Run serially: these contend
+#          for the single Wine prefix (see the build window note in CLAUDE.md).
+#   wip    Registered but has no run.py yet. Always reported as skipped.
+#
+# timeout is in seconds and is a ceiling, not an expectation.
+
+[nr-before-upscale]
+tier = "host"
+timeout = 300
+summary = "Pre-upscale boundary functions against strict host fakes, under ASan/UBSan."
+
+[nr-gpu-timing]
+tier = "host"
+timeout = 300
+summary = "Portable timing validation plus the duplicate-execution guard at the submission boundary."
+
+[nr-gpu-timing-config]
+tier = "host"
+timeout = 300
+summary = "Config GPU-timing transactions and the INI expressions that back them."
+
+[nr-localization]
+tier = "host"
+timeout = 600
+summary = "The real portable .lang parser and the repository ImGui hash."
+
+[nr-menu]
+tier = "host"
+timeout = 300
+summary = "Pass-menu control flow driven by scripted ImGui events."
+
+[nr-multipass]
+tier = "host"
+timeout = 300
+summary = "Portable multi-pass chain helpers."
+
+[nr-pass-config]
+tier = "host"
+timeout = 300
+summary = "Pass-settings codec and the four-point Config round trip for the master keys."
+
+[nr-submission]
+tier = "host"
+timeout = 300
+summary = "Command-list submission lifetime model that gates resource release."
+
+[nr-timing-boundary]
+tier = "host"
+timeout = 300
+summary = "Timing metadata and UI boundary, plus placement of the timing markers."
+
+[nr-gpu-timing-d3d12]
+tier = "wine"
+timeout = 1800
+summary = "Real D3D12 timestamp queries in an isolated Wine prefix. Never loads NGX or a game."
+
+[vulkan-overlay]
+tier = "wine"
+timeout = 1800
+summary = "Builds a real DLL and drives real Vulkan to exercise overlay lifetime under Wine."
+
+[dlssnr-loopback]
+tier = "wine"
+timeout = 600
+summary = "Drives the production NGX exports on a real D3D12 device. Currently FAILS by design: the NR feature create returns FAIL_PlatformError in this environment, so the harness reports ZERO COVERAGE rather than passing on the upscaler alone."
+
