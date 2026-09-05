@@ -22,7 +22,8 @@ allocation = between(source, 'ID3D12Resource* CreatePreUpscaleScratch(', '\nvoid
 scope = between(source, 'ScopedPreUpscale::ScopedPreUpscale(', '// The pass. Resources in,')
 after = between(source, 'void EvaluateAfterUpscale(', '// ---------------------------------------------------------------------------------------------')
 coverage = between(source, 'std::mutex g_coverageMutex;', '// NGX result codes, by name.')
-unit = '#include "fakes.h"\n' + coverage + allocation
+resources = between(source, 'struct RestoreResourceState\n', '// The upscaler\'s own names differ')
+unit = '#include "fakes.h"\n' + coverage + allocation + resources
 unit += '\nnamespace DlssNr {\n' + declaration + after + scope + '\n}\n#include "cases.h"\n'
 (OUT / 'boundary.cpp').write_text(unit)
 subprocess.run(['g++', '-std=c++20', '-g', '-O1', '-fno-omit-frame-pointer',

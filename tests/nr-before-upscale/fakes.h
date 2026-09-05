@@ -3,6 +3,8 @@
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <limits>
+#include "OptiScaler/dlssnr/DlssNr_Exposure.h"
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -18,6 +20,7 @@
 // Vulkan/D3D12/NGX execution is intentionally not simulated as a performance or GPU-safety claim.
 inline std::vector<std::string> infoLogs;
 #define LOG_INFO(...) infoLogs.push_back(fmt::format(__VA_ARGS__))
+#define LOG_DEBUG(...) ((void)0)
 #define FAILED(x) ((x) < 0)
 #define IID_PPV_ARGS(x) (x)
 using D3D12_RESOURCE_STATES = int;
@@ -40,6 +43,23 @@ constexpr int D3D12_FORMAT_SUPPORT1_SHADER_LOAD = 1, D3D12_FORMAT_SUPPORT1_RENDE
 constexpr int D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE = 1;
 constexpr int DXGI_FORMAT_R8G8B8A8_UNORM_SRGB = 10, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB = 11;
 constexpr int DXGI_FORMAT_B8G8R8X8_UNORM_SRGB = 12;
+constexpr int DXGI_FORMAT_R32_TYPELESS = 200;
+constexpr int DXGI_FORMAT_R32_FLOAT = 201;
+constexpr int DXGI_FORMAT_R32G32_TYPELESS = 202;
+constexpr int DXGI_FORMAT_R32G32_FLOAT = 203;
+constexpr int DXGI_FORMAT_R16G16_TYPELESS = 204;
+constexpr int DXGI_FORMAT_R16G16_FLOAT = 205;
+constexpr int DXGI_FORMAT_R32G32B32A32_TYPELESS = 206;
+constexpr int DXGI_FORMAT_R32G32B32A32_FLOAT = 207;
+constexpr int DXGI_FORMAT_R16G16B16A16_TYPELESS = 208;
+constexpr int DXGI_FORMAT_R16G16B16A16_FLOAT = 209;
+constexpr int DXGI_FORMAT_R16_FLOAT = 210;
+constexpr int DXGI_FORMAT_R8_UNORM = 211;
+constexpr int DXGI_FORMAT_R16_UNORM = 212;
+constexpr int DXGI_FORMAT_R8G8_UNORM = 213;
+constexpr int DXGI_FORMAT_R16G16_UNORM = 214;
+constexpr int DXGI_FORMAT_R8G8B8A8_UNORM = 215;
+constexpr int DXGI_FORMAT_R16G16B16A16_UNORM = 216;
 constexpr auto NVSDK_NGX_Parameter_Color = "Color";
 constexpr auto NVSDK_NGX_Parameter_Depth = "Depth";
 constexpr auto NVSDK_NGX_Parameter_MotionVectors = "Motion";
@@ -90,7 +110,15 @@ struct ID3D12Device
         return 0;
     }
 };
-struct ID3D12GraphicsCommandList { unsigned barriers = 0; };
+struct ID3D12GraphicsCommandList
+{
+    unsigned barriers = 0;
+    void CopyResource(ID3D12Resource* dst, ID3D12Resource* src)
+    {
+        assert(dst->state == 32 && src->state == 16);
+        assert(dst->desc.Width == src->desc.Width && dst->desc.Height == src->desc.Height);
+    }
+};
 struct ID3D12CommandQueue {};
 void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* r, int from, int to)
 {
@@ -102,6 +130,15 @@ void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* r, int from, int to
     ++cmd->barriers;
 }
 bool IsTypeless(int format) { return format == 99; }
+int TypedGuideFormat(int) { return 1; }
+ID3D12Resource* CreateGuideClone(ID3D12Device* device, ID3D12Resource* source)
+{
+    if (device->allocationFails) return nullptr;
+    auto desc = source->desc; desc.Format = 1;
+    device->owned.push_back(std::make_unique<ID3D12Resource>(ID3D12Resource{desc, device, 32}));
+    return device->owned.back().get();
+}
+
 struct NVSDK_NGX_Parameter
 {
     std::unordered_map<std::string, ID3D12Resource*> typed;

@@ -198,6 +198,67 @@ int main()
       assert(coverage.totals.appliedPresents == 1); // Same present can occur in both buckets.
       sample.present = 101; coverage.Record(sample, now + seconds(5));
       assert(coverage.totals.appliedPresents == 2); ++checks; }
-    assert(checks >= 40 && "ZERO COVERAGE");
+    for (bool typeless : {false, true})
+    { Fixture f; f.depth.desc.Format = typeless ? 99 : 1; f.depth.state = 32;
+      ID3D12Resource* clone = nullptr;
+      { ReadResourceScope input(&f.cmd, &f.depth, 32);
+        auto* readable = ReadableGuide(&f.device, &f.cmd, &f.depth, &clone);
+        RestoreResourceState cleanup { &f.cmd, readable != &f.depth ? readable : nullptr, 1, 32 };
+        assert(readable->state == 1);
+        // Simulate the next guide failing: scope exit still restores the first used clone.
+        f.device.allocationFails = true;
+        f.motion.desc.Format = 99;
+        ID3D12Resource* missing = nullptr;
+        assert(ReadableGuide(&f.device, &f.cmd, &f.motion, &missing) == nullptr);
+      }
+      assert(f.depth.state == 32 && (!clone || clone->state == 32)); ++checks; }
+    { Fixture f; f.output.state = 4; f.output.desc.Flags = 2;
+      { ReadResourceScope exposure(&f.cmd, &f.output, 4); assert(f.output.state == 1); }
+      assert(f.output.state == 4);
+      f.output.state = 1;
+      { RestoreResourceState cleanup { &f.cmd, &f.output, 1, 2 }; cleanup.Restore(); }
+      assert(f.output.state == 2); ++checks; }
+    // Actual production SRV validation, including hardware load support.
+    for (int contract = 0; contract < 10; ++contract)
+    { Fixture f; f.output.desc.Format = DXGI_FORMAT_R32_FLOAT;
+      switch (contract) {
+      case 1: f.output.desc.Dimension = 1; break;
+      case 2: f.output.desc.DepthOrArraySize = 2; break;
+      case 3: f.output.desc.SampleDesc.Count = 4; break;
+      case 4: f.output.desc.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE; break;
+      case 5: f.output.desc.Width = 0; break;
+      case 6: f.output.desc.MipLevels = 0; break;
+      case 7: f.output.desc.Format = 999; break;
+      case 8: f.device.formatSupported = false; break;
+      case 9: f.output.desc.Format = DXGI_FORMAT_R32_TYPELESS; break;
+      }
+      assert(ExposureTextureUsable(&f.device, &f.output) == (contract == 0 || contract == 9));
+      assert(!ExposureTextureUsable(&f.device, nullptr)); ++checks; }
+    { using namespace DlssNr::Exposure;
+      const float nan = std::numeric_limits<float>::quiet_NaN();
+      const float inf = std::numeric_limits<float>::infinity();
+      for (float invalid : {nan, inf, -inf, 0.0f, -1.0f, 1e-6f, 1e6f})
+      { assert(!ValidSample(invalid)); assert(WhitePoint(1, true, 8, 1, invalid, 2, 0) == 8); }
+      assert(ValidSample(0.5f)); assert(PreExposure(inf) == 1 && PreExposure(nan) == 1);
+      assert(Trim(nan) == 1); assert(WhitePoint(0, true, nan, 1, 0, 1, 0) == 1);
+      for (unsigned source : {0u, 1u, 2u, 3u})
+      { assert(WhitePoint(source, false, 8, 1.5f, 0.5f, 2, 20) == 8);
+        assert(!LiveWanted(source, false, true, false));
+        assert(!LiveWanted(source, true, true, true));
+        assert(!MeterWanted(source, true, true));
+        assert(!LiveWanted(source, true, false, false));
+        assert(LiveWanted(source, true, true, false) == (source == 1)); }
+      assert(WhitePoint(0, true, 8, 1.5f, 0.5f, 2, 20) == 8);
+      assert(WhitePoint(1, true, 8, 1.5f, 0.5f, 2, 20) == 6);
+      assert(WhitePoint(2, true, 8, 1.5f, 0.5f, 2, 20) == 20);
+      assert(WhitePoint(2, true, 8, 1.5f, 0.5f, 2, inf) == 8);
+      assert(WhitePoint(1, true, 8, 1.5f, 0.5f, inf, 20) == 3);
+      bool wasGame = false;
+      for (unsigned source : {0u, 1u, 1u, 2u, 1u, 0u})
+      { assert(InvalidateOnSourceChange(wasGame, source) == (source == 1 && !wasGame));
+        wasGame = source == 1; }
+      ++checks;
+    }
+    assert(checks >= 54 && "ZERO COVERAGE");
     std::printf("PASS: %u boundary cases; allocation-failure and DRS loops: 1000 each\n", checks);
 }

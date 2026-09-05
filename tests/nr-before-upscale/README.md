@@ -78,3 +78,27 @@ using the repository's fmt implementation. It checks zero-application labeling,
 per-stage routing, model-success-without-application, failure, disabled silence,
 same-present deduplication, and the all-skip five-second heartbeat with a controlled
 clock. Model execution remains a fake; the emitted sample line is synthetic evidence.
+
+## State and exposure regression coverage (PR #14/#16 adaptation)
+
+The suite also extracts the production resource-read/restore guards, guide-clone
+selection, and exposure SRV validator. It covers typed and typeless guides with
+configured arrival states, partial clone failure, explicit restoration followed by
+scope exit (no duplicate barrier), and compatible/invalid texture descriptors and
+shader-load support. These checks exercise host state transitions, not GPU validation.
+
+Production exposure decisions are included directly from `DlssNr_Exposure.h`:
+sources 0/1/2 and unknown sources, HDR/passthrough, missing/current/held exposure,
+NaN/Inf/nonpositive/out-of-range readings, trim, anchored fallback, source reentry,
+and suppression of live exposure and meter reads while holding color. The existing
+`preExposure / exposure * trim` operation order is retained; PR #14's alternative
+GameWhite formula and ExposureScale constant are intentionally not imported.
+
+Frame hold now disables live t4 exposure for both encode and resolve, stops the
+exposure courier and scan sampling, and uses the captured CPU white point. The first
+held frame can therefore use the delayed CPU reading instead of the immediately
+preceding live GPU sample; it is a stable comparison, not a pixel-identical capture
+of the live shader white point. A failed held-color allocation leaves color live.
+Exposure texture validation is conservative: unknown/integer/depth/array/MSAA or
+non-loadable views are rejected and the existing CPU fallback is used. Readback
+completion and resource retirement are still not proven by this host suite.
