@@ -20,6 +20,7 @@
 #include "nvsdk_ngx_params.h"
 
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -31,6 +32,28 @@ using namespace DirectX;
 // Failure discipline: a harness that cannot reach its own instrumentation must fail loudly.
 // A silent pass is the exact failure mode the manual in-game test had.
 // --------------------------------------------------------------------------------------------
+
+// Every line goes to stdout and to dlssnr-loopback.log beside the exe, flushed at once. Proton
+// does not pass a child's stdout through, and a page fault discards buffered output; the file is
+// the record that survives both, and it names the last step reached before a crash.
+static FILE* g_log = nullptr;
+static void Say(const char* fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    fflush(stdout);
+    if (!g_log)
+        g_log = fopen("dlssnr-loopback.log", "w");
+    if (g_log)
+    {
+        va_start(ap, fmt);
+        vfprintf(g_log, fmt, ap);
+        va_end(ap);
+        fflush(g_log);
+    }
+}
 
 static void Require(bool ok, const char* what)
 {
@@ -147,7 +170,7 @@ static_assert(sizeof(FrameConstants) % 256 == 0, "constant buffers are 256-byte 
 // --------------------------------------------------------------------------------------------
 
 using PFN_Init = NVSDK_NGX_Result(NVSDK_CONV*)(unsigned long long, const wchar_t*, ID3D12Device*,
-                                                const NVSDK_NGX_FeatureCommonInfo*, NVSDK_NGX_Version);
+                                               const NVSDK_NGX_FeatureCommonInfo*, NVSDK_NGX_Version);
 using PFN_Shutdown = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D12Device*);
 using PFN_AllocParams = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Parameter**);
 using PFN_DestroyParams = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Parameter*);
@@ -249,8 +272,8 @@ static Frame MakeFrame(ID3D12Device* device, UINT renderW, UINT renderH, UINT ou
     f.colour = MakeTexture(device, renderW, renderH, DXGI_FORMAT_R16G16B16A16_FLOAT, false, srv);
     f.depth = MakeTexture(device, renderW, renderH, DXGI_FORMAT_R32_FLOAT, false, srv);
     f.motion = MakeTexture(device, renderW, renderH, DXGI_FORMAT_R16G16_FLOAT, false, srv);
-    f.output = MakeTexture(device, outW, outH, DXGI_FORMAT_R16G16B16A16_FLOAT, true,
-                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    f.output =
+        MakeTexture(device, outW, outH, DXGI_FORMAT_R16G16B16A16_FLOAT, true, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     return f;
 }
 
@@ -260,7 +283,7 @@ int main(int argc, char** argv)
 
     try
     {
-        std::printf("dlssnr-loopback: driving the production NR path\n");
+        Say("dlssnr-loopback: driving the production NR path\n");
 
         Com<IDXGIFactory4> factory;
         Check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
@@ -278,8 +301,7 @@ int main(int argc, char** argv)
             const bool software = (ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
             const HRESULT hr =
                 software ? E_FAIL : D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device));
-            std::printf("  adapter %u: vendor=%04X device=%04X -> 0x%08lX\n", i, ad.VendorId, ad.DeviceId,
-                        (unsigned long) hr);
+            Say("  adapter %u: vendor=%04X device=%04X -> 0x%08lX\n", i, ad.VendorId, ad.DeviceId, (unsigned long) hr);
             adapter->Release();
             if (SUCCEEDED(hr))
                 break;
@@ -304,29 +326,38 @@ int main(int argc, char** argv)
         UINT64 fenceValue = 0;
 
         Ngx ngx = LoadNgx(dllPath);
-        std::printf("  NGX exports resolved from the production DLL\n");
+        Say("  NGX exports resolved from the production DLL\n");
 
         NVSDK_NGX_Result r = ngx.Init(0x1337, L".", device, nullptr, NVSDK_NGX_Version_API);
-        std::printf("  NVSDK_NGX_D3D12_Init -> 0x%08X\n", (unsigned) r);
+        Say("  NVSDK_NGX_D3D12_Init -> 0x%08X\n", (unsigned) r);
         Require(NVSDK_NGX_SUCCEED(r), "NGX init refused");
 
-        // The sweep. Each entry is a render extent; the output stays fixed, which is what a real
-        // upscaler contract looks like and what the settling gate observes changing.
-        const UINT outW = 3440, outH = 1440;
-        const struct { UINT w, h; int holdMs; } steps[] = {
-            { 2292, 960, 1500 },  { 2292, 960, 1500 },  { 1720, 720, 1500 },
-            { 2292, 960, 200 },   { 1720, 720, 200 },   { 2292, 960, 200 },  // oscillation, gate should hold
-            { 2292, 960, 1500 },
+        // The sweep. Each entry is a render extent AND an output extent. The post-stage settling
+        // gate keys on the resource it composes into -- the upscaler's OUTPUT -- so varying only the
+        // render extent never trips it: the model takes the guides as a subrect and is not rebuilt
+        // for them (the first run of this harness proved that with one rebuild across five render
+        // sizes). A game changing resolution changes the output, so that is what is swept here.
+        // Quality ratio is held at 1.5x so the DLSS feature stays valid at every step.
+        const struct
+        {
+            UINT w, h, outW, outH;
+            int holdMs;
+        } steps[] = {
+            { 2292, 960, 3440, 1440, 1500 }, { 2292, 960, 3440, 1440, 1500 },
+            { 1706, 720, 2560, 1080, 1500 }, // settled change
+            { 2292, 960, 3440, 1440, 200 },  { 1706, 720, 2560, 1080, 200 },
+            { 2292, 960, 3440, 1440, 200 },  // oscillation: gate must hold
+            { 2292, 960, 3440, 1440, 1500 }, // settle again
         };
 
         NVSDK_NGX_Handle* handle = nullptr;
         NVSDK_NGX_Parameter* params = nullptr;
-        UINT builtW = 0, builtH = 0;
+        UINT builtW = 0, builtH = 0, builtOutW = 0, builtOutH = 0;
         unsigned evaluates = 0, creates = 0;
 
         for (const auto& step : steps)
         {
-            if (step.w != builtW || step.h != builtH)
+            if (step.w != builtW || step.h != builtH || step.outW != builtOutW || step.outH != builtOutH)
             {
                 if (handle)
                 {
@@ -342,8 +373,8 @@ int main(int argc, char** argv)
                       "AllocateParameters");
                 params->Set(NVSDK_NGX_Parameter_Width, step.w);
                 params->Set(NVSDK_NGX_Parameter_Height, step.h);
-                params->Set(NVSDK_NGX_Parameter_OutWidth, outW);
-                params->Set(NVSDK_NGX_Parameter_OutHeight, outH);
+                params->Set(NVSDK_NGX_Parameter_OutWidth, step.outW);
+                params->Set(NVSDK_NGX_Parameter_OutHeight, step.outH);
                 params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxQuality);
                 params->Set(NVSDK_NGX_Parameter_CreationNodeMask, 1u);
                 params->Set(NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
@@ -358,14 +389,17 @@ int main(int argc, char** argv)
                 fence->SetEventOnCompletion(fenceValue, fenceEvent);
                 WaitForSingleObject(fenceEvent, 5000);
 
-                std::printf("  create %ux%u -> %ux%u : 0x%08X\n", step.w, step.h, outW, outH, (unsigned) r);
+                Say("  create %ux%u -> %ux%u : 0x%08X\n", step.w, step.h, step.outW, step.outH, (unsigned) r);
                 Require(NVSDK_NGX_SUCCEED(r), "CreateFeature refused");
                 builtW = step.w;
                 builtH = step.h;
+                builtOutW = step.outW;
+                builtOutH = step.outH;
                 ++creates;
             }
 
-            Frame frame = MakeFrame(device, step.w, step.h, outW, outH);
+            Say("  step %ux%u -> %ux%u hold=%dms\n", step.w, step.h, step.outW, step.outH, step.holdMs);
+            Frame frame = MakeFrame(device, step.w, step.h, step.outW, step.outH);
             const auto deadline = GetTickCount64() + (ULONGLONG) step.holdMs;
             while (GetTickCount64() < deadline)
             {
@@ -393,29 +427,33 @@ int main(int argc, char** argv)
                 ++evaluates;
                 if (!NVSDK_NGX_SUCCEED(r))
                 {
-                    std::printf("  evaluate %ux%u refused: 0x%08X\n", step.w, step.h, (unsigned) r);
+                    Say("  evaluate %ux%u refused: 0x%08X\n", step.w, step.h, (unsigned) r);
                     break;
                 }
             }
+            Say("  step done, evaluates so far=%u; releasing frame resources\n", evaluates);
             frame.Release();
         }
 
-        std::printf("\n  creates=%u evaluates=%u\n", creates, evaluates);
+        Say("\n  creates=%u evaluates=%u\n", creates, evaluates);
         Require(creates > 0, "ZERO COVERAGE: no feature was created");
         Require(evaluates > 0, "ZERO COVERAGE: EvaluateFeature was never reached");
 
+        Say("  teardown: ReleaseFeature\n");
         if (handle)
             ngx.ReleaseFeature(handle);
+        Say("  teardown: DestroyParameters\n");
         if (params)
             ngx.DestroyParameters(params);
+        Say("  teardown: Shutdown\n");
         ngx.Shutdown(device);
         CloseHandle(fenceEvent);
-        std::printf("PASS\n");
+        Say("PASS\n");
         return 0;
     }
     catch (const std::exception& e)
     {
-        std::printf("FAIL: %s\n", e.what());
+        Say("FAIL: %s\n", e.what());
         return 1;
     }
 }
