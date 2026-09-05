@@ -69,8 +69,23 @@ exist in the solution but CI and every script build only x64. Configurations: `D
   stall happened with `tests/dlssnr-loopback/run.py` compiling its harness through the same prefix
   at the same time. That is not proven to be the cause — stalls also happen alone — but it is the
   one condition that was added, and the wine test tier is serial for exactly this reason.
-- **Observed recovery** (once; not proven deterministic): build the forwarder project on its own
-  with the original flags, then run the normal build, which then completes and copies both DLLs.
+- `/MP` was the seventh hypothesis and it fell too: with `MultiProcessorCompilation=false`
+  injected through `ForceImportBeforeCppTargets` (verified absent from the `.rsp` — a global `/p:`
+  does *not* override that item metadata) the DLL still stalled on `pch.cpp`, and two `CL.exe`
+  were still present, because the MSVC driver forks its front-end regardless of `/MP`. One earlier
+  serial run of 202 TUs passed; that was a sample, not evidence. The forwarder never defines
+  `MultiProcessorCompilation` at all, so `/MP` could never have explained its stalls.
+- **What `build-local.sh` does about it now.** Two msbuild processes instead of one solution
+  build — `dlssnr_forwarder.vcxproj` first, then `OptiScaler.vcxproj` — because seven of eight
+  forwarder stalls were at the in-process project transition and it has never stalled built alone.
+  Each invocation runs under a watchdog (`run_msbuild` in the script): three 30 s samples with
+  every `CL.exe`/`link.exe` at 0 CPU ticks and no log growth count as a hang, the attempt is torn
+  down, `wineserver -k` resets the prefix, and the next attempt resumes incrementally, up to five
+  times. Every manual recovery of that shape completed on the first resume, which is the evidence
+  this is built on. Per-invocation logs are `x64/build-forwarder.log` and `x64/build-optiscaler.log`;
+  watchdog events go to stderr. The original single-invocation form is in git history.
+- **Observed recovery, by hand** (before the watchdog existed): build the forwarder project on its
+  own with the original flags, then run the normal build. This is what the script now automates.
 
 ```bash
 WINEPREFIX=~/.local/opt/msvc-wineprefix WINEDEBUG=-all ~/.local/opt/msvc/bin/x64/msbuild \
