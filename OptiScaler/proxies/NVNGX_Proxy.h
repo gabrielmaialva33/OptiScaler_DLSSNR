@@ -257,6 +257,9 @@ typedef NVSDK_NGX_Result (*PFN_D3D12_Init_Ext)(unsigned long long InApplicationI
                                                const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo);
 typedef NVSDK_NGX_Result (*PFN_D3D12_Shutdown)(void);
 typedef NVSDK_NGX_Result (*PFN_D3D12_Shutdown1)(ID3D12Device* InDevice);
+// Driver-core ABI, distinct from the one-argument SDK/snippet export. The core writes
+// its remaining-instance count through the second argument (verified on driver 610.57.04).
+typedef NVSDK_NGX_Result (*PFN_D3D12_CoreShutdown1)(ID3D12Device* InDevice, unsigned int* OutRemainingCount);
 typedef NVSDK_NGX_Result (*PFN_D3D12_GetParameters)(NVSDK_NGX_Parameter** OutParameters);
 typedef NVSDK_NGX_Result (*PFN_D3D12_AllocateParameters)(NVSDK_NGX_Parameter** OutParameters);
 typedef NVSDK_NGX_Result (*PFN_D3D12_GetCapabilityParameters)(NVSDK_NGX_Parameter** OutParameters);
@@ -375,7 +378,7 @@ struct NvngxModule
     PFN_D3D12_Init_ProjectID D3D12_Init_ProjectID = nullptr;
     PFN_D3D12_Init_Ext D3D12_Init_Ext = nullptr;
     PFN_D3D12_Shutdown D3D12_Shutdown = nullptr;
-    PFN_D3D12_Shutdown1 D3D12_Shutdown1 = nullptr;
+    PFN_D3D12_CoreShutdown1 D3D12_Shutdown1 = nullptr;
     PFN_D3D12_GetParameters D3D12_GetParameters = nullptr;
     PFN_D3D12_AllocateParameters D3D12_AllocateParameters = nullptr;
     PFN_D3D12_GetCapabilityParameters D3D12_GetCapabilityParameters = nullptr;
@@ -419,6 +422,16 @@ class NVNGXProxy
     inline static bool _dx11Inited = false;
     inline static bool _dx12Inited = false;
     inline static bool _vulkanInited = false;
+
+    static NVSDK_NGX_Result ShutdownDx12Device(ID3D12Device* device)
+    {
+        // The private device-specific entry dereferences device; the SDK's null-device
+        // convention is implemented by the core's separate all-devices entry point.
+        if (device == nullptr)
+            return _module.D3D12_Shutdown != nullptr ? _module.D3D12_Shutdown() : NVSDK_NGX_Result_FAIL_NotImplemented;
+        unsigned int remaining = 0;
+        return _module.D3D12_Shutdown1(device, &remaining);
+    }
 
     inline static void LogCallback(const char* message, NVSDK_NGX_Logging_Level loggingLevel,
                                    NVSDK_NGX_Feature sourceComponent)
@@ -541,7 +554,7 @@ class NVNGXProxy
             _module.D3D12_Shutdown =
                 (PFN_D3D12_Shutdown) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_D3D12_Shutdown");
             _module.D3D12_Shutdown1 =
-                (PFN_D3D12_Shutdown1) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_D3D12_Shutdown1");
+                (PFN_D3D12_CoreShutdown1) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_D3D12_Shutdown1");
             _module.D3D12_GetParameters = (PFN_D3D12_GetParameters) KernelBaseProxy::GetProcAddress_()(
                 _module.dll, "NVSDK_NGX_D3D12_GetParameters");
             _module.D3D12_AllocateParameters = (PFN_D3D12_AllocateParameters) KernelBaseProxy::GetProcAddress_()(
@@ -867,7 +880,7 @@ class NVNGXProxy
         if (!_dx12Inited)
             return nullptr;
 
-        return _module.D3D12_Shutdown1;
+        return _module.D3D12_Shutdown1 != nullptr ? &ShutdownDx12Device : nullptr;
     }
 
     // Vulkan
