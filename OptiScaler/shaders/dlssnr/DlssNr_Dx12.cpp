@@ -1,7 +1,5 @@
 #include "pch.h"
 
-#include <set>
-
 #include <dlssnr/DlssNr.h>
 
 #include <dlssnr/DlssNr_Capture.h>
@@ -25,6 +23,7 @@
 #include <mutex>
 #include <algorithm>
 #include <cstring>
+#include <vector>
 #include "precompile/DlssNr_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
 
@@ -974,20 +973,23 @@ void TickNrRetired()
 {
     for (size_t i = 0; i < g_nrRetired.size();)
     {
-        if (g_nrRetired[i].tracked ? !DlssNr::Submission::Ready(g_nrRetired[i].usage) : --g_nrRetired[i].framesLeft > 0)
+        auto& retired = g_nrRetired[i];
+        if (retired.tracked ? !DlssNr::Submission::Ready(retired.usage) : --retired.framesLeft > 0)
         {
             ++i;
             continue;
         }
 
-        if (g_nrRetired[i].feature != nullptr && g_nr.release != nullptr)
-            g_nr.release(g_nrRetired[i].feature);
+        if (retired.feature != nullptr && g_nr.release != nullptr)
+            g_nr.release(retired.feature);
 
-        if (g_nrRetired[i].resource != nullptr)
-            g_nrRetired[i].resource->Release();
+        if (retired.resource != nullptr)
+            retired.resource->Release();
 
-        delete g_nrRetired[i].scaler;
-        g_nrRetired.erase(g_nrRetired.begin() + i);
+        delete retired.scaler;
+
+        g_nrRetired[i] = std::move(g_nrRetired.back());
+        g_nrRetired.pop_back();
     }
 }
 
@@ -1759,10 +1761,19 @@ struct ScopedNrStateEnvelope
 // So each distinct reason is reported once. Once, not once per frame.
 void ReportSkipOnce(const char* reason)
 {
-    static std::set<std::string> seen;
+    static std::vector<const char*> seen;
 
-    if (seen.insert(reason).second)
-        LOG_INFO("DLSS-NR did not run: {}", reason);
+    if (reason == nullptr)
+        reason = "(null reason)";
+
+    for (const char* logged : seen)
+    {
+        if (std::strcmp(logged, reason) == 0)
+            return;
+    }
+
+    seen.push_back(reason);
+    LOG_INFO("DLSS-NR did not run: {}", reason);
 }
 
 } // namespace
@@ -1939,8 +1950,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return false;
     }
     auto passSnapshot = cfg.GetDlssNrPassSnapshot();
-    const bool chainEnabled = g_tracked && !cfg.DlssNrUseProxy.value_or_default();
-    if (g_tracked && cfg.DlssNrUseProxy.value_or_default())
+    const bool useProxy = cfg.DlssNrUseProxy.value_or_default();
+    const bool chainEnabled = g_tracked && !useProxy;
+    if (g_tracked && useProxy)
         ChainStatus("Driver proxy uses one pass and master settings; overrides are inactive");
     if (!chainEnabled)
     {
@@ -1996,7 +2008,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Construct before every resource/state guard: the final timestamp is recorded only after
     // their destructors restore the caller's resources. The extra device query is measurement-only.
     const auto timingSettings = cfg.GetDlssNrGpuTimingSettings();
-    const bool timingEnabled = timingSettings.Enabled && !cfg.DlssNrUseProxy.value_or_default();
+    const bool timingEnabled = timingSettings.Enabled && !useProxy;
     ID3D12Device* timingDevice = nullptr;
     if (timingEnabled)
         target->GetDevice(IID_PPV_ARGS(&timingDevice));
@@ -2929,7 +2941,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Nothing falls back automatically. A silent fallback would mean never finding out the proxy
     // path was broken: the picture would look right either way, because the forwarder would be
     // quietly doing the work.
-    if (cfg.DlssNrUseProxy.value_or_default())
+    if (useProxy)
     {
         const unsigned int proxyResult = DlssNr::Proxy::Run(
             cmdList, device, modelInput, depthIn, motionIn, g_nr.output, workWidth, workHeight, guideWidth, guideHeight,
@@ -3504,14 +3516,18 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                           ID3D12CommandQueue* timingQueue, bool preUpscaleDeclined)
 {
-    if (!Config::Instance()->DlssNrEnabled.value_or_default())
+    const Config& cfg = *Config::Instance();
+    const bool dlssNrEnabled = cfg.DlssNrEnabled.value_or_default();
+    const int dlssNrStage = cfg.DlssNrStage.value_or_default();
+
+    if (!dlssNrEnabled)
     {
         GpuTiming::SetEnabled(false);
         ReportSkipOnce("it is switched off");
         return;
     }
 
-    CoverageScope coverage(Config::Instance()->DlssNrStage.value_or_default() != 1 ? 0 : preUpscaleDeclined ? 2 : -1);
+    CoverageScope coverage(dlssNrStage != 1 ? 0 : preUpscaleDeclined ? 2 : -1);
 
     if (cmdList == nullptr || params == nullptr)
     {
@@ -3529,7 +3545,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     // frame generation evaluates on its own command list, interleaved with the upscaler's, and a
     // global flag written by one evaluate was read by the other: the after-upscale pass ran, the
     // model was rebuilt at display size, and rebuilt again at render size the next frame.
-    if (Config::Instance()->DlssNrStage.value_or_default() == 1 && !preUpscaleDeclined)
+    if (dlssNrStage == 1 && !preUpscaleDeclined)
     {
         ReportSkipOnce("stage 1: the model runs before the upscaler, so the after-upscale pass stands down");
         return;
@@ -3615,8 +3631,12 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     : _cmdList(cmdList), _params(params)
 {
     const Config& cfg = *Config::Instance();
+    const bool holdFrame = cfg.DlssNrHoldFrame.value_or_default();
+    const bool useProxy = cfg.DlssNrUseProxy.value_or_default();
+    const int stage = cfg.DlssNrStage.value_or_default();
+    const bool enabled = cfg.DlssNrEnabled.value_or_default();
 
-    if (!cfg.DlssNrEnabled.value_or_default() || cfg.DlssNrStage.value_or_default() != 1)
+    if (!enabled || stage != 1)
         return;
 
     CoverageScope coverage(1);
@@ -3660,7 +3680,7 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
         return;
     }
 
-    if (cfg.DlssNrHoldFrame.value_or_default() || cfg.DlssNrUseProxy.value_or_default())
+    if (holdFrame || useProxy)
     {
         decline("before the upscaler: Hold frame and the driver proxy use the after-upscale path");
         return;
