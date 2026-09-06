@@ -51,7 +51,7 @@ const char* StageLabel(const char* value)
 {
     // Never retain a caller's temporary string in an asynchronous sample.
     if (value)
-        for (const auto* label : { "before", "after", "after-fallback" })
+        for (const auto* label : { "before", "after", "after-fallback", "after-rr" })
             if (std::strcmp(label, value) == 0)
                 return label;
     return "unknown";

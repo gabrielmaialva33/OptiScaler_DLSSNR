@@ -4156,6 +4156,12 @@ ExposureStatus GameExposureStatus()
 
 std::optional<double> LastGpuTime() { return std::nullopt; }
 const char* BeforeUpscaleStatus() { return g_preStatus.load(); }
+
+bool RunningAfterRayReconstruction()
+{
+    std::lock_guard<std::mutex> lock(g_nrMutex);
+    return g_nr.afterRayReconstruction;
+}
 unsigned int ActivePassCount() { return g_activePasses.load(); }
 const char* MultipassStatus() { return g_chainStatus.load(); }
 

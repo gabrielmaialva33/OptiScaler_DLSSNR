@@ -176,6 +176,12 @@ ExposureStatus GameExposureStatus();
 // for a confirmed historical sample, its immutable metadata, counters and recording age.
 std::optional<double> LastGpuTime();
 const char* BeforeUpscaleStatus();
+
+// Which placement the pass is actually running at. The menu needs this to decide which working
+// scale governs: RRWorkingScale on the ray-reconstruction route, WorkingScale otherwise. Asking
+// the ApplyAfterRR checkbox instead would be wrong -- ticking it in a title without ray
+// reconstruction does not move the route.
+bool RunningAfterRayReconstruction();
 unsigned int ActivePassCount();
 const char* MultipassStatus();
 

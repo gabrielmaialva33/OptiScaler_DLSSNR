@@ -13,7 +13,7 @@ struct Metadata
     uint64_t settingsGeneration = 0;
     uint64_t contractHash = 0;
     char modelIdentity[128] {};
-    const char* stage = "unknown"; // Canonicalized to static before/after/after-fallback/unknown labels.
+    const char* stage = "unknown"; // Canonicalized to static before/after/after-fallback/after-rr/unknown labels.
     uint32_t renderWidth = 0, renderHeight = 0;
     uint32_t outputWidth = 0, outputHeight = 0;
     uint32_t modelWidth = 0, modelHeight = 0;
