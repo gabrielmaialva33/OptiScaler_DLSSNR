@@ -1281,15 +1281,14 @@ void InvalidateExposureMeter()
 
 // Keep source selection testable without changing the established exposure law.
 float ResolveWhitePoint(int whitePointSource, float whitePointScale, float whitePointTrim, bool isHdrBuffer,
-                       bool scanInverted, float scanTrim)
+                        bool scanInverted, float scanTrim)
 {
-    const float anchored = isHdrBuffer && whitePointSource == 2
-                               ? DlssNr::ExposureScan::AnchoredWhitePoint(DlssNr::ExposureScan::BestValue(),
-                                                                        scanInverted, scanTrim)
-                               : 0.0f;
+    const float anchored =
+        isHdrBuffer && whitePointSource == 2
+            ? DlssNr::ExposureScan::AnchoredWhitePoint(DlssNr::ExposureScan::BestValue(), scanInverted, scanTrim)
+            : 0.0f;
     return DlssNr::Exposure::WhitePoint(whitePointSource, isHdrBuffer, whitePointScale, whitePointTrim,
-                                        g_nr.gameExposure,
-                                        g_nr.gamePreExposure, anchored);
+                                        g_nr.gameExposure, g_nr.gamePreExposure, anchored);
 }
 
 ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned int width, unsigned int height)
@@ -1994,9 +1993,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         passSnapshot.Count = 1;
         passSnapshot.Individual = false;
-        const auto master = DlssNrResolvedPassSettings {
-            cfgIntensity, cfgLocalStructure, cfgLocalTone, cfgSkinStructure, cfgStyle, cfgPreset, cfgAutoMask
-        };
+        const auto master =
+            DlssNrResolvedPassSettings { cfgIntensity, cfgLocalStructure, cfgLocalTone, cfgSkinStructure,
+                                         cfgStyle,     cfgPreset,         cfgAutoMask };
         passSnapshot.Settings.fill(master);
     }
     const auto& firstSettings = passSnapshot.Settings[0];
@@ -2007,9 +2006,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const float skinStructureForChain = chainEnabled ? firstSettings.SkinStructure : cfgSkinStructure;
     const int styleForChain = static_cast<int>(chainEnabled ? firstSettings.Style : cfgStyle);
     const bool autoMaskForChain = chainEnabled ? firstSettings.AutoMask : cfgAutoMask;
-    const auto stageForTiming = !chainEnabled      ? "after"
-                                : (dlssNrStage == 1 ? "after-fallback"
-                                                    : "after");
+    const auto stageForTiming = !chainEnabled ? "after" : (dlssNrStage == 1 ? "after-fallback" : "after");
     const uint64_t observedFrame = State::Instance().frameCount;
     const auto now = std::chrono::steady_clock::now();
     const bool chainStable = !chainEnabled || g_chainSchedule.Stable(passSnapshot, now);
@@ -2029,15 +2026,18 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // never written or transitioned by this pass at all.
     ID3D12Resource* const source = colour;
     const bool sourceIsTarget = source == target;
-    const auto exposureResourceBarrier =
-        static_cast<D3D12_RESOURCE_STATES>(cfg.ExposureResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
-    const auto depthResourceBarrier =
-        static_cast<D3D12_RESOURCE_STATES>(cfg.DepthResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
-    const auto motionResourceBarrier =
-        static_cast<D3D12_RESOURCE_STATES>(cfg.MVResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
-    const auto exposureBarrierState = sourceIsTarget ? exposureResourceBarrier : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    const auto depthBarrierState = sourceIsTarget ? depthResourceBarrier : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    const auto motionBarrierState = sourceIsTarget ? motionResourceBarrier : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const auto exposureResourceBarrier = static_cast<D3D12_RESOURCE_STATES>(
+        cfg.ExposureResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+    const auto depthResourceBarrier = static_cast<D3D12_RESOURCE_STATES>(
+        cfg.DepthResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+    const auto motionResourceBarrier = static_cast<D3D12_RESOURCE_STATES>(
+        cfg.MVResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+    const auto exposureBarrierState =
+        sourceIsTarget ? exposureResourceBarrier : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const auto depthBarrierState =
+        sourceIsTarget ? depthResourceBarrier : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const auto motionBarrierState =
+        sourceIsTarget ? motionResourceBarrier : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
     // Whether the resolve wrote the target this frame. See the header.
     bool wrote = false;
@@ -2052,10 +2052,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Unless the caller owns the output and says otherwise. The before-upscale path writes into a copy
     // of its own that never passed through an upscaler, and rests it in UNORDERED_ACCESS whatever the
     // config says about the game's output.
-    const D3D12_RESOURCE_STATES outputArrival =
-        frame.OutputState >= 0 ? (D3D12_RESOURCE_STATES) frame.OutputState
-        : cfg.OutputResourceBarrier.has_value() ? (D3D12_RESOURCE_STATES) cfg.OutputResourceBarrier.value()
-                                               : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    const D3D12_RESOURCE_STATES outputArrival = frame.OutputState >= 0 ? (D3D12_RESOURCE_STATES) frame.OutputState
+                                                : cfg.OutputResourceBarrier.has_value()
+                                                    ? (D3D12_RESOURCE_STATES) cfg.OutputResourceBarrier.value()
+                                                    : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
     // Construct before every resource/state guard: the final timestamp is recorded only after
     // their destructors restore the caller's resources. The extra device query is measurement-only.
@@ -2238,8 +2238,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);
     const bool reduced = workWidth != width || workHeight != height;
 
-    if (chainEnabled && !g_chainExtent.Observe(workWidth, workHeight, now,
-                                               static_cast<uint32_t>(desc.Format)))
+    if (chainEnabled && !g_chainExtent.Observe(workWidth, workHeight, now, static_cast<uint32_t>(desc.Format)))
     {
         reportSkip("chain working resolution is settling (500 ms); no model reconstruction");
         device->Release();
@@ -2436,14 +2435,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             }
             VideoMemory(device, memoryBefore);
         }
-        g_nr.feature =
-            g_nr.create(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(), device,
-                        cmdList, g_nr.capabilityParams, workWidth, workHeight,
-                        static_cast<int>(presetForChain), intensityForChain, styleForChain, localStructureForChain,
-                        localToneForChain, skinStructureForChain, autoMaskForChain ? 1 : 0,
-                        // UI correction at the model's own default: with no UI layer fed to it there
-                        // is nothing for it to correct.
-                        1);
+        g_nr.feature = g_nr.create(
+            snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(), device, cmdList,
+            g_nr.capabilityParams, workWidth, workHeight, static_cast<int>(presetForChain), intensityForChain,
+            styleForChain, localStructureForChain, localToneForChain, skinStructureForChain, autoMaskForChain ? 1 : 0,
+            // UI correction at the model's own default: with no UI layer fed to it there
+            // is nothing for it to correct.
+            1);
 
         if (chainEnabled)
         {
@@ -2631,10 +2629,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             for (unsigned i = 1; i < passSnapshot.Count; ++i)
                 modelReset = modelReset || g_nr.passReset[i];
             timing.SetMetadata(TimingMetadata(cfg, passSnapshot, initialTiming.evaluationId, observedFrame,
-                                              beforeUpscale ? "before" : stageForTiming,
-                                              guideWidth, guideHeight, width, height, workWidth, workHeight, workScale,
-                                              modelReset, g_capture.isActive(), isHdrBuffer,
-                                              static_cast<unsigned>(desc.Format)));
+                                              beforeUpscale ? "before" : stageForTiming, guideWidth, guideHeight, width,
+                                              height, workWidth, workHeight, workScale, modelReset,
+                                              g_capture.isActive(), isHdrBuffer, static_cast<unsigned>(desc.Format)));
             timingMetadataReady = true;
         }
         catch (...)
@@ -2696,8 +2693,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         {
-            ReadResourceScope exposureRead(
-                cmdList, static_cast<ID3D12Resource*>(frame.ExposureTexture), exposureBarrierState);
+            ReadResourceScope exposureRead(cmdList, static_cast<ID3D12Resource*>(frame.ExposureTexture),
+                                           exposureBarrierState);
             DispatchPass(cmdList, meterParams, source, nullptr, nullptr, (ID3D12Resource*) frame.ExposureTexture,
                          nullptr, g_nr.meter, nullptr);
         }
@@ -2712,8 +2709,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     g_nr.gamePreExposure = DlssNr::Exposure::PreExposure(frame.PreExposure);
 
-    float whitePoint = ResolveWhitePoint(whitePointSource, whitePointScale, whitePointTrim, isHdrBuffer, scanInverted,
-                                        scanTrim);
+    float whitePoint =
+        ResolveWhitePoint(whitePointSource, whitePointScale, whitePointTrim, isHdrBuffer, scanInverted, scanTrim);
 
     // Zero-latency exposure (D3D12, source 1): when the game hands us a live exposure texture, the
     // white point is recomputed in-shader every frame from it (ExposurePreMul / exposure) instead of
@@ -2723,8 +2720,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     uint32_t useGameExposure = 0;
     float exposurePreMul = 0.0f;
 
-    if (DlssNr::Exposure::LiveWanted(whitePointSource, isHdrBuffer, usableExposure,
-                                     holdingColor))
+    if (DlssNr::Exposure::LiveWanted(whitePointSource, isHdrBuffer, usableExposure, holdingColor))
     {
         exposureTex = (ID3D12Resource*) frame.ExposureTexture;
         useGameExposure = 1;
@@ -2824,8 +2820,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     {
-        ReadResourceScope exposureRead(cmdList, exposureTex,
-                                       exposureBarrierState);
+        ReadResourceScope exposureRead(cmdList, exposureTex, exposureBarrierState);
         DispatchPass(cmdList, encodeParams, source, nullptr, nullptr, nullptr, exposureTex, g_nr.colorCopy,
                      g_nr.hdrCopy);
     }
@@ -2918,10 +2913,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (!holdingColor)
         DlssNr::ExposureScan::Tick(device, cmdList);
 
-    ReadResourceScope depthRead(cmdList, depth,
-                                depthBarrierState);
-    ReadResourceScope motionRead(cmdList, motion,
-                                 motionBarrierState);
+    ReadResourceScope depthRead(cmdList, depth, depthBarrierState);
+    ReadResourceScope motionRead(cmdList, motion, motionBarrierState);
     ID3D12Resource* depthIn = ReadableGuide(device, cmdList, depth, &g_nr.depthClone);
     RestoreResourceState depthCloneRead { cmdList, depthIn != depth ? depthIn : nullptr,
                                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -2963,8 +2956,6 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     // The vectors were scaled to full-frame pixels; the image the model reprojects is the working size.
-    // The vectors were scaled to full-frame pixels; the image the model reprojects is the
-    // working size.
     const float mvToWork = width != 0 ? (float) workWidth / (float) width : 1.0f;
     const float guideMvScaleXToWork = g_nr.guideMvScaleX * mvToWork;
     const float guideMvScaleYToWork = g_nr.guideMvScaleY * mvToWork;
@@ -3007,11 +2998,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const auto firstCpuStart =
         chainEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
     int result;
-    result = g_nr.evaluate(cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output, workWidth,
-                           workHeight, guideWidth, guideHeight, guideDepthInverted,
-                           g_nr.reset ? 1 : 0, intensityForChain, styleForChain, localStructureForChain,
-                           localToneForChain, skinStructureForChain, autoMaskForChain ? 1 : 0,
-                           guideMvScaleXToWork, guideMvScaleYToWork);
+    result = g_nr.evaluate(cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output,
+                           workWidth, workHeight, guideWidth, guideHeight, guideDepthInverted, g_nr.reset ? 1 : 0,
+                           intensityForChain, styleForChain, localStructureForChain, localToneForChain,
+                           skinStructureForChain, autoMaskForChain ? 1 : 0, guideMvScaleXToWork, guideMvScaleYToWork);
 
     timing.ModelEnd();
 
@@ -3043,12 +3033,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
             const auto startCpu = std::chrono::steady_clock::now();
             timing.ModelBegin();
-                const int extraResult =
-                g_nr.evaluate(cmdList, g_nr.passFeature[i], g_nr.capabilityParams, input, depthIn, motionIn, answer,
-                              workWidth, workHeight, guideWidth, guideHeight, guideDepthInverted,
-                              (g_nr.reset || g_nr.passReset[i]) ? 1 : 0, settings.Intensity, (int) settings.Style,
-                              settings.LocalStructure, settings.LocalTone, settings.SkinStructure,
-                              settings.AutoMask ? 1 : 0, guideMvScaleXToWork, guideMvScaleYToWork);
+            const int extraResult = g_nr.evaluate(
+                cmdList, g_nr.passFeature[i], g_nr.capabilityParams, input, depthIn, motionIn, answer, workWidth,
+                workHeight, guideWidth, guideHeight, guideDepthInverted, (g_nr.reset || g_nr.passReset[i]) ? 1 : 0,
+                settings.Intensity, (int) settings.Style, settings.LocalStructure, settings.LocalTone,
+                settings.SkinStructure, settings.AutoMask ? 1 : 0, guideMvScaleXToWork, guideMvScaleYToWork);
             timing.ModelEnd();
             const double cpuMs =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startCpu).count();
@@ -3250,9 +3239,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ID3D12Resource* resolveAnswer = resolved.answer;
 
         {
-            ReadResourceScope exposureRead(
-                cmdList, exposureTex,
-                exposureBarrierState);
+            ReadResourceScope exposureRead(cmdList, exposureTex, exposureBarrierState);
             wrote = DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, motionIn,
                                  exposureTex, target, nullptr);
         }
