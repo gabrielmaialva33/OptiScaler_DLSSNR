@@ -76,6 +76,9 @@ With the corrected harness, the persistent-mapping build completed all seven ext
 5 feature creations and 4268 upscale evaluations, and logged NR composition at both output sizes.
 It then reproduced the known `Shutdown1` access violation inside `_nvngx.dll` (RVA `0x3af44`).
 That is a **failed suite**, not a runtime acceptance or an FPS measurement.
+The immediately preceding DLL (`fb079c16`) also completed this corrected harness (4487 evaluations)
+and failed at the same `_nvngx.dll` RVA `0x3af44` during `Shutdown1`. These single-run evaluation
+counts include skipped work and initialization and must not be interpreted as performance results.
 
 What the first Proton run taught about the settling gate: it keys on the resource the pass composes
 into, the upscaler's **output**. Sweeping only the render extent never trips it — the model takes

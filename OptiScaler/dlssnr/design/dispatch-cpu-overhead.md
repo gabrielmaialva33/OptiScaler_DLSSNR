@@ -55,6 +55,10 @@ reference to its existing process-lifetime string to avoid copies during timing 
   inside `_nvngx.dll` during `NVSDK_NGX_D3D12_Shutdown1`; the suite remains red. The harness README
   records the corrected compiler watchdog, diagnostic logging and menu routing. Local evidence is
   retained under `x64/dispatch-validation/`.
+  The immediately preceding DLL (`fb079c16`) completed the same corrected harness with
+  4487 evaluations and then crashed at the same `_nvngx.dll` RVA `0x3af44`. The different evaluation
+  counts are not a benchmark: the sweep is wall-clock bounded, includes initialization and skips,
+  and was run with diagnostic logging.
 
 Reduced API/snapshot/allocation counts are the demonstrated CPU-work reduction. These checks
 establish neither an FPS improvement nor image-quality acceptance; those require measured runtime
