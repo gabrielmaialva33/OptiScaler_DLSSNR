@@ -1,12 +1,6 @@
-// Deterministic D3D12 driver for the production Neural Rendering path.
-//
-// This process renders a scene it fully controls and then calls the NGX entry points that
-// OptiScaler.dll exports, which is how a game reaches NR. Nothing below that line is mocked.
-//
-// Two properties are the reason this exists, and neither is available in a game:
-//   - The motion vectors are computed from matrices we own, not estimated from the image.
-//   - Frame N is identical across runs, because every animated quantity is driven by the frame
-//     counter and never by wall-clock time. Two runs are therefore comparable pixel by pixel.
+// D3D12 lifetime/extent driver for the production Neural Rendering exports.
+// Submits real work and waits on queue fences. The planned scene and analytic motion are not
+// wired yet, so this is not a deterministic image fixture or a performance benchmark.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -484,7 +478,9 @@ int main(int argc, char** argv)
         if (params)
             ngx.DestroyParameters(params);
         Say("  teardown: Shutdown\n");
-        ngx.Shutdown(device);
+        r = ngx.Shutdown(device);
+        Say("  Shutdown result: 0x%08X\n", (unsigned) r);
+        Require(NVSDK_NGX_SUCCEED(r), "Shutdown refused");
         DestroyWindow(window);
         CloseHandle(fenceEvent);
         Say("PASS\n");

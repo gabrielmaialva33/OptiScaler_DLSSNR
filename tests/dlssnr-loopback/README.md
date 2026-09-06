@@ -1,34 +1,20 @@
 # DLSS-NR loopback harness
 
-A deterministic D3D12 application that drives the production Neural Rendering path without a
-game. It exists because every NR measurement so far came from launching a title and reading a
-log, which gives no control over the scene, no ground truth for motion, and no way to compare
-two runs pixel by pixel.
+A D3D12 application that drives the production Neural Rendering exports without a game.
+It creates real input/output resources, submits evaluations, waits on queue fences and sweeps
+the output extent to exercise recreation and the post-stage settling gate. Nothing below the
+production `OptiScaler.dll` NGX entry points is mocked.
 
-## Why this is not another unit test
+## Scope
 
-`tests/nr-*` exercise decision logic with fakes: no NGX, no D3D12, no shader. This harness is
-the opposite. It creates a real D3D12 device and swapchain, renders a real scene, and calls
-**`NVSDK_NGX_D3D12_EvaluateFeature` exported by the production `OptiScaler.dll`** — one of the
-four NR call sites, the same entry a game reaches. Nothing is mocked below that line.
+The current harness has no swapchain and does not render the planned scene. `scene.hlsl`
+exists but is not wired into execution; input contents and motion are not a deterministic
+image fixture. The wall-clock sweep tests real initialization, NR composition, resolution
+changes and shutdown. Evaluation counts include initialization and skipped NR work.
 
-## What it controls that a game cannot
-
-- **Motion vectors are analytic.** The camera path and the geometry are ours, so the previous
-  and current clip-space positions are both known and the vector is computed, not estimated.
-  A game's vectors are an input we have to trust; here they are ground truth.
-- **The scene is deterministic.** Frame N is identical across runs — same camera, same
-  animation phase, driven by a frame counter and never by wall-clock time. Two runs are
-  therefore comparable pixel by pixel, which is what an image-quality claim requires.
-- **The whole matrix is reachable from one process.** Working scale, stage, resolution changes
-  and flag combinations can be swept without a human opening a game.
-
-## What it deliberately does NOT prove
-
-The scene is synthetic. The NR model is a relighting network trained on real rendered content,
-so this harness is evidence about **cost, lifetime, determinism and regression** — not about
-whether the picture looks better in a real title. An image difference here means the pass
-changed the frame, not that it improved it. Visual judgement stays in-game.
+Passing this harness establishes neither image quality, deterministic pixels nor an FPS
+improvement. Analytic motion, repeatable frame contents, readback and controlled A/B timing
+remain future work. Visual acceptance also requires testing in a real title.
 
 ## Status
 
@@ -75,7 +61,7 @@ configuration isolates NR validation; it does not fix the production menu lifeti
 With the corrected harness, the persistent-mapping build completed all seven extent steps with
 5 feature creations and 4268 upscale evaluations, and logged NR composition at both output sizes.
 It then reproduced the known `Shutdown1` access violation inside `_nvngx.dll` (RVA `0x3af44`).
-That is a **failed suite**, not a runtime acceptance or an FPS measurement.
+Those historical runs were failed suites, not runtime acceptance or FPS measurements.
 The immediately preceding DLL (`fb079c16`) also completed this corrected harness (4487 evaluations)
 and failed at the same `_nvngx.dll` RVA `0x3af44` during `Shutdown1`. These single-run evaluation
 counts include skipped work and initialization and must not be interpreted as performance results.
@@ -85,9 +71,22 @@ into, the upscaler's **output**. Sweeping only the render extent never trips it 
 the guides as a subrect and was built once across five render sizes. The sweep therefore changes
 the output extent, which is what a game's resolution change does.
 
-Still to do, in order: the page fault the first Proton run ended in (the per-step log now names
-where); the deterministic scene (`scene.hlsl` is written, not yet wired); frame dumps for
-run-to-run comparison.
+The corrected core-shutdown ABI adapter now completes this same sweep and shutdown:
+5 creates, 4371 upscale evaluations, NR composition at both output sizes, shutdown result
+`0x00000001`, process exit 0. The raw core export needs writable output storage in its
+second argument; using the public SDK's one-argument typedef left it unspecified.
+See `OptiScaler/dlssnr/design/ngx-shutdown-order.md` for the binary evidence and scope.
+The runner also verifies the shutdown result and prefers the forwarder built beside the
+selected DLL. Logs and hashes are retained in `x64/dispatch-validation/core-abi/`.
+
+The final build `20260905_224708` also passes with GPU timing off and on. The enabled run
+used the same binary and INI with `GpuTiming=true` and `GpuTimingInterval=30`, then called
+this runner's `run_under_proton()` directly to preserve those settings. It produced confirmed
+GPU samples and three expected contract generations across the extent changes. This validates
+the instrumented path, not comparable frame-time or image-quality measurements.
+
+Still to do: the deterministic scene (`scene.hlsl` is written, not yet wired), analytic
+motion and frame dumps for controlled run-to-run comparison.
 
 A stage that cannot reach its own instrumentation must fail loudly rather than pass quietly;
 that is the `ZERO COVERAGE` rule the Vulkan harness established and this one inherits.

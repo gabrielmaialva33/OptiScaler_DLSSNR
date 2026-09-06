@@ -214,6 +214,10 @@ def main():
                 link.symlink_to(src)
     for name in ('nvngx.dll_dlssnr.dll', 'nvngx_dlssnr.dll', '_nvngx.dll'):
         src = kit / name
+        # Test the forwarder built alongside this DLL. The kit remains a fallback
+        # for external builds that do not ship their matching forwarder.
+        if name == 'nvngx.dll_dlssnr.dll' and (dll.parent / name).exists():
+            src = (dll.parent / name).resolve()
         if not src.exists():
             print(f'  warning: {name} not in {kit} — NR will report itself unavailable')
             continue
