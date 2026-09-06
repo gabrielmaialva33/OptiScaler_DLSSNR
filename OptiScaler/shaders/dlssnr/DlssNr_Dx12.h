@@ -58,6 +58,9 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // any of them executes, so every pass ends up reading whichever constants were written last --
     // encode and downsample would run with the resolve's parameters.
     ID3D12Resource* _constantBuffers[DLSSNR_NUM_OF_HEAPS] = {};
+    // Upload buffers stay mapped for their lifetime. Each slot still owns distinct storage;
+    // DispatchPass only writes it when that same descriptor-ring slot is selected.
+    void* _mappedConstants[DLSSNR_NUM_OF_HEAPS] = {};
 
     uint32_t _heapIndex = 0;
 

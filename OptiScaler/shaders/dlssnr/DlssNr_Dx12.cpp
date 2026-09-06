@@ -21,6 +21,7 @@
 #include <dlssnr/DlssNr_GpuTiming.h>
 
 #include <mutex>
+#include <optional>
 #include <algorithm>
 #include <cstring>
 #include <vector>
@@ -439,7 +440,7 @@ std::atomic<const char*> g_preStatus { "Waiting for a supported upscale evaluati
 
 // Timing identifies the loaded model file once per process. These file attributes are an audit
 // label, not a content hash or proof that the file was unchanged while the process was running.
-std::string TimingModelIdentity()
+const std::string& TimingModelIdentity()
 {
     static const std::string identity = []
     {
@@ -524,7 +525,7 @@ DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSn
     metadata.requestedPasses = passes.Count;
     metadata.modelReset = reset;
     metadata.captureActive = captureActive;
-    const auto identity = TimingModelIdentity();
+    const auto& identity = TimingModelIdentity();
     std::snprintf(metadata.modelIdentity, sizeof(metadata.modelIdentity), "%s", identity.c_str());
     return metadata;
 }
@@ -843,15 +844,14 @@ void ChainStatus(const char* reason)
 
 bool RetiredCapacity();
 
-bool WantsTrackedRecording(const Config& cfg)
+bool WantsTrackedRecording(const DlssNrPassSnapshot& requested)
 {
-    const auto requested = cfg.GetDlssNrPassSnapshot();
     return g_tracked || (!g_legacyRecorded && (requested.Count > 1 || requested.Individual));
 }
 
-bool TrackNrRecording(ID3D12GraphicsCommandList* cmd, const Config& cfg, DlssNr::Chain::RecordingLease* lease)
+bool TrackNrRecording(ID3D12GraphicsCommandList* cmd, const DlssNrPassSnapshot& requested,
+                      DlssNr::Chain::RecordingLease* lease)
 {
-    const auto requested = cfg.GetDlssNrPassSnapshot();
     const bool optIn = requested.Count > 1 || requested.Individual;
     if (!g_tracked && optIn && !g_legacyRecorded)
         g_tracked = true;
@@ -1824,6 +1824,14 @@ DlssNr_Dx12::DlssNr_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx
             LOG_ERROR("[{0}] CreateCommittedResource error {1:x}", _name, (unsigned int) result);
             return;
         }
+
+        const D3D12_RANGE noRead { 0, 0 };
+        result = _constantBuffers[i]->Map(0, &noRead, &_mappedConstants[i]);
+        if (FAILED(result) || _mappedConstants[i] == nullptr)
+        {
+            LOG_ERROR("[{0}] Map constants error {1:x}", _name, (unsigned int) result);
+            return;
+        }
     }
 
     // Precompiled, with no source fallback. The shader used to be compiled at runtime from a string,
@@ -1835,7 +1843,18 @@ DlssNr_Dx12::DlssNr_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx
         return;
     }
 
-    _init = InitHeaps(InDevice, _frameHeaps, DLSSNR_NUM_OF_HEAPS);
+    if (!InitHeaps(InDevice, _frameHeaps, DLSSNR_NUM_OF_HEAPS))
+        return;
+
+    // Buffer addresses and sizes never change during this shader's lifetime.
+    for (uint32_t i = 0; i < DLSSNR_NUM_OF_HEAPS; ++i)
+    {
+        D3D12_CONSTANT_BUFFER_VIEW_DESC cbv {};
+        cbv.BufferLocation = _constantBuffers[i]->GetGPUVirtualAddress();
+        cbv.SizeInBytes = sizeof(DlssNrConstants);
+        InDevice->CreateConstantBufferView(&cbv, _frameHeaps[i].GetCbvCPU(0));
+    }
+    _init = true;
 }
 
 bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
@@ -1873,11 +1892,7 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
     for (uint32_t i = 0; i < kUavCount; ++i)
         CreateUnorderedAccessView(_device, uavs[i], currentHeap.GetUavCPU(i), 0);
 
-    if (!CreateConstantsBuffer(_device, _constantBuffers[slot], InConstants, currentHeap.GetCbvCPU(0)))
-    {
-        LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
-        return false;
-    }
+    std::memcpy(_mappedConstants[slot], &InConstants, sizeof(InConstants));
 
     ID3D12DescriptorHeap* heaps[] = { currentHeap.GetHeapCSU() };
     InCmdList->SetDescriptorHeaps(_countof(heaps), heaps);
@@ -1896,10 +1911,16 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
 
 DlssNr_Dx12::~DlssNr_Dx12()
 {
-    for (auto& buffer : _constantBuffers)
+    for (uint32_t i = 0; i < DLSSNR_NUM_OF_HEAPS; ++i)
     {
+        auto& buffer = _constantBuffers[i];
         if (buffer != nullptr)
         {
+            if (_mappedConstants[i] != nullptr)
+            {
+                buffer->Unmap(0, nullptr);
+                _mappedConstants[i] = nullptr;
+            }
             buffer->Release();
             buffer = nullptr;
         }
@@ -1936,19 +1957,18 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     g_activePasses = 0;
-    std::unique_ptr<DlssNr::Chain::RecordingLease> ownedRecording;
-    if (!recording && WantsTrackedRecording(cfg))
+    auto passSnapshot = cfg.GetDlssNrPassSnapshot();
+    std::optional<DlssNr::Chain::RecordingLease> ownedRecording;
+    if (!recording && WantsTrackedRecording(passSnapshot))
     {
-        ownedRecording =
-            std::make_unique<DlssNr::Chain::RecordingLease>(g_recordings, reinterpret_cast<uintptr_t>(cmdList));
-        recording = ownedRecording.get();
+        ownedRecording.emplace(g_recordings, reinterpret_cast<uintptr_t>(cmdList));
+        recording = &*ownedRecording;
     }
-    if (!TrackNrRecording(cmdList, cfg, recording))
+    if (!TrackNrRecording(cmdList, passSnapshot, recording))
     {
         reportSkip(g_chainStatus.load());
         return false;
     }
-    auto passSnapshot = cfg.GetDlssNrPassSnapshot();
     const bool useProxy = cfg.DlssNrUseProxy.value_or_default();
     const bool chainEnabled = g_tracked && !useProxy;
     const int dlssNrStage = cfg.DlssNrStage.value_or_default();
@@ -3797,9 +3817,10 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     {
         std::lock_guard<std::mutex> lock(g_nrMutex);
 
-        if (WantsTrackedRecording(cfg))
+        const auto requested = cfg.GetDlssNrPassSnapshot();
+        if (WantsTrackedRecording(requested))
             _recording = std::make_unique<Chain::RecordingLease>(g_recordings, reinterpret_cast<uintptr_t>(cmdList));
-        if (!TrackNrRecording(cmdList, cfg, _recording.get()))
+        if (!TrackNrRecording(cmdList, requested, _recording.get()))
         {
             device->Release();
             report(g_chainStatus.load());
