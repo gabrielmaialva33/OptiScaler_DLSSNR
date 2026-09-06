@@ -3873,6 +3873,12 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     const D3D12_RESOURCE_STATES colourRest = cfg.ColorResourceBarrier.has_value()
                                                  ? (D3D12_RESOURCE_STATES) cfg.ColorResourceBarrier.value()
                                                  : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const auto depthRest = static_cast<D3D12_RESOURCE_STATES>(
+        cfg.DepthResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+    const auto motionRest = static_cast<D3D12_RESOURCE_STATES>(
+        cfg.MVResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+    const auto exposureRest = static_cast<D3D12_RESOURCE_STATES>(
+        cfg.ExposureResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 
     const unsigned int colorStates = D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS |
                                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
@@ -3905,12 +3911,6 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     // Each game resource is restored even on a build/skip/failed dispatch. ReadableGuide sees the
     // NPSR state it expects; the upscaler receives its original configured arrival states afterward.
     ReadScope colorRead(cmdList, colour, colourRest);
-    const auto depthRest = static_cast<D3D12_RESOURCE_STATES>(
-        cfg.DepthResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
-    const auto motionRest = static_cast<D3D12_RESOURCE_STATES>(
-        cfg.MVResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
-    const auto exposureRest = static_cast<D3D12_RESOURCE_STATES>(
-        cfg.ExposureResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
     ReadScope depthRead(cmdList, depth, depthRest);
     ReadScope motionRead(cmdList, motion, motionRest);
     ReadScope exposureRead(cmdList, static_cast<ID3D12Resource*>(frame.ExposureTexture), exposureRest);
