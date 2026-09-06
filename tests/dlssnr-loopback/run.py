@@ -37,7 +37,8 @@ def _cpu_ticks(pid):
 
 
 def _wine_build_pids():
-    out = subprocess.run(['pgrep', '-f', r'[H]ostX64.x64.(CL|link)\.exe'], capture_output=True, text=True)
+    # msvc-wine currently launches Hostx64/x64/cl.exe; Windows path casing is not stable.
+    out = subprocess.run(['pgrep', '-if', r'[h]ostx64.x64.(cl|link)\.exe'], capture_output=True, text=True)
     return [int(x) for x in out.stdout.split()]
 
 
@@ -55,12 +56,14 @@ def run_watched(args, *, env, log, attempts=4):
             dead = 0
             while p.poll() is None:
                 size = Path(log).stat().st_size
-                pids = _wine_build_pids()
+                # A stalled wrapper may never spawn a compiler. Monitor it too rather than
+                # making an empty compiler list disable recovery indefinitely.
+                pids = _wine_build_pids() or [p.pid]
                 before = sum(_cpu_ticks(q) for q in pids)
                 time.sleep(20)
                 after = sum(_cpu_ticks(q) for q in pids)
                 grew = Path(log).stat().st_size != size
-                if pids and after == before and not grew:
+                if p.poll() is None and after == before and not grew:
                     dead += 1
                     print(f'  compile attempt {attempt}: stalled sample {dead}/3')
                 else:
@@ -69,7 +72,10 @@ def run_watched(args, *, env, log, attempts=4):
                     print(f'  compile attempt {attempt}: hung; resetting wineserver and retrying')
                     p.kill()
                     for q in _wine_build_pids():
-                        os.kill(q, signal.SIGTERM)
+                        try:
+                            os.kill(q, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
                     time.sleep(2)
                     subprocess.run(['wineserver', '-k'], env=env)
                     time.sleep(2)
