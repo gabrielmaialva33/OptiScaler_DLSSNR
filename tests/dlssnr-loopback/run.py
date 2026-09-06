@@ -123,10 +123,12 @@ def run_under_proton():
                STEAM_COMPAT_CLIENT_INSTALL_PATH=str(steam),
                # The harness LoadLibrary()s OptiScaler.dll by name, so no dxgi override is needed
                # for it; Proton keeps its own DXVK/vkd3d overrides.
-               WINEDEBUG='-all',
+               WINEDEBUG='-all,+timestamp,+pid,+tid,+seh,+unwind,+loaddll',
                # Proton does not pass the child's stdout through; the harness writes its own
                # dlssnr-loopback.log, and PROTON_LOG captures wine-side crashes into OUT.
-               PROTON_LOG='1', PROTON_LOG_DIR=str(OUT))
+               # Proton refuses to create its per-process log without SteamGameId. Zero
+               # labels this standalone harness without opting into a game's compatibility fixes.
+               SteamGameId='0', PROTON_LOG='1', PROTON_LOG_DIR=str(OUT))
     for stale in ('run/OptiScaler.log', 'run/dlssnr-loopback.log'):
         (OUT / stale).unlink(missing_ok=True)
     print(f'running under {proton.parent.name}')
