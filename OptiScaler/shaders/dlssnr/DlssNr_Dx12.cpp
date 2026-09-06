@@ -1951,6 +1951,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     auto passSnapshot = cfg.GetDlssNrPassSnapshot();
     const bool useProxy = cfg.DlssNrUseProxy.value_or_default();
     const bool chainEnabled = g_tracked && !useProxy;
+    const int dlssNrStage = cfg.DlssNrStage.value_or_default();
+    const Scaler nrScalerForChain = cfg.DlssNrScalingDownscaler.value_or_default();
+    const bool proxyProbe = cfg.DlssNrProxyProbe.value_or_default();
     const int whitePointSource = cfg.DlssNrWhitePointSource.value_or_default();
     const float whitePointScale = cfg.DlssNrWhitePointScale.value_or_default();
     const float whitePointTrim = cfg.DlssNrWhitePointTrim.value_or_default();
@@ -1958,16 +1961,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const float scanTrim = cfg.DlssNrScanTrim.value_or_default();
     const bool holdFrame = cfg.DlssNrHoldFrame.value_or_default();
     const bool reversibleMode = cfg.DlssNrReversibleMode.value_or_default();
-    const auto presetForChain = chainEnabled ? firstSettings.Preset : cfg.DlssNrPreset.value_or_default();
-    const float intensityForChain = chainEnabled ? firstSettings.Intensity : cfg.DlssNrIntensity.value_or_default();
-    const float localStructureForChain = chainEnabled ? firstSettings.LocalStructure : cfg.DlssNrLocalStructure.value_or_default();
-    const float localToneForChain = chainEnabled ? firstSettings.LocalTone : cfg.DlssNrLocalTone.value_or_default();
-    const float skinStructureForChain = chainEnabled ? firstSettings.SkinStructure : cfg.DlssNrSkinStructure.value_or_default();
-    const int styleForChain = chainEnabled ? firstSettings.Style : cfg.DlssNrStyle.value_or_default();
-    const bool autoMaskForChain = chainEnabled ? firstSettings.AutoMask : cfg.DlssNrAutoMask.value_or_default();
-    const auto stageForTiming = !chainEnabled      ? "after"
-                                : (cfg.DlssNrStage.value_or_default() == 1 ? "after-fallback"
-                                                                           : "after");
+    const auto cfgPreset = cfg.DlssNrPreset.value_or_default();
+    const float cfgIntensity = cfg.DlssNrIntensity.value_or_default();
+    const float cfgLocalStructure = cfg.DlssNrLocalStructure.value_or_default();
+    const float cfgLocalTone = cfg.DlssNrLocalTone.value_or_default();
+    const float cfgSkinStructure = cfg.DlssNrSkinStructure.value_or_default();
+    const auto cfgStyle = cfg.DlssNrStyle.value_or_default();
+    const bool cfgAutoMask = cfg.DlssNrAutoMask.value_or_default();
     if (g_tracked && useProxy)
         ChainStatus("Driver proxy uses one pass and master settings; overrides are inactive");
     if (!chainEnabled)
@@ -1975,14 +1975,21 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         passSnapshot.Count = 1;
         passSnapshot.Individual = false;
         const auto master = DlssNrResolvedPassSettings {
-            cfg.DlssNrIntensity.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
-            cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
-            cfg.DlssNrStyle.value_or_default(),     cfg.DlssNrPreset.value_or_default(),
-            cfg.DlssNrAutoMask.value_or_default()
+            cfgIntensity, cfgLocalStructure, cfgLocalTone, cfgSkinStructure, cfgStyle, cfgPreset, cfgAutoMask
         };
         passSnapshot.Settings.fill(master);
     }
     const auto& firstSettings = passSnapshot.Settings[0];
+    const auto presetForChain = chainEnabled ? firstSettings.Preset : cfgPreset;
+    const float intensityForChain = chainEnabled ? firstSettings.Intensity : cfgIntensity;
+    const float localStructureForChain = chainEnabled ? firstSettings.LocalStructure : cfgLocalStructure;
+    const float localToneForChain = chainEnabled ? firstSettings.LocalTone : cfgLocalTone;
+    const float skinStructureForChain = chainEnabled ? firstSettings.SkinStructure : cfgSkinStructure;
+    const int styleForChain = static_cast<int>(chainEnabled ? firstSettings.Style : cfgStyle);
+    const bool autoMaskForChain = chainEnabled ? firstSettings.AutoMask : cfgAutoMask;
+    const auto stageForTiming = !chainEnabled      ? "after"
+                                : (dlssNrStage == 1 ? "after-fallback"
+                                                    : "after");
     const uint64_t observedFrame = State::Instance().frameCount;
     const bool chainStable = !chainEnabled || g_chainSchedule.Stable(passSnapshot, std::chrono::steady_clock::now());
     if (chainEnabled && (!chainStable || !g_chainSchedule.Evaluate(observedFrame)))
@@ -2001,6 +2008,15 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // never written or transitioned by this pass at all.
     ID3D12Resource* const source = colour;
     const bool sourceIsTarget = source == target;
+    const auto exposureResourceBarrier =
+        static_cast<D3D12_RESOURCE_STATES>(cfg.ExposureResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+    const auto depthResourceBarrier =
+        static_cast<D3D12_RESOURCE_STATES>(cfg.DepthResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+    const auto motionResourceBarrier =
+        static_cast<D3D12_RESOURCE_STATES>(cfg.MVResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+    const auto exposureBarrierState = sourceIsTarget ? exposureResourceBarrier : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const auto depthBarrierState = sourceIsTarget ? depthResourceBarrier : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const auto motionBarrierState = sourceIsTarget ? motionResourceBarrier : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
     // Whether the resolve wrote the target this frame. See the header.
     bool wrote = false;
@@ -2179,7 +2195,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                  guideWidth, guideHeight, width, height);
     }
 
-    if (cfg.DlssNrProxyProbe.value_or_default())
+    if (proxyProbe)
         ProbeProxyDispatch(cmdList);
 
     if (!EnsureForwarder() || !EnsureCapabilityParams(device))
@@ -2195,7 +2211,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // the model runs reduced and cheaper; above 1 it SUPERSAMPLES -- the proxy is upscaled to a larger
     // working size so the model denoises a super-native input, which the resolve then samples back down.
     // Capped at 2x: cost grows with the area and NGX acceptance above native is what this probe tests.
-    float workScale = cfg.DlssNrWorkingScale.value_or_default();
+    const float configuredWorkScale = cfg.DlssNrWorkingScale.value_or_default();
+    float workScale = configuredWorkScale;
     workScale = workScale < 0.25f ? 0.25f : (workScale > 2.0f ? 2.0f : workScale);
     const auto workWidth = (unsigned int) (width * workScale + 0.5f);
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);
@@ -2402,13 +2419,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.feature =
             g_nr.create(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(), device,
                         cmdList, g_nr.capabilityParams, workWidth, workHeight,
-                        (int) (chainEnabled ? firstSettings.Preset : cfg.DlssNrPreset.value_or_default()),
-                        (chainEnabled ? firstSettings.Intensity : cfg.DlssNrIntensity.value_or_default()),
-                        (int) (chainEnabled ? firstSettings.Style : cfg.DlssNrStyle.value_or_default()),
-                        (chainEnabled ? firstSettings.LocalStructure : cfg.DlssNrLocalStructure.value_or_default()),
-                        (chainEnabled ? firstSettings.LocalTone : cfg.DlssNrLocalTone.value_or_default()),
-                        (chainEnabled ? firstSettings.SkinStructure : cfg.DlssNrSkinStructure.value_or_default()),
-                        (chainEnabled ? firstSettings.AutoMask : cfg.DlssNrAutoMask.value_or_default()) ? 1 : 0,
+                        static_cast<int>(presetForChain), intensityForChain, styleForChain, localStructureForChain,
+                        localToneForChain, skinStructureForChain, autoMaskForChain ? 1 : 0,
                         // UI correction at the model's own default: with no UI layer fed to it there
                         // is nothing for it to correct.
                         1);
@@ -2638,7 +2650,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const bool usableExposure = exposureSettingOn && ExposureTextureUsable(device, offeredExposure) &&
                                 offeredExposure != source && offeredExposure != target && offeredExposure != depth &&
                                 offeredExposure != motion;
-    const bool holdingColor = cfg.DlssNrHoldFrame.value_or_default();
+    const bool holdingColor = holdFrame;
     const bool wantExposure = DlssNr::Exposure::MeterWanted(whitePointSource, usableExposure, holdingColor);
     static bool reportedInvalidExposure = false;
     if (exposureSettingOn && offeredExposure != nullptr && !usableExposure && !reportedInvalidExposure)
@@ -2796,10 +2808,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     {
         ReadResourceScope exposureRead(cmdList, exposureTex,
-                                       sourceIsTarget
-                                           ? static_cast<D3D12_RESOURCE_STATES>(cfg.ExposureResourceBarrier.value_or(
-                                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
-                                           : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                                       exposureBarrierState);
         DispatchPass(cmdList, encodeParams, source, nullptr, nullptr, nullptr, exposureTex, g_nr.colorCopy,
                      g_nr.hdrCopy);
     }
@@ -2838,17 +2847,16 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             // filter is baked at construction). Both use NR's own DlssNrScalingDownscaler, independent
             // of Output Scaling, so the two can run different filters at once. superDown is built here
             // and used after the model (the down-leg below).
-            const Scaler nrScaler = cfg.DlssNrScalingDownscaler.value_or_default();
-            if (g_nr.nrScaler != nrScaler)
+            if (g_nr.nrScaler != nrScalerForChain)
             {
                 ParkNrScaler(g_nr.superUp);
                 ParkNrScaler(g_nr.superDown);
-                g_nr.nrScaler = nrScaler;
+                g_nr.nrScaler = nrScalerForChain;
             }
             if (g_nr.superUp == nullptr)
-                g_nr.superUp = new OS_Dx12("DLSS-NR supersample up", device, true, nrScaler);
+                g_nr.superUp = new OS_Dx12("DLSS-NR supersample up", device, true, nrScalerForChain);
             if (g_nr.superDown == nullptr)
-                g_nr.superDown = new OS_Dx12("DLSS-NR supersample down", device, false, nrScaler);
+                g_nr.superDown = new OS_Dx12("DLSS-NR supersample down", device, false, nrScalerForChain);
 
             if (g_nr.superUp != nullptr && g_nr.superUp->Dispatch(cmdList, g_nr.colorCopy, g_nr.colorSmall))
             {
@@ -2894,13 +2902,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         DlssNr::ExposureScan::Tick(device, cmdList);
 
     ReadResourceScope depthRead(cmdList, depth,
-                                sourceIsTarget ? static_cast<D3D12_RESOURCE_STATES>(cfg.DepthResourceBarrier.value_or(
-                                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
-                                               : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                                depthBarrierState);
     ReadResourceScope motionRead(cmdList, motion,
-                                 sourceIsTarget ? static_cast<D3D12_RESOURCE_STATES>(cfg.MVResourceBarrier.value_or(
-                                                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
-                                                : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                                 motionBarrierState);
     ID3D12Resource* depthIn = ReadableGuide(device, cmdList, depth, &g_nr.depthClone);
     RestoreResourceState depthCloneRead { cmdList, depthIn != depth ? depthIn : nullptr,
                                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -2982,29 +2986,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const auto firstCpuStart =
         chainEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
     int result;
-    if (!chainEnabled)
-    {
-        result = g_nr.evaluate(cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output,
-                               workWidth, workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
-                               g_nr.reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
-                               (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
-                               cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
-                               cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
-                               g_nr.guideMvScaleY * mvToWork);
-    }
-    else
-    {
-        result = g_nr.evaluate(
-            cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output, workWidth,
-            workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0, g_nr.reset ? 1 : 0,
-            (chainEnabled ? firstSettings.Intensity : cfg.DlssNrIntensity.value_or_default()),
-            (int) (chainEnabled ? firstSettings.Style : cfg.DlssNrStyle.value_or_default()),
-            (chainEnabled ? firstSettings.LocalStructure : cfg.DlssNrLocalStructure.value_or_default()),
-            (chainEnabled ? firstSettings.LocalTone : cfg.DlssNrLocalTone.value_or_default()),
-            (chainEnabled ? firstSettings.SkinStructure : cfg.DlssNrSkinStructure.value_or_default()),
-            (chainEnabled ? firstSettings.AutoMask : cfg.DlssNrAutoMask.value_or_default()) ? 1 : 0,
-            g_nr.guideMvScaleX * mvToWork, g_nr.guideMvScaleY * mvToWork);
-    }
+    result = g_nr.evaluate(cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output, workWidth,
+                           workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
+                           g_nr.reset ? 1 : 0, intensityForChain, styleForChain, localStructureForChain,
+                           localToneForChain, skinStructureForChain, autoMaskForChain ? 1 : 0,
+                           g_nr.guideMvScaleX * mvToWork, g_nr.guideMvScaleY * mvToWork);
 
     timing.ModelEnd();
 
@@ -3245,9 +3231,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         {
             ReadResourceScope exposureRead(
                 cmdList, exposureTex,
-                sourceIsTarget ? static_cast<D3D12_RESOURCE_STATES>(cfg.ExposureResourceBarrier.value_or(
-                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
-                               : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                exposureBarrierState);
             wrote = DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, motionIn,
                                  exposureTex, target, nullptr);
         }
