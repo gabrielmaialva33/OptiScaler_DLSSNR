@@ -20,6 +20,11 @@ This removes two repeated snapshot transactions in `Dispatch` and one in the pre
 The dispatch-owned recording lease lives in an optional on the stack, preserving its destructor
 order and borrowing semantics without a heap allocation. The model-file identity returns a
 reference to its existing process-lifetime string to avoid copies during timing metadata creation.
+Timing metadata also reuses the prior contract hash while the exact contract text is unchanged.
+The hash is recomputed before publishing each changed contract, preserving generation/log semantics,
+including changes back to an earlier configuration. Text formatting/comparison still happen each
+instrumented evaluation; this only removes repeated hashing. Dispatch's existing `g_nrMutex`
+serializes access to this cache. Failed string assignment cannot publish a hash for an old contract.
 
 ## Review against DEVELOPMENT.md
 
@@ -52,13 +57,25 @@ reference to its existing process-lifetime string to avoid copies during timing 
   for the changed renderer files.
 - Real Proton loopback: the optimized build completed the seven-step resolution sweep (5 creates,
   4268 upscale evaluations), with NR composition logs for 3440x1440 and 2560x1080. It then failed
-  inside `_nvngx.dll` during `NVSDK_NGX_D3D12_Shutdown1`; the suite remains red. The harness README
+  inside `_nvngx.dll` during `NVSDK_NGX_D3D12_Shutdown1`; that historical run failed. The harness README
   records the corrected compiler watchdog, diagnostic logging and menu routing. Local evidence is
   retained under `x64/dispatch-validation/`.
   The immediately preceding DLL (`fb079c16`) completed the same corrected harness with
   4487 evaluations and then crashed at the same `_nvngx.dll` RVA `0x3af44`. The different evaluation
   counts are not a benchmark: the sweep is wall-clock bounded, includes initialization and skips,
   and was run with diagnostic logging.
+
+- A separate proxy ABI correction subsequently passed all 11 host suites and the complete
+  real sweep including shutdown, with these composition optimizations still present. See
+  `ngx-shutdown-order.md`; local evidence is in `x64/dispatch-validation/core-abi/`.
+- The subsequent timing-hash change passes all 16 metadata/UI boundary cases, including returning
+  to an earlier configuration and repeated evaluations with an unchanged generation/hash.
+- Final Release build `20260905_224708` passes the full Proton sweep with timing disabled
+  (6115 evaluations) and enabled (6200 evaluations). Both shut down normally. The enabled run
+  confirms GPU samples and emits exactly three contract generations; returning to the original
+  extent returns to its original hash. These counts remain coverage evidence, not a benchmark.
+  Final logs and hashes are under `x64/dispatch-validation/final-{default,timing}/` and
+  `final-manifest.json`.
 
 Reduced API/snapshot/allocation counts are the demonstrated CPU-work reduction. These checks
 establish neither an FPS improvement nor image-quality acceptance; those require measured runtime

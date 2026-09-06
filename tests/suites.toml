@@ -58,6 +58,11 @@ tier = "host"
 timeout = 300
 summary = "Command-list submission lifetime model that gates resource release."
 
+[nr-shutdown]
+tier = "host"
+timeout = 300
+summary = "Production NGX core shutdown ABI adapter, output storage, result propagation and null-device routing."
+
 [nr-timing-boundary]
 tier = "host"
 timeout = 300
@@ -76,4 +81,4 @@ summary = "Builds a real DLL and drives real Vulkan to exercise overlay lifetime
 [dlssnr-loopback]
 tier = "wine"
 timeout = 600
-summary = "Drives the production NGX exports on a real D3D12 device and exercises the post-stage settling gate by sweeping the output extent. Runs under the local Proton (--runtime proton); bare wine reaches NR but its feature create returns FAIL_PlatformError. Currently FAILS at the end: the sweep completes, then NVSDK_NGX_D3D12_Shutdown1 crashes."
+summary = "Drives the production NGX exports on a real D3D12 device and exercises the post-stage settling gate by sweeping the output extent. Runs under the local Proton (--runtime proton); bare wine reaches NR but its feature create returns FAIL_PlatformError. Includes successful shutdown and rejects runs without NR composition."

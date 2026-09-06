@@ -1,7 +1,7 @@
 # Tests
 
 Every suite is a self-contained directory with its own `run.py` and `README.md`.
-Nothing here is a unit-test framework: each `run.py` slices production source out
+The host suites are not a unit-test framework: each host `run.py` slices production source out
 of `OptiScaler/`, compiles that slice against local fakes, runs it under
 sanitizers, and asserts. That is deliberate, and it is also the reason the suites
 are honest about what they do not prove.
@@ -28,7 +28,7 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the ten `nr-*` suites below |
+| `host` | Python, `g++`, `clang++` | the eleven `nr-*` suites below |
 | `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** All ten build real production code with local fakes under
+**Host tier.** All eleven build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-before-upscale` — pre-upscale boundary functions against strict host fakes.
@@ -53,6 +53,7 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-multipass` — portable multi-pass chain helpers.
 - `nr-pass-config` — the pass-settings codec and the four-point Config round trip
   for the master keys.
+- `nr-shutdown` — the private NGX core shutdown adapter and its public calling contract.
 - `nr-submission` — the command-list submission lifetime model that gates
   resource release.
 - `nr-timing-boundary` — timing metadata and UI boundary, and where the timing
@@ -62,6 +63,8 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-gpu-timing-d3d12` — real D3D12 timestamp queries in an isolated prefix. It
   never loads NGX and never launches a game.
+- `dlssnr-loopback` — drives the production NGX exports, NR composition, resolution changes
+  and shutdown on a real GPU under Proton.
 - `vulkan-overlay` — builds a real DLL and drives real Vulkan to exercise overlay
   lifetime.
 
@@ -71,7 +74,7 @@ script pinned to baseline commit `660303ec`. `run.py` does not call it and
 
 ## What none of this covers
 
-The `nr-*` suites exercise decision logic against fakes. They do not execute NGX,
+The host `nr-*` suites exercise decision logic against fakes. They do not execute NGX,
 a real D3D12 device, or a real shader. A green run says nothing about GPU
 behaviour, image quality, or performance. In-game validation is still required;
 `CLAUDE.md` has the test target. For Neural Rendering changes, work through the

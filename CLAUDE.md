@@ -173,26 +173,26 @@ for the same reason. The tree is currently clean under version 20.
 
 ### Tests
 
-`tests/README.md` is the index; read it before adding or changing a suite. Twelve directories under
+`tests/README.md` is the index; read it before adding or changing a suite. Fourteen directories under
 `tests/`, each self-contained with its own `run.py` and README, registered in `tests/suites.toml`.
 
 ```bash
-python3 tests/run_all.py            # host tier, the default; 9 suites, ~45 s
+python3 tests/run_all.py            # host tier, the default; 11 suites, ~50 s
 python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
-python3 tests/run_all.py --tier all # adds the two wine suites
+python3 tests/run_all.py --tier all # adds the three wine suites
 python3 tests/<name>/run.py         # one suite, unchanged
 ```
 
-Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the nine `nr-*`
-suites. **wine** needs the msvc-wine prefix and runs serially, because both suites contend for the
+Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the eleven `nr-*`
+suites. **wine** needs the msvc-wine prefix and runs serially, because these suites contend for the
 same prefix `build-local.sh` uses: `nr-gpu-timing-d3d12`, `vulkan-overlay` (which also needs a
-graphical session and a working Vulkan loader). **wip** is `dlssnr-loopback`, registered with a
-README, a scene shader and `harness.cpp`, but still no `run.py`.
+graphical session and a working Vulkan loader), and `dlssnr-loopback` (real NGX/NR under Proton).
+There are currently no **wip** suites.
 
 `suites.toml` is a drift guard, not just a config file. A directory with no entry, or an entry with
 no directory, fails the run. That is deliberate: this list had gone stale before.
 
-Know what they do **not** cover: the `nr-*` suites exercise decision logic against fakes — they do
+Know what they do **not** cover: the host `nr-*` suites exercise decision logic against fakes — they do
 not execute NGX, a real D3D12 device, or a real shader, so a green suite is not evidence about GPU
 behaviour, image quality or performance. `vulkan-overlay` builds a real DLL and drives real Vulkan.
 `nr-before-upscale/verify-invariants.py` is an orphan by design: a one-shot evidence script pinned to
