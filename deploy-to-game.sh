@@ -73,6 +73,40 @@ else
     echo "[!] Preserving existing ${TARGET_DIR}/OptiScaler.ini"
 fi
 
+# 4. Stand our libxell down when the game ships its own.
+#
+# OptiScaler bundles libxell.dll (~415 KB). Several games ship a different one, and
+# XeLL_Proxy::InitXeLLProper points one at the other with RedirectAllExports; a missing export
+# becomes a null function pointer. That crashed Dying Light: The Beast at startup roughly three
+# launches in four, and three Streamline minidumps all showed 0xC0000005 at address 0x0 with the
+# return address in libxell.dll. Renamed, never deleted, so it is one mv to undo.
+OURS="${TARGET_DIR}/OptiScaler/libxell.dll"
+THEIRS="${TARGET_DIR}/libxell.dll"
+if [[ -f "${THEIRS}" && -f "${OURS}" ]]; then
+    if cmp -s "${THEIRS}" "${OURS}"; then
+        echo "[=] libxell.dll: the game's copy is ours, leaving it"
+    else
+        mv -v "${OURS}" "${OURS}.disabled"
+        echo "[+] libxell.dll: the game ships its own, ours renamed to .disabled"
+    fi
+elif [[ -f "${OURS}.disabled" ]]; then
+    echo "[=] libxell.dll: ours already disabled"
+fi
+
+# 5. The Vulkan hook marker, if this deployment relies on it.
+#
+# Under vkd3d-proton the Vulkan overlay competed with Streamline DLSS-G's pacer and lost the
+# device. The marker beside the DLL disables those hooks; [Vulkan] SkipHooks=true in the ini does
+# the same and is the supported way to ask. Report which one is in force so a deployment never
+# silently changes it.
+if [[ -f "${TARGET_DIR}/optiscaler_skip_vulkan_hooks" ]]; then
+    echo "[=] Vulkan hooks: skipped via marker file"
+elif [[ -f "${TARGET_DIR}/optiscaler_skip_vulkan_hooks.disabled" ]]; then
+    echo "[=] Vulkan hooks: ACTIVE (marker present but disabled)"
+else
+    echo "[=] Vulkan hooks: ACTIVE (no marker); set [Vulkan] SkipHooks=true if the device is lost"
+fi
+
 echo ""
 echo "[✓] Deployment completed successfully!"
 echo "    Files installed:"
