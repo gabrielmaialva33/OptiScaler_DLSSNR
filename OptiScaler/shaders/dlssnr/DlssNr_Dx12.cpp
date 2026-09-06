@@ -1280,16 +1280,15 @@ void InvalidateExposureMeter()
 }
 
 // Keep source selection testable without changing the established exposure law.
-float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
+float ResolveWhitePoint(int whitePointSource, float whitePointScale, float whitePointTrim, bool isHdrBuffer,
+                       bool scanInverted, float scanTrim)
 {
-    const auto source = cfg.DlssNrWhitePointSource.value_or_default();
-    const float anchored = isHdrBuffer && source == 2
+    const float anchored = isHdrBuffer && whitePointSource == 2
                                ? DlssNr::ExposureScan::AnchoredWhitePoint(DlssNr::ExposureScan::BestValue(),
-                                                                          cfg.DlssNrScanInverted.value_or_default(),
-                                                                          cfg.DlssNrScanTrim.value_or_default())
+                                                                        scanInverted, scanTrim)
                                : 0.0f;
-    return DlssNr::Exposure::WhitePoint(source, isHdrBuffer, cfg.DlssNrWhitePointScale.value_or_default(),
-                                        cfg.DlssNrWhitePointTrim.value_or_default(), g_nr.gameExposure,
+    return DlssNr::Exposure::WhitePoint(whitePointSource, isHdrBuffer, whitePointScale, whitePointTrim,
+                                        g_nr.gameExposure,
                                         g_nr.gamePreExposure, anchored);
 }
 
@@ -1952,6 +1951,23 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     auto passSnapshot = cfg.GetDlssNrPassSnapshot();
     const bool useProxy = cfg.DlssNrUseProxy.value_or_default();
     const bool chainEnabled = g_tracked && !useProxy;
+    const int whitePointSource = cfg.DlssNrWhitePointSource.value_or_default();
+    const float whitePointScale = cfg.DlssNrWhitePointScale.value_or_default();
+    const float whitePointTrim = cfg.DlssNrWhitePointTrim.value_or_default();
+    const bool scanInverted = cfg.DlssNrScanInverted.value_or_default();
+    const float scanTrim = cfg.DlssNrScanTrim.value_or_default();
+    const bool holdFrame = cfg.DlssNrHoldFrame.value_or_default();
+    const bool reversibleMode = cfg.DlssNrReversibleMode.value_or_default();
+    const auto presetForChain = chainEnabled ? firstSettings.Preset : cfg.DlssNrPreset.value_or_default();
+    const float intensityForChain = chainEnabled ? firstSettings.Intensity : cfg.DlssNrIntensity.value_or_default();
+    const float localStructureForChain = chainEnabled ? firstSettings.LocalStructure : cfg.DlssNrLocalStructure.value_or_default();
+    const float localToneForChain = chainEnabled ? firstSettings.LocalTone : cfg.DlssNrLocalTone.value_or_default();
+    const float skinStructureForChain = chainEnabled ? firstSettings.SkinStructure : cfg.DlssNrSkinStructure.value_or_default();
+    const int styleForChain = chainEnabled ? firstSettings.Style : cfg.DlssNrStyle.value_or_default();
+    const bool autoMaskForChain = chainEnabled ? firstSettings.AutoMask : cfg.DlssNrAutoMask.value_or_default();
+    const auto stageForTiming = !chainEnabled      ? "after"
+                                : (cfg.DlssNrStage.value_or_default() == 1 ? "after-fallback"
+                                                                           : "after");
     if (g_tracked && useProxy)
         ChainStatus("Driver proxy uses one pass and master settings; overrides are inactive");
     if (!chainEnabled)
@@ -2001,9 +2017,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // config says about the game's output.
     const D3D12_RESOURCE_STATES outputArrival =
         frame.OutputState >= 0 ? (D3D12_RESOURCE_STATES) frame.OutputState
-        : Config::Instance()->OutputResourceBarrier.has_value()
-            ? (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value()
-            : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        : cfg.OutputResourceBarrier.has_value() ? (D3D12_RESOURCE_STATES) cfg.OutputResourceBarrier.value()
+                                               : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
     // Construct before every resource/state guard: the final timestamp is recorded only after
     // their destructors restore the caller's resources. The extra device query is measurement-only.
@@ -2584,9 +2599,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             for (unsigned i = 1; i < passSnapshot.Count; ++i)
                 modelReset = modelReset || g_nr.passReset[i];
             timing.SetMetadata(TimingMetadata(cfg, passSnapshot, initialTiming.evaluationId, observedFrame,
-                                              beforeUpscale                             ? "before"
-                                              : cfg.DlssNrStage.value_or_default() == 1 ? "after-fallback"
-                                                                                        : "after",
+                                              beforeUpscale ? "before" : stageForTiming,
                                               guideWidth, guideHeight, width, height, workWidth, workHeight, workScale,
                                               modelReset, g_capture.isActive(), isHdrBuffer,
                                               static_cast<unsigned>(desc.Format)));
@@ -2609,12 +2622,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Gated on the source the menu actually writes. This read the retired WhitePointFromExposure
     // flag while consumption keyed on WhitePointSource == 1, so choosing "the game's own exposure"
     // never dispatched the meter and the white point silently fell back to the slider.
-    const bool exposureSettingOn = cfg.DlssNrWhitePointSource.value_or_default() == 1;
+    const bool exposureSettingOn = whitePointSource == 1;
 
     // Nothing held from before the option was switched off may survive switching it back on. See
     // InvalidateExposureMeter for what froze and why it read as a colour cast.
-    if (DlssNr::Exposure::InvalidateOnSourceChange(g_nr.exposureSettingWasOn,
-                                                   cfg.DlssNrWhitePointSource.value_or_default()))
+    if (DlssNr::Exposure::InvalidateOnSourceChange(g_nr.exposureSettingWasOn, whitePointSource))
     {
         InvalidateExposureMeter();
         LOG_INFO("DLSS-NR exposure: option switched on, held reading discarded");
@@ -2627,8 +2639,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                 offeredExposure != source && offeredExposure != target && offeredExposure != depth &&
                                 offeredExposure != motion;
     const bool holdingColor = cfg.DlssNrHoldFrame.value_or_default();
-    const bool wantExposure =
-        DlssNr::Exposure::MeterWanted(cfg.DlssNrWhitePointSource.value_or_default(), usableExposure, holdingColor);
+    const bool wantExposure = DlssNr::Exposure::MeterWanted(whitePointSource, usableExposure, holdingColor);
     static bool reportedInvalidExposure = false;
     if (exposureSettingOn && offeredExposure != nullptr && !usableExposure && !reportedInvalidExposure)
     {
@@ -2672,7 +2683,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     g_nr.gamePreExposure = DlssNr::Exposure::PreExposure(frame.PreExposure);
 
-    float whitePoint = ResolveWhitePoint(cfg, isHdrBuffer);
+    float whitePoint = ResolveWhitePoint(whitePointSource, whitePointScale, whitePointTrim, isHdrBuffer, scanInverted,
+                                        scanTrim);
 
     // Zero-latency exposure (D3D12, source 1): when the game hands us a live exposure texture, the
     // white point is recomputed in-shader every frame from it (ExposurePreMul / exposure) instead of
@@ -2682,12 +2694,12 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     uint32_t useGameExposure = 0;
     float exposurePreMul = 0.0f;
 
-    if (DlssNr::Exposure::LiveWanted(cfg.DlssNrWhitePointSource.value_or_default(), isHdrBuffer, usableExposure,
+    if (DlssNr::Exposure::LiveWanted(whitePointSource, isHdrBuffer, usableExposure,
                                      holdingColor))
     {
         exposureTex = (ID3D12Resource*) frame.ExposureTexture;
         useGameExposure = 1;
-        const float trim = DlssNr::Exposure::Trim(cfg.DlssNrWhitePointTrim.value_or_default());
+        const float trim = DlssNr::Exposure::Trim(whitePointTrim);
         exposurePreMul = g_nr.gamePreExposure * trim;
         if (!std::isfinite(exposurePreMul))
         {
@@ -2705,7 +2717,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // `target` is UAV here (normalised at entry, restored by the meter block above). The held copy is
     // left in COPY_SOURCE after capture and stays there for every restore.
     {
-        const bool hold = cfg.DlssNrHoldFrame.value_or_default();
+        const bool hold = holdFrame;
 
         if (hold)
         {
@@ -2770,7 +2782,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     encodeParams.WhitePoint = whitePoint;
     encodeParams.UseGameExposure = useGameExposure;
     encodeParams.ExposurePreMul = exposurePreMul;
-    encodeParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
+    encodeParams.ReversibleMode = reversibleMode;
     // Match only takes effect once a fit exists; until then the table is empty and the shader would
     // read a curve of zeros, so it falls back to the plain proxy.
     encodeParams.Width = width;
