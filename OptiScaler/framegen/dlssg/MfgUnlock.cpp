@@ -8,10 +8,13 @@
 
 namespace
 {
-// mov ebx,1 / mov r8d,3 / cmp edi,0x1b0 / cmovl r8d,ebx. The two counts and the architecture
-// constant together are unique in the module; the wildcards cover nothing, they are here only to
-// keep the shape readable.
-constexpr std::string_view kAdvertisePattern = "BB 01 00 00 00 41 B8 03 00 00 00 81 FF B0 01 00 00 44 0F 4C C3";
+// mov ebx,1 / mov r8d,<count> / cmp <reg>,0x1b0 / cmovl r8d,ebx. Both the published count and the
+// register holding the architecture vary between builds of nvngx_dlssg.dll, so both are wildcards:
+// 309 carried mov r8d,3 / cmp edi, and the dlssg shipped with Crimson Desert carries mov r8d,5 /
+// cmp esi. Neither byte identifies the site. What does is the shape around them - the architecture
+// constant sitting between a count and a cmovl that falls back to ebx - and it is still one match in
+// .text. Note the count is already 5 in that build, so on it the write below only lands the cmovl.
+constexpr std::string_view kAdvertisePattern = "BB 01 00 00 00 41 B8 ? 00 00 00 81 ? B0 01 00 00 44 0F 4C C3";
 
 // cmp eax,0x1b0 / jl / cmp ebx,3 / jbe. The only comparison against the architecture constant that
 // is followed by a signed branch and a count test.
