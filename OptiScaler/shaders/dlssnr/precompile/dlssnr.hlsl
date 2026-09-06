@@ -743,6 +743,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // The model's own answer, kept before the matched-residual block below can rewrite `model`, so the
     // replace decode uses what the model returned rather than the residual reconstruction.
     float3 modelDirect = model;
+    const bool emptyModel = all(modelDirect <= 1e-5);
     float4 originalSample = gCompareMode == 1 ? gOriginal.SampleLevel(gLinear, cmpUv, 0)
                                               : gOriginal.Load(int3(id.xy, 0));
 
@@ -874,10 +875,12 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     float modelLuma = dot(model, kLuma);
     float3 upgraded;
 
-    if (modelLuma <= 1e-5)
+    // Two reasons to hand the frame back untouched. The model returned an empty frame for this
+    // pixel (emptyModel, measured before the residual). Or the composed model picture is black
+    // here, which the residual can legitimately produce on a dark pixel; the highlight branch below
+    // divides by modelLuma and needs it non-zero.
+    if (emptyModel || modelLuma <= 1e-5)
     {
-        // The model can return an empty frame for an input it cannot read. Rescaling that collapses
-        // the picture to black, so the frame is handed back untouched instead.
         upgraded = original;
     }
     else
