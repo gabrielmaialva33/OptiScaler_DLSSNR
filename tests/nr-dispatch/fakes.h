@@ -30,14 +30,27 @@ struct D3D12_STATIC_SAMPLER_DESC
     int Filter {}, AddressU {}, AddressV {}, AddressW {}, ShaderVisibility {};
     float MaxLOD {};
 };
-struct D3D12_RESOURCE_DESC { size_t Width; };
+struct D3D12_RESOURCE_DESC
+{
+    size_t Width;
+};
 struct CD3DX12_RESOURCE_DESC
 {
     static D3D12_RESOURCE_DESC Buffer(size_t size) { return { size }; }
 };
-struct CD3DX12_HEAP_PROPERTIES { explicit CD3DX12_HEAP_PROPERTIES(int) {} };
-struct D3D12_RANGE { size_t Begin, End; };
-struct D3D12_CONSTANT_BUFFER_VIEW_DESC { uintptr_t BufferLocation {}; UINT SizeInBytes {}; };
+struct CD3DX12_HEAP_PROPERTIES
+{
+    explicit CD3DX12_HEAP_PROPERTIES(int) {}
+};
+struct D3D12_RANGE
+{
+    size_t Begin, End;
+};
+struct D3D12_CONSTANT_BUFFER_VIEW_DESC
+{
+    uintptr_t BufferLocation {};
+    UINT SizeInBytes {};
+};
 using ConstantBytes = std::array<unsigned char, sizeof(DlssNrConstants)>;
 
 struct ID3D12Resource
@@ -50,8 +63,13 @@ struct ID3D12Resource
         assert(read && read->Begin == 0 && read->End == 0);
         assert(!mapped && !releases);
         ++maps;
-        if (failMap) return -1;
-        if (nullMap) { *output = nullptr; return S_OK; }
+        if (failMap)
+            return -1;
+        if (nullMap)
+        {
+            *output = nullptr;
+            return S_OK;
+        }
         mapped = true;
         *output = bytes.data();
         return S_OK;
@@ -63,7 +81,11 @@ struct ID3D12Resource
         ++unmaps;
     }
     uintptr_t GetGPUVirtualAddress() { return reinterpret_cast<uintptr_t>(this); }
-    void Release() { assert(!mapped && releases == 0); ++releases; }
+    void Release()
+    {
+        assert(!mapped && releases == 0);
+        ++releases;
+    }
 };
 
 struct ID3D12Device
@@ -75,12 +97,13 @@ struct ID3D12Device
     std::array<D3D12_CONSTANT_BUFFER_VIEW_DESC, 48> cbvs {};
     std::array<std::array<ID3D12Resource*, 5>, 48> srvs {};
     std::array<std::array<ID3D12Resource*, 2>, 48> uavs {};
-    HRESULT CreateCommittedResource(const CD3DX12_HEAP_PROPERTIES*, int,
-                                    const D3D12_RESOURCE_DESC* desc, int, void*, ID3D12Resource** output)
+    HRESULT CreateCommittedResource(const CD3DX12_HEAP_PROPERTIES*, int, const D3D12_RESOURCE_DESC* desc, int, void*,
+                                    ID3D12Resource** output)
     {
         const int index = static_cast<int>(creates++);
         assert(desc->Width == sizeof(DlssNrConstants));
-        if (index == failCreateAt) return -1;
+        if (index == failCreateAt)
+            return -1;
         auto resource = std::make_unique<ID3D12Resource>();
         resource->failMap = index == failMapAt;
         resource->nullMap = index == nullMapAt;
@@ -96,7 +119,11 @@ struct ID3D12Device
     }
 };
 
-struct ID3D12DescriptorHeap { ID3D12Device* device {}; unsigned slot {}; };
+struct ID3D12DescriptorHeap
+{
+    ID3D12Device* device {};
+    unsigned slot {};
+};
 struct FrameDescriptorHeap
 {
     ID3D12DescriptorHeap heap;
@@ -112,11 +139,13 @@ struct ID3D12GraphicsCommandList
     std::vector<ConstantBytes> recorded;
     std::vector<std::array<UINT, 3>> groups;
     void SetDescriptorHeaps(size_t count, ID3D12DescriptorHeap** heaps)
-    { assert(count == 1); heap = heaps[0]; }
+    {
+        assert(count == 1);
+        heap = heaps[0];
+    }
     void SetComputeRootSignature(void*) {}
     void SetPipelineState(void*) {}
-    void SetComputeRootDescriptorTable(unsigned root, unsigned slot)
-    { assert(root == 0 && slot == heap->slot); }
+    void SetComputeRootDescriptorTable(unsigned root, unsigned slot) { assert(root == 0 && slot == heap->slot); }
     void Dispatch(UINT x, UINT y, UINT z)
     {
         auto& view = heap->device->cbvs.at(heap->slot);
@@ -127,8 +156,14 @@ struct ID3D12GraphicsCommandList
     }
 };
 struct ID3D12CommandQueue;
-namespace DlssNr::Detail { struct CoverageSample; }
-namespace DlssNr::Chain { class RecordingLease; }
+namespace DlssNr::Detail
+{
+struct CoverageSample;
+}
+namespace DlssNr::Chain
+{
+class RecordingLease;
+}
 
 class Shader_Dx12
 {
@@ -138,20 +173,35 @@ class Shader_Dx12
     bool _init = false;
     void* _rootSignature = nullptr;
     void* _pipelineState = nullptr;
-    bool SetupRootSignature(ID3D12Device* device, unsigned, unsigned, unsigned, unsigned,
-                            unsigned, unsigned, D3D12_STATIC_SAMPLER_DESC*) { return !device->failRoot; }
+    bool SetupRootSignature(ID3D12Device* device, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
+                            D3D12_STATIC_SAMPLER_DESC*)
+    {
+        return !device->failRoot;
+    }
     bool CreateComputePipeline(ID3D12Device* device, void**, const void*, size_t, const char*)
-    { return !device->failPipeline; }
+    {
+        return !device->failPipeline;
+    }
     bool InitHeaps(ID3D12Device* device, FrameDescriptorHeap* heaps, size_t count)
     {
-        if (device->failHeaps) return false;
-        for (unsigned i = 0; i < count; ++i) heaps[i].heap = { device, i };
+        if (device->failHeaps)
+            return false;
+        for (unsigned i = 0; i < count; ++i)
+            heaps[i].heap = { device, i };
         return true;
     }
     void CreateShaderResourceView(ID3D12Device* device, ID3D12Resource* resource, unsigned handle)
-    { device->srvs.at(handle / 8).at(handle % 8) = resource; ++device->srvWrites; }
+    {
+        device->srvs.at(handle / 8).at(handle % 8) = resource;
+        ++device->srvWrites;
+    }
     void CreateUnorderedAccessView(ID3D12Device* device, ID3D12Resource* resource, unsigned handle, unsigned mip)
-    { assert(mip == 0); device->uavs.at(handle / 8).at(handle % 8 - 5) = resource; ++device->uavWrites; }
+    {
+        assert(mip == 0);
+        device->uavs.at(handle / 8).at(handle % 8 - 5) = resource;
+        ++device->uavWrites;
+    }
+
   public:
     Shader_Dx12(std::string name, ID3D12Device* device) : _name(name), _device(device) {}
     bool IsInit() const { return _init; }

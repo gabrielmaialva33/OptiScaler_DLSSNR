@@ -14,16 +14,16 @@ int main()
             constants.Height = 7 + frame;
             constants.Mode = frame % 5;
             const bool full = frame % 2;
-            assert(shader.DispatchPass(&cmd, constants, &source, full ? &model : nullptr,
-                                       full ? &original : nullptr, full ? &motion : nullptr,
-                                       full ? &previous : nullptr, &target, full ? &keep : nullptr));
+            assert(shader.DispatchPass(&cmd, constants, &source, full ? &model : nullptr, full ? &original : nullptr,
+                                       full ? &motion : nullptr, full ? &previous : nullptr, &target,
+                                       full ? &keep : nullptr));
             assert(std::memcmp(cmd.recorded.back().data(), &constants, sizeof(constants)) == 0);
-            assert(cmd.groups.back() == (std::array<UINT, 3> { (constants.Width + 7) / 8,
-                                                              (constants.Height + 7) / 8, 1 }));
+            assert(cmd.groups.back() ==
+                   (std::array<UINT, 3> { (constants.Width + 7) / 8, (constants.Height + 7) / 8, 1 }));
             const unsigned slot = frame % 48;
-            assert(device.srvs[slot] == (std::array<ID3D12Resource*, 5> {
-                &source, full ? &model : &source, full ? &original : &source,
-                full ? &motion : &source, full ? &previous : &source }));
+            assert(device.srvs[slot] ==
+                   (std::array<ID3D12Resource*, 5> { &source, full ? &model : &source, full ? &original : &source,
+                                                     full ? &motion : &source, full ? &previous : &source }));
             assert(device.uavs[slot] == (std::array<ID3D12Resource*, 2> { &target, full ? &keep : &target }));
             // Writing this pass must not change another slot's constants.
             for (unsigned i = 0; i < 48 && i <= frame; ++i)
@@ -50,9 +50,12 @@ int main()
         for (int slot = 0; slot < 48; ++slot)
         {
             ID3D12Device broken;
-            if (failure == 0) broken.failCreateAt = slot;
-            if (failure == 1) broken.failMapAt = slot;
-            if (failure == 2) broken.nullMapAt = slot;
+            if (failure == 0)
+                broken.failCreateAt = slot;
+            if (failure == 1)
+                broken.failMapAt = slot;
+            if (failure == 2)
+                broken.nullMapAt = slot;
             {
                 DlssNr_Dx12 shader("failed init", &broken);
                 assert(!shader.IsInit() && broken.cbvWrites == 0);
@@ -72,11 +75,15 @@ int main()
         broken.failRoot = failure == 0;
         broken.failPipeline = failure == 1;
         broken.failHeaps = failure == 2;
-        { DlssNr_Dx12 shader("failed setup", &broken); assert(!shader.IsInit()); }
+        {
+            DlssNr_Dx12 shader("failed setup", &broken);
+            assert(!shader.IsInit());
+        }
         for (const auto& buffer : broken.resources)
             assert(buffer->unmaps == 1 && buffer->releases == 1);
     }
     DlssNr_Dx12 noDevice("no device", nullptr);
     assert(!noDevice.IsInit());
-    std::cout << "PASS: production dispatch, 145 passes, isolated ring slots, fixed CBVs, 148 initialization failures\n";
+    std::cout
+        << "PASS: production dispatch, 145 passes, isolated ring slots, fixed CBVs, 148 initialization failures\n";
 }
