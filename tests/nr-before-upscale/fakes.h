@@ -223,6 +223,10 @@ struct State
 };
 namespace DlssNr
 {
+void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+                          ID3D12CommandQueue* timingQueue = nullptr, bool preUpscaleDeclined = false,
+                          bool isRayReconstruction = false);
+
 DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* p)
 {
     DlssNrFrameInfo f;
