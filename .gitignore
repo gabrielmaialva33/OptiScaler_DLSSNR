@@ -444,6 +444,7 @@ release
 
 # Winx PTY session state
 .winx/
+tmp
 
 # Test suite outputs. tests/run_all.py and the per-suite run.py scripts build
 # here. artifacts/ is already caught by the NuGet rule inherited from the
