@@ -386,6 +386,7 @@ struct NrState
 
     unsigned int width = 0;
     unsigned int height = 0;
+    bool afterRayReconstruction = false;
     bool reset = true;
 
     // Dimensions of the guides as the upscaler handed them over, kept for the present path, which runs
@@ -436,6 +437,7 @@ DlssNr::Detail::CreationFrameGate g_preCreation;
 ID3D12Device* g_preDevice = nullptr; // Held by the scratch; refuse a different device this session.
 bool g_preAllocationFailed = false;
 bool g_lastBeforeUpscale = false;
+bool g_lastAfterRayReconstruction = false;
 std::atomic<const char*> g_preStatus { "Waiting for a supported upscale evaluation" };
 
 // Timing identifies the loaded model file once per process. These file attributes are an audit
@@ -1960,6 +1962,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     g_activePasses = 0;
     auto passSnapshot = cfg.GetDlssNrPassSnapshot();
+    if (frame.AfterRayReconstruction)
+        passSnapshot.Count = DlssNr::PassConfig::BoundCount(cfg.DlssNrRRPasses.value_or_default());
     std::optional<DlssNr::Chain::RecordingLease> ownedRecording;
     if (!recording && WantsTrackedRecording(passSnapshot))
     {
@@ -1994,7 +1998,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ChainStatus("Driver proxy uses one pass and master settings; overrides are inactive");
     if (!chainEnabled)
     {
-        passSnapshot.Count = 1;
+        passSnapshot.Count =
+            frame.AfterRayReconstruction ? DlssNr::PassConfig::BoundCount(cfg.DlssNrRRPasses.value_or_default()) : 1;
         passSnapshot.Individual = false;
         const auto master =
             DlssNrResolvedPassSettings { cfgIntensity, cfgLocalStructure, cfgLocalTone, cfgSkinStructure,
@@ -2235,7 +2240,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // the model runs reduced and cheaper; above 1 it SUPERSAMPLES -- the proxy is upscaled to a larger
     // working size so the model denoises a super-native input, which the resolve then samples back down.
     // Capped at 2x: cost grows with the area and NGX acceptance above native is what this probe tests.
-    const float configuredWorkScale = cfg.DlssNrWorkingScale.value_or_default();
+    const float configuredWorkScale = frame.AfterRayReconstruction ? cfg.DlssNrRRWorkingScale.value_or_default()
+                                                                   : cfg.DlssNrWorkingScale.value_or_default();
     const float workScale = std::clamp(configuredWorkScale, 0.25f, 2.0f);
     const auto workWidth = (unsigned int) (width * workScale + 0.5f);
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);
@@ -2297,20 +2303,23 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     ReleaseSurfacesIfFormatChanged(desc.Format);
 
     const bool beforeUpscale = !sourceIsTarget;
-    if (g_lastBeforeUpscale != beforeUpscale)
+    if (g_lastBeforeUpscale != beforeUpscale || g_lastAfterRayReconstruction != frame.AfterRayReconstruction)
     {
         g_nr.reset = true;
         g_lastBeforeUpscale = beforeUpscale;
+        g_lastAfterRayReconstruction = frame.AfterRayReconstruction;
     }
 
     const bool resolutionChanged =
         g_nr.width != width || g_nr.height != height || g_nr.workWidth != workWidth || g_nr.workHeight != workHeight;
+    const bool placementChanged = g_nr.afterRayReconstruction != frame.AfterRayReconstruction;
 
     // The model reads its tuning once, while the feature is built, so a changed setting only takes
     // effect when the feature is rebuilt. TuningMatchesFeature was written to notice that and then
     // never called, which is why every one of these controls appeared to do nothing until something
     // else -- a resolution change -- happened to force a rebuild by accident.
-    const bool tuningChanged = chainEnabled ? g_nr.passBuilt[0] != firstSettings : !TuningMatchesFeature(cfg);
+    const bool tuningChanged =
+        placementChanged || (chainEnabled ? g_nr.passBuilt[0] != firstSettings : !TuningMatchesFeature(cfg));
 
     if (g_nr.feature != nullptr && (resolutionChanged || tuningChanged))
     {
@@ -2472,10 +2481,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         g_nr.width = width;
         g_nr.height = height;
+        g_nr.afterRayReconstruction = frame.AfterRayReconstruction;
         g_nr.reset = true;
         RecordBuiltTuning(cfg);
-        LOG_INFO("DLSS-NR running at {}x{}, guides {}x{} (preset {}, intensity {}, style {})", width, height,
-                 guideWidth, guideHeight, g_nr.builtPreset, g_nr.builtIntensity, g_nr.builtStyle);
+        LOG_INFO("DLSS-NR running {}: target {}x{}, guides {}x{} (preset {}, intensity {}, style {})",
+                 frame.AfterRayReconstruction ? "after Ray Reconstruction"
+                                              : (sourceIsTarget ? "after upscale" : "before upscale"),
+                 width, height, guideWidth, guideHeight, g_nr.builtPreset, g_nr.builtIntensity, g_nr.builtStyle);
         if (!sourceIsTarget)
         {
             g_preCreation.Created(State::Instance().frameCount);
@@ -3521,7 +3533,7 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
 // reprojection stage, a frame generation path, anything that is not the upscaler seam -- calls
 // RunPass directly and never touches an NGX parameter block.
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
-                          ID3D12CommandQueue* timingQueue, bool preUpscaleDeclined)
+                          ID3D12CommandQueue* timingQueue, bool preUpscaleDeclined, bool isRayReconstruction)
 {
     const Config& cfg = *Config::Instance();
     const bool dlssNrEnabled = cfg.DlssNrEnabled.value_or_default();
@@ -3531,6 +3543,12 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     {
         GpuTiming::SetEnabled(false);
         ReportSkipOnce("it is switched off");
+        return;
+    }
+
+    if (isRayReconstruction && !cfg.DlssNrApplyAfterRR.value_or_default())
+    {
+        ReportSkipOnce("Ray Reconstruction is active; enable ApplyAfterRR to process its output");
         return;
     }
 
@@ -3590,7 +3608,8 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
         return;
     }
 
-    const DlssNrFrameInfo frame = GatherFrame(params);
+    DlssNrFrameInfo frame = GatherFrame(params);
+    frame.AfterRayReconstruction = isRayReconstruction;
     const auto contractOutput = target->GetDesc();
     ReportSpatialContract(params, GetResource(params, NVSDK_NGX_Parameter_Color, "DLSSD.Color"), target, false,
                           static_cast<unsigned>(contractOutput.Width), contractOutput.Height);

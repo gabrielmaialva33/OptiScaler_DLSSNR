@@ -162,14 +162,14 @@ template<typename T> struct Option : std::optional<T>
 };
 struct Config
 {
-    Option<float> DlssNrWorkingScale;
-    Option<bool> DlssNrEnabled, DlssNrHoldFrame, DlssNrUseProxy;
-    Option<unsigned> DlssNrStage;
+    Option<float> DlssNrWorkingScale, DlssNrRRWorkingScale;
+    Option<bool> DlssNrEnabled, DlssNrHoldFrame, DlssNrUseProxy, DlssNrApplyAfterRR;
+    Option<unsigned> DlssNrStage, DlssNrRRPasses;
     Option<int> ColorResourceBarrier, DepthResourceBarrier, MVResourceBarrier, ExposureResourceBarrier;
     DlssNrPassSnapshot GetDlssNrPassSnapshot() const { return {}; }
     static Config* Instance() { static Config cfg; return &cfg; }
 };
-struct DlssNrFrameInfo { int OutputState = -1; void* ExposureTexture = nullptr; };
+struct DlssNrFrameInfo { int OutputState = -1; void* ExposureTexture = nullptr; bool AfterRayReconstruction = false; };
 struct DlssNr_Dx12
 {
     static inline bool writes = true;

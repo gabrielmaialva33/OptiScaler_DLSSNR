@@ -401,6 +401,26 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nThe original game color is used while the model is being built or skipped.");
             if (enabled && stage == 1)
                 ImGui::TextWrapped(Localization::Tr("%s"), Localization::Tr(DlssNr::BeforeUpscaleStatus()));
+
+            bool applyAfterRR = config->DlssNrApplyAfterRR.value_or_default();
+            if (ImGui::Checkbox(Localization::Label("Apply after Ray Reconstruction###nrApplyAfterRR"), &applyAfterRR))
+                config->DlssNrApplyAfterRR = applyAfterRR;
+
+            HelpMarker("Runs Neural Rendering over native Ray Reconstruction (DLSSD) output."
+                       "\n\nDisabled by default: Ray Reconstruction already synthesizes denoised output."
+                       "\nEnable if you want to run DLSS-NR over the final RR result at configured scale.");
+
+            if (applyAfterRR)
+            {
+                int rrPasses = static_cast<int>(config->DlssNrRRPasses.value_or_default());
+                if (ImGui::SliderInt(Localization::Label("RR Passes###nrRRPasses"), &rrPasses, 1, 3))
+                    config->DlssNrRRPasses = static_cast<unsigned int>(std::clamp(rrPasses, 1, 3));
+
+                float rrScale = config->DlssNrRRWorkingScale.value_or_default();
+                if (ImGui::SliderFloat(Localization::Label("RR Working scale###nrRRWorkingScale"), &rrScale, 0.25f,
+                                       1.0f, "%.2fx"))
+                    config->DlssNrRRWorkingScale = std::clamp(rrScale, 0.25f, 1.0f);
+            }
         }
 
         // Any percentage, rather than a handful of steps somebody chose in advance. The lower bound

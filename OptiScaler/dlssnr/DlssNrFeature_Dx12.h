@@ -39,7 +39,8 @@ namespace DlssNr
 // evaluate, when there was one. On stage 1 this pass stands down unless that scope declined the
 // evaluate for a reason this side can serve.
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
-                          ID3D12CommandQueue* timingQueue = nullptr, bool preUpscaleDeclined = false);
+                          ID3D12CommandQueue* timingQueue = nullptr, bool preUpscaleDeclined = false,
+                          bool isRayReconstruction = false);
 
 // The other place the model can run: before the upscaler, over the game's render-resolution colour.
 //

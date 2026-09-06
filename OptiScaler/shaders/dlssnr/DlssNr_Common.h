@@ -56,6 +56,9 @@ struct DlssNrFrameInfo
     // Which way round depth runs. The game states this when it creates its own upscaler.
     bool DepthInverted = false;
 
+    // Optional NR placement after native Ray Reconstruction (DX12).
+    bool AfterRayReconstruction = false;
+
     // How the game encodes its motion vectors, as the game itself reports it. Passed through: every
     // resource already carries a subrect saying how big it is, so scaling by the resolution ratio on
     // top of that counts it twice.
