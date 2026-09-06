@@ -416,10 +416,19 @@ void RenderMenu(Config* config, float menuResScale)
                 if (ImGui::SliderInt(Localization::Label("RR Passes###nrRRPasses"), &rrPasses, 1, 3))
                     config->DlssNrRRPasses = static_cast<unsigned int>(std::clamp(rrPasses, 1, 3));
 
+                // The engine clamps this to 0.25..2.0, the same range the after-upscale slider offers;
+                // stopping the control at 1.0 hid half of what the route accepts. Above 1 the model
+                // supersamples -- its input is enlarged, denoised, and sampled back down -- so it buys
+                // edge stability, not detail, and the cost grows with the area.
                 float rrScale = config->DlssNrRRWorkingScale.value_or_default();
                 if (ImGui::SliderFloat(Localization::Label("RR Working scale###nrRRWorkingScale"), &rrScale, 0.25f,
-                                       1.0f, "%.2fx"))
-                    config->DlssNrRRWorkingScale = std::clamp(rrScale, 0.25f, 1.0f);
+                                       2.0f, "%.2fx"))
+                    config->DlssNrRRWorkingScale = std::clamp(rrScale, 0.25f, 2.0f);
+
+                if (rrScale > 1.001f)
+                    ImGui::TextDisabled(Localization::Tr(
+                        "Above 1x the model supersamples: no new detail, and cost grows with the area. "
+                        "Ray Reconstruction already denoises this frame."));
             }
         }
 
