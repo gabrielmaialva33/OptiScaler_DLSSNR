@@ -846,6 +846,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             VulkanSpoofing.set_from_config(readBool("Spoofing", "Vulkan"));
             VulkanExtensionSpoofing.set_from_config(readBool("Spoofing", "VulkanExtensionSpoofing"));
             VulkanVRAM.set_from_config(readInt("Spoofing", "VulkanVRAM"));
+            VulkanSkipHooks.set_from_config(readBool("Vulkan", "SkipHooks"));
             SpoofedGPUName.set_from_config(readWString("Spoofing", "SpoofedGPUName"));
             StreamlineSpoofing.set_from_config(readBool("Spoofing", "StreamlineSpoofing"));
             SpoofHAGS.set_from_config(readBool("Spoofing", "SpoofHAGS"));
@@ -1739,6 +1740,11 @@ bool Config::SaveIni()
         ini.SetValue("Plugins", "LoadAsiPlugins", GetBoolValue(Instance()->LoadAsiPlugins.value_for_config()).c_str());
         ini.SetValue("Plugins", "LateAsiPluginsDelay",
                      GetIntValue(Instance()->LateAsiPluginsDelay.value_for_config()).c_str());
+    }
+
+    // vulkan
+    {
+        ini.SetValue("Vulkan", "SkipHooks", GetBoolValue(Instance()->VulkanSkipHooks.value_for_config()).c_str());
     }
 
     // fakenvapi

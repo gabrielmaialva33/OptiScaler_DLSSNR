@@ -37,6 +37,17 @@ static uint32_t vkEnumerateDeviceExtensionPropertiesCount = 0;
 static bool vkEnumerateDeviceExtensionPropertiesListed = false;
 static bool vkEnumerateInstanceExtensionPropertiesListed = false;
 
+static bool SkipVulkanWdx12Hooks()
+{
+    if (Config::Instance()->VulkanSkipHooks.value_or_default())
+        return true;
+
+    wchar_t value[2] {};
+    const auto length =
+        GetEnvironmentVariableW(L"OPTISCALER_DISABLE_VULKAN_WDX12_HOOKS", value, static_cast<DWORD>(std::size(value)));
+    return length == 1 && value[0] == L'1';
+}
+
 inline static void hkvkGetPhysicalDeviceMemoryProperties(VkPhysicalDevice physicalDevice,
                                                          VkPhysicalDeviceMemoryProperties* pMemoryProperties)
 {
@@ -752,9 +763,12 @@ PFN_vkVoidFunction VulkanSpoofing::hkvkGetInstanceProcAddr(const PFN_vkVoidFunct
 {
     auto procName = std::string(pName);
 
-    auto result = Vulkan_wDx12::GetInstanceProcAddr(orgFunc, pName);
-    if (result != VK_NULL_HANDLE)
-        return result;
+    if (!SkipVulkanWdx12Hooks())
+    {
+        auto result = Vulkan_wDx12::GetInstanceProcAddr(orgFunc, pName);
+        if (result != VK_NULL_HANDLE)
+            return result;
+    }
 
     if (Config::Instance()->VulkanSpoofing.value_or_default())
     {
@@ -839,9 +853,12 @@ PFN_vkVoidFunction VulkanSpoofing::hkvkGetDeviceProcAddr(const PFN_vkVoidFunctio
 {
     auto procName = std::string(pName);
 
-    auto result = Vulkan_wDx12::GetDeviceProcAddr(orgFunc, pName);
-    if (result != VK_NULL_HANDLE)
-        return result;
+    if (!SkipVulkanWdx12Hooks())
+    {
+        auto result = Vulkan_wDx12::GetDeviceProcAddr(orgFunc, pName);
+        if (result != VK_NULL_HANDLE)
+            return result;
+    }
 
     if (Config::Instance()->VulkanSpoofing.value_or_default())
     {
@@ -924,7 +941,10 @@ PFN_vkVoidFunction VulkanSpoofing::hkvkGetDeviceProcAddr(const PFN_vkVoidFunctio
 
 void VulkanSpoofing::HookForVulkanSpoofing(HMODULE vulkanModule)
 {
-    Vulkan_wDx12::Hook(vulkanModule);
+    if (SkipVulkanWdx12Hooks())
+        LOG_WARN("Skipping Vulkan_wDx12 hooks by diagnostic request");
+    else
+        Vulkan_wDx12::Hook(vulkanModule);
 
     if (Config::Instance()->VulkanSpoofing.value_or_default() && o_vkGetPhysicalDeviceProperties == nullptr)
     {

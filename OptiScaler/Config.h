@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "SysUtils.h"
 #include "State.h"
@@ -748,6 +748,7 @@ class Config
     // vulkanwdx12
     CustomOptional<bool> VulkanUseCopyForInputs { false };
     CustomOptional<bool> VulkanUseCopyForOutput { false };
+    CustomOptional<bool> VulkanSkipHooks { false };
 
     // NVAPI Override
     CustomOptional<bool> DisableFlipMetering { false };
