@@ -221,9 +221,12 @@ def main():
         link.unlink(missing_ok=True)
         link.symlink_to(src)
 
+    # OverlayMenu=false selects the menu drawn inside upscaler Evaluate, rather than
+    # disabling the menu. Keep the swapchain-overlay route selected: this harness has
+    # no swapchain, so it does not initialize unrelated ImGui rendering during the sweep.
     # The harness only reads NR behaviour; it never writes into a game install.
     (OUT / 'run/OptiScaler.ini').write_text(
-        '[Menu]\nOverlayMenu=false\n[DlssNr]\nEnabled=true\n[Log]\nLogToFile=true\nLogLevel=2\n')
+        '[Menu]\nOverlayMenu=true\n[DlssNr]\nEnabled=true\n[Log]\nLogToFile=true\nLogLevel=2\n')
 
     if args.runtime == 'proton':
         return run_under_proton()
