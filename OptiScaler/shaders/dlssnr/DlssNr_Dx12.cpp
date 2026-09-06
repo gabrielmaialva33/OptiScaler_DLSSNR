@@ -500,12 +500,15 @@ DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSn
     }
     static std::string previous;
     static uint64_t generation = 0;
-    uint64_t hash = 14695981039346656037ull;
-    for (const unsigned char ch : contract)
-        hash = (hash ^ ch) * 1099511628211ull;
+    static uint64_t hash = 0;
     if (previous != contract)
     {
+        // An unchanged contract already has its hash; avoid rehashing the full text every evaluation.
+        uint64_t updatedHash = 14695981039346656037ull;
+        for (const unsigned char ch : contract)
+            updatedHash = (updatedHash ^ ch) * 1099511628211ull;
         previous = contract;
+        hash = updatedHash;
         ++generation;
         LOG_INFO("DLSS-NR timing contract generation={} hash={:016X}: {}", generation, hash, contract);
     }
