@@ -2,6 +2,7 @@
 #include "FrameLimit.h"
 
 #include "Config.h"
+#include "State.h"
 // #include "hooks/D3D11Hooks.h"
 
 inline uint64_t FrameLimit::get_timestamp()
@@ -68,7 +69,17 @@ void FrameLimit::sleep(bool fgActive)
         uint64_t min_interval_us = std::clamp((uint64_t) (1'000'000 / fpsCap), 0ULL, 100'000'000ULL);
 
         if (fgActive)
-            min_interval_us *= 2;
+        {
+            int multiplier = 2;
+            if (State::Instance().dlssgDetectedInterpolationCount > 0)
+                multiplier = State::Instance().dlssgDetectedInterpolationCount + 1;
+            else if (Config::Instance()->FGDLSSGOverrideInterpolationCount.has_value())
+                multiplier = Config::Instance()->FGDLSSGOverrideInterpolationCount.value() + 1;
+            else if (Config::Instance()->FGXeFGInterpolationCount.value_or_default() > 1)
+                multiplier = Config::Instance()->FGXeFGInterpolationCount.value_or_default();
+
+            min_interval_us *= std::max(2, multiplier);
+        }
 
         static uint64_t previous_frame_time = 0;
         uint64_t current_time = get_timestamp();
