@@ -1991,7 +1991,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                 : (dlssNrStage == 1 ? "after-fallback"
                                                     : "after");
     const uint64_t observedFrame = State::Instance().frameCount;
-    const bool chainStable = !chainEnabled || g_chainSchedule.Stable(passSnapshot, std::chrono::steady_clock::now());
+    const auto now = std::chrono::steady_clock::now();
+    const bool chainStable = !chainEnabled || g_chainSchedule.Stable(passSnapshot, now);
     if (chainEnabled && (!chainStable || !g_chainSchedule.Evaluate(observedFrame)))
     {
         reportSkip(!chainStable ? "chain settings are settling (500 ms)"
@@ -2212,13 +2213,12 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // working size so the model denoises a super-native input, which the resolve then samples back down.
     // Capped at 2x: cost grows with the area and NGX acceptance above native is what this probe tests.
     const float configuredWorkScale = cfg.DlssNrWorkingScale.value_or_default();
-    float workScale = configuredWorkScale;
-    workScale = workScale < 0.25f ? 0.25f : (workScale > 2.0f ? 2.0f : workScale);
+    const float workScale = std::clamp(configuredWorkScale, 0.25f, 2.0f);
     const auto workWidth = (unsigned int) (width * workScale + 0.5f);
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);
     const bool reduced = workWidth != width || workHeight != height;
 
-    if (chainEnabled && !g_chainExtent.Observe(workWidth, workHeight, std::chrono::steady_clock::now(),
+    if (chainEnabled && !g_chainExtent.Observe(workWidth, workHeight, now,
                                                static_cast<uint32_t>(desc.Format)))
     {
         reportSkip("chain working resolution is settling (500 ms); no model reconstruction");
@@ -2246,7 +2246,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // evaluate and needs the gate just as much. The driver proxy is a post-upscale path too and is
     // deliberately included; it faces the same rebuild churn.
     if (sourceIsTarget && !chainEnabled &&
-        !g_postExtent.Observe(workWidth, workHeight, std::chrono::steady_clock::now(),
+        !g_postExtent.Observe(workWidth, workHeight, now,
                               PostContract(width, (unsigned int) height, static_cast<uint32_t>(desc.Format))))
     {
         reportSkip("working resolution is settling (500 ms); no model reconstruction");
@@ -2677,10 +2677,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         {
             ReadResourceScope exposureRead(
-                cmdList, static_cast<ID3D12Resource*>(frame.ExposureTexture),
-                sourceIsTarget ? static_cast<D3D12_RESOURCE_STATES>(cfg.ExposureResourceBarrier.value_or(
-                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
-                               : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                cmdList, static_cast<ID3D12Resource*>(frame.ExposureTexture), exposureBarrierState);
             DispatchPass(cmdList, meterParams, source, nullptr, nullptr, (ID3D12Resource*) frame.ExposureTexture,
                          nullptr, g_nr.meter, nullptr);
         }
