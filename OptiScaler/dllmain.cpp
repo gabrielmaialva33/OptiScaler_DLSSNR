@@ -974,9 +974,8 @@ static void CheckWorkingMode()
     // Streamline 2.14 that resolve happens first, so DisableFlipMetering stopped taking effect.
     // Loading it here puts the detour in front of it. Only on Nvidia, and only when something asks,
     // so no process gains nvapi that would not have had it.
-    if (GetDllNameWModule(&nvapiNamesW) != nullptr ||
-        (Config::Instance()->DisableFlipMetering.value_or_default() &&
-         IdentifyGpu::getPrimaryGpu().vendorId == VendorId::Nvidia))
+    if (GetDllNameWModule(&nvapiNamesW) != nullptr || (Config::Instance()->DisableFlipMetering.value_or_default() &&
+                                                       IdentifyGpu::getPrimaryGpu().vendorId == VendorId::Nvidia))
     {
         // This hooks nvapi as well when possible
         auto nvapi64 = LibraryLoadHooks::LoadNvApi();
