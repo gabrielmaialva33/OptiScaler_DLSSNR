@@ -33,12 +33,15 @@ namespace
 // Coverage belongs to an upscaler boundary, not to an arbitrary Dispatch call. Keep fallback
 // separate from Stage 0, and do not count the normal Stage 1 post-path stand-down as another skip.
 std::mutex g_coverageMutex;
-DlssNr::Detail::StageCoverage g_coverage[3];
-DlssNr::Detail::CoverageTotals g_coverageLogged[3];
+DlssNr::Detail::StageCoverage g_coverage[4];
+DlssNr::Detail::CoverageTotals g_coverageLogged[4];
 
 struct CoverageScope
 {
-    int stage; // -1 inactive, 0 after, 1 before, 2 after-fallback
+    // After the upscaler and after ray reconstruction are different placements with different
+    // costs, and both used to report stage=after. Anyone comparing the three from these lines
+    // could not separate them.
+    int stage; // -1 inactive, 0 after, 1 before, 2 after-fallback, 3 after-rr
     DlssNr::Detail::CoverageSample sample;
 
     explicit CoverageScope(int which) : stage(which)
@@ -63,7 +66,8 @@ struct CoverageScope
                  "evidence=CPU-recorded-not-GPU-complete",
                  stage == 0   ? "after"
                  : stage == 1 ? "before"
-                              : "after-fallback",
+                 : stage == 2 ? "after-fallback"
+                              : "after-rr",
                  t.calls, t.modelOk, t.modelFailed, t.applied, t.skipped, t.fallback, t.appliedPresents,
                  t.skippedPresents, sample.present, sample.width, sample.height, sample.modelWidth, sample.modelHeight,
                  t.calls - previous.calls, t.modelOk - previous.modelOk, t.applied - previous.applied,
@@ -2014,7 +2018,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const float skinStructureForChain = chainEnabled ? firstSettings.SkinStructure : cfgSkinStructure;
     const int styleForChain = static_cast<int>(chainEnabled ? firstSettings.Style : cfgStyle);
     const bool autoMaskForChain = chainEnabled ? firstSettings.AutoMask : cfgAutoMask;
-    const auto stageForTiming = !chainEnabled ? "after" : (dlssNrStage == 1 ? "after-fallback" : "after");
+    const auto stageForTiming = frame.AfterRayReconstruction ? "after-rr"
+                                : !chainEnabled              ? "after"
+                                                             : (dlssNrStage == 1 ? "after-fallback" : "after");
     const uint64_t observedFrame = State::Instance().frameCount;
     const auto now = std::chrono::steady_clock::now();
     const bool chainStable = !chainEnabled || g_chainSchedule.Stable(passSnapshot, now);
@@ -3552,7 +3558,11 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
         return;
     }
 
-    CoverageScope coverage(dlssNrStage != 1 ? 0 : preUpscaleDeclined ? 2 : -1);
+    // Ray reconstruction refines which after-placement this is; it never turns an inactive scope
+    // active, so the stand-down case keeps reporting nothing.
+    CoverageScope coverage(dlssNrStage != 1     ? (isRayReconstruction ? 3 : 0)
+                           : preUpscaleDeclined ? (isRayReconstruction ? 3 : 2)
+                                                : -1);
 
     if (cmdList == nullptr || params == nullptr)
     {
