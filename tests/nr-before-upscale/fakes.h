@@ -166,6 +166,7 @@ struct Config
     Option<bool> DlssNrEnabled, DlssNrHoldFrame, DlssNrUseProxy;
     Option<unsigned> DlssNrStage;
     Option<int> ColorResourceBarrier, DepthResourceBarrier, MVResourceBarrier, ExposureResourceBarrier;
+    DlssNrPassSnapshot GetDlssNrPassSnapshot() const { return {}; }
     static Config* Instance() { static Config cfg; return &cfg; }
 };
 struct DlssNrFrameInfo { int OutputState = -1; void* ExposureTexture = nullptr; };
@@ -200,8 +201,8 @@ unsigned trackingCalls = 0;
 std::atomic<const char*> g_chainStatus { "test submission tracking refused" };
 DlssNr::Chain::RecordingGate g_recordings;
 bool trackingOptIn = false;
-bool WantsTrackedRecording(const Config&) { return trackingOptIn; }
-bool TrackNrRecording(ID3D12GraphicsCommandList*, const Config&, DlssNr::Chain::RecordingLease*)
+bool WantsTrackedRecording(const DlssNrPassSnapshot&) { return trackingOptIn; }
+bool TrackNrRecording(ID3D12GraphicsCommandList*, const DlssNrPassSnapshot&, DlssNr::Chain::RecordingLease*)
 {
     ++trackingCalls;
     return trackingAccepted;
