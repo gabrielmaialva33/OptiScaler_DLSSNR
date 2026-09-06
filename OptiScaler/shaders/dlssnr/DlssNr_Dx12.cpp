@@ -2946,6 +2946,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // The vectors were scaled to full-frame pixels; the image the model reprojects is the
     // working size.
     const float mvToWork = width != 0 ? (float) workWidth / (float) width : 1.0f;
+    const float guideMvScaleXToWork = g_nr.guideMvScaleX * mvToWork;
+    const float guideMvScaleYToWork = g_nr.guideMvScaleY * mvToWork;
+    const int guideDepthInverted = g_nr.guideDepthInverted ? 1 : 0;
+    const bool isLogFrame = g_frames % 120 == 0;
 
     SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
 
@@ -2958,7 +2962,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         const unsigned int proxyResult = DlssNr::Proxy::Run(
             cmdList, device, modelInput, depthIn, motionIn, g_nr.output, workWidth, workHeight, guideWidth, guideHeight,
-            g_nr.guideDepthInverted, g_nr.reset, g_nr.guideMvScaleX * mvToWork, g_nr.guideMvScaleY * mvToWork);
+            guideDepthInverted, g_nr.reset, guideMvScaleXToWork, guideMvScaleYToWork);
 
         if (coverage != nullptr)
             coverage->ModelResult(proxyResult, workWidth, workHeight);
@@ -2984,14 +2988,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         chainEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
     int result;
     result = g_nr.evaluate(cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output, workWidth,
-                           workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
+                           workHeight, guideWidth, guideHeight, guideDepthInverted,
                            g_nr.reset ? 1 : 0, intensityForChain, styleForChain, localStructureForChain,
                            localToneForChain, skinStructureForChain, autoMaskForChain ? 1 : 0,
-                           g_nr.guideMvScaleX * mvToWork, g_nr.guideMvScaleY * mvToWork);
+                           guideMvScaleXToWork, guideMvScaleYToWork);
 
     timing.ModelEnd();
 
-    if (chainEnabled && (g_frames % 120 == 0 || result != 1))
+    if (chainEnabled && (isLogFrame || result != 1))
         LOG_INFO("DLSS-NR chain: pass 1 result=0x{:X}, dimensions={}x{}, CPU-call-ms={:.3f} (not GPU time)",
                  (unsigned) result, workWidth, workHeight,
                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - firstCpuStart).count());
@@ -3019,12 +3023,12 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
             const auto startCpu = std::chrono::steady_clock::now();
             timing.ModelBegin();
-            const int extraResult =
+                const int extraResult =
                 g_nr.evaluate(cmdList, g_nr.passFeature[i], g_nr.capabilityParams, input, depthIn, motionIn, answer,
-                              workWidth, workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
+                              workWidth, workHeight, guideWidth, guideHeight, guideDepthInverted,
                               (g_nr.reset || g_nr.passReset[i]) ? 1 : 0, settings.Intensity, (int) settings.Style,
                               settings.LocalStructure, settings.LocalTone, settings.SkinStructure,
-                              settings.AutoMask ? 1 : 0, g_nr.guideMvScaleX * mvToWork, g_nr.guideMvScaleY * mvToWork);
+                              settings.AutoMask ? 1 : 0, guideMvScaleXToWork, guideMvScaleYToWork);
             timing.ModelEnd();
             const double cpuMs =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startCpu).count();
@@ -3043,7 +3047,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             }
             g_nr.passReset[i] = false;
             chain.Success();
-            if (g_frames % 120 == 0)
+            if (isLogFrame)
                 LOG_INFO("DLSS-NR chain: pass {} evaluated at {}x{}, CPU-call-ms={:.3f} (not GPU time)", i + 1,
                          workWidth, workHeight, cpuMs);
         }
@@ -3052,10 +3056,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     g_activePasses = chain.completed;
     if (chainEnabled && chain.completed == passSnapshot.Count)
         ChainStatus("All requested passes completed; one final composition");
-    if (chainEnabled && (g_frames % 120 == 0 || chain.completed != passSnapshot.Count))
+    if (chainEnabled && (isLogFrame || chain.completed != passSnapshot.Count))
     {
         static unsigned previousRequested = 0, previousCompleted = 0;
-        if (g_frames % 120 == 0 || previousRequested != passSnapshot.Count || previousCompleted != chain.completed)
+        if (isLogFrame || previousRequested != passSnapshot.Count || previousCompleted != chain.completed)
             LOG_INFO("DLSS-NR chain: requested={} completed={} present={} stage={} status={}", passSnapshot.Count,
                      chain.completed, observedFrame, beforeUpscale ? "before" : "after", g_chainStatus.load());
         previousRequested = passSnapshot.Count;
