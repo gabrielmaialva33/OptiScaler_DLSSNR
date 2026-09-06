@@ -437,13 +437,25 @@ void RenderMenu(Config* config, float menuResScale)
         int scalePercent =
             pendingScale >= 0 ? pendingScale : (int) lroundf(config->DlssNrWorkingScale.value_or_default() * 100.0f);
 
-        if (ImGui::SliderInt(Localization::Label("Model resolution"), &scalePercent, 25, 200, "%d%%"))
-            pendingScale = scalePercent;
-
-        if (ImGui::IsItemDeactivatedAfterEdit() && pendingScale >= 0)
+        // On the ray-reconstruction route the model works at RRWorkingScale, and this slider is not
+        // read at all. Leaving it live was worse than hiding it: it moved, it accepted 200%, and the
+        // cost did not change, so the only way to find out it governed nothing was to read the log.
+        // The route decides, not the ApplyAfterRR checkbox -- ticking that in a title without ray
+        // reconstruction leaves this slider in charge.
+        if (DlssNr::RunningAfterRayReconstruction())
         {
-            config->DlssNrWorkingScale = std::clamp(pendingScale, 25, 200) / 100.0f;
-            pendingScale = -1;
+            ImGui::TextDisabled(Localization::Tr("Model resolution: set by RR Working scale on this route"));
+        }
+        else
+        {
+            if (ImGui::SliderInt(Localization::Label("Model resolution"), &scalePercent, 25, 200, "%d%%"))
+                pendingScale = scalePercent;
+
+            if (ImGui::IsItemDeactivatedAfterEdit() && pendingScale >= 0)
+            {
+                config->DlssNrWorkingScale = std::clamp(pendingScale, 25, 200) / 100.0f;
+                pendingScale = -1;
+            }
         }
 
         if (scalePercent > 100)
