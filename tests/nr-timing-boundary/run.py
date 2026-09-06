@@ -26,10 +26,11 @@ assert dispatch.index('timing.SetMetadata(') < dispatch.index('timing.ModelBegin
 assert dispatch.count('timing.ModelBegin();') == dispatch.count('timing.ModelEnd();') == 2
 first_begin = dispatch.index('timing.ModelBegin();')
 first_end = dispatch.index('timing.ModelEnd();')
-assert dispatch[first_begin:first_end].count('g_nr.evaluate(') == 2  # exclusive single/chain branches
+assert dispatch[first_begin:first_end].count('g_nr.evaluate(') == 1  # shared single/chain first pass
 second_begin = dispatch.index('timing.ModelBegin();', first_end)
 second_end = dispatch.index('timing.ModelEnd();', second_begin)
 assert dispatch[second_begin:second_end].count('g_nr.evaluate(') == 1  # repeated per extra pass
+assert dispatch.count('g_nr.evaluate(') == 2  # no unmeasured forwarder calls outside the markers
 assert second_begin > dispatch.index('for (unsigned i = 1; i < passSnapshot.Count; ++i)')
 assert dispatch.index('timing.FinishOnScopeExit(') > dispatch.index('colorRead.Restore();')
 assert 'wrote && result == 1 && chain.completed == passSnapshot.Count' in dispatch
