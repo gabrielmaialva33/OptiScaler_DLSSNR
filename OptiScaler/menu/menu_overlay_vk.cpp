@@ -26,20 +26,6 @@ static bool _vulkanBackendInited = false;
 static std::mutex _vkCleanMutex;
 static std::mutex _vkPresentMutex;
 
-// Returns true when the DXGI swapchain wrapping is active and drawing via D3D12/D3D11. On Proton
-// (vkd3d-proton) the Vulkan swapchain hook also sees the presentation, but MenuOverlayDx draws the
-// menu on the game's own queue. Drawing from both or tearing down the DX backend from the Vulkan
-// path removes the device.
-static bool DxOverlayOwnsBackend()
-{
-    auto& gpu = IdentifyGpu::getPrimaryGpu();
-    // DXVK (D3D11 on Vulkan) relies on MenuOverlayVk; vkd3d-proton (D3D12 on Vulkan) uses MenuOverlayDx.
-    return gpu.usesDxvk && !State::Instance().isD3D11 && State::Instance().swapchainApi == API::DX12;
-}
-
-// The caller holds _vkPresentMutex and _vkCleanMutex, in that order.
-static bool DestroyVulkanObjectsLocked(bool shutdown);
-
 // imgui stuff
 struct ImGui_ImplVulkan_InitInfo _ImVulkan_Info = {};
 struct ImGui_ImplVulkanH_Frame* _ImVulkan_Frames = VK_NULL_HANDLE;
@@ -187,7 +173,7 @@ void MenuOverlayVk::NoteDeviceQueues(VkDevice device, const VkDeviceCreateInfo* 
     LOG_DEBUG("recorded {0} queue families for device {1:X}", families.size(), (UINT64) device);
 }
 
-static void DestroyVulkanObjectsLocked(bool shutdown);
+static bool DestroyVulkanObjectsLocked(bool shutdown);
 
 // These hooks see vkd3d-proton's presents as well as a native Vulkan game's. swapchainApi is DX12
 // only once a wrapped DXGI swapchain has presented from a D3D12 queue, which under Proton means
