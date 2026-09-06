@@ -50,6 +50,11 @@ reference to its existing process-lifetime string to avoid copies during timing 
 - Release build through `build-local.sh` passed; compiler-prefix watchdog recovered one stall.
   Existing XeSS inheritance and linker warnings remain. clang-format 20 and whitespace checks pass
   for the changed renderer files.
+- Real Proton loopback: the optimized build completed the seven-step resolution sweep (5 creates,
+  4268 upscale evaluations), with NR composition logs for 3440x1440 and 2560x1080. It then failed
+  inside `_nvngx.dll` during `NVSDK_NGX_D3D12_Shutdown1`; the suite remains red. The harness README
+  records the corrected compiler watchdog, diagnostic logging and menu routing. Local evidence is
+  retained under `x64/dispatch-validation/`.
 
 Reduced API/snapshot/allocation counts are the demonstrated CPU-work reduction. These checks
 establish neither an FPS improvement nor image-quality acceptance; those require measured runtime

@@ -56,7 +56,26 @@ assembles; nothing here reproduces that by hand. If NR does not compose, the run
 
 The harness writes `dlssnr-loopback.log` beside itself, flushed per line, because Proton does not
 pass a child's stdout through and a crash discards buffered output. The runner prints it, and
-`PROTON_LOG=1` lands wine-side crash logs in `artifacts/`.
+`PROTON_LOG=1`, `SteamGameId=0` and explicit exception tracing land wine-side crash logs in
+`artifacts/steam-0.log`. The neutral ID is required by Proton's log setup and selects no game profile.
+Previously the missing ID prevented that file from being created, while `WINEDEBUG=-all` also
+suppressed the exception trace.
+
+The compiler watchdog matches MSVC paths case-insensitively (`Hostx64/x64/cl.exe` is the local
+spelling), and monitors the wrapper if it has not spawned a compiler. An empty PID match must not
+disable stall recovery indefinitely.
+
+The generated INI selects `OverlayMenu=true`. This is the **swapchain overlay route**, not an
+"enable all menus" switch. The harness has no swapchain, so this avoids the in-upscaler ImGui path.
+`OverlayMenu=false` used to activate that unrelated path and could crash at
+`Menu_Dx12::Render` with a null ImGui context during the sweep. Both the pre-optimization DLL
+(`fb079c16`) and the persistent-mapping DLL (`61eabbce`) failed with that configuration. This runner
+configuration isolates NR validation; it does not fix the production menu lifetime issue.
+
+With the corrected harness, the persistent-mapping build completed all seven extent steps with
+5 feature creations and 4268 upscale evaluations, and logged NR composition at both output sizes.
+It then reproduced the known `Shutdown1` access violation inside `_nvngx.dll` (RVA `0x3af44`).
+That is a **failed suite**, not a runtime acceptance or an FPS measurement.
 
 What the first Proton run taught about the settling gate: it keys on the resource the pass composes
 into, the upscaler's **output**. Sweeping only the render extent never trips it — the model takes
