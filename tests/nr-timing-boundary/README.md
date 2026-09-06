@@ -17,6 +17,9 @@ resource restores, and incomplete chains to be rejected. Legacy NR D3D12 timers 
 log must be absent. Destructor ordering is verified by inspection and the actual timing core tests;
 source guards are not execution of the full Windows renderer.
 
+The metadata cases include returning to a prior contract and repeated evaluation without a
+generation/hash change.
+
 These tests prove host metadata/UI decisions and detect marker-placement regressions. They do not run
 NGX, submit D3D12 commands, validate actual GPU timestamps, or establish Crimson Desert acceptance.
 The separate `tests/nr-gpu-timing` suite tests the production timing/certificate decision paths; a real

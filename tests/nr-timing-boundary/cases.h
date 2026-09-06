@@ -11,6 +11,9 @@ int main() {
     auto before=make("before",2293,960);
     assert(before.settingsGeneration>a.settingsGeneration && before.contractHash!=a.contractHash);
     assert(before.outputWidth==2293 && before.renderWidth==2293 && before.modelWidth==2293); ++cases;
+    auto restored=make(), repeated=make();
+    assert(restored.contractHash==a.contractHash && restored.settingsGeneration>before.settingsGeneration);
+    assert(repeated.contractHash==restored.contractHash && repeated.settingsGeneration==restored.settingsGeneration); ++cases;
     auto scaled=make("after",3440,1440,2.0f);
     assert(scaled.modelWidth==6880 && scaled.workingScale==2 && scaled.contractHash!=a.contractHash); ++cases;
     auto normal=make(), reset=make("after",3440,1440,1,true,true);
@@ -44,6 +47,6 @@ int main() {
     assert(ImGui::Contains("not the current frame") && !ImGui::Contains("ms per frame")); ++cases;
     ImGui::toggle=0; ImGui::Clear(); RenderGpuTiming(&cfg,false);
     assert(!cfg.settings.Enabled && ImGui::sliderCalls==0 && !ImGui::Contains("Last confirmed")); ++cases;
-    assert(cases==15);
+    assert(cases==16);
     std::printf("PASS %d timing boundary metadata/UI cases\n",cases);
 }
