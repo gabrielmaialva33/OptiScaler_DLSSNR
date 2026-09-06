@@ -474,6 +474,11 @@ static const QuirkEntry quirkTable[] = {
     QUIRK_ENTRY("over the hill.exe", GameQuirk::DisableDxgiSpoofing),
     QUIRK_ENTRY("shrot.exe", GameQuirk::DisableDxgiSpoofing),
 
+    // Fall of Avalon (Unity)
+    // Save thumbnails cause resolution drop (320x180) which destroys/recreates FG context
+    // resulting in broken frame tracking and crash
+    QUIRK_ENTRY("fall of avalon.exe", GameQuirk::FastFeatureReset, GameQuirk::ForceAutoExposure),
+
     // FSR2/3 only, no spoof needed
     //
     // Tiny Tina's Wonderlands, Dead Island 2, The Outer Worlds: Spacer's Choice Edition, Scorn, Thymesia, Company of

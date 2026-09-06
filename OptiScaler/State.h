@@ -197,6 +197,13 @@ class State
     bool scChanged = false;
     bool skipHeapCapture = false;
 
+    // Set when a save thumbnail upscaler (<=640x360) is created.
+    // Stays true through the entire thumbnail sequence (thumbnail create →
+    // main upscaler release → replacement upscaler create) to prevent
+    // fgChanged from being set during the save operation.
+    // Cleared when the replacement normal-res upscaler is created.
+    bool thumbnailSaveActive = false;
+
     bool fgCaptureResources = false;
     size_t fgCapturedResourceCount = 0;
     bool fgResetCapturedResources = false;

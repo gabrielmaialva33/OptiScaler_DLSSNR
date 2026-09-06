@@ -726,7 +726,35 @@ static NVSDK_NGX_Result TryCreateOptiFeature(ID3D12GraphicsCommandList* InCmdLis
     D3D12Hooks::SetRootSignatureTracking(true);
 
     if (state.activeFgInput == FGInput::Upscaler)
-        state.fgChanged = true;
+    {
+        // Don't trigger FG state change during save thumbnail sequences.
+        // Unity games (e.g. Fall of Avalon) render save thumbnails at tiny resolutions
+        // (320x180) which creates a temporary upscaler. The sequence is:
+        //   1. Thumbnail upscaler created (320x180)
+        //   2. Main upscaler released
+        //   3. Replacement normal-res upscaler created (3840x2160)
+        // We must suppress fgChanged for ALL THREE steps, not just step 1,
+        // otherwise the replacement upscaler triggers FG deactivation -> freeze.
+        // The flag is set in step 1 and cleared in step 3.
+        if (feature != nullptr && feature->DisplayWidth() <= 640 && feature->DisplayHeight() <= 360)
+        {
+            LOG_INFO("Thumbnail feature ({}x{}), setting thumbnailSaveActive and skipping fgChanged",
+                     feature->DisplayWidth(), feature->DisplayHeight());
+            State::Instance().thumbnailSaveActive = true;
+        }
+        else if (State::Instance().thumbnailSaveActive)
+        {
+            LOG_INFO("Replacement upscaler created after thumbnail ({}x{}), skipping fgChanged, clearing "
+                     "thumbnailSaveActive",
+                     feature != nullptr ? feature->DisplayWidth() : 0,
+                     feature != nullptr ? feature->DisplayHeight() : 0);
+            State::Instance().thumbnailSaveActive = false;
+        }
+        else
+        {
+            State::Instance().fgChanged = true;
+        }
+    }
 
     return NVSDK_NGX_Result_Success;
 }
@@ -827,11 +855,37 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_ReleaseFeature(NVSDK_NGX_Handle* 
 
     auto handleId = InHandle->Id;
 
-    // Clean up framegen
-    if (State::Instance().currentFG != nullptr && State::Instance().activeFgInput == FGInput::Upscaler)
+    bool skipFgCleanup = State::Instance().thumbnailSaveActive;
+    if (!skipFgCleanup)
     {
+        for (auto& [id, ctx] : Dx12Contexts)
+        {
+            auto* f = ctx.feature.get();
+            if (f != nullptr && f->DisplayWidth() <= 640 && f->DisplayHeight() <= 360)
+            {
+                skipFgCleanup = true;
+                LOG_INFO("Thumbnail feature found ({}x{}) during release of {}, skipping FG cleanup", f->DisplayWidth(),
+                         f->DisplayHeight(), handleId);
+                break;
+            }
+        }
+    }
+    else
+    {
+        LOG_INFO("thumbnailSaveActive flag set during release of {}, skipping FG cleanup", handleId);
+    }
+
+    if (!skipFgCleanup && State::Instance().activeFgInput == FGInput::Upscaler)
         State::Instance().fgChanged = true;
-        State::Instance().currentFG->DestroyFGContext();
+
+    // Clean up framegen
+    if (State::Instance().currentFG != nullptr && State::Instance().activeFgInput == FGInput::Upscaler &&
+        !skipFgCleanup)
+    {
+        if (State::Instance().currentFG->IsActive())
+            State::Instance().currentFG->Deactivate();
+
+        State::Instance().fgChanged = true;
         State::Instance().clearCapturedHudlesses = true;
         UpscalerInputsDx12::Reset();
     }
@@ -1187,7 +1241,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
             // return, so filtering on the parameter block alone would run the model twice a frame.
             // Stands down by itself on stage 1, unless the pre-upscale scope declined this evaluate.
             if (result == NVSDK_NGX_Result_Success && isUpscale)
-                DlssNr::EvaluateAfterUpscale(InCmdList, InParameters, nullptr, preUpscaleDeclined);
+                DlssNr::EvaluateAfterUpscale(InCmdList, InParameters, nullptr, preUpscaleDeclined,
+                                             feature == NVSDK_NGX_Feature_RayReconstruction);
 
             return result;
         }
@@ -1229,7 +1284,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
 
     // Same pass, for OptiScaler's own upscalers rather than native DLSS.
     if (optiResult == NVSDK_NGX_Result_Success && isUpscale)
-        DlssNr::EvaluateAfterUpscale(InCmdList, InParameters, nullptr, preUpscaleDeclined);
+        DlssNr::EvaluateAfterUpscale(InCmdList, InParameters, nullptr, preUpscaleDeclined,
+                                     feature == NVSDK_NGX_Feature_RayReconstruction);
 
     return optiResult;
 }
