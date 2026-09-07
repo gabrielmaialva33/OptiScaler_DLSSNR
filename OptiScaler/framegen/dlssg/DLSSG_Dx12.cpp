@@ -103,6 +103,16 @@ bool DLSSG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
 
     desc->Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
 
+    // The bundled sl.dlss_g plugin wraps the swapchain present with a "throttleFlipQueue"
+    // that, on Ada (no HW flip metering), blocks each present up to 30 ms waiting for a free
+    // flip-queue slot (log: "throttleFlipQueue: no flip-queue slot freed within 30 ms ...").
+    // That drags the menu to ~20-30 FPS with vsync on, adds hundreds of ms of input latency,
+    // and caps the MFG output at ~2x the game rate (3x/4x never add frames). The plugin
+    // disarms the throttle when the app owns the frame-latency waitable object ("App requested
+    // FRAME_LATENCY_WAITABLE_OBJECT itself - flip queue throttling disabled"), which is what
+    // this flag requests at swapchain creation.
+    desc->Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+
     auto result = S_FALSE;
 
     {
@@ -213,6 +223,9 @@ bool DLSSG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmd
         StreamlineProxy::SetFeatureLoaded()(sl::kFeatureDLSS_G, true);
 
         desc->Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        // See CreateSwapchain: request the frame-latency waitable object so the sl.dlss_g
+        // plugin's flip-queue present throttle is disarmed (no 30 ms present backpressure).
+        desc->Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
         auto result = factory2->CreateSwapChainForHwnd(cmdQueue, hwnd, desc, pFullscreenDesc, nullptr, swapChain);
 
         factory2->Release();
