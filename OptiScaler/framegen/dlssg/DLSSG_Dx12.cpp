@@ -360,6 +360,26 @@ bool DLSSG_Dx12::Dispatch()
                  Config::Instance()->FGDLSSGInterpolationCount.value_or_default());
 
         _framesToInterpolate = Config::Instance()->FGDLSSGInterpolationCount.value_or_default();
+
+        // The SL plugin only latches numFramesToGenerate on an eOff -> eOn transition
+        // (its presentCommon "DLSS-G interpolation state changed" / the NGX
+        // ReportOverrideStates). Changing the count while FG stays eOn is ignored, so a
+        // mid-session 3x/4x request would silently keep generating at the original count.
+        // Drop to eOff this frame; the next Dispatch re-enters eOn with the new count and
+        // the feature rebuilds at the requested rate.
+        _mfgReinitPending = true;
+    }
+
+    if (_mfgReinitPending)
+    {
+        _mfgReinitPending = false;
+
+        sl::DLSSGOptions off {};
+        off.mode = sl::DLSSGMode::eOff;
+        off.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
+        StreamlineProxy::DLSSGSetOptions()(viewport, off);
+        LOG_INFO("DLSSG MFG count change: sent eOff to force a feature rebuild; next frame resumes eOn at the new count");
+        return false;
     }
 
     sl::DLSSGOptions options {};

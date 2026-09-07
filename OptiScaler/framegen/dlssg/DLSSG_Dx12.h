@@ -11,6 +11,14 @@ class DLSSG_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _height = 0;
     std::optional<bool> _haveHudless = std::nullopt;
 
+    // The DLSS-G feature latches numFramesToGenerate only on an eOff->eOn
+    // transition ("DLSS-G interpolation state changed" / NGX ReportOverrideStates).
+    // Changing the multiplier while FG stays eOn is ignored by the plugin, so 3x/4x
+    // would silently keep generating at the original count. When the requested count
+    // changes we set this so the next Dispatch sends one eOff frame (below) and the
+    // frame after re-enters eOn with the new count, forcing the feature to rebuild.
+    bool _mfgReinitPending = false;
+
     sl::ViewportHandle viewport { 0 };
     sl::FrameToken* frameToken = nullptr;
 
