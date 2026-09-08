@@ -221,6 +221,7 @@ using PFN_NrCreate = void*(__cdecl*) (const wchar_t*, const wchar_t*, ID3D12Devi
                                       unsigned int, unsigned int, int, float, int, float, float, float, int, int);
 using PFN_NrEvaluate = int(__cdecl*)(ID3D12GraphicsCommandList*, void*, void*, ID3D12Resource*, ID3D12Resource*,
                                      ID3D12Resource*, ID3D12Resource*, unsigned int, unsigned int, unsigned int,
+                                     unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int,
                                      unsigned int, int, int, float, int, float, float, float, int, float, float);
 using PFN_NrRelease = void(__cdecl*)(void*);
 using PFN_NrSetExtras = void(__cdecl*)(void*, float, ID3D12Resource*, ID3D12Resource*, ID3D12Resource*, unsigned int,
@@ -670,6 +671,27 @@ bool EnsureForwarder()
         g_nr.reason = "the forwarder is missing its exports";
         return false;
     }
+
+    // Refused rather than called, because calling it would work. See kDlssNrForwarderAbi: the
+    // argument lists have changed while the export names stayed the same, so a forwarder left over
+    // from an earlier build answers GetProcAddress and then reads every argument past the fourth from
+    // the wrong stack slot. That does not fault -- it quietly ruins the picture -- and the file is
+    // copied per game folder, so one directory updated by hand is all it takes.
+    const auto* forwarderAbi = (const int*) GetProcAddress(g_nr.forwarder, "dlssnr_abi_version");
+
+    if (forwarderAbi == nullptr || *forwarderAbi != kDlssNrForwarderAbi)
+    {
+        LOG_ERROR("nvngx.dll_dlssnr.dll at {} is version {} and this build needs {}; copy the forwarder "
+                  "from the same build as OptiScaler",
+                  path.string(), forwarderAbi == nullptr ? 1 : *forwarderAbi, kDlssNrForwarderAbi);
+        g_nr.reason = "nvngx.dll_dlssnr.dll is from a different build";
+        return false;
+    }
+
+    // Said rather than asked, so the check works in the other direction too: an OptiScaler.dll rolled
+    // back from dxgi.dll.prev never calls this, and the forwarder refuses a host it has not heard from.
+    if (const auto setHostAbi = (void(__cdecl*)(int)) GetProcAddress(g_nr.forwarder, "dlssnr_set_host_abi"))
+        setHostAbi(kDlssNrForwarderAbi);
 
     LOG_INFO("DLSS-NR forwarder loaded from {}", path.string());
     return true;
@@ -2130,14 +2152,23 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // one less thing a call site can get wrong, and the model takes the difference as a subrect per
     // resource rather than needing anything resampled.
     const D3D12_RESOURCE_DESC guideDesc = depth->GetDesc();
-    unsigned int guideWidth = (unsigned int) guideDesc.Width;
-    unsigned int guideHeight = guideDesc.Height;
+    const D3D12_RESOURCE_DESC motionDesc = motion->GetDesc();
 
-    if (guideWidth == 0 || guideHeight == 0)
+    // How big the allocation is, kept apart from how much of it holds this frame. Every bound below
+    // is taken against this rather than against guideDesc directly, because the fallback for a
+    // description that says nothing has to survive them: clamping to the raw description afterwards
+    // would put the zero back and hand the model an empty subrect.
+    unsigned int guideAllocWidth = (unsigned int) guideDesc.Width;
+    unsigned int guideAllocHeight = guideDesc.Height;
+
+    if (guideAllocWidth == 0 || guideAllocHeight == 0)
     {
-        guideWidth = width;
-        guideHeight = height;
+        guideAllocWidth = width;
+        guideAllocHeight = height;
     }
+
+    unsigned int guideWidth = guideAllocWidth;
+    unsigned int guideHeight = guideAllocHeight;
 
     // What the game rendered wins over how big the texture is.
     //
@@ -2170,6 +2201,53 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         guideWidth = subW;
         guideHeight = subH;
+    }
+
+    // Where in the allocation the picture starts. A game that renders into a corner says so per
+    // resource, and depth and motion vectors do not have to agree: bounded by the allocation for the
+    // same reason the size is, and the size is then bounded by what is left after the offset.
+    const unsigned int depthBaseX = std::min(frame.DepthSubrectBaseX, guideAllocWidth);
+    const unsigned int depthBaseY = std::min(frame.DepthSubrectBaseY, guideAllocHeight);
+    guideWidth = std::min(guideWidth, guideAllocWidth - depthBaseX);
+    guideHeight = std::min(guideHeight, guideAllocHeight - depthBaseY);
+
+    // Motion vectors are the one guide that is not always render resolution -- MVLowRes says which --
+    // so the valid region is derived from the flag rather than shared with depth.
+    const unsigned int wantedMotionWidth = frame.MotionVectorsLowResolution ? guideWidth : width;
+    const unsigned int wantedMotionHeight = frame.MotionVectorsLowResolution ? guideHeight : height;
+
+    unsigned int motionAllocWidth = (unsigned int) motionDesc.Width;
+    unsigned int motionAllocHeight = motionDesc.Height;
+
+    if (motionAllocWidth == 0 || motionAllocHeight == 0)
+    {
+        motionAllocWidth = wantedMotionWidth;
+        motionAllocHeight = wantedMotionHeight;
+    }
+
+    const unsigned int motionBaseX = std::min(frame.MotionSubrectBaseX, motionAllocWidth);
+    const unsigned int motionBaseY = std::min(frame.MotionSubrectBaseY, motionAllocHeight);
+    const unsigned int motionWidth = std::min(wantedMotionWidth, motionAllocWidth - motionBaseX);
+    const unsigned int motionHeight = std::min(wantedMotionHeight, motionAllocHeight - motionBaseY);
+
+    // What the model is actually being shown, stated once per shape rather than only when something
+    // looks wrong. The line above reports a surprise -- an allocation bigger than the frame in it --
+    // and stays quiet otherwise; motion vectors now carry dimensions and an origin of their own, and
+    // a wrong one is not a surprise anywhere, it is just a worse picture. The Vulkan path says the
+    // same thing in the same shape, because these two are one behaviour read through two logs.
+    {
+        static unsigned int saidGuides[6] = { ~0u, ~0u, ~0u, ~0u, ~0u, ~0u };
+        const unsigned int now[6] = { depthBaseX, depthBaseY, motionBaseX, motionBaseY, motionWidth, motionHeight };
+
+        if (!std::equal(std::begin(now), std::end(now), std::begin(saidGuides)))
+        {
+            std::copy(std::begin(now), std::end(now), std::begin(saidGuides));
+            LOG_INFO("DLSS-NR guides: depth {}x{} at ({},{}), motion vectors {}x{} at ({},{}) in a {}x{} "
+                     "texture, {}",
+                     guideWidth, guideHeight, depthBaseX, depthBaseY, motionWidth, motionHeight, motionBaseX,
+                     motionBaseY, motionAllocWidth, motionAllocHeight,
+                     frame.MotionVectorsLowResolution ? "render resolution" : "display resolution");
+        }
     }
 
     g_nr.guideWidth = guideWidth;
@@ -2977,9 +3055,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     // The vectors were scaled to full-frame pixels; the image the model reprojects is the working size.
-    const float mvToWork = width != 0 ? (float) workWidth / (float) width : 1.0f;
-    const float guideMvScaleXToWork = g_nr.guideMvScaleX * mvToWork;
-    const float guideMvScaleYToWork = g_nr.guideMvScaleY * mvToWork;
+    const float mvToWorkX = width != 0 ? (float) workWidth / (float) width : 1.0f;
+    const float mvToWorkY = height != 0 ? (float) workHeight / (float) height : 1.0f;
+    const float guideMvScaleXToWork = g_nr.guideMvScaleX * mvToWorkX;
+    const float guideMvScaleYToWork = g_nr.guideMvScaleY * mvToWorkY;
     const int guideDepthInverted = g_nr.guideDepthInverted ? 1 : 0;
     const bool isLogFrame = g_frames % 120 == 0;
 
@@ -2992,9 +3071,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // quietly doing the work.
     if (useProxy)
     {
-        const unsigned int proxyResult = DlssNr::Proxy::Run(
-            cmdList, device, modelInput, depthIn, motionIn, g_nr.output, workWidth, workHeight, guideWidth, guideHeight,
-            guideDepthInverted, g_nr.reset, guideMvScaleXToWork, guideMvScaleYToWork);
+        const unsigned int proxyResult =
+            DlssNr::Proxy::Run(cmdList, device, modelInput, depthIn, motionIn, g_nr.output, workWidth, workHeight,
+                               guideWidth, guideHeight, motionWidth, motionHeight, depthBaseX, depthBaseY, motionBaseX,
+                               motionBaseY, guideDepthInverted, g_nr.reset, guideMvScaleXToWork, guideMvScaleYToWork);
 
         if (coverage != nullptr)
             coverage->ModelResult(proxyResult, workWidth, workHeight);
@@ -3020,7 +3100,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         chainEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
     int result;
     result = g_nr.evaluate(cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output,
-                           workWidth, workHeight, guideWidth, guideHeight, guideDepthInverted, g_nr.reset ? 1 : 0,
+                           workWidth, workHeight, guideWidth, guideHeight, motionWidth, motionHeight, depthBaseX,
+                           depthBaseY, motionBaseX, motionBaseY, guideDepthInverted, g_nr.reset ? 1 : 0,
                            intensityForChain, styleForChain, localStructureForChain, localToneForChain,
                            skinStructureForChain, autoMaskForChain ? 1 : 0, guideMvScaleXToWork, guideMvScaleYToWork);
 
@@ -3056,9 +3137,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             timing.ModelBegin();
             const int extraResult = g_nr.evaluate(
                 cmdList, g_nr.passFeature[i], g_nr.capabilityParams, input, depthIn, motionIn, answer, workWidth,
-                workHeight, guideWidth, guideHeight, guideDepthInverted, (g_nr.reset || g_nr.passReset[i]) ? 1 : 0,
-                settings.Intensity, (int) settings.Style, settings.LocalStructure, settings.LocalTone,
-                settings.SkinStructure, settings.AutoMask ? 1 : 0, guideMvScaleXToWork, guideMvScaleYToWork);
+                workHeight, guideWidth, guideHeight, motionWidth, motionHeight, depthBaseX, depthBaseY, motionBaseX,
+                motionBaseY, guideDepthInverted, (g_nr.reset || g_nr.passReset[i]) ? 1 : 0, settings.Intensity,
+                (int) settings.Style, settings.LocalStructure, settings.LocalTone, settings.SkinStructure,
+                settings.AutoMask ? 1 : 0, guideMvScaleXToWork, guideMvScaleYToWork);
             timing.ModelEnd();
             const double cpuMs =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startCpu).count();
@@ -3404,6 +3486,7 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
     DlssNrFrameInfo frame {};
     frame.DepthInverted = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
     frame.ColourIsLinearHdr = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0;
+    frame.MotionVectorsLowResolution = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0;
 
     // The game telling the upscaler to forget everything it has accumulated: a cut, a teleport, a
     // load. Every upscaler in this tree reads it and this pass did not, so the model's history was
@@ -3423,6 +3506,10 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
     // How much of the guides is real. See DlssNrFrameInfo -- zero means the game did not say.
     params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &frame.RenderSubrectWidth);
     params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &frame.RenderSubrectHeight);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X, &frame.DepthSubrectBaseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y, &frame.DepthSubrectBaseY);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, &frame.MotionSubrectBaseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, &frame.MotionSubrectBaseY);
 
     if (params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &frame.MvScaleX) != NVSDK_NGX_Result_Success)
         frame.MvScaleX = 1.0f;

@@ -30,6 +30,7 @@ using PFN_VkInit = int(__cdecl*)(const wchar_t*, const wchar_t*, void*, void*, v
 using PFN_VkCreate = void*(__cdecl*) (void*, void*, unsigned int, unsigned int, int, float, int, float, float, float,
                                       int, int);
 using PFN_VkEvaluate = int(__cdecl*)(void*, void*, void*, void*, void*, void*, void*, unsigned int, unsigned int,
+                                     unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int,
                                      unsigned int, unsigned int, int, int, float, int, float, float, float, int, float,
                                      float);
 using PFN_VkRelease = void(__cdecl*)(void*);
@@ -433,6 +434,25 @@ bool LoadForwarder()
         return false;
     }
 
+    // The same refusal the D3D12 loader makes, for the same reason: the export names have outlived
+    // several argument lists, so an old forwarder resolves and then misreads every argument past the
+    // fourth. See kDlssNrForwarderAbi.
+    const auto* forwarderAbi = (const int*) GetProcAddress(g_vk.forwarder, "dlssnr_abi_version");
+
+    if (forwarderAbi == nullptr || *forwarderAbi != kDlssNrForwarderAbi)
+    {
+        LOG_ERROR("nvngx.dll_dlssnr.dll is version {} and this build needs {}; copy the forwarder from "
+                  "the same build as OptiScaler",
+                  forwarderAbi == nullptr ? 1 : *forwarderAbi, kDlssNrForwarderAbi);
+        Fail("nvngx.dll_dlssnr.dll is from a different build");
+        return false;
+    }
+
+    // The same announcement the D3D12 loader makes; a host too old to make it is refused by the
+    // forwarder rather than mismatching its arguments in silence.
+    if (const auto setHostAbi = (void(__cdecl*)(int)) GetProcAddress(g_vk.forwarder, "dlssnr_set_host_abi"))
+        setHostAbi(kDlssNrForwarderAbi);
+
     return true;
 }
 
@@ -601,8 +621,10 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
     const uint32_t width = colour->Resource.ImageViewInfo.Width;
     const uint32_t height = colour->Resource.ImageViewInfo.Height;
-    const uint32_t guideWidth = depth->Resource.ImageViewInfo.Width;
-    const uint32_t guideHeight = depth->Resource.ImageViewInfo.Height;
+    uint32_t guideWidth = depth->Resource.ImageViewInfo.Width;
+    uint32_t guideHeight = depth->Resource.ImageViewInfo.Height;
+    const uint32_t motionAllocationWidth = motion->Resource.ImageViewInfo.Width;
+    const uint32_t motionAllocationHeight = motion->Resource.ImageViewInfo.Height;
 
     if (width == 0 || height == 0)
         return;
@@ -798,6 +820,87 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     const unsigned int createFlags = GameCreateFlags(params);
     const bool gameSaysHdr = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0;
     const bool depthInverted = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
+    const bool lowResolutionMotion = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0;
+
+    // Everything below mirrors the D3D12 path deliberately. The two are one behaviour reached through
+    // two APIs, and the last time they were written independently they disagreed about which frame
+    // the model was being shown.
+    uint32_t guideAllocWidth = guideWidth;
+    uint32_t guideAllocHeight = guideHeight;
+
+    if (guideAllocWidth == 0 || guideAllocHeight == 0)
+    {
+        guideAllocWidth = width;
+        guideAllocHeight = height;
+    }
+
+    guideWidth = guideAllocWidth;
+    guideHeight = guideAllocHeight;
+
+    uint32_t renderWidth = 0, renderHeight = 0;
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &renderWidth);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &renderHeight);
+
+    uint32_t depthBaseX = 0, depthBaseY = 0, motionBaseX = 0, motionBaseY = 0;
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X, &depthBaseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y, &depthBaseY);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, &motionBaseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, &motionBaseY);
+
+    // Zero is the game declining to answer, not a zero-sized frame: the block leaves the value alone
+    // when the key is absent, and a game is free to publish it as zero. Taking it literally would
+    // hand the model an empty depth subrect, which is why the D3D12 path has always guarded it.
+    if (renderWidth != 0 && renderHeight != 0)
+    {
+        guideWidth = std::min(renderWidth, guideWidth);
+        guideHeight = std::min(renderHeight, guideHeight);
+    }
+
+    depthBaseX = std::min(depthBaseX, guideAllocWidth);
+    depthBaseY = std::min(depthBaseY, guideAllocHeight);
+    guideWidth = std::min(guideWidth, guideAllocWidth - depthBaseX);
+    guideHeight = std::min(guideHeight, guideAllocHeight - depthBaseY);
+
+    // MVLowRes decides whether the vectors cover the render or the display frame, so the motion
+    // subrect is derived from the flag rather than shared with depth.
+    const uint32_t wantedMotionWidth = lowResolutionMotion ? guideWidth : width;
+    const uint32_t wantedMotionHeight = lowResolutionMotion ? guideHeight : height;
+
+    uint32_t motionAllocWidth = motionAllocationWidth;
+    uint32_t motionAllocHeight = motionAllocationHeight;
+
+    if (motionAllocWidth == 0 || motionAllocHeight == 0)
+    {
+        motionAllocWidth = wantedMotionWidth;
+        motionAllocHeight = wantedMotionHeight;
+    }
+
+    motionBaseX = std::min(motionBaseX, motionAllocWidth);
+    motionBaseY = std::min(motionBaseY, motionAllocHeight);
+    const uint32_t motionWidth = std::min(wantedMotionWidth, motionAllocWidth - motionBaseX);
+    const uint32_t motionHeight = std::min(wantedMotionHeight, motionAllocHeight - motionBaseY);
+
+    // The only account of what the model was shown on this path. The Vulkan half of the subrect work
+    // has no test that reaches it -- vulkan-overlay instruments the menu, not the evaluate -- and the
+    // marker leaves it inert on the D3D12 test target, so this line is the evidence.
+    {
+        static uint32_t said[6] = { ~0u, ~0u, ~0u, ~0u, ~0u, ~0u };
+        const uint32_t now[6] = { guideWidth, guideHeight, depthBaseX, depthBaseY, motionWidth, motionHeight };
+
+        if (!std::equal(std::begin(now), std::end(now), std::begin(said)))
+        {
+            std::copy(std::begin(now), std::end(now), std::begin(said));
+            LOG_INFO("DLSS-NR Vulkan guides: depth {}x{} at ({},{}), motion vectors {}x{} at ({},{}) in a "
+                     "{}x{} image, {}",
+                     guideWidth, guideHeight, depthBaseX, depthBaseY, motionWidth, motionHeight, motionBaseX,
+                     motionBaseY, motionAllocWidth, motionAllocHeight,
+                     lowResolutionMotion ? "render resolution" : "display resolution");
+        }
+    }
+
+    float mvScaleX = 1.0f, mvScaleY = 1.0f;
+    params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &mvScaleX);
+    params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &mvScaleY);
 
     // The game asking the upscaler to forget its history -- a cut, a teleport, a load. Same omission
     // as the D3D12 path had: the model's history was only ever reset by things that happened to us,
@@ -1040,12 +1143,15 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
     Transition(cmdBuffer, g_vk.output, VK_IMAGE_LAYOUT_GENERAL);
 
+    const float mvToWorkX = width != 0 ? (float) workWidth / (float) width : 1.0f;
+    const float mvToWorkY = height != 0 ? (float) workHeight / (float) height : 1.0f;
     const int evaluated = g_vk.evaluate(
         (void*) cmdBuffer, g_vk.feature, g_vk.capabilityParams, &modelInput->ngx, depth, motion, &g_vk.output.ngx,
-        workWidth, workHeight, guideWidth, guideHeight, depthInverted ? 1 : 0, g_vk.reset ? 1 : 0,
-        cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
-        cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
-        cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1.0f, 1.0f);
+        workWidth, workHeight, guideWidth, guideHeight, motionWidth, motionHeight, depthBaseX, depthBaseY, motionBaseX,
+        motionBaseY, depthInverted ? 1 : 0, g_vk.reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
+        (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
+        cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+        cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, mvScaleX * mvToWorkX, mvScaleY * mvToWorkY);
 
     g_vk.reset = false;
     g_vk.frames++;

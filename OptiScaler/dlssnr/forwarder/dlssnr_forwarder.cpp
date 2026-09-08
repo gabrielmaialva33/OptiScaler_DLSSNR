@@ -94,10 +94,46 @@ bool loadSnippet(const wchar_t* path)
     return g_snip.create != nullptr && g_snip.evaluate != nullptr;
 }
 
+// What the host said its evaluate signature is, or zero if it never said. See dlssnr_abi_version.
+int g_hostAbi = 0;
+
 } // namespace
 
 extern "C"
 {
+
+    // The shape of the evaluate calls below, so the host can refuse a forwarder that does not match.
+    //
+    // The forwarder is a separate file the user copies per game folder, and the export names have
+    // stayed the same across every signature change so far. Adding a parameter to dlssnr_call_evaluate
+    // and shipping a new OptiScaler.dll beside an old forwarder therefore fails silently rather than
+    // loudly: __cdecl on x64 passes everything past the fourth argument on the stack, so the old
+    // forwarder reads each one from the slot below the one the host wrote. The 1 -> 2 change put six
+    // subrect arguments in the middle, which lands motionHeight in `reset` -- a non-zero value that
+    // tells the model to forget its history on every frame -- and a subrect base in `intensity`.
+    // Nothing crashes; the picture just quietly gets worse.
+    //
+    // package_release.ps1 looks for export names, which cannot see a changed signature behind an
+    // unchanged name, so this is the check that catches it. Bump on any change to the argument list
+    // of dlssnr_call_evaluate or dlssnr_vk_evaluate, and change kForwarderAbi in the host to match --
+    // a forwarder from before this export existed resolves to null and is refused the same way.
+    //
+    // 1: the original argument lists (no exported version).
+    // 2: per-resource subrect bases and an independent motion-vector subrect on both evaluates.
+    __declspec(dllexport) int dlssnr_abi_version = 2;
+
+    // The other half of the same check, for the direction reading dlssnr_abi_version cannot cover.
+    //
+    // A host that predates this export cannot ask the forwarder anything -- so the forwarder is told
+    // instead, and a host that never says stays at zero and is refused. That is not hypothetical
+    // here: every deployed game folder keeps a dxgi.dll.prev beside the forwarder, so rolling
+    // OptiScaler back without also rolling the forwarder back is one copy away, and an old host
+    // calling this build's evaluate would leave the six subrect arguments reading whatever the stack
+    // happened to hold.
+    //
+    // Refusing costs the picture the model would have edited. Running would cost it the picture the
+    // game rendered, and say nothing.
+    __declspec(dllexport) void dlssnr_set_host_abi(int version) { g_hostAbi = version; }
 
     // Called once, after the host has worked out which slot this block keeps floats in.
     __declspec(dllexport) void dlssnr_call_set_float_slot(int slot)
@@ -726,14 +762,15 @@ extern "C"
     //
     // Filling it here rather than in the host keeps the two APIs from drifting: a parameter added to one
     // evaluate and forgotten in the other would be a bug that only appears on one backend.
-    __declspec(dllexport) int dlssnr_vk_evaluate(void* cmdBuffer, void* feature, void* capabilityParams, void* color,
-                                                 void* depth, void* motion, void* output, unsigned int width,
-                                                 unsigned int height, unsigned int guideWidth, unsigned int guideHeight,
-                                                 int depthInverted, int reset, float intensity, int style,
-                                                 float localStructure, float localTone, float skinStructure,
-                                                 int useAutoMask, float mvScaleX, float mvScaleY)
+    __declspec(dllexport) int dlssnr_vk_evaluate(
+        void* cmdBuffer, void* feature, void* capabilityParams, void* color, void* depth, void* motion, void* output,
+        unsigned int width, unsigned int height, unsigned int guideWidth, unsigned int guideHeight,
+        unsigned int motionWidth, unsigned int motionHeight, unsigned int depthBaseX, unsigned int depthBaseY,
+        unsigned int motionBaseX, unsigned int motionBaseY, int depthInverted, int reset, float intensity, int style,
+        float localStructure, float localTone, float skinStructure, int useAutoMask, float mvScaleX, float mvScaleY)
     {
-        if (g_vk.evaluate == nullptr || feature == nullptr || capabilityParams == nullptr)
+        if (g_vk.evaluate == nullptr || feature == nullptr || capabilityParams == nullptr ||
+            g_hostAbi != dlssnr_abi_version)
         {
             return -1;
         }
@@ -759,14 +796,14 @@ extern "C"
         setUInt(capabilityParams, "DLSSNR.OutputSubrectBaseY", 0);
         setUInt(capabilityParams, "DLSSNR.OutputSubrectWidth", width);
         setUInt(capabilityParams, "DLSSNR.OutputSubrectHeight", height);
-        setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseX", 0);
-        setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseY", 0);
+        setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseX", depthBaseX);
+        setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseY", depthBaseY);
         setUInt(capabilityParams, "DLSSNR.DepthSubrectWidth", guideWidth);
         setUInt(capabilityParams, "DLSSNR.DepthSubrectHeight", guideHeight);
-        setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseX", 0);
-        setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseY", 0);
-        setUInt(capabilityParams, "DLSSNR.MVecSubrectWidth", guideWidth);
-        setUInt(capabilityParams, "DLSSNR.MVecSubrectHeight", guideHeight);
+        setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseX", motionBaseX);
+        setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseY", motionBaseY);
+        setUInt(capabilityParams, "DLSSNR.MVecSubrectWidth", motionWidth);
+        setUInt(capabilityParams, "DLSSNR.MVecSubrectHeight", motionHeight);
 
         // The game's own encoding, passed through rather than derived. Deriving it from the resolutions
         // came out as exactly 1.0 at native, which told the model almost nothing had moved.
@@ -848,15 +885,16 @@ extern "C"
 
     // Colour and output are display resolution; depth and motion come from the game's own DLSS evaluation and
     // may be render resolution, so each resource carries its own subrect and motion scales by the ratio.
-    __declspec(dllexport) int dlssnr_call_evaluate(ID3D12GraphicsCommandList* cmd, void* feature,
-                                                   void* capabilityParams, ID3D12Resource* color, ID3D12Resource* depth,
-                                                   ID3D12Resource* motion, ID3D12Resource* output, unsigned int width,
-                                                   unsigned int height, unsigned int guideWidth,
-                                                   unsigned int guideHeight, int depthInverted, int reset,
-                                                   float intensity, int style, float localStructure, float localTone,
-                                                   float skinStructure, int useAutoMask, float mvScaleX, float mvScaleY)
+    __declspec(dllexport) int
+    dlssnr_call_evaluate(ID3D12GraphicsCommandList* cmd, void* feature, void* capabilityParams, ID3D12Resource* color,
+                         ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output, unsigned int width,
+                         unsigned int height, unsigned int guideWidth, unsigned int guideHeight,
+                         unsigned int motionWidth, unsigned int motionHeight, unsigned int depthBaseX,
+                         unsigned int depthBaseY, unsigned int motionBaseX, unsigned int motionBaseY, int depthInverted,
+                         int reset, float intensity, int style, float localStructure, float localTone,
+                         float skinStructure, int useAutoMask, float mvScaleX, float mvScaleY)
     {
-        if (!feature || !capabilityParams || !g_snip.evaluate)
+        if (!feature || !capabilityParams || !g_snip.evaluate || g_hostAbi != dlssnr_abi_version)
         {
             return 0;
         }
@@ -881,14 +919,14 @@ extern "C"
         setUInt(capabilityParams, "DLSSNR.OutputSubrectBaseY", 0);
         setUInt(capabilityParams, "DLSSNR.OutputSubrectWidth", width);
         setUInt(capabilityParams, "DLSSNR.OutputSubrectHeight", height);
-        setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseX", 0);
-        setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseY", 0);
+        setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseX", depthBaseX);
+        setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseY", depthBaseY);
         setUInt(capabilityParams, "DLSSNR.DepthSubrectWidth", guideWidth);
         setUInt(capabilityParams, "DLSSNR.DepthSubrectHeight", guideHeight);
-        setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseX", 0);
-        setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseY", 0);
-        setUInt(capabilityParams, "DLSSNR.MVecSubrectWidth", guideWidth);
-        setUInt(capabilityParams, "DLSSNR.MVecSubrectHeight", guideHeight);
+        setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseX", motionBaseX);
+        setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseY", motionBaseY);
+        setUInt(capabilityParams, "DLSSNR.MVecSubrectWidth", motionWidth);
+        setUInt(capabilityParams, "DLSSNR.MVecSubrectHeight", motionHeight);
 
         // The game's own encoding, passed through. Deriving this from the resolutions was a guess, and at
         // native resolution it came out as exactly 1.0 -- so a game using normalised vectors was telling

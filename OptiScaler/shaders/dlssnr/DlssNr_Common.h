@@ -12,6 +12,20 @@
 
 #include <cstdint>
 
+// The evaluate signature this build expects nvngx.dll_dlssnr.dll to have.
+//
+// The forwarder is a separate DLL the user copies into each game folder, so the two halves drift the
+// moment one is updated without the other. The export names have never changed across a signature
+// change, so a mismatch is invisible to package_release.ps1's export check and to GetProcAddress:
+// past the fourth argument everything is on the stack, and an old forwarder reads each one from the
+// wrong slot. Version 2 moved `reset` under a motion-vector dimension, which is non-zero every frame,
+// so the model would be told to forget its history continuously and nothing would report a fault.
+//
+// Both backends check this against the forwarder's exported dlssnr_abi_version before using it, and a
+// forwarder built before that export simply resolves to null. Keep the two numbers in step; the
+// comment on dlssnr_abi_version in dlssnr_forwarder.cpp records what each version means.
+constexpr int kDlssNrForwarderAbi = 2;
+
 // Which of the passes a dispatch is. One shader, because they read and write the same set of
 // resources and differ only in what they compute.
 enum DlssNrMode : uint32_t
@@ -99,6 +113,15 @@ struct DlssNrFrameInfo
     // available and is what gets used.
     unsigned int RenderSubrectWidth = 0;
     unsigned int RenderSubrectHeight = 0;
+
+    unsigned int DepthSubrectBaseX = 0;
+    unsigned int DepthSubrectBaseY = 0;
+    unsigned int MotionSubrectBaseX = 0;
+    unsigned int MotionSubrectBaseY = 0;
+
+    // DLSS permits motion vectors at either render or output resolution. This flag comes from the
+    // feature-create flags and decides which valid-region dimensions apply to the motion texture.
+    bool MotionVectorsLowResolution = false;
 
     // The resource state the output arrives in and is handed back in, as a D3D12_RESOURCE_STATES
     // value, when the caller owns the output and knows. Negative means the output is the upscaler's
