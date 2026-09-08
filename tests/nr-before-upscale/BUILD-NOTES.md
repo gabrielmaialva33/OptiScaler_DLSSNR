@@ -24,7 +24,7 @@ forwarder were copied with SHA-256 manifests to the workstation state backup dir
 That preserves the previous **local build**, not a claim that it was validated in game.
 Game installations and markers were not modified. Runtime traces, successful/failed
 build logs and host test output are retained under the project-specific workstation
-state directory `~/.local/state/crimson-desert-dlss5/nr-before-upscale-validation/`.
+state directory `~/.local/state/dlss5/nr-before-upscale-validation/`.
 
 Release success is a compile/link check. It does not validate the NGX model, actual
 GPU resource completion, pixels or performance; see the design note's GPU lifetime

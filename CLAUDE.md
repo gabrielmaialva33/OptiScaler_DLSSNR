@@ -109,7 +109,7 @@ WINEPREFIX=~/.local/opt/msvc-wineprefix WINEDEBUG=-all ~/.local/opt/msvc/bin/x64
 ./build-local.sh Release /p:CL_MPCount=4 > /tmp/release.log 2>&1
 ```
 
-  Evidence, manifests and logs: `~/.local/state/crimson-desert-dlss5/gpu-timing-validation/1885828a/`.
+  Evidence, manifests and logs: `~/.local/state/dlss5/gpu-timing-validation/1885828a/`.
 - When killing a stalled build, **use a bracket pattern**: `pgrep -f '[M]SBuild\.exe'`. A plain
   `pgrep -f 'build-local'` matches the very shell running it, so the kill takes out your own
   command (exit 144) and leaves the stall untouched. The bracket trick is not enough on its own
@@ -219,7 +219,7 @@ Crimson Desert (Steam 3321460), `~/.local/share/Steam/steamapps/common/Crimson D
 - Ini: `[DlssNr] Enabled=true ToggleKey=0x76` (F7); `[Menu] ShortcutKey=0x24` (Home);
   `[Log] LogToFile=true LogLevel=2`. Runtime log: `bin64/OptiScaler.log`.
 - Full history, backups and rollback notes:
-  `~/.local/state/crimson-desert-dlss5/backups/20260902-201621-optiscaler/README.md`.
+  `~/.local/state/dlss5/backups/20260902-201621-optiscaler/README.md`.
 
 ## Precompiled shaders
 
