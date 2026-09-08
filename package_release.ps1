@@ -47,7 +47,13 @@ if (-not (Test-Path $forwarder)) {
     Write-Host "forwarder: using the shared build output ($forwarder)"
 }
 
-$exports = @("dlssnr_call_create", "dlssnr_call_evaluate", "dlssnr_call_set_extras")
+# dlssnr_abi_version is here for the case the other three cannot see: a forwarder whose exports are
+# all present but whose argument lists are from an older build. The name alone is a weak check --
+# it says the forwarder knows about versioning, not that it agrees with this one -- but the number
+# itself lives in the DLL's data rather than its export names, so it is the loader that compares it
+# against kDlssNrForwarderAbi and refuses. This only has to catch a forwarder built before the export
+# existed at all.
+$exports = @("dlssnr_call_create", "dlssnr_call_evaluate", "dlssnr_call_set_extras", "dlssnr_abi_version")
 $bytes = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($forwarder))
 $missing = @($exports | Where-Object { $bytes.IndexOf($_) -lt 0 })
 
