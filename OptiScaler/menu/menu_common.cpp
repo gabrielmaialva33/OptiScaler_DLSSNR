@@ -4328,6 +4328,16 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             }
         }
 
+        if (bool reflexBoost = config->FGDLSSGReflexBoost.value_or_default();
+            ImGui::Checkbox("Reflex Boost", &reflexBoost))
+        {
+            config->FGDLSSGReflexBoost = reflexBoost;
+            LOG_DEBUG("Changed set FGDLSSGReflexBoost: {}", reflexBoost);
+        }
+        ShowHelpMarker("Holds the GPU at high clocks while a frame is in flight.\n"
+                       "Lower input latency, at the cost of power and heat,\n"
+                       "and no gain when the scene is waiting on the CPU.");
+
         bool useGamesMarkers = config->FGDLSSGUseGamesReflexMarkers.value_or_default();
         ImGui::BeginDisabled(!ReflexHooks::gameIsSendingMarkers());
         if (ImGui::Checkbox("Use Game's Reflex Markers", &useGamesMarkers))

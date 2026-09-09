@@ -878,6 +878,13 @@ class Config
     // DLSSG
     CustomOptional<int> FGDLSSGInterpolationCount { 1 }; // For Opti's own SL instance
     CustomOptional<bool> FGDLSSGUseGamesReflexMarkers { true };
+
+    // Whether Opti's own DLSS-G asks Reflex for the boost variant of low latency. Boost keeps the
+    // GPU at high clocks while a frame is in flight, which is the remaining latency lever on top of
+    // frame generation -- and is not free: more power and heat, and nothing to win in a scene that
+    // is waiting on the CPU. Off still means low latency, never eOff, which is what turns the
+    // frame-generated image pink.
+    CustomOptional<bool> FGDLSSGReflexBoost { true };
     CustomOptional<int, NoDefault>
         FGDLSSGOverrideInterpolationCount; // For overriding game's value sent to SL, could be Nvngx FG, could be noFG
                                            // but someone just uses real DLSSG
