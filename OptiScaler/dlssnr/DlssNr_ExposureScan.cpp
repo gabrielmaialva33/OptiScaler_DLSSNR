@@ -43,6 +43,23 @@ constexpr unsigned int kStride = 512;
 constexpr float kFloor = 1e-6f;
 constexpr float kCeiling = 1e4f;
 
+// Once a mover has been found the sweep only needs to keep feeding the white point a fresh value,
+// not to re-scan for a mover. An auto-exposure eases over many frames, so re-reading the whole
+// candidate ring (up to kMaxCandidates x {2 barriers + 1 copy} on the game's command list plus a CPU
+// readback) every frame is wasted work. Run the full sweep every kScanThrottle frames instead and
+// reuse the last read value between sweeps. Before discovery the sweep still runs every frame (see
+// Tick), so a mover is found as fast as the unthrottled code. The cost removed is proportional to
+// this; the white-point staleness is proportional to it too (kSlots sweeps behind x kScanThrottle).
+constexpr unsigned int kScanThrottle = 4;
+
+// How many frames of watching without movement before the scan is considered settled-barren. At
+// sixty frames a second this is about half a minute, which is long enough to have walked somewhere
+// with different light in it and short enough that nobody waits on it wondering. Once a candidate has
+// been seen this many reads without any moving, the exposure is not in this game (e.g. KCD2 computes
+// one but never hands it to the upscaler), so the sweep's value is never consumed (BestValue -> 0) and
+// the per-frame cost is pure waste; throttle it then, exactly like the mover-found case.
+constexpr unsigned int kPatience = 1800;
+
 struct Tracked
 {
     ID3D12Resource* resource = nullptr;
@@ -64,7 +81,8 @@ struct ScanState
     unsigned int examined = 0;
     std::vector<Tracked> tracked;
     ID3D12Resource* readback[kSlots] = {};
-    unsigned long long frames = 0;
+    unsigned long long frames = 0; // Tick() calls (drives the periodic readout cadence)
+    unsigned long long writes = 0; // sweeps actually recorded (drives the readback ring)
     const char* status = "not started";
     bool complained = false;
     unsigned int nearMissLogged = 0; // bounded diagnostic; see NoteResource
@@ -402,86 +420,147 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList)
         return;
     }
 
-    // Read the slot written four frames ago before overwriting it. Retired by now, so this reads
-    // mapped memory rather than waiting on the GPU.
-    if (g_scan.frames >= kSlots)
+    // Throttle the sweep once it is "settled". The per-frame sweep -- up to kMaxCandidates x {2
+    // transition barriers + 1 copy} spliced onto the GAME's command list plus a CPU readback of the
+    // whole ring -- exists to discover which buffer is the exposure and, after that, to keep feeding
+    // the white point a fresh value. It is settled in either of two ways: a mover has been found (the
+    // exposure is tracking the light, so the white point just needs a fresh value every few frames --
+    // an auto-exposure eases over many frames, so the last read value is fine between sweeps), or the
+    // scan has watched for kPatience reads with nothing moving (the exposure is not in this game -- e.g.
+    // KCD2 computes one but never hands it to the upscaler -- so BestValue returns 0 and the sweep's
+    // value is never consumed; the per-frame cost is pure waste). Until settled the sweep runs every
+    // frame, so a mover is found as fast as the unthrottled code. The readback ring is indexed by
+    // `writes` (sweeps recorded) rather than `frames` (Tick calls), so the slot read is kSlots sweeps
+    // behind the slot written and is always retired.
+    bool anyMover = false;
+    unsigned int mostReads = 0;
+    for (const Tracked& t : g_scan.tracked)
     {
-        ID3D12Resource* old = g_scan.readback[g_scan.frames % kSlots];
-        void* mapped = nullptr;
-        D3D12_RANGE range { 0, kStride * kMaxCandidates };
+        if (t.moves)
+            anyMover = true;
+        mostReads = std::max(mostReads, t.reads);
+    }
 
-        if (old != nullptr && SUCCEEDED(old->Map(0, &range, &mapped)) && mapped != nullptr)
+    const bool settled = anyMover || mostReads >= kPatience;
+    const bool doSweep = !settled || (g_scan.frames % kScanThrottle == 0);
+
+    if (doSweep)
+    {
+        // Read the slot written kSlots sweeps ago before overwriting it. Retired by now, so this reads
+        // mapped memory rather than waiting on the GPU.
+        if (g_scan.writes >= kSlots)
         {
-            const unsigned char* base = (const unsigned char*) mapped;
+            ID3D12Resource* old = g_scan.readback[g_scan.writes % kSlots];
+            void* mapped = nullptr;
+            D3D12_RANGE range { 0, kStride * kMaxCandidates };
 
+            if (old != nullptr && SUCCEEDED(old->Map(0, &range, &mapped)) && mapped != nullptr)
+            {
+                const unsigned char* base = (const unsigned char*) mapped;
+
+                for (size_t i = 0; i < g_scan.tracked.size(); ++i)
+                {
+                    Tracked& t = g_scan.tracked[i];
+                    const unsigned char* at = base + i * kStride;
+
+                    float value = 0.0f;
+
+                    if (t.bytes == 2)
+                    {
+                        uint16_t half = 0;
+                        std::memcpy(&half, at, sizeof(half));
+                        value = HalfToFloat(half);
+                    }
+                    else
+                    {
+                        std::memcpy(&value, at, sizeof(value));
+                    }
+
+                    if (!std::isfinite(value))
+                        continue;
+
+                    if (value <= kFloor || value >= kCeiling)
+                    {
+                        t.latest = value;
+                        t.reads++;
+                        continue;
+                    }
+
+                    if (t.inRange == 0)
+                    {
+                        t.lowest = value;
+                        t.highest = value;
+                    }
+                    else
+                    {
+                        t.lowest = std::min(t.lowest, value);
+                        t.highest = std::max(t.highest, value);
+                    }
+
+                    t.inRange++;
+
+                    if (t.inRange > 1 && t.highest > t.lowest * 1.25f)
+                        t.moves = true;
+
+                    t.latest = value;
+                    t.reads++;
+                }
+
+                D3D12_RANGE nothingWritten { 0, 0 };
+                old->Unmap(0, &nothingWritten);
+            }
+        }
+
+        // The state a candidate is in is the game's business and nothing here has a contract about it.
+        //
+        // UNORDERED_ACCESS is the assumption, and it is the reasonable one: every candidate got here by
+        // having an unordered access view created on it, which is what a compute shader writes through,
+        // and an eye adaptation buffer is written every frame and read by the next pass. It is still an
+        // assumption, which is why the whole scan is behind a setting that is off by default -- getting
+        // this wrong on someone's machine costs them a frame or a device, and nobody who has not asked
+        // for the scan should be exposed to that.
+        ID3D12Resource* dst = g_scan.readback[g_scan.writes % kSlots];
+
+        if (dst != nullptr)
+        {
             for (size_t i = 0; i < g_scan.tracked.size(); ++i)
             {
                 Tracked& t = g_scan.tracked[i];
-                const unsigned char* at = base + i * kStride;
 
-                float value = 0.0f;
+                if (t.resource == nullptr)
+                    continue;
 
-                if (t.bytes == 2)
+                Barrier(cmdList, t.resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+                if (t.isBuffer)
                 {
-                    uint16_t half = 0;
-                    std::memcpy(&half, at, sizeof(half));
-                    value = HalfToFloat(half);
+                    cmdList->CopyBufferRegion(dst, i * kStride, t.resource, 0, t.bytes);
                 }
                 else
                 {
-                    std::memcpy(&value, at, sizeof(value));
+                    D3D12_TEXTURE_COPY_LOCATION src {};
+                    src.pResource = t.resource;
+                    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    src.SubresourceIndex = 0;
+
+                    D3D12_TEXTURE_COPY_LOCATION to {};
+                    to.pResource = dst;
+                    to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                    to.PlacedFootprint.Offset = i * kStride;
+                    to.PlacedFootprint.Footprint.Format = t.texFormat;
+                    to.PlacedFootprint.Footprint.Width = 1;
+                    to.PlacedFootprint.Footprint.Height = 1;
+                    to.PlacedFootprint.Footprint.Depth = 1;
+                    to.PlacedFootprint.Footprint.RowPitch = 256;
+
+                    D3D12_BOX one { 0, 0, 0, 1, 1, 1 };
+                    cmdList->CopyTextureRegion(&to, 0, 0, 0, &src, &one);
                 }
 
-                if (!std::isfinite(value))
-                    continue;
-
-                // Only values that could BE an exposure are allowed into the range, and this is
-                // the whole of "8 watching, none moving" never changing.
-                //
-                // A buffer is usually zero the first time it is read -- created but not yet
-                // written, or read a frame before the game fills it. That zero became `lowest`,
-                // and since movement is a ratio guarded by `lowest > kFloor`, one early zero
-                // disqualified that candidate for the rest of the session however the light
-                // changed. The range has to be built from plausible samples, not from whichever
-                // sample happened to be first.
-                if (value <= kFloor || value >= kCeiling)
-                {
-                    t.latest = value;
-                    t.reads++;
-                    continue;
-                }
-
-                if (t.inRange == 0)
-                {
-                    t.lowest = value;
-                    t.highest = value;
-                }
-                else
-                {
-                    t.lowest = std::min(t.lowest, value);
-                    t.highest = std::max(t.highest, value);
-                }
-
-                t.inRange++;
-
-                // "Moves" is the whole point of the readout, and the first version of this test
-                // was wrong in a way that mattered: a spread of ten percent of the highest value
-                // seen is a threshold of zero when the highest value seen is zero, so three buffers
-                // sitting at 0.00000 with float noise around them all reported MOVES.
-                //
-                // Ratios, not differences, and only over values that could be an exposure at all.
-                // An exposure is positive, is not a thousandth of a thousandth, and does not sit at
-                // a million. Nioh 3's real one runs 0.0019 to 0.616 -- a factor of three hundred --
-                // so a quarter is a low bar that noise cannot reach.
-                if (t.inRange > 1 && t.highest > t.lowest * 1.25f)
-                    t.moves = true;
-
-                t.latest = value;
-                t.reads++;
+                Barrier(cmdList, t.resource, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
 
-            D3D12_RANGE nothingWritten { 0, 0 };
-            old->Unmap(0, &nothingWritten);
+            g_scan.writes++;
         }
     }
 
@@ -511,64 +590,9 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList)
                      (unsigned int) g_scan.tracked.size());
     }
 
-    ID3D12Resource* dst = g_scan.readback[g_scan.frames % kSlots];
-
-    if (dst == nullptr)
-        return;
-
-    // The state a candidate is in is the game's business and nothing here has a contract about it.
-    //
-    // UNORDERED_ACCESS is the assumption, and it is the reasonable one: every candidate got here by
-    // having an unordered access view created on it, which is what a compute shader writes through,
-    // and an eye adaptation buffer is written every frame and read by the next pass. It is still an
-    // assumption, which is why the whole scan is behind a setting that is off by default -- getting
-    // this wrong on someone's machine costs them a frame or a device, and nobody who has not asked
-    // for the scan should be exposed to that.
-    for (size_t i = 0; i < g_scan.tracked.size(); ++i)
-    {
-        Tracked& t = g_scan.tracked[i];
-
-        if (t.resource == nullptr)
-            continue;
-
-        Barrier(cmdList, t.resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-
-        if (t.isBuffer)
-        {
-            cmdList->CopyBufferRegion(dst, i * kStride, t.resource, 0, t.bytes);
-        }
-        else
-        {
-            D3D12_TEXTURE_COPY_LOCATION src {};
-            src.pResource = t.resource;
-            src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            src.SubresourceIndex = 0;
-
-            D3D12_TEXTURE_COPY_LOCATION to {};
-            to.pResource = dst;
-            to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-            to.PlacedFootprint.Offset = i * kStride;
-            to.PlacedFootprint.Footprint.Format = t.texFormat;
-            to.PlacedFootprint.Footprint.Width = 1;
-            to.PlacedFootprint.Footprint.Height = 1;
-            to.PlacedFootprint.Footprint.Depth = 1;
-            to.PlacedFootprint.Footprint.RowPitch = 256;
-
-            D3D12_BOX one { 0, 0, 0, 1, 1, 1 };
-            cmdList->CopyTextureRegion(&to, 0, 0, 0, &src, &one);
-        }
-
-        Barrier(cmdList, t.resource, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    }
-
     g_scan.frames++;
     g_scan.status = "";
 }
-
-// How many frames of watching without movement before saying so. At sixty frames a second this is
-// about half a minute, which is long enough to have walked somewhere with different light in it and
-// short enough that nobody waits on it wondering.
-constexpr unsigned int kPatience = 1800;
 
 Verdict Where()
 {
@@ -985,6 +1009,7 @@ void Shutdown()
     }
 
     g_scan.frames = 0;
+    g_scan.writes = 0;
     g_scan.status = "not started";
 }
 
