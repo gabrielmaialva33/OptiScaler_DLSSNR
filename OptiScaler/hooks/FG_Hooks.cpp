@@ -1139,7 +1139,10 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
 
     IFGFeature* fg = state.currentFG;
 
-    if (fg != nullptr && willPresent && fg->IsActive() && !fg->IsPaused())
+    // The readback Map/Unmaps a readback heap on the game's thread every present, for the
+    // performance display alone. The queue recording the timestamps keeps going either way.
+    if (fg != nullptr && willPresent && fg->IsActive() && !fg->IsPaused() &&
+        (config->ShowFps.value_or_default() || state.menuVisible))
     {
         if (auto currentFeature = State::Instance().currentFeature; currentFeature != nullptr)
         {

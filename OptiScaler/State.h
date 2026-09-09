@@ -330,6 +330,10 @@ class State
     VkInstance VulkanInstance = nullptr;
 
     // Framegraph
+    // Set by the menu every frame. The GPU-time readbacks that feed the stats below are for the
+    // performance display, and they are skipped while it is not on screen.
+    bool menuVisible = false;
+
     std::deque<double> upscaleTimes;
     std::deque<double> frameTimes;
     std::vector<DetailedGpuTime> detailedGpuTimes;
