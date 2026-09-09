@@ -7893,7 +7893,7 @@ bool MenuCommon::RenderMenu()
     return ctx.newFrame;
 }
 
-void MenuCommon::Init(HWND InHwnd, bool isUWP)
+void MenuCommon::Init(HWND InHwnd, bool isUWP, bool nativeVulkan)
 {
     // Reset shutdown flag in case of re-init
     State::Instance().isShuttingDown = false;
@@ -7914,8 +7914,18 @@ void MenuCommon::Init(HWND InHwnd, bool isUWP)
 
     LOG_DEBUG("Handle: {0:X}", (size_t) _handle);
 
-    // In case d3d12 wasn't yet used up to this point, try to update GPU info late here
-    IdentifyGpu::updateD3d12Capabilities();
+    // In case d3d12 wasn't yet used up to this point, try to update GPU info late here.
+    //
+    // Not on a native Vulkan game, where "d3d12 wasn't yet used" is not a gap to fill but the truth
+    // about the process: there is no D3D12 and there never will be. The probe exists to find out
+    // whether the adapter supports FSR4, and it answers that by creating a D3D12 device -- so on
+    // Proton it drags vkd3d-proton into a process that speaks only Vulkan, where it asserts and
+    // calls abort() during physical-device init. DOOM Eternal dies of it, reporting nothing.
+    //
+    // Only the Vulkan overlay opts out, so a D3D12 title that has genuinely not presented yet still
+    // gets the late probe this was written for, and FSR4 detection is unchanged everywhere else.
+    if (!nativeVulkan)
+        IdentifyGpu::updateD3d12Capabilities();
 
     // Setup Dear ImGui context
     IMGUI_CHECKVERSION();

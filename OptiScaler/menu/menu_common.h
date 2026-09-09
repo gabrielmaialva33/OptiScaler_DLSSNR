@@ -194,7 +194,9 @@ class MenuCommon
     static HWND Handle() { return _handle; }
 
     static bool RenderMenu();
-    static void Init(HWND InHwnd, bool isUWP);
+    // nativeVulkan: the process speaks only Vulkan, so two things the menu normally does are
+    // unsafe here. See the definition.
+    static void Init(HWND InHwnd, bool isUWP, bool nativeVulkan = false);
     static void Shutdown();
     static void HideMenu();
     static void Present();

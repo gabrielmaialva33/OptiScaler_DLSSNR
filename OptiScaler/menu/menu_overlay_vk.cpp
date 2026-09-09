@@ -240,7 +240,7 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
             MenuOverlayBase::Shutdown();
 
         LOG_DEBUG("MenuOverlayBase::Init");
-        MenuOverlayBase::Init(hwnd, false);
+        MenuOverlayBase::Init(hwnd, false, true);
     }
 
     // Starts here, not above: MenuOverlayBase::Init reaches D3D12 device creation, which re-enters the
@@ -1078,7 +1078,7 @@ void MenuOverlayVk::CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInst
         }
 
         LOG_DEBUG("MenuOverlayBase::Init({0:X})", (UINT64) hwnd);
-        MenuOverlayBase::Init(hwnd, false);
+        MenuOverlayBase::Init(hwnd, false, true);
     }
 
     CreateVulkanObjects(device, pd, instance, hwnd, pCreateInfo, pSwapchain);

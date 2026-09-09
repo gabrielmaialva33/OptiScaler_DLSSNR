@@ -21,13 +21,13 @@ bool MenuOverlayBase::IsInited() { return MenuCommon::IsInited(); }
 
 bool MenuOverlayBase::IsVisible() { return MenuCommon::IsVisible(); }
 
-void MenuOverlayBase::Init(HWND InHandle, bool isUWP)
+void MenuOverlayBase::Init(HWND InHandle, bool isUWP, bool nativeVulkan)
 {
     if (!Config::Instance()->OverlayMenu.value_or_default())
         return;
 
     LOG_FUNC();
-    MenuCommon::Init(InHandle, isUWP);
+    MenuCommon::Init(InHandle, isUWP, nativeVulkan);
 }
 
 bool MenuOverlayBase::RenderMenu()
