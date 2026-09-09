@@ -146,6 +146,11 @@ class StreamlineHooks
     // DLSS-G option push, including the ones OptiScaler makes through StreamlineProxy.
     static void applyMenuDlssgInterlock(sl::DLSSGOptions& options, bool dlssgPotentiallyActive);
 
+    // Bumped whenever the game pushes its own options through to the plugin, so a caller that
+    // caches what it last sent can tell that the plugin no longer holds it. See DLSSG_Dx12.
+    static unsigned int dlssgOptionsGeneration();
+    static unsigned int reflexOptionsGeneration();
+
     static void unhookInterposer();
     static void hookInterposer(HMODULE slInterposer);
 

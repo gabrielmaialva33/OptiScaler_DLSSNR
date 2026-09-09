@@ -18,6 +18,7 @@
 #include <sl1_reflex.h>
 #include <magic_enum.hpp>
 #include "detours/detours.h"
+#include <atomic>
 
 static bool IsSL1AndDLSSGActive()
 {
@@ -1088,8 +1089,27 @@ bool StreamlineHooks::hkcommon_slOnPluginLoad(sl::param::IParameters* params, co
     return result;
 }
 
+// The game's own pushes reach the plugin through the two hooks below, which latch options that
+// OptiScaler did not send. Anything caching its last-sent values has no other way to notice; see
+// DLSSG_Dx12::Dispatch, which skips redundant proxy calls and would otherwise let the game's
+// values stand while believing its own were still in force.
+static std::atomic<unsigned int> g_dlssgOptionsGeneration { 0 };
+static std::atomic<unsigned int> g_reflexOptionsGeneration { 0 };
+
+unsigned int StreamlineHooks::dlssgOptionsGeneration()
+{
+    return g_dlssgOptionsGeneration.load(std::memory_order_relaxed);
+}
+
+unsigned int StreamlineHooks::reflexOptionsGeneration()
+{
+    return g_reflexOptionsGeneration.load(std::memory_order_relaxed);
+}
+
 sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options)
 {
+    g_dlssgOptionsGeneration.fetch_add(1, std::memory_order_relaxed);
+
     lastDlssgViewport = viewport;
     lastDlssgOptions = options;
 
@@ -1332,6 +1352,8 @@ bool StreamlineHooks::hkreflex_slOnPluginLoad(sl::param::IParameters* params, co
 
 sl::Result StreamlineHooks::hkslReflexSetOptions(const sl::ReflexOptions& options)
 {
+    g_reflexOptionsGeneration.fetch_add(1, std::memory_order_relaxed);
+
     reflexGamesLastMode = options.mode;
 
     sl::ReflexOptions newOptions = options;

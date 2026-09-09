@@ -289,6 +289,17 @@ void DLSSG_Dx12::Deactivate()
         reflexConst.useMarkersToOptimize = false;
         StreamlineProxy::ReflexSetOptions()(reflexConst);
 
+        // The cache mirrors what the plugin now holds (eOff), so the next Dispatch re-sends the
+        // active values instead of assuming they are still latched from before the deactivate.
+        _lastDlssgMode = sl::DLSSGMode::eOff;
+        _lastDlssgFrames = 0;
+        _lastDlssgDynamicTarget = 0.0f;
+        _lastDlssgFlags = {};
+        _lastReflexMode = sl::ReflexMode::eOff;
+        _lastReflexMarkers = false;
+        _lastDlssgGeneration = StreamlineHooks::dlssgOptionsGeneration();
+        _lastReflexGeneration = StreamlineHooks::reflexOptionsGeneration();
+
         _isActive = false;
     }
 }
@@ -356,32 +367,68 @@ bool DLSSG_Dx12::Dispatch()
     options.numFramesToGenerate = _framesToInterpolate;
     options.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
 
+    float dynamicTarget = 0.0f;
     if (Config::Instance()->FGDLSSGForceDMFG.value_or_default())
     {
         options.mode = sl::DLSSGMode::eDynamic;
-        options.dynamicTargetFrameRate = Config::Instance()->FGDLSSGFramerateTargetDMFG.value_or_default();
+        dynamicTarget = Config::Instance()->FGDLSSGFramerateTargetDMFG.value_or_default();
+        options.dynamicTargetFrameRate = dynamicTarget;
     }
 
     // StreamlineProxy holds the raw export, so this push bypasses hkslDLSSGSetOptions and its
     // interlock. Apply it here too.
     StreamlineHooks::applyMenuDlssgInterlock(options, true);
 
-    auto dlssgSetOptionsResult = StreamlineProxy::DLSSGSetOptions()(viewport, options);
+    // The plugin latches these options (the count is only re-read on an eOff->eOn transition), so
+    // push them through the proxy only when they actually change. For a non-Streamline game the
+    // Reflex marker flag is always false, so after the first frame both option sets are static and
+    // this skips two proxy -> NvAPI calls every frame.
+    // flags is in the comparison because applyMenuDlssgInterlock sets it alongside the mode: today
+    // the two always move together, so leaving it out would work by coincidence rather than by
+    // construction, and the day a flag moves on its own it would go unsent with nothing to show.
+    const unsigned int dlssgGeneration = StreamlineHooks::dlssgOptionsGeneration();
 
-    if (dlssgSetOptionsResult != sl::Result::eOk)
+    if (options.mode != _lastDlssgMode || options.numFramesToGenerate != _lastDlssgFrames ||
+        dynamicTarget != _lastDlssgDynamicTarget || options.flags != _lastDlssgFlags ||
+        dlssgGeneration != _lastDlssgGeneration)
     {
-        LOG_ERROR("Couldn't set DLSSG options, error: {}", magic_enum::enum_name(dlssgSetOptionsResult));
+        auto dlssgSetOptionsResult = StreamlineProxy::DLSSGSetOptions()(viewport, options);
+
+        if (dlssgSetOptionsResult != sl::Result::eOk)
+        {
+            LOG_ERROR("Couldn't set DLSSG options, error: {}", magic_enum::enum_name(dlssgSetOptionsResult));
+        }
+
+        _lastDlssgMode = options.mode;
+        _lastDlssgFrames = options.numFramesToGenerate;
+        _lastDlssgDynamicTarget = dynamicTarget;
+        _lastDlssgFlags = options.flags;
+        _lastDlssgGeneration = dlssgGeneration;
     }
 
     sl::ReflexOptions reflexConst = {};
-    reflexConst.mode = sl::ReflexMode::eLowLatency;
+    // Request the lowest-latency Reflex mode ("ultra" / boost), not just eLowLatency. The
+    // boost mode tells the driver to hold the GPU at boost clocks while a frame is in flight,
+    // which is the main remaining input-latency lever on top of frame generation. It is fully
+    // compatible with DLSS Frame Generation (only eOff causes the pink screen).
+    reflexConst.mode = sl::ReflexMode::eLowLatencyWithBoost;
     reflexConst.useMarkersToOptimize = ReflexHooks::gameIsSendingMarkers();
 
-    auto reflexSetOptionsResult = StreamlineProxy::ReflexSetOptions()(reflexConst);
+    const unsigned int reflexGeneration = StreamlineHooks::reflexOptionsGeneration();
 
-    if (reflexSetOptionsResult != sl::Result::eOk)
+    if (reflexConst.mode != _lastReflexMode || reflexConst.useMarkersToOptimize != _lastReflexMarkers ||
+        reflexGeneration != _lastReflexGeneration)
     {
-        LOG_ERROR("Couldn't set Reflex options, error: {}", magic_enum::enum_name(reflexSetOptionsResult));
+        auto reflexSetOptionsResult = StreamlineProxy::ReflexSetOptions()(reflexConst);
+
+        if (reflexSetOptionsResult != sl::Result::eOk)
+        {
+            LOG_ERROR("Couldn't set Reflex options, error: {}", magic_enum::enum_name(reflexSetOptionsResult));
+        }
+
+        _lastReflexMode = reflexConst.mode;
+        _lastReflexMarkers = reflexConst.useMarkersToOptimize;
+        _lastReflexGeneration = reflexGeneration;
     }
 
     if (!_haveHudless.has_value())

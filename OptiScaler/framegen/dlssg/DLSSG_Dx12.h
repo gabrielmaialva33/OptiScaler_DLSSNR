@@ -17,6 +17,23 @@ class DLSSG_Dx12 : public virtual IFGFeature_Dx12
     ID3D12Fence* dlssgFence[BUFFER_COUNT] = {};
     UINT64 lastOptionFrame = 0;
 
+    // The DLSSG and Reflex options are latched by the SL plugin, so re-sending identical
+    // options every frame costs two proxy -> NvAPI calls for nothing. Track the last-sent
+    // values and call the proxy only when one of them actually changes.
+    sl::DLSSGMode _lastDlssgMode = sl::DLSSGMode::eOff;
+    uint32_t _lastDlssgFrames = 0;
+    float _lastDlssgDynamicTarget = 0.0f;
+    sl::DLSSGFlags _lastDlssgFlags = {};
+    sl::ReflexMode _lastReflexMode = sl::ReflexMode::eOff;
+    bool _lastReflexMarkers = false;
+
+    // What the game had pushed the last time this cache was believed. The interlock and the menu
+    // reach the plugin through OptiScaler, but a Streamline game also sets its own options behind
+    // us; when it does, the plugin no longer holds what we last sent and the cache has to be
+    // treated as cold, or our values quietly stop being applied.
+    unsigned int _lastDlssgGeneration = 0;
+    unsigned int _lastReflexGeneration = 0;
+
     bool Dispatch();
 
   protected:
