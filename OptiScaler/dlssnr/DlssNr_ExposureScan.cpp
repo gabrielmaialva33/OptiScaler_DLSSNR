@@ -57,8 +57,20 @@ constexpr unsigned int kScanThrottle = 4;
 // with different light in it and short enough that nobody waits on it wondering. Once a candidate has
 // been seen this many reads without any moving, the exposure is not in this game (e.g. KCD2 computes
 // one but never hands it to the upscaler), so the sweep's value is never consumed (BestValue -> 0) and
-// the per-frame cost is pure waste; throttle it then, exactly like the mover-found case.
+// the sweep cost is pure waste; drop to the liveness cadence below then.
 constexpr unsigned int kPatience = 1800;
+
+// Barren cadence. With nothing moving, a full sweep no longer feeds any value anywhere; its only job
+// is to notice a NEW candidate (created by a later level load) or a long-quiet buffer that finally
+// starts to move. Neither is quick: buffers appear at level load, and an auto-exposure eases over many
+// frames. So a barren scan sweeps once every kBarrenSweepInterval frames instead of every
+// kScanThrottle -- kBarrenSweepInterval / kScanThrottle times less GPU/CPU work for the KCD2 case, at
+// the cost of detecting a late mover up to ~2s later. That cost is invisible in practice: while the
+// scan is barren it feeds nothing (BestValue -> 0), so the white point comes from another source until
+// a mover is found, and once one is found the cadence returns to kScanThrottle. A freshly adopted
+// candidate (reads == 0) still gets its first sweep next frame, so a new buffer is not left unwatched
+// for a full interval.
+constexpr unsigned int kBarrenSweepInterval = 120;
 
 struct Tracked
 {
@@ -85,6 +97,7 @@ struct ScanState
     unsigned long long writes = 0; // sweeps actually recorded (drives the readback ring)
     const char* status = "not started";
     bool complained = false;
+    bool barrenLogged = false;       // once per transition into the barren cadence
     unsigned int nearMissLogged = 0; // bounded diagnostic; see NoteResource
 };
 
@@ -433,16 +446,38 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList)
     // `writes` (sweeps recorded) rather than `frames` (Tick calls), so the slot read is kSlots sweeps
     // behind the slot written and is always retired.
     bool anyMover = false;
+    bool anyFresh = false;
     unsigned int mostReads = 0;
     for (const Tracked& t : g_scan.tracked)
     {
         if (t.moves)
             anyMover = true;
+        if (t.reads == 0)
+            anyFresh = true;
         mostReads = std::max(mostReads, t.reads);
     }
 
     const bool settled = anyMover || mostReads >= kPatience;
-    const bool doSweep = !settled || (g_scan.frames % kScanThrottle == 0);
+    const bool barren = !anyMover && mostReads >= kPatience;
+
+    bool doSweep;
+
+    if (!settled)
+        doSweep = true; // discovery: every frame, as fast as the unthrottled code
+    else if (anyMover)
+        doSweep = (g_scan.frames % kScanThrottle == 0); // feed the white point a fresh value
+    else
+        // Barren: the value goes nowhere, so the sweep only watches for a new candidate (anyFresh --
+        // sampled next frame, then back to the slow cadence) or a quiet buffer that starts to move.
+        doSweep = anyFresh || (g_scan.frames % kBarrenSweepInterval == 0);
+
+    if (barren && !g_scan.barrenLogged)
+    {
+        g_scan.barrenLogged = true;
+        LOG_INFO("DLSS-NR exposure scan: nothing moved in {} sweeps; nothing to feed, so the sweep drops "
+                 "to every {} frames (new buffers are still picked up)",
+                 kPatience, kBarrenSweepInterval);
+    }
 
     if (doSweep)
     {
@@ -985,6 +1020,7 @@ void ReleaseTrackedResources()
 
     g_scan.tracked.clear();
     g_scan.complained = false;
+    g_scan.barrenLogged = false;
 }
 
 void Shutdown()
@@ -1010,6 +1046,7 @@ void Shutdown()
 
     g_scan.frames = 0;
     g_scan.writes = 0;
+    g_scan.barrenLogged = false;
     g_scan.status = "not started";
 }
 
