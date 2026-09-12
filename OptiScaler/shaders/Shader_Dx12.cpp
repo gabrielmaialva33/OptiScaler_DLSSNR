@@ -57,9 +57,15 @@ DXGI_FORMAT Shader_Dx12::TranslateTypelessFormats(DXGI_FORMAT format)
     case DXGI_FORMAT_R32_TYPELESS:
         return DXGI_FORMAT_R32_FLOAT;
 
-    case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
-        return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-
+    // R32_FLOAT_X8X24_TYPELESS is NOT translated, and used to be. It is already the depth-plane SRV
+    // format for the R32G8X24 family -- the very thing the case above produces -- so translating it
+    // again handed CreateShaderResourceView (line 201) D32_FLOAT_S8X24_UINT, a depth-stencil format
+    // that is not a legal SRV format. The view is invalid and the device is removed. Falling through
+    // to `default` preserves it, which is what the DX11 copy and the NR module's copy of this table
+    // already do -- neither carries this case, and that asymmetry was the tell.
+    //
+    // The reverse direction is still needed and stays: a resource created as the typed depth format
+    // has to be viewed through the typeless plane format.
     case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
         return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
 
