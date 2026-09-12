@@ -3486,8 +3486,6 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
             if (maxInterpolationCount >= 1)
             {
-                const char* intModes[] = { "Default", "Off", "2X", "3X", "4X", "5X", "6X" };
-
                 // Map config value to UI index
                 int currentSet = 0;
                 if (config->FGDLSSGOverrideInterpolationCount.has_value())
@@ -3495,15 +3493,29 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                     currentSet = config->FGDLSSGOverrideInterpolationCount.value() + 1;
                 }
 
-                const char* currentIntCount = intModes[currentSet];
+                std::string currentIntCountStr;
+                if (currentSet == 0)
+                    currentIntCountStr = "Default";
+                else if (currentSet == 1)
+                    currentIntCountStr = "Off";
+                else
+                    currentIntCountStr = std::to_string(currentSet) + "X";
 
                 ImGui::PushItemWidth(95.0f * menuResScale);
 
-                if (ImGui::BeginCombo("Override DLSSG Ratio", currentIntCount))
+                if (ImGui::BeginCombo("Override DLSSG Ratio", currentIntCountStr.c_str()))
                 {
                     for (int i = 0; i <= maxInterpolationCount + 1; i++)
                     {
-                        if (ImGui::Selectable(intModes[i], (currentSet == i)))
+                        std::string modeStr;
+                        if (i == 0)
+                            modeStr = "Default";
+                        else if (i == 1)
+                            modeStr = "Off";
+                        else
+                            modeStr = std::to_string(i) + "X";
+
+                        if (ImGui::Selectable(modeStr.c_str(), (currentSet == i)))
                         {
                             if (i == 0)
                             {
@@ -4109,17 +4121,19 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         {
             ImGui::SameLine(0.0f, 16.0f);
 
-            const char* intModes[] = { "2X", "3X", "4X", "5X", "6X" };
             auto currentSet = fgOutput->GetInterpolatedFrameCount() - 1;
-            auto currentIntCount = intModes[currentSet];
+
+            std::string currentIntCountStr = std::to_string(currentSet + 2) + "X";
 
             ImGui::PushItemWidth(95.0f * menuResScale);
 
-            if (ImGui::BeginCombo("MFG", currentIntCount))
+            if (ImGui::BeginCombo("MFG", currentIntCountStr.c_str()))
             {
                 for (int i = 0; i < maxInterpolationCount; i++)
                 {
-                    if (ImGui::Selectable(intModes[i], (currentSet == i)))
+                    std::string modeStr = std::to_string(i + 2) + "X";
+
+                    if (ImGui::Selectable(modeStr.c_str(), (currentSet == i)))
                     {
                         LOG_DEBUG("XeFG Interpolation Count set to: {}", i + 1);
                         state.fgChanged = true;
@@ -4273,17 +4287,19 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
             ImGui::BeginDisabled(config->FGDLSSGForceDMFG.value_or_default());
 
-            const char* intModes[] = { "2X", "3X", "4X", "5X", "6X" };
             auto currentSet = fgOutput->GetInterpolatedFrameCount() - 1;
-            auto currentIntCount = intModes[currentSet];
+
+            std::string currentIntCountStr = std::to_string(currentSet + 2) + "X";
 
             ImGui::PushItemWidth(95.0f * menuResScale);
 
-            if (ImGui::BeginCombo("MFG", currentIntCount))
+            if (ImGui::BeginCombo("MFG", currentIntCountStr.c_str()))
             {
                 for (int i = 0; i < maxInterpolationCount; i++)
                 {
-                    if (ImGui::Selectable(intModes[i], (currentSet == i)))
+                    std::string modeStr = std::to_string(i + 2) + "X";
+
+                    if (ImGui::Selectable(modeStr.c_str(), (currentSet == i)))
                     {
                         LOG_DEBUG("DLSSG Interpolation Count set to: {}", i + 1);
                         config->FGDLSSGInterpolationCount = i + 1;
