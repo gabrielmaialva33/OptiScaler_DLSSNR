@@ -268,7 +268,9 @@ class StreamlineProxy
             }
         }
 
-        bool result = _slReflexGetState != nullptr;
+        // _slPCLSetMarker, not _slReflexGetState: this reported the Reflex hook's outcome under the
+        // PCL hook's name, so a PCL failure logged as success whenever Reflex had already succeeded.
+        bool result = _slPCLSetMarker != nullptr;
         LOG_INFO("Result: {}", result);
         return pcl;
     }
@@ -283,6 +285,127 @@ class StreamlineProxy
         }
 
         return _slVersion;
+    }
+
+    // Resolve one entry point through the interposer that is actually live, instead of through the
+    // copy we shipped. Streamline's plugin manager hunts for OTA'd plugins on every launch -- the
+    // line "Searching for OTA'd plugins..." is in any Streamline log, this fork's Proton logs
+    // included -- and when it finds one, the interposer runs that plugin while a GetProcAddress
+    // against our bundled DLL still hands back the bundled one. Calling into a plugin the
+    // interposer never initialised is what produced the access violation upstream reported.
+    //
+    // sl_core_api.h:300 states the ordering this depends on: slGetFeatureFunction must be called
+    // AFTER the device is set. That is why this lives behind slSetD3DDevice and not beside slInit.
+    //
+    // `module` is filled from the resolved address so State's optiSl* keep naming a real module,
+    // which is now whichever plugin actually answered rather than whichever file we opened.
+    template <typename T>
+    static bool ResolveActiveFeature(sl::Feature feature, const char* name, T& target, HMODULE& module,
+                                     bool required = true)
+    {
+        if (_slGetFeatureFunction == nullptr)
+            return false;
+
+        void* function = nullptr;
+        const auto result = _slGetFeatureFunction(feature, name, function);
+        target = result == sl::Result::eOk ? reinterpret_cast<T>(function) : nullptr;
+
+        if (target == nullptr)
+        {
+            if (required)
+                LOG_WARN("Active Streamline function {} unavailable: {}", name, (int) result);
+
+            return !required;
+        }
+
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(function), &module);
+        return true;
+    }
+
+    // slSetD3DDevice, plus the feature binding that can only happen once it has returned.
+    //
+    // Deliberately NOT fatal, which is where this departs from upstream's version of the same fix.
+    // Upstream answers eErrorFeatureMissing when the binding comes up short, and that failure
+    // propagates out of D3D12 init. Here the bundled hooks -- the behaviour this fork has shipped
+    // all along -- are run as a fallback instead, and the device set still reports success. The
+    // active interposer is the better source; it is not worth losing frame generation over in the
+    // 15 installs this fork is deployed to if it ever answers nothing under Proton.
+    static sl::Result SetD3DDeviceAndBind(void* device)
+    {
+        const auto result = _slSetD3DDevice(device);
+
+        if (result != sl::Result::eOk || !_isD3D12Requested)
+            return result;
+
+        auto& state = State::Instance();
+
+        bool dlssgOk = true;
+        dlssgOk &= ResolveActiveFeature(sl::kFeatureDLSS_G, "slDLSSGSetOptions", _slDLSSGSetOptions, state.optiSlDLSSG);
+        dlssgOk &= ResolveActiveFeature(sl::kFeatureDLSS_G, "slDLSSGGetState", _slDLSSGGetState, state.optiSlDLSSG);
+
+        bool reflexOk = true;
+        reflexOk &= ResolveActiveFeature(sl::kFeatureReflex, "slReflexGetState", _slReflexGetState, state.optiSlReflex);
+        reflexOk &= ResolveActiveFeature(sl::kFeatureReflex, "slReflexSleep", _slReflexSleep, state.optiSlReflex);
+        reflexOk &=
+            ResolveActiveFeature(sl::kFeatureReflex, "slReflexSetOptions", _slReflexSetOptions, state.optiSlReflex);
+        ResolveActiveFeature(sl::kFeatureReflex, "slReflexSetCameraData", _slReflexSetCameraData, state.optiSlReflex,
+                             false);
+        ResolveActiveFeature(sl::kFeatureReflex, "slReflexGetPredictedCameraData", _slReflexGetPredictedCameraData,
+                             state.optiSlReflex, false);
+
+        bool pclOk = true;
+        pclOk &= ResolveActiveFeature(sl::kFeaturePCL, "slPCLSetMarker", _slPCLSetMarker, state.optiSlPCL);
+        pclOk &= ResolveActiveFeature(sl::kFeaturePCL, "slPCLSetOptions", _slPCLSetOptions, state.optiSlPCL);
+        ResolveActiveFeature(sl::kFeaturePCL, "slPCLGetState", _slPCLGetState, state.optiSlPCL, false);
+
+        if (dlssgOk && reflexOk && pclOk)
+        {
+            LOG_INFO("Streamline features bound through the active interposer");
+            return sl::Result::eOk;
+        }
+
+        LOG_WARN("Active Streamline binding incomplete (dlssg={} reflex={} pcl={}); falling back to the bundled "
+                 "plugins for what is short",
+                 dlssgOk, reflexOk, pclOk);
+
+        // Per feature, and every pointer in the group cleared first. Each bundled hook returns early
+        // when one nominated entry point is already set -- _slDLSSGSetOptions, _slReflexGetState,
+        // _slPCLSetMarker -- so a group where the interposer answered for that one function and not
+        // for its siblings would short-circuit the hook and leave the siblings null. That is worse
+        // than either source used whole. Clearing the group makes the fallback re-resolve all of it.
+        if (!dlssgOk)
+        {
+            _slDLSSGSetOptions = nullptr;
+            _slDLSSGGetState = nullptr;
+
+            if (auto dlssg = HookStreamlineDLSSG(); dlssg != nullptr)
+                state.optiSlDLSSG = dlssg;
+        }
+
+        if (!reflexOk)
+        {
+            _slReflexGetState = nullptr;
+            _slReflexSleep = nullptr;
+            _slReflexSetOptions = nullptr;
+            _slReflexSetCameraData = nullptr;
+            _slReflexGetPredictedCameraData = nullptr;
+
+            if (auto reflex = HookStreamlineReflex(); reflex != nullptr)
+                state.optiSlReflex = reflex;
+        }
+
+        if (!pclOk)
+        {
+            _slPCLGetState = nullptr;
+            _slPCLSetMarker = nullptr;
+            _slPCLSetOptions = nullptr;
+
+            if (auto pcl = HookStreamlinePCL(); pcl != nullptr)
+                state.optiSlPCL = pcl;
+        }
+
+        return sl::Result::eOk;
     }
 
     static bool InitWithD3D12(ID3D12Device* device)
@@ -358,24 +481,28 @@ class StreamlineProxy
             State::DisableChecks(owner);
         }
 
+        // Before Init, and read by SetD3DDeviceAndBind: the D3D11 path shares that function through
+        // the SetD3DDevice() accessor and must not rebind D3D12's features out from under itself.
+        _isD3D12Requested = true;
+
         auto initResult = StreamlineProxy::Init()(pref, sl::kSDKVersion);
 
         State::EnableChecks(owner);
 
         if (initResult == sl::Result::eOk)
         {
-            State::Instance().optiSlDLSSG = StreamlineProxy::HookStreamlineDLSSG();
-            State::Instance().optiSlReflex = StreamlineProxy::HookStreamlineReflex();
-            State::Instance().optiSlPCL = StreamlineProxy::HookStreamlinePCL();
-
+            // The bundled plugins are no longer opened here. Binding now happens inside
+            // SetD3DDeviceAndBind, which is the earliest point slGetFeatureFunction is legal, and
+            // falls back to these same hooks if the interposer answers nothing.
             if (State::Instance().gameQuirks & GameQuirk::CreateSLOnThe2ndDevice)
             {
-                // slSetD3DDevice moved to hkD3D12CreateDevice
+                // slSetD3DDevice moved to hkD3D12CreateDevice, which calls SetD3DDevice() -- the
+                // accessor now hands out SetD3DDeviceAndBind, so that path binds too.
                 _isD3D12Inited = true;
             }
             else
             {
-                auto result = _slSetD3DDevice(device);
+                auto result = SetD3DDeviceAndBind(device);
                 if (result == sl::Result::eOk)
                 {
                     auto reflexConst = sl::ReflexOptions {};
@@ -451,7 +578,7 @@ class StreamlineProxy
     static PFN_slGetNativeInterface GetNativeInterface() { return _slGetNativeInterface; }
     static PFN_slGetFeatureFunction GetFeatureFunction() { return _slGetFeatureFunction; }
     static PFN_slGetNewFrameToken GetNewFrameToken() { return _slGetNewFrameToken; }
-    static PFN_slSetD3DDevice SetD3DDevice() { return _slSetD3DDevice; }
+    static PFN_slSetD3DDevice SetD3DDevice() { return &SetD3DDeviceAndBind; }
     static PFN_CreateDxgiFactory CreateDxgiFactory() { return _slCreateDxgiFactory; }
     static PFN_CreateDxgiFactory1 CreateDxgiFactory1() { return _slCreateDxgiFactory1; }
     static PFN_CreateDxgiFactory2 CreateDxgiFactory2() { return _slCreateDxgiFactory2; }
@@ -475,6 +602,7 @@ class StreamlineProxy
     inline static bool _isInited = false;
     inline static bool _isD3D11Inited = false;
     inline static bool _isD3D12Inited = false;
+    inline static bool _isD3D12Requested = false;
 
     // Interposer
     inline static PFN_slInit _slInit = nullptr;
