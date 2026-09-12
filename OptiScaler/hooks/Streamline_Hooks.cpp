@@ -919,7 +919,15 @@ bool StreamlineHooks::hkdlssg_slOnPluginLoad(sl::param::IParameters* params, con
             configJson["external"]["vk"]["device"]["1.3_features"].clear();
     }
 
-    if (State::Instance().activeFgInput == FGInput::DLSSG || State::Instance().activeFgInput == FGInput::NvngxFG)
+    // Apply the vsync/hws overrides whenever the DLSS-G plugin is driving frame
+    // generation, whether as the FG *input* (native Streamline games) or as the FG
+    // *output* (OptiFG/other input + DLSSG output, e.g. KCD2 which has no Streamline of
+    // its own). With only the input check, the "output DLSSG" case kept the plugin's
+    // default eVSyncOffRequired / eHardwareSchedulingRequired flags, which makes its
+    // Silk/RSYNC pacer fight the game's vsync setting (low FPS with vsync on in menus,
+    // and a ~60 Hz cap when vsync/tearing is enabled in the 3D scene).
+    if (State::Instance().activeFgInput == FGInput::DLSSG || State::Instance().activeFgInput == FGInput::NvngxFG ||
+        State::Instance().activeFgOutput == FGOutput::DLSSG)
     {
         if (configJson.contains("/vsync/supported"_json_pointer))
             configJson["vsync"]["supported"] = true; // disable eVSyncOffRequired

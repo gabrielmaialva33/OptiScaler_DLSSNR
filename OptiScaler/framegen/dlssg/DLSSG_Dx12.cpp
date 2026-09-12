@@ -103,11 +103,35 @@ bool DLSSG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
 
     desc->Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
 
+    // The bundled sl.dlss_g plugin wraps the swapchain present with a "throttleFlipQueue"
+    // that, on Ada (no HW flip metering), blocks each present up to 30 ms waiting for a free
+    // flip-queue slot (log: "throttleFlipQueue: no flip-queue slot freed within 30 ms ...").
+    // That drags the menu to ~20-30 FPS with vsync on, adds hundreds of ms of input latency,
+    // and caps the MFG output at ~2x the game rate (3x/4x never add frames). The plugin
+    // disarms the throttle when the app owns the frame-latency waitable object ("App requested
+    // FRAME_LATENCY_WAITABLE_OBJECT itself - flip queue throttling disabled"), which is what
+    // this flag requests at swapchain creation.
+    desc->Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+
     auto result = S_FALSE;
 
     {
         ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
         result = factory->CreateSwapChain(cmdQueue, desc, swapChain);
+
+        // The waitable object is an optimisation, not a requirement, and it is the one flag here
+        // that a runtime is entitled to reject -- it is invalid alongside a fullscreen swapchain,
+        // and validation of it differs between DXGI, DXVK and vkd3d-proton. Losing the throttle
+        // fix costs frame pacing; failing the creation costs frame generation entirely. So on any
+        // failure, drop just that bit and try once more.
+        if (result != S_OK)
+        {
+            LOG_WARN("CreateSwapChain with FRAME_LATENCY_WAITABLE_OBJECT failed ({:X}); retrying "
+                     "without it -- the sl.dlss_g flip-queue throttle stays armed",
+                     (UINT) result);
+            desc->Flags &= ~(UINT) DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+            result = factory->CreateSwapChain(cmdQueue, desc, swapChain);
+        }
     }
 
     if (result != S_OK)
@@ -213,7 +237,22 @@ bool DLSSG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmd
         StreamlineProxy::SetFeatureLoaded()(sl::kFeatureDLSS_G, true);
 
         desc->Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        // See CreateSwapchain: request the frame-latency waitable object so the sl.dlss_g
+        // plugin's flip-queue present throttle is disarmed (no 30 ms present backpressure).
+        desc->Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
         auto result = factory2->CreateSwapChainForHwnd(cmdQueue, hwnd, desc, pFullscreenDesc, nullptr, swapChain);
+
+        // See CreateSwapchain: the waitable bit is the one flag a runtime may reject -- it is
+        // invalid with a fullscreen description, which this overload can be handed. Retry without
+        // it rather than losing frame generation.
+        if (result != S_OK)
+        {
+            LOG_WARN("CreateSwapChainForHwnd with FRAME_LATENCY_WAITABLE_OBJECT failed ({:X}); "
+                     "retrying without it -- the sl.dlss_g flip-queue throttle stays armed",
+                     (UINT) result);
+            desc->Flags &= ~(UINT) DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+            result = factory2->CreateSwapChainForHwnd(cmdQueue, hwnd, desc, pFullscreenDesc, nullptr, swapChain);
+        }
 
         factory2->Release();
         factory2 = nullptr;
@@ -360,6 +399,27 @@ bool DLSSG_Dx12::Dispatch()
                  Config::Instance()->FGDLSSGInterpolationCount.value_or_default());
 
         _framesToInterpolate = Config::Instance()->FGDLSSGInterpolationCount.value_or_default();
+
+        // The SL plugin only latches numFramesToGenerate on an eOff -> eOn transition
+        // (its presentCommon "DLSS-G interpolation state changed" / the NGX
+        // ReportOverrideStates). Changing the count while FG stays eOn is ignored, so a
+        // mid-session 3x/4x request would silently keep generating at the original count.
+        // Drop to eOff this frame; the next Dispatch re-enters eOn with the new count and
+        // the feature rebuilds at the requested rate.
+        _mfgReinitPending = true;
+    }
+
+    if (_mfgReinitPending)
+    {
+        _mfgReinitPending = false;
+
+        sl::DLSSGOptions off {};
+        off.mode = sl::DLSSGMode::eOff;
+        off.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
+        StreamlineProxy::DLSSGSetOptions()(viewport, off);
+        LOG_INFO(
+            "DLSSG MFG count change: sent eOff to force a feature rebuild; next frame resumes eOn at the new count");
+        return false;
     }
 
     sl::DLSSGOptions options {};

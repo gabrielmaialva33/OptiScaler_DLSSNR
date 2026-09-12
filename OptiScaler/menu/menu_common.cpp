@@ -7901,6 +7901,9 @@ bool MenuCommon::RenderMenu()
     UpdateMenuInputMode(ctx);
     HandleMenuShortcuts(ctx);
 
+    // The GPU-time readbacks run only while the display that shows them is on screen.
+    State::Instance().menuVisible = _isVisible;
+
     // 2) Prepare one-shot notifications and start a new ImGui frame only when needed.
     UpdateVersionAndStartupNotifications(ctx);
     BeginMenuFrameIfNeeded(ctx);

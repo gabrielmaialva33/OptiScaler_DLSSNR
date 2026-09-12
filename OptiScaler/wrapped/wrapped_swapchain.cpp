@@ -364,8 +364,10 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
     XellHooks::update();
 
-    // Upscaler GPU time computation
-    if (willPresent && (fg == nullptr || !fg->IsActive() || fg->IsPaused()))
+    // Upscaler GPU time computation. Like the FG path, this only feeds the performance display, so
+    // the readback heap is Map/Unmap'd on the present path only while the display is on screen.
+    if (willPresent && (fg == nullptr || !fg->IsActive() || fg->IsPaused()) &&
+        (Config::Instance()->ShowFps.value_or_default() || State::Instance().menuVisible))
     {
         if (auto currentFeature = State::Instance().currentFeature; currentFeature != nullptr)
         {
