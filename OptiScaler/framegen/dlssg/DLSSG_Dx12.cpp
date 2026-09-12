@@ -118,6 +118,20 @@ bool DLSSG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
     {
         ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
         result = factory->CreateSwapChain(cmdQueue, desc, swapChain);
+
+        // The waitable object is an optimisation, not a requirement, and it is the one flag here
+        // that a runtime is entitled to reject -- it is invalid alongside a fullscreen swapchain,
+        // and validation of it differs between DXGI, DXVK and vkd3d-proton. Losing the throttle
+        // fix costs frame pacing; failing the creation costs frame generation entirely. So on any
+        // failure, drop just that bit and try once more.
+        if (result != S_OK)
+        {
+            LOG_WARN("CreateSwapChain with FRAME_LATENCY_WAITABLE_OBJECT failed ({:X}); retrying "
+                     "without it -- the sl.dlss_g flip-queue throttle stays armed",
+                     (UINT) result);
+            desc->Flags &= ~(UINT) DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+            result = factory->CreateSwapChain(cmdQueue, desc, swapChain);
+        }
     }
 
     if (result != S_OK)
@@ -227,6 +241,18 @@ bool DLSSG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmd
         // plugin's flip-queue present throttle is disarmed (no 30 ms present backpressure).
         desc->Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
         auto result = factory2->CreateSwapChainForHwnd(cmdQueue, hwnd, desc, pFullscreenDesc, nullptr, swapChain);
+
+        // See CreateSwapchain: the waitable bit is the one flag a runtime may reject -- it is
+        // invalid with a fullscreen description, which this overload can be handed. Retry without
+        // it rather than losing frame generation.
+        if (result != S_OK)
+        {
+            LOG_WARN("CreateSwapChainForHwnd with FRAME_LATENCY_WAITABLE_OBJECT failed ({:X}); "
+                     "retrying without it -- the sl.dlss_g flip-queue throttle stays armed",
+                     (UINT) result);
+            desc->Flags &= ~(UINT) DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+            result = factory2->CreateSwapChainForHwnd(cmdQueue, hwnd, desc, pFullscreenDesc, nullptr, swapChain);
+        }
 
         factory2->Release();
         factory2 = nullptr;
@@ -391,7 +417,8 @@ bool DLSSG_Dx12::Dispatch()
         off.mode = sl::DLSSGMode::eOff;
         off.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
         StreamlineProxy::DLSSGSetOptions()(viewport, off);
-        LOG_INFO("DLSSG MFG count change: sent eOff to force a feature rebuild; next frame resumes eOn at the new count");
+        LOG_INFO(
+            "DLSSG MFG count change: sent eOff to force a feature rebuild; next frame resumes eOn at the new count");
         return false;
     }
 
