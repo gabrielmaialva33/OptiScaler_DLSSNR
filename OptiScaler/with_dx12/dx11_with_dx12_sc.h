@@ -135,4 +135,12 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     bool _interopInitialized = false;
 
     HWND _handle = nullptr;
+
+    // Set by Release() before it deletes this object. The destructor calls global teardown that
+
+    // cannot tell instances apart, so it needs to know whether this one owned the globals.
+
+    // Defaults true so a destruction that never went through Release keeps the old behaviour.
+
+    bool _wasCurrentOnRelease = true;
 };

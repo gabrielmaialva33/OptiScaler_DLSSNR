@@ -136,7 +136,13 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
 
 Dx11wDx12SC::~Dx11wDx12SC()
 {
-    MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    // CleanupRenderTarget takes an HWND and does not use it (menu_overlay_dx.cpp:506): it
+    // deactivates the global FG and frees the global overlay render targets whoever calls it. So a
+    // secondary wrapper being destroyed used to tear down the live one's overlay. Guarded here
+    // rather than in the shared function, which has other callers with their own expectations.
+    if (_wasCurrentOnRelease)
+        MenuOverlayDx::CleanupRenderTarget(true, _handle);
+
     _ReleaseInteropObjects();
 
     SafeRelease(_real4);
@@ -253,7 +259,12 @@ ULONG STDMETHODCALLTYPE Dx11wDx12SC::Release()
         if (State::Instance().currentFGSwapchain == _fgSwapChain)
             State::Instance().currentFGSwapchain = nullptr;
 
-        if (State::Instance().currentD3D11Device == _dx11Device)
+        // Pointer equality is not ownership here, and this is the one guard above where that
+        // distinction bites: the swapchain, wrapper and presenter comparisons each match an object
+        // created for this instance alone, while the D3D11 device is shared by every wrapper on it.
+        // Two wrappers on one device, the second current, releasing the first: the equality holds
+        // and clears the device the live one is still using. wasCurrent is the missing half.
+        if (wasCurrent && State::Instance().currentD3D11Device == _dx11Device)
             State::Instance().currentD3D11Device = nullptr;
 
         // Guarded like every other global above it. This line used to run unconditionally, so
@@ -261,10 +272,20 @@ ULONG STDMETHODCALLTYPE Dx11wDx12SC::Release()
         if (wasCurrent)
             State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
 
+        // The destructor runs from the delete below and needs the same answer; by then the globals
+        // it would have to consult have already been cleared above.
+        _wasCurrentOnRelease = wasCurrent;
+
         auto fg = State::Instance().currentFG;
         if (fg != nullptr && fg->Mutex.getOwner() != 1 && fg->SwapchainContext() != nullptr)
         {
-            fg->Deactivate();
+            // Deactivate is global and takes no handle, so it used to run whichever instance was
+            // going away -- releasing a stale wrapper switched off frame generation for the live
+            // one. ReleaseSwapchain does take our HWND and rejects a mismatch itself, so it stays
+            // unconditional; only the global switch needs the ownership test.
+            if (wasCurrent)
+                fg->Deactivate();
+
             fg->ReleaseSwapchain(_handle);
         }
 
@@ -993,6 +1014,17 @@ bool Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
         return true;
 
     const auto completedValue = _copyFence->GetCompletedValue();
+
+    // UINT64_MAX is not a very large completed value: it is what GetCompletedValue returns once the
+    // device has been removed. Comparing it with >= reports every slot as finished, and the caller
+    // then resets allocators and reuses shadows whose GPU work never completed and never will.
+    if (completedValue == UINT64_MAX)
+    {
+        LOG_ERROR("copy fence reports UINT64_MAX: the device has been removed. slot {}, waiting for {}", slot,
+                  fenceValue);
+        return false;
+    }
+
     if (completedValue >= fenceValue)
         return true;
 
@@ -1089,15 +1121,23 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
 
     const auto signalValue = ++_copyFenceValue;
 
+    // Recorded before the Signal, not after. ExecuteCommandLists above has already submitted work
+    // that reads this shadow slot, so the slot is busy from that moment whatever happens next. If
+    // the Signal fails and we leave the slot's old value in place, the next _WaitForCopyAllocator
+    // reads a value the fence has already passed -- or zero, meaning never used -- and reports the
+    // slot free while the GPU may still be reading it. Recording first makes a failed Signal wait
+    // for a value that never arrives, which fails closed instead of handing back live memory.
+    _copyAllocatorFenceValues[copySlot] = signalValue;
+    _lastInteropCopyFenceValue = signalValue;
+
     result = _dx12CommandQueue->Signal(_copyFence, signalValue);
     if (FAILED(result))
     {
-        LOG_ERROR("interop copy fence signal failed: {:X}", (UINT) result);
+        LOG_ERROR("interop copy fence signal failed: {:X}. slot {} is left pending on fence {}, which will not "
+                  "arrive; waits on it will time out rather than reuse memory the GPU may still be reading",
+                  (UINT) result, copySlot, signalValue);
         return false;
     }
-
-    _copyAllocatorFenceValues[copySlot] = signalValue;
-    _lastInteropCopyFenceValue = signalValue;
 
     return true;
 }
@@ -1134,6 +1174,14 @@ bool Dx11wDx12SC::_WaitForCopyQueueIdle()
         return true;
 
     const auto completedValue = _copyFence->GetCompletedValue();
+
+    // Same as in _WaitForCopyAllocator: device removal, not completion.
+    if (completedValue == UINT64_MAX)
+    {
+        LOG_ERROR("copy fence reports UINT64_MAX: the device has been removed. waiting for {}", waitValue);
+        return false;
+    }
+
     if (completedValue >= waitValue)
         return true;
 
@@ -1214,7 +1262,11 @@ void Dx11wDx12SC::_RefreshCachedSwapchainDesc()
 {
     _bufferCount = ResolveBufferCount(_real, _real1);
     _bufferFormat = ResolveBufferFormat(_real, _real1);
-    _currentFakeIndex = _bufferCount > 0 ? _currentFakeIndex : 0;
+    // Wrapped into the new range, not merely zeroed when the count reaches zero. A ResizeBuffers
+    // that asks for fewer buffers shrinks the shadow arrays just below, and the old index can then
+    // sit past their end -- _CopyDx11BackBufferToShared indexes _sharedDx11BackBufferCopies with it
+    // directly. Modulo keeps it in range for any count.
+    _currentFakeIndex = _bufferCount > 0 ? (_currentFakeIndex % _bufferCount) : 0;
 }
 
 UINT Dx11wDx12SC::_GetDx11BackBufferIndexForPresent() const
