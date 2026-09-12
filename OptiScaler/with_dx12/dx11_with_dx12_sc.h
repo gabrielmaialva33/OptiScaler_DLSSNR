@@ -8,6 +8,7 @@
 #include "d3d12.h"
 
 #include <vector>
+#include <mutex>
 
 using Microsoft::WRL::ComPtr;
 
@@ -15,7 +16,6 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
 {
   public:
     Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Device* pDevice, HWND hWnd, UINT flags);
-    virtual ~Dx11wDx12SC();
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override;
     ULONG STDMETHODCALLTYPE AddRef() override;
@@ -72,13 +72,21 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type, UINT Size, void* pMetaData) override;
 
   private:
+    virtual ~Dx11wDx12SC();
     bool _InitInteropObjects();
     bool _RequestSharedBackBuffer(UINT index);
     bool _CopyDx11BackBufferToShared(UINT index);
     bool _WaitDx11ThenDx12();
     bool _CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index);
-    bool _WaitForCopyQueueIdle();
-    bool _WaitForCopyAllocator(UINT slot);
+    HRESULT _WaitForCopyQueueIdle(DWORD timeout);
+    HRESULT _WaitForCopyAllocator(UINT slot);
+    HRESULT _DrainForTeardown(DWORD timeout);
+    void _ResetTeardownDrain();
+    bool _DevicesRemoved() const;
+    bool _OwnsFgPresenter() const;
+    bool _OwnsOverlay() const;
+    void _FinishRelease(bool deviceLost);
+    static void _CollectRetired();
     void _ReleaseInteropBackBuffers();
     void _ReleaseInteropObjects();
     void _RefreshCachedSwapchainDesc();
@@ -136,11 +144,17 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
 
     HWND _handle = nullptr;
 
-    // Set by Release() before it deletes this object. The destructor calls global teardown that
+    bool _wasCurrentOnRelease = false;
+    bool _hasInteropWork = false;
+    UINT64 _dx11DrainValue = 0;
+    ID3D12Fence* _drainFences[2] {};
+    bool _drainSignaled[2] {};
+    ID3D12CommandQueue* _presentQueue = nullptr;
+    std::vector<ID3D12Resource*> _copyDestinations;
 
-    // cannot tell instances apart, so it needs to know whether this one owned the globals.
-
-    // Defaults true so a destruction that never went through Release keeps the old behaviour.
-
-    bool _wasCurrentOnRelease = true;
+    // Intrusive retirement needs no allocation at the failure boundary. Deliberately no static
+    // destructor: unproven live-device work stays quarantined until process exit.
+    Dx11wDx12SC* _nextRetired = nullptr;
+    inline static Dx11wDx12SC* _retired = nullptr;
+    inline static std::mutex _retiredMutex;
 };

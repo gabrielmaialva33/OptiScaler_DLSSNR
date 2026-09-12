@@ -38,6 +38,47 @@ void SafeCloseHandle(HANDLE& value)
     }
 }
 
+// An event wake is not a completion proof: removal and an old timed-out registration
+// can both wake it. Keep one deadline across all such wakes.
+HRESULT WaitForBridgeFence(ID3D12Fence* fence, ID3D12Device* device, HANDLE event, UINT64 value, DWORD timeout)
+{
+    if (value == 0)
+        return S_OK;
+    if (fence == nullptr || event == nullptr)
+        return E_UNEXPECTED;
+
+    const auto deadline = GetTickCount64() + timeout;
+    bool registered = false;
+    for (;;)
+    {
+        const auto completed = fence->GetCompletedValue();
+        if (completed == UINT64_MAX)
+        {
+            const auto reason = device != nullptr ? device->GetDeviceRemovedReason() : S_OK;
+            return FAILED(reason) ? reason : DXGI_ERROR_DEVICE_REMOVED;
+        }
+        if (completed >= value)
+            return S_OK;
+
+        const auto now = GetTickCount64();
+        if (now >= deadline)
+            return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        if (!registered)
+        {
+            const auto result = fence->SetEventOnCompletion(value, event);
+            if (FAILED(result))
+                return result;
+            registered = true;
+        }
+        const auto result = WaitForSingleObject(event, static_cast<DWORD>(deadline - now));
+        if (result == WAIT_FAILED)
+            return HRESULT_FROM_WIN32(GetLastError());
+        if (result != WAIT_OBJECT_0 && result != WAIT_TIMEOUT)
+            return E_FAIL;
+        // Including WAIT_TIMEOUT: recheck removal/completion before returning a timeout.
+    }
+}
+
 void TransitionResource(ID3D12GraphicsCommandList* commandList, ID3D12Resource* resource,
                         D3D12_RESOURCE_STATES beforeState, D3D12_RESOURCE_STATES afterState)
 {
@@ -85,6 +126,7 @@ DXGI_FORMAT ResolveBufferFormat(IDXGISwapChain* swapchain, IDXGISwapChain1* swap
 Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Device* pDevice, HWND hWnd, UINT flags)
     : _real(real), _fgSwapChain(fgSC), _dx11Device(pDevice), _handle(hWnd), _refcount(1)
 {
+    _CollectRetired();
     _id = ++scCount;
     _lastFlags = flags;
 
@@ -120,6 +162,10 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
     {
         _dx12Device = WithDx12::GetD3D12Device();
         _dx12CommandQueue = WithDx12::GetD3D12CommandQueue();
+        if (_dx12Device != nullptr)
+            _dx12Device->AddRef();
+        if (_dx12CommandQueue != nullptr)
+            _dx12CommandQueue->AddRef();
     }
     else
     {
@@ -136,13 +182,8 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
 
 Dx11wDx12SC::~Dx11wDx12SC()
 {
-    // CleanupRenderTarget takes an HWND and does not use it (menu_overlay_dx.cpp:506): it
-    // deactivates the global FG and frees the global overlay render targets whoever calls it. So a
-    // secondary wrapper being destroyed used to tear down the live one's overlay. Guarded here
-    // rather than in the shared function, which has other callers with their own expectations.
-    if (_wasCurrentOnRelease)
-        MenuOverlayDx::CleanupRenderTarget(true, _handle);
-
+    // Release (or the retirement collector) has already proved completion, or confirmed
+    // device loss. Direct destruction is not a supported ownership path.
     _ReleaseInteropObjects();
 
     SafeRelease(_real4);
@@ -155,6 +196,9 @@ Dx11wDx12SC::~Dx11wDx12SC()
     SafeRelease(_dx11Context);
     SafeRelease(_dx11Device5);
     SafeRelease(_dx11Device);
+    SafeRelease(_presentQueue);
+    SafeRelease(_dx12CommandQueue);
+    SafeRelease(_dx12Device);
 }
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::QueryInterface(REFIID riid, void** ppvObject)
@@ -239,60 +283,115 @@ ULONG STDMETHODCALLTYPE Dx11wDx12SC::Release()
 
     if (ret == 0)
     {
-        // Whether the globals below describe this instance. A game can hold more than one of these
-        // -- a launcher window, a tool window, a second viewport -- and releasing one of them must
-        // not tell the rest of OptiScaler that there is no interop swapchain any more.
-        const bool wasCurrent =
-            State::Instance().currentSwapchain == this || State::Instance().currentWrappedSwapchain == this;
-
-        if (State::Instance().currentSwapchain == this)
-            State::Instance().currentSwapchain = nullptr;
-
-        if (State::Instance().currentWrappedSwapchain == this)
-            State::Instance().currentWrappedSwapchain = nullptr;
-
-        if (State::Instance().currentRealSwapchain == _real)
-            State::Instance().currentRealSwapchain = nullptr;
-
-        FGHooks::ClearDx12InteropPresentSC(_fgSwapChain);
-
-        if (State::Instance().currentFGSwapchain == _fgSwapChain)
-            State::Instance().currentFGSwapchain = nullptr;
-
-        // Pointer equality is not ownership here, and this is the one guard above where that
-        // distinction bites: the swapchain, wrapper and presenter comparisons each match an object
-        // created for this instance alone, while the D3D11 device is shared by every wrapper on it.
-        // Two wrappers on one device, the second current, releasing the first: the equality holds
-        // and clears the device the live one is still using. wasCurrent is the missing half.
-        if (wasCurrent && State::Instance().currentD3D11Device == _dx11Device)
-            State::Instance().currentD3D11Device = nullptr;
-
-        // Guarded like every other global above it. This line used to run unconditionally, so
-        // releasing any instance cleared the interop mode for all of them.
-        if (wasCurrent)
-            State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
-
-        // The destructor runs from the delete below and needs the same answer; by then the globals
-        // it would have to consult have already been cleared above.
-        _wasCurrentOnRelease = wasCurrent;
-
-        auto fg = State::Instance().currentFG;
-        if (fg != nullptr && fg->Mutex.getOwner() != 1 && fg->SwapchainContext() != nullptr)
+        // Drain before FG, overlay, either swapchain, or a shared resource can be destroyed.
+        const auto result = _DrainForTeardown(5000);
+        const bool deviceLost = _DevicesRemoved();
+        if (FAILED(result) && !deviceLost)
         {
-            // Deactivate is global and takes no handle, so it used to run whichever instance was
-            // going away -- releasing a stale wrapper switched off frame generation for the live
-            // one. ReleaseSwapchain does take our HWND and rejects a mismatch itself, so it stays
-            // unconditional; only the global switch needs the ownership test.
-            if (wasCurrent)
-                fg->Deactivate();
-
-            fg->ReleaseSwapchain(_handle);
+            LOG_ERROR("retaining bridge {} after unproven teardown: {:X}", _id, (UINT) result);
+            // Keep the entire wrapper, including explicit destination, device and queue references.
+            // No worker thread or saved HWND callback may tear down a later FG generation.
+            std::lock_guard lock(_retiredMutex);
+            _nextRetired = _retired;
+            _retired = this;
+            return 0;
         }
-
+        _FinishRelease(deviceLost);
         delete this;
     }
 
     return ret;
+}
+
+bool Dx11wDx12SC::_OwnsFgPresenter() const
+{
+    return _fgSwapChain != nullptr && State::Instance().currentFGSwapchain == _fgSwapChain &&
+           State::Instance().currentFG != nullptr;
+}
+
+bool Dx11wDx12SC::_OwnsOverlay() const
+{
+    // CleanupRenderTarget also mutates currentFG. Never use it for a different FG presenter.
+    const bool current =
+        State::Instance().currentSwapchain == this || State::Instance().currentWrappedSwapchain == this;
+    return _OwnsFgPresenter() || (current && State::Instance().currentFGSwapchain == nullptr);
+}
+
+bool Dx11wDx12SC::_DevicesRemoved() const
+{
+    // Shared storage can still be used by either API. One removed device does not prove that
+    // the other has stopped using it; quarantine that case until a complete drain is possible.
+    return _dx12Device != nullptr && FAILED(_dx12Device->GetDeviceRemovedReason()) && _dx11Device != nullptr &&
+           FAILED(_dx11Device->GetDeviceRemovedReason());
+}
+
+void Dx11wDx12SC::_FinishRelease(bool deviceLost)
+{
+    // Whether the globals below describe this instance. A game can hold more than one of these
+    // -- a launcher window, a tool window, a second viewport -- and releasing one of them must
+    // not tell the rest of OptiScaler that there is no interop swapchain any more.
+    auto fg = State::Instance().currentFG;
+    const auto fgContext = fg != nullptr ? fg->SwapchainContext() : nullptr;
+    const bool ownsFg = _OwnsFgPresenter();
+    _wasCurrentOnRelease = _OwnsOverlay();
+    const bool wasCurrent =
+        State::Instance().currentSwapchain == this || State::Instance().currentWrappedSwapchain == this;
+
+    if (State::Instance().currentSwapchain == this)
+        State::Instance().currentSwapchain = nullptr;
+
+    if (State::Instance().currentWrappedSwapchain == this)
+        State::Instance().currentWrappedSwapchain = nullptr;
+
+    if (State::Instance().currentRealSwapchain == _real)
+        State::Instance().currentRealSwapchain = nullptr;
+
+    FGHooks::ClearDx12InteropPresentSC(_fgSwapChain);
+
+    if (State::Instance().currentFGSwapchain == _fgSwapChain)
+        State::Instance().currentFGSwapchain = nullptr;
+
+    // Pointer equality is not ownership here, and this is the one guard above where that
+    // distinction bites: the swapchain, wrapper and presenter comparisons each match an object
+    // created for this instance alone, while the D3D11 device is shared by every wrapper on it.
+    // Two wrappers on one device, the second current, releasing the first: the equality holds
+    // and clears the device the live one is still using. wasCurrent is the missing half.
+    if (wasCurrent && State::Instance().currentD3D11Device == _dx11Device)
+        State::Instance().currentD3D11Device = nullptr;
+
+    // Guarded like every other global above it. This line used to run unconditionally, so
+    // releasing any instance cleared the interop mode for all of them.
+    if (wasCurrent)
+        State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
+
+    // FG ownership is presenter identity, not HWND identity or game-facing wrapper identity.
+    if (!deviceLost && ownsFg && fg->Mutex.getOwner() != 1 && fg->SwapchainContext() == fgContext)
+    {
+        fg->Deactivate();
+        fg->ReleaseSwapchain(_handle);
+    }
+    if (_wasCurrentOnRelease && !deviceLost)
+        MenuOverlayDx::CleanupRenderTarget(true, _handle);
+}
+
+void Dx11wDx12SC::_CollectRetired()
+{
+    std::lock_guard lock(_retiredMutex);
+    auto link = &_retired;
+    while (*link != nullptr)
+    {
+        auto item = *link;
+        const auto result = item->_DrainForTeardown(0);
+        const bool deviceLost = item->_DevicesRemoved();
+        if (FAILED(result) && !deviceLost)
+        {
+            link = &item->_nextRetired;
+            continue;
+        }
+        *link = item->_nextRetired;
+        item->_FinishRelease(deviceLost);
+        delete item;
+    }
 }
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetPrivateData(REFGUID Name, UINT DataSize, const void* pData)
@@ -331,9 +430,25 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if ((Flags & DXGI_PRESENT_TEST) != 0)
         return _real->Present(SyncInterval, Flags);
 
+    _CollectRetired();
+    if (_dx11DrainValue != 0)
+    {
+        const auto result = _DrainForTeardown(5000);
+        if (FAILED(result))
+            return result;
+        _ResetTeardownDrain();
+    }
     if (!_InitInteropObjects())
         return DXGI_ERROR_DEVICE_REMOVED;
 
+    auto presentQueue = _fg != nullptr ? _fg->GetCommandQueue() : nullptr;
+    if (presentQueue == nullptr || (_presentQueue != nullptr && _presentQueue != presentQueue))
+        return E_UNEXPECTED;
+    if (_presentQueue == nullptr)
+    {
+        _presentQueue = presentQueue;
+        _presentQueue->AddRef();
+    }
     auto dx11Index = _GetDx11BackBufferIndexForPresent();
 
     if (!_RequestSharedBackBuffer(dx11Index))
@@ -345,8 +460,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     // overwrite a shadow D3D12 was still reading for an earlier frame that reused the slot. The
     // fence value is per slot, so in steady state the ring has already come round and this returns
     // at once; it only blocks when the GPU is genuinely still behind.
-    if (!_WaitForCopyAllocator(_currentFakeIndex))
-        return DXGI_ERROR_DEVICE_REMOVED;
+    if (const auto result = _WaitForCopyAllocator(_currentFakeIndex); FAILED(result))
+        return result;
 
     if (!_CopyDx11BackBufferToShared(dx11Index))
         return DXGI_ERROR_DEVICE_REMOVED;
@@ -441,10 +556,13 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) NewFormat, SwapChainFlags);
 
-    if (!_WaitForCopyQueueIdle())
-        LOG_WARN("continuing ResizeBuffers after copy fence wait failure");
+    const auto drainResult = _DrainForTeardown(5000);
+    if (FAILED(drainResult))
+        return drainResult;
 
-    MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    if (_OwnsOverlay())
+        MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    _ResetTeardownDrain();
     _ReleaseInteropBackBuffers();
 
     HRESULT realResult = _real != nullptr ? _real->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags)
@@ -650,10 +768,13 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers1: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) Format, SwapChainFlags);
 
-    if (!_WaitForCopyQueueIdle())
-        LOG_WARN("continuing ResizeBuffers1 after copy fence wait failure");
+    const auto drainResult = _DrainForTeardown(5000);
+    if (FAILED(drainResult))
+        return drainResult;
 
-    MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    if (_OwnsOverlay())
+        MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    _ResetTeardownDrain();
     _ReleaseInteropBackBuffers();
 
     HRESULT realResult = _real3 != nullptr ? _real3->ResizeBuffers1(BufferCount, Width, Height, Format, SwapChainFlags,
@@ -962,6 +1083,7 @@ bool Dx11wDx12SC::_CopyDx11BackBufferToShared(UINT index)
     LOG_DEBUG("Copying DX11 backbuffer {} sourceTexture: {:X} to shadow copy {:X}", index, (size_t) sourceTexture,
               (size_t) _sharedDx11BackBufferCopies[_currentFakeIndex]);
 
+    _hasInteropWork = true;
     _dx11Context->CopyResource(_sharedDx11BackBufferCopies[_currentFakeIndex], sourceTexture);
     sourceTexture->Release();
     return true;
@@ -997,54 +1119,11 @@ bool Dx11wDx12SC::_WaitDx11ThenDx12()
     return true;
 }
 
-bool Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
+HRESULT Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
 {
-    if (_copyFence == nullptr || _copyFenceEvent == nullptr)
-        return true;
-
     if (slot >= _copyAllocatorFenceValues.size())
-    {
-        LOG_ERROR("copy allocator slot {} out of range {}", slot, _copyAllocatorFenceValues.size());
-        return false;
-    }
-
-    const auto fenceValue = _copyAllocatorFenceValues[slot];
-
-    if (fenceValue == 0)
-        return true;
-
-    const auto completedValue = _copyFence->GetCompletedValue();
-
-    // UINT64_MAX is not a very large completed value: it is what GetCompletedValue returns once the
-    // device has been removed. Comparing it with >= reports every slot as finished, and the caller
-    // then resets allocators and reuses shadows whose GPU work never completed and never will.
-    if (completedValue == UINT64_MAX)
-    {
-        LOG_ERROR("copy fence reports UINT64_MAX: the device has been removed. slot {}, waiting for {}", slot,
-                  fenceValue);
-        return false;
-    }
-
-    if (completedValue >= fenceValue)
-        return true;
-
-    auto result = _copyFence->SetEventOnCompletion(fenceValue, _copyFenceEvent);
-    if (FAILED(result))
-    {
-        LOG_ERROR("copy allocator fence SetEventOnCompletion failed. slot {}, fence {}, completed {}, result {:X}",
-                  slot, fenceValue, completedValue, (UINT) result);
-        return false;
-    }
-
-    const auto waitResult = WaitForSingleObject(_copyFenceEvent, 5000);
-    if (waitResult != WAIT_OBJECT_0)
-    {
-        LOG_ERROR("copy allocator fence wait failed. slot {}, fence {}, completed {}, waitResult {:X}", slot,
-                  fenceValue, _copyFence->GetCompletedValue(), waitResult);
-        return false;
-    }
-
-    return true;
+        return E_INVALIDARG;
+    return WaitForBridgeFence(_copyFence, _dx12Device, _copyFenceEvent, _copyAllocatorFenceValues[slot], 5000);
 }
 
 bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
@@ -1062,7 +1141,7 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     if (allocator == nullptr)
         return false;
 
-    if (!_WaitForCopyAllocator(copySlot))
+    if (FAILED(_WaitForCopyAllocator(copySlot)))
         return false;
 
     auto result = allocator->Reset();
@@ -1107,7 +1186,10 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
 
     _openedDx11BackBufferStates[copySlot] = D3D12_RESOURCE_STATE_COMMON;
 
-    fgBackBuffer->Release();
+    if (_copyDestinations.size() <= copySlot)
+        _copyDestinations.resize(copySlot + 1, nullptr);
+    SafeRelease(_copyDestinations[copySlot]);
+    _copyDestinations[copySlot] = fgBackBuffer;
 
     result = _copyCommandLists[copySlot]->Close();
     if (FAILED(result))
@@ -1144,13 +1226,13 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
 
 bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue()
 {
-    if (_fg == nullptr || _copyFence == nullptr)
+    if (_presentQueue == nullptr || _copyFence == nullptr)
         return false;
 
     if (_lastInteropCopyFenceValue == 0)
         return true;
 
-    auto result = _fg->GetCommandQueue()->Wait(_copyFence, _lastInteropCopyFenceValue);
+    auto result = _presentQueue->Wait(_copyFence, _lastInteropCopyFenceValue);
     if (FAILED(result))
     {
         LOG_ERROR("present queue Wait on interop copy fence failed: {:X}", (UINT) result);
@@ -1160,59 +1242,93 @@ bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue()
     return true;
 }
 
-bool Dx11wDx12SC::_WaitForCopyQueueIdle()
+HRESULT Dx11wDx12SC::_WaitForCopyQueueIdle(DWORD timeout)
 {
-    if (_copyFence == nullptr || _copyFenceEvent == nullptr)
-        return true;
-
     UINT64 waitValue = _lastInteropCopyFenceValue;
+    for (const auto value : _copyAllocatorFenceValues)
+        waitValue = std::max(waitValue, value);
+    // Preserve accounting even on success; the destructive caller resets it after the full drain.
+    return WaitForBridgeFence(_copyFence, _dx12Device, _copyFenceEvent, waitValue, timeout);
+}
 
-    for (const auto fenceValue : _copyAllocatorFenceValues)
-        waitValue = std::max(waitValue, fenceValue);
-
-    if (waitValue == 0)
-        return true;
-
-    const auto completedValue = _copyFence->GetCompletedValue();
-
-    // Same as in _WaitForCopyAllocator: device removal, not completion.
-    if (completedValue == UINT64_MAX)
+HRESULT Dx11wDx12SC::_DrainForTeardown(DWORD timeout)
+{
+    if (!_hasInteropWork)
+        return S_OK;
+    const auto deadline = GetTickCount64() + timeout;
+    const auto remaining = [&]() -> DWORD
     {
-        LOG_ERROR("copy fence reports UINT64_MAX: the device has been removed. waiting for {}", waitValue);
-        return false;
-    }
-
-    if (completedValue >= waitValue)
-        return true;
-
-    auto result = _copyFence->SetEventOnCompletion(waitValue, _copyFenceEvent);
+        const auto now = GetTickCount64();
+        return now < deadline ? static_cast<DWORD>(deadline - now) : 0;
+    };
+    auto result = _WaitForCopyQueueIdle(remaining());
     if (FAILED(result))
+        return result;
+
+    // Cover a D3D11 write even when its following Signal/queue Wait/copy submission failed.
+    if (_dx11DrainValue == 0)
     {
-        LOG_ERROR("copy queue idle SetEventOnCompletion failed. fence {}, completed {}, result {:X}", waitValue,
-                  completedValue, (UINT) result);
-        return false;
+        if (_dx11Context4 == nullptr || _dx11Fence == nullptr || _dx12SharedFence == nullptr)
+            return E_UNEXPECTED;
+        const auto value = _sharedFenceValue++;
+        result = _dx11Context4->Signal(_dx11Fence, value);
+        if (FAILED(result))
+            return result;
+        _dx11Context4->Flush();
+        _dx11DrainValue = value;
     }
+    result = WaitForBridgeFence(_dx12SharedFence, _dx12Device, _copyFenceEvent, _dx11DrainValue, remaining());
+    if (FAILED(result))
+        return result;
 
-    const auto waitResult = WaitForSingleObject(_copyFenceEvent, 5000);
-    if (waitResult != WAIT_OBJECT_0)
+    // Fresh markers include work submitted after the saved copy fence, in particular overlay work.
+    // Separate fences are essential: a higher value on one queue proves nothing about another.
+    ID3D12CommandQueue* queues[] = { _dx12CommandQueue, _presentQueue };
+    for (UINT i = 0; i < 2; ++i)
     {
-        LOG_ERROR("copy queue idle wait failed. fence {}, completed {}, waitResult {:X}", waitValue,
-                  _copyFence->GetCompletedValue(), waitResult);
-        return false;
+        if (queues[i] == nullptr)
+            continue;
+        if (_drainFences[i] == nullptr)
+        {
+            result = _dx12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_drainFences[i]));
+            if (FAILED(result))
+                return result;
+        }
+        if (!_drainSignaled[i])
+        {
+            result = queues[i]->Signal(_drainFences[i], 1);
+            if (FAILED(result))
+                return result;
+            _drainSignaled[i] = true;
+        }
+        result = WaitForBridgeFence(_drainFences[i], _dx12Device, _copyFenceEvent, 1, remaining());
+        if (FAILED(result))
+            return result;
     }
+    return S_OK;
+}
 
-    for (auto& fenceValue : _copyAllocatorFenceValues)
-        fenceValue = 0;
-
+void Dx11wDx12SC::_ResetTeardownDrain()
+{
+    for (UINT i = 0; i < 2; ++i)
+    {
+        SafeRelease(_drainFences[i]);
+        _drainSignaled[i] = false;
+    }
+    _dx11DrainValue = 0;
+    _hasInteropWork = false;
     _lastInteropCopyFenceValue = 0;
-
-    return true;
+    for (auto& value : _copyAllocatorFenceValues)
+        value = 0;
 }
 
 void Dx11wDx12SC::_ReleaseInteropBackBuffers()
 {
     _interopInitialized = false;
 
+    for (auto& resource : _copyDestinations)
+        SafeRelease(resource);
+    _copyDestinations.clear();
     for (auto& resource : _openedDx11BackBuffers)
         SafeRelease(resource);
 
@@ -1230,7 +1346,8 @@ void Dx11wDx12SC::_ReleaseInteropBackBuffers()
 
 void Dx11wDx12SC::_ReleaseInteropObjects()
 {
-    _WaitForCopyQueueIdle();
+    // Only called after the preflight drain, or confirmed loss of both participating devices.
+    _ResetTeardownDrain();
     _ReleaseInteropBackBuffers();
 
     _lastInteropCopyFenceValue = 0;
