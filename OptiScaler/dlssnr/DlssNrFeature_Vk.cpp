@@ -34,6 +34,8 @@ using PFN_VkEvaluate = int(__cdecl*)(void*, void*, void*, void*, void*, void*, v
                                      unsigned int, unsigned int, int, int, float, int, float, float, float, int, float,
                                      float);
 using PFN_VkRelease = void(__cdecl*)(void*);
+using PFN_NrSetFloatSlot = void(__cdecl*)(int);
+using PFN_NrProbeFloat = void(__cdecl*)(void*, const char*, float, int);
 
 // One image this pass owns: the storage, the view, and the NGX wrapper that describes it. Kept
 // together because they are created, resized and destroyed as one thing.
@@ -62,6 +64,12 @@ struct VkState
     PFN_VkCreate create = nullptr;
     PFN_VkEvaluate evaluate = nullptr;
     PFN_VkRelease release = nullptr;
+
+    // Where this block keeps floats, and the forwarder calls that find out. Optional: an older
+    // forwarder lacks them and the floats go to the header's slot, as they always did here.
+    PFN_NrSetFloatSlot setFloatSlot = nullptr;
+    PFN_NrProbeFloat probeFloat = nullptr;
+    bool floatSlotKnown = false;
 
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
@@ -427,6 +435,9 @@ bool LoadForwarder()
     g_vk.create = (PFN_VkCreate) GetProcAddress(g_vk.forwarder, "dlssnr_vk_create");
     g_vk.evaluate = (PFN_VkEvaluate) GetProcAddress(g_vk.forwarder, "dlssnr_vk_evaluate");
     g_vk.release = (PFN_VkRelease) GetProcAddress(g_vk.forwarder, "dlssnr_vk_release");
+    // Optional, and shared with the D3D12 path: one global slot inside the forwarder.
+    g_vk.setFloatSlot = (PFN_NrSetFloatSlot) GetProcAddress(g_vk.forwarder, "dlssnr_call_set_float_slot");
+    g_vk.probeFloat = (PFN_NrProbeFloat) GetProcAddress(g_vk.forwarder, "dlssnr_call_probe_float");
 
     if (g_vk.init == nullptr || g_vk.create == nullptr || g_vk.evaluate == nullptr)
     {
@@ -454,6 +465,38 @@ bool LoadForwarder()
         setHostAbi(kDlssNrForwarderAbi);
 
     return true;
+}
+
+// Where this parameter block keeps floats. The same probe as DlssNr_Dx12's DiscoverFloatSlot, for
+// the reason documented there: the header's slot is not where the driver's own block keeps them.
+// This path never ran it, so every float the model was given went into a slot that discards it.
+void DiscoverFloatSlot(NVSDK_NGX_Parameter* params)
+{
+    if (g_vk.floatSlotKnown || params == nullptr || g_vk.probeFloat == nullptr || g_vk.setFloatSlot == nullptr)
+        return;
+
+    g_vk.floatSlotKnown = true;
+
+    static const char* kProbeKey = "DLSSNR.OptiScalerFloatProbe";
+    static const int kCandidates[] = { 1, 2, 5, 6, 7, 4, 3, 0 };
+    const float expected = 0.375f; // exact in binary, so the round trip is exact or it is wrong
+
+    for (int slot : kCandidates)
+    {
+        float readBack = 0.0f;
+        g_vk.probeFloat(params, kProbeKey, expected, slot);
+
+        if (params->Get(kProbeKey, &readBack) == NVSDK_NGX_Result_Success && readBack == expected)
+        {
+            g_vk.setFloatSlot(slot);
+            LOG_INFO("DLSS-NR Vulkan: float parameters go through vtable slot {}", slot);
+            return;
+        }
+    }
+
+    LOG_ERROR("DLSS-NR Vulkan could not find the float setter: the motion vector scale, intensity, "
+              "local structure, local tone and skin structure will have no effect. The uint "
+              "parameters still apply.");
 }
 
 // Whether a format can hold linear, open-ended light. A frame the game already tone mapped has white
@@ -702,6 +745,9 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         }
     }
 
+    // Before anything is written to it, work out where this block keeps floats.
+    DiscoverFloatSlot(g_vk.capabilityParams);
+
     if (g_vk.queryPool == VK_NULL_HANDLE)
     {
         VkPhysicalDeviceProperties props {};
@@ -729,6 +775,9 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
     if (g_vk.pass == nullptr)
     {
+        // Before anything is written to it, work out where this block keeps floats.
+        DiscoverFloatSlot(g_vk.capabilityParams);
+
         g_vk.pass = std::make_unique<DlssNr_Vk>("Neural Rendering", device, physicalDevice);
 
         if (!g_vk.pass->IsInit())
