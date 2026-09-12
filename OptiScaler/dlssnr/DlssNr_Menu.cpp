@@ -420,10 +420,28 @@ void RenderMenu(Config* config, float menuResScale)
                 // stopping the control at 1.0 hid half of what the route accepts. Above 1 the model
                 // supersamples -- its input is enlarged, denoised, and sampled back down -- so it buys
                 // edge stability, not detail, and the cost grows with the area.
-                float rrScale = config->DlssNrRRWorkingScale.value_or_default();
+                //
+                // The commit waits for the drag to end, for the same reason the after-upscale slider
+                // below does: every distinct value is a different working size, and a different
+                // working size tears down the scratch textures and rebuilds the model. This one was
+                // left writing on each pixel of the drag, and a Cyberpunk log shows exactly the
+                // symptom that lesson was learned from -- "working resolution is settling (500 ms);
+                // no model reconstruction" while the scale moved. The slider still reads live; only
+                // the commit waits.
+                static float pendingRrScale = -1.0f;
+
+                float rrScale =
+                    pendingRrScale >= 0.0f ? pendingRrScale : config->DlssNrRRWorkingScale.value_or_default();
+
                 if (ImGui::SliderFloat(Localization::Label("RR Working scale###nrRRWorkingScale"), &rrScale, 0.25f,
                                        2.0f, "%.2fx"))
-                    config->DlssNrRRWorkingScale = std::clamp(rrScale, 0.25f, 2.0f);
+                    pendingRrScale = rrScale;
+
+                if (ImGui::IsItemDeactivatedAfterEdit() && pendingRrScale >= 0.0f)
+                {
+                    config->DlssNrRRWorkingScale = std::clamp(pendingRrScale, 0.25f, 2.0f);
+                    pendingRrScale = -1.0f;
+                }
 
                 if (rrScale > 1.001f)
                     ImGui::TextDisabled(Localization::Tr(
