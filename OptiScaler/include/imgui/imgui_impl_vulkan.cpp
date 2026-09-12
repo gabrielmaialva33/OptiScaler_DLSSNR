@@ -811,7 +811,8 @@ void ImGui_ImplVulkan_UpdateTexture(ImTextureData* tex)
             VkMappedMemoryRange range[1] = {};
             range[0].sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
             range[0].memory = upload_buffer_memory;
-            range[0].size = upload_size;
+            // Partial atlas updates may not be atom-aligned; flush the whole mapped range.
+            range[0].size = VK_WHOLE_SIZE;
             err = vkFlushMappedMemoryRanges(v->Device, 1, range);
             check_vk_result(err);
             vkUnmapMemory(v->Device, upload_buffer_memory);
