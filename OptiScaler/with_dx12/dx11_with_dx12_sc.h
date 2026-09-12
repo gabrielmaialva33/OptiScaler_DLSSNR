@@ -149,6 +149,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
 
     bool _wasCurrentOnRelease = false;
     bool _hasInteropWork = false;
+    bool _resizeIncomplete = false;
     UINT64 _dx11DrainValue = 0;
     ID3D12Fence* _drainFences[2] {};
     bool _drainSignaled[2] {};

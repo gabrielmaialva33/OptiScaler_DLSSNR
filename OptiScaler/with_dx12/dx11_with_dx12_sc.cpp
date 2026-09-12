@@ -129,7 +129,6 @@ DXGI_FORMAT ResolveBufferFormat(IDXGISwapChain* swapchain, IDXGISwapChain1* swap
 Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Device* pDevice, HWND hWnd, UINT flags)
     : _real(real), _fgSwapChain(fgSC), _dx11Device(pDevice), _handle(hWnd), _refcount(1)
 {
-    _CollectRetired();
     _id = ++scCount;
     _lastFlags = flags;
     _fg = State::Instance().currentFG;
@@ -182,6 +181,7 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
         _nextLive = _live;
         _live = this;
     }
+    _CollectRetired();
 
     State::Instance().swapchainInteropApi = SwapchainInteropApi::Dx11wDx12;
 
@@ -407,6 +407,10 @@ void Dx11wDx12SC::_FinishRelease(bool deviceLost)
     if (ownsFg)
         State::Instance().currentFGSwapchain = nullptr;
 
+    // Completion has been proved (or both devices are lost). Drop our explicit buffer pins
+    // before the backend's swapchain teardown, whose release hooks may trim buffer references.
+    _ReleaseInteropObjects();
+
     // FG ownership is presenter identity, not HWND identity or game-facing wrapper identity.
     if (!deviceLost && ownsFg && fgContext != nullptr && fg->Mutex.getOwner() != 1 &&
         fg->SwapchainContext() == fgContext)
@@ -476,6 +480,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetDevice(REFIID riid, void** ppDevice)
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 {
+    if (_resizeIncomplete)
+        return DXGI_ERROR_INVALID_CALL;
+
     if (_real == nullptr || _fgSwapChain == nullptr)
         return DXGI_ERROR_DEVICE_REMOVED;
 
@@ -631,6 +638,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     HRESULT fgResult = DXGI_ERROR_DEVICE_REMOVED;
     if (SUCCEEDED(realResult) && _fgSwapChain != nullptr)
         fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
+
+    if (SUCCEEDED(realResult))
+        _resizeIncomplete = FAILED(fgResult);
 
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers results: real {:X}, fg {:X}", (UINT) realResult, (UINT) fgResult);
 
@@ -828,6 +838,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers1: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) Format, SwapChainFlags);
 
+    if (_real3 == nullptr)
+        return ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
+
     const auto drainResult = _DrainForTeardown(5000);
     if (FAILED(drainResult))
         return drainResult;
@@ -837,9 +850,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     _ResetTeardownDrain();
     _ReleaseInteropBackBuffers();
 
-    HRESULT realResult = _real3 != nullptr ? _real3->ResizeBuffers1(BufferCount, Width, Height, Format, SwapChainFlags,
-                                                                    pCreationNodeMask, ppPresentQueue)
-                                           : ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
+    HRESULT realResult =
+        _real3->ResizeBuffers1(BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, ppPresentQueue);
 
     HRESULT fgResult = DXGI_ERROR_DEVICE_REMOVED;
     if (SUCCEEDED(realResult) && _fgSwapChain != nullptr)
@@ -847,6 +859,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         // The game's ppPresentQueue is not valid for the DX12 FG swapchain. Use ResizeBuffers for phase 1.
         fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
     }
+
+    if (SUCCEEDED(realResult))
+        _resizeIncomplete = FAILED(fgResult);
 
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers1 results: real {:X}, fg {:X}", (UINT) realResult, (UINT) fgResult);
 
