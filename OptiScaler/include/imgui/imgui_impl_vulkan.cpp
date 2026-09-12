@@ -804,14 +804,14 @@ void ImGui_ImplVulkan_UpdateTexture(ImTextureData* tex)
         // Upload to Buffer:
         {
             char* map = nullptr;
-            err = vkMapMemory(v->Device, upload_buffer_memory, 0, upload_size, 0, (void**)(&map));
+            // Map and flush the whole allocation: partial atlas updates need not be atom-aligned.
+            err = vkMapMemory(v->Device, upload_buffer_memory, 0, VK_WHOLE_SIZE, 0, (void**)(&map));
             check_vk_result(err);
             for (int y = 0; y < upload_h; y++)
                 memcpy(map + upload_pitch * y, tex->GetPixelsAt(upload_x, upload_y + y), (size_t)upload_pitch);
             VkMappedMemoryRange range[1] = {};
             range[0].sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
             range[0].memory = upload_buffer_memory;
-            // Partial atlas updates may not be atom-aligned; flush the whole mapped range.
             range[0].size = VK_WHOLE_SIZE;
             err = vkFlushMappedMemoryRanges(v->Device, 1, range);
             check_vk_result(err);
