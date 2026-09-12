@@ -7,6 +7,7 @@
 #include <dlssnr/DlssNr_ExposureScan.h>
 #include <dlssnr/DlssNr_Exposure.h>
 #include <dlssnr/DlssNr_Chain.h>
+#include <dlssnr/DlssNr_Consumers.h>
 #include <dlssnr/DlssNr_Submission.h>
 #include <dxgi1_4.h>
 
@@ -694,6 +695,11 @@ bool EnsureForwarder()
         setHostAbi(kDlssNrForwarderAbi);
 
     LOG_INFO("DLSS-NR forwarder loaded from {}", path.string());
+
+    // The neural pass is live from here, which is the only moment worth asking whether something
+    // else in this process is also running one. See DlssNr_Consumers.h for why two is a wrong image.
+    DlssNr::Consumers::WarnIfCompeting();
+
     return true;
 }
 

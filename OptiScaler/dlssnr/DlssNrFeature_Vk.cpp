@@ -6,6 +6,7 @@
 #include <State.h>
 #include <Util.h>
 #include <NVNGX_Parameter.h>
+#include <dlssnr/DlssNr_Consumers.h>
 
 #include <shaders/dlssnr/DlssNr_Vk.h>
 #include <shaders/output_scaling/OS_Vk.h>
@@ -463,6 +464,9 @@ bool LoadForwarder()
     // forwarder rather than mismatching its arguments in silence.
     if (const auto setHostAbi = (void(__cdecl*)(int)) GetProcAddress(g_vk.forwarder, "dlssnr_set_host_abi"))
         setHostAbi(kDlssNrForwarderAbi);
+
+    // Same check the D3D12 loader makes, once per process either way.
+    DlssNr::Consumers::WarnIfCompeting();
 
     return true;
 }
