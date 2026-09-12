@@ -84,6 +84,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     void _ResetTeardownDrain();
     bool _DevicesRemoved() const;
     bool _OwnsFgPresenter() const;
+    bool _OwnsPresenter() const;
     bool _OwnsOverlay() const;
     void _FinishRelease(bool deviceLost);
     void _DetachWrapperGlobals();
@@ -156,6 +157,8 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
 
     // Intrusive retirement needs no allocation at the failure boundary. Deliberately no static
     // destructor: unproven live-device work stays quarantined until process exit.
+    Dx11wDx12SC* _nextLive = nullptr;
+    inline static Dx11wDx12SC* _live = nullptr;
     Dx11wDx12SC* _nextRetired = nullptr;
     inline static Dx11wDx12SC* _retired = nullptr;
     inline static std::mutex _retiredMutex;

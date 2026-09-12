@@ -177,6 +177,12 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
         LOG_ERROR("failed to resolve D3D12 device/queue");
     }
 
+    {
+        std::lock_guard lock(_retiredMutex);
+        _nextLive = _live;
+        _live = this;
+    }
+
     State::Instance().swapchainInteropApi = SwapchainInteropApi::Dx11wDx12;
 
     _RefreshCachedSwapchainDesc();
@@ -187,6 +193,15 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
 
 Dx11wDx12SC::~Dx11wDx12SC()
 {
+    {
+        std::lock_guard lock(_retiredMutex);
+        auto link = &_live;
+        while (*link != nullptr && *link != this)
+            link = &(*link)->_nextLive;
+        if (*link == this)
+            *link = _nextLive;
+    }
+
     // Release (or the retirement collector) has already proved completion, or confirmed
     // device loss. Direct destruction is not a supported ownership path.
     _ReleaseInteropObjects();
@@ -311,8 +326,24 @@ ULONG STDMETHODCALLTYPE Dx11wDx12SC::Release()
 
 bool Dx11wDx12SC::_OwnsFgPresenter() const
 {
-    return _fgSwapChain != nullptr && State::Instance().currentFGSwapchain == _fgSwapChain && _fg != nullptr &&
-           State::Instance().currentFG == _fg && _fg->SwapchainContext() == _fgSwapchainContext;
+    if (_fgSwapChain == nullptr || State::Instance().currentFGSwapchain != _fgSwapChain || _fg == nullptr ||
+        State::Instance().currentFG != _fg || _fg->SwapchainContext() != _fgSwapchainContext)
+        return false;
+
+    return _OwnsPresenter();
+}
+
+bool Dx11wDx12SC::_OwnsPresenter() const
+{
+    // FGPreserveSwapChain can hand the SAME presenter/context to a new wrapper. Its most
+    // recent wrapper owns teardown, even if an older wrapper still holds COM references.
+    std::lock_guard lock(_retiredMutex);
+    for (auto item = _live; item != nullptr; item = item->_nextLive)
+    {
+        if (item->_fgSwapChain == _fgSwapChain)
+            return item == this;
+    }
+    return false;
 }
 
 bool Dx11wDx12SC::_OwnsOverlay() const
@@ -320,7 +351,7 @@ bool Dx11wDx12SC::_OwnsOverlay() const
     // CleanupRenderTarget also mutates currentFG. Never use it for a different FG presenter.
     const bool current =
         State::Instance().currentSwapchain == this || State::Instance().currentWrappedSwapchain == this;
-    return _OwnsFgPresenter() || (current && State::Instance().currentFGSwapchain == nullptr);
+    return _OwnsFgPresenter() || (current && _OwnsPresenter() && State::Instance().currentFGSwapchain == nullptr);
 }
 
 bool Dx11wDx12SC::_DevicesRemoved() const
@@ -370,18 +401,20 @@ void Dx11wDx12SC::_FinishRelease(bool deviceLost)
     _wasCurrentOnRelease = _OwnsOverlay();
     _DetachWrapperGlobals();
 
-    FGHooks::ClearDx12InteropPresentSC(_fgSwapChain);
+    if (_OwnsPresenter())
+        FGHooks::ClearDx12InteropPresentSC(_fgSwapChain);
 
-    if (State::Instance().currentFGSwapchain == _fgSwapChain)
+    if (ownsFg)
         State::Instance().currentFGSwapchain = nullptr;
 
     // FG ownership is presenter identity, not HWND identity or game-facing wrapper identity.
-    if (!deviceLost && ownsFg && fg->Mutex.getOwner() != 1 && fg->SwapchainContext() == fgContext)
+    if (!deviceLost && ownsFg && fgContext != nullptr && fg->Mutex.getOwner() != 1 &&
+        fg->SwapchainContext() == fgContext)
     {
         fg->Deactivate();
         fg->ReleaseSwapchain(_handle);
     }
-    if (_wasCurrentOnRelease && !deviceLost)
+    if (_wasCurrentOnRelease && !deviceLost && (fg == nullptr || fg->Mutex.getOwner() != 1))
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
 }
 
