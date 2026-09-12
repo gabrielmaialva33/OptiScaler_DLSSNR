@@ -48,7 +48,7 @@ neural pass, the composition and the menu all in place. What we lack is only a *
 | Colour | The swapchain backbuffer, at present time | Have it. `wrapped/wrapped_swapchain.cpp` already hands the overlay a backbuffer there |
 | Exposure | `DlssNr_ExposureScan` already scans for one and holds a value when the game offers none | Have it |
 | Depth | `resource_tracking/ResTrack_dx12.cpp` already hooks `OMSetRenderTargets` (`ResTrack_dx12.h:511-514`, implementation at `ResTrack_dx12.cpp:1128`) and therefore already *sees* every depth-stencil descriptor the game binds | Machinery exists; the heuristic does not |
-| Motion vectors | Nothing produces them. This is the blocker | Absent |
+| Motion vectors | Nothing produces them, and it turns out not to matter for a first cut | Absent, and survivable — see below |
 
 Depth is the encouraging one. We do not have to add a hook or guess from scratch — the hook that
 observes the game's own depth binding is already installed and already running for the exposure-scan
@@ -57,11 +57,27 @@ depth-stencils is *the* scene depth), and that heuristic is where ReShade has ye
 special-casing. A wrong depth is worse than no depth: the model would be guided by a surface that does
 not describe the scene.
 
-Motion vectors are the real wall. The model is temporal; without a motion guide it either gets a reset
-every frame or gets vectors we invented. Optical flow is the scene's answer and Ada has the hardware
-for it, but **whether NVOFA is reachable under Proton is unverified** and would have to be established
-before anything else in this note is worth building. That single unknown gates the whole idea, and it is
-cheap to answer with a standalone probe long before any NR code is written.
+Motion vectors looked like the wall when this note was first written. They are not, and the correction
+came from the last place anyone would look for it: the projects running feature 18 over **video**.
+
+`SAOG0721/DaVinci-Resolve-DLSS5` is an OpenFX filter that runs the neural model on film footage inside
+DaVinci Resolve. At 79 stars it is by an order of magnitude the most-used thing in this whole ecosystem,
+and it states its contract plainly: **"Motion is zero-filled `R16G16_FLOAT`; depth is zero-filled
+`R32_FLOAT`"**, with "real motion/depth are later work". It produces a visible, useful neural change
+anyway. So the model runs, and does something worth having, with **no guides at all**.
+
+`jessicanataliagta/DLSS-5-Video-Player` takes the middle road and says why: "Normal encoded video does
+not contain the original game engine Z-buffer or object motion vectors. Those buffers are discarded when
+the game is rendered into a 2D movie, so the player reconstructs temporal guides from consecutive
+frames" — motion as `R16G16_FLOAT` current-to-previous in input-pixel units, a depth proxy, and Halton
+subpixel jitter shared between the generated guides and the NGX parameters. Its own caveat is the honest
+one: "These are reconstructed video guides, not the original engine buffers. Their quality depends on
+the source material."
+
+That reorders everything. Guides are a **quality axis, not a gate**: zero-filled works, reconstructed
+from consecutive frames works better, real engine buffers work best. Optical flow under Proton stops
+being the question that has to be answered before anything else can start, and becomes an optimisation
+to reach for once there is something to optimise.
 
 ## Who would originate the evaluate
 
@@ -79,16 +95,28 @@ it. Porting it is its own design note and its own review.
 
 ## Sequencing, honestly
 
-1. Probe whether NVIDIA Optical Flow initialises under Proton on this hardware. Standalone, no NR code.
-   If it does not, this note is finished: stop here and say so.
-2. Port the present-time dispatch (`bc223dae` and its four follow-ups) under its own design note. Useful
-   independently.
-3. Only then: a depth-selection heuristic over the `OMSetRenderTargets` observations, and a synthesized
-   DLAA contract behind a config key that is off by default, inert when off, like every other `[DlssNr]`
-   key.
+1. Port the present-time dispatch (`bc223dae` and its four follow-ups) under its own design note. It is
+   the host everything else needs, and it is useful on its own: it reaches games where the after-upscale
+   hook never fires.
+2. A synthesized same-resolution contract with **zero-filled motion and depth**, behind a config key
+   that is off by default and inert when off, like every other `[DlssNr]` key. This is the cheapest
+   thing that can possibly work, two shipping projects say it does work, and it settles the only
+   question that actually matters — whether the model produces something worth having on a frame we
+   assembled ourselves — before a single line of guide-synthesis is written.
+3. Only if step 2 earns it: guides. Consecutive-frame motion reconstruction first, because it needs no
+   hardware feature and no Proton unknowns; a depth-selection heuristic over the existing
+   `OMSetRenderTargets` observations second; optical flow last.
 
-Steps 1 and 2 are worth doing on their own merits. Step 3 is speculative and should not be started
-before both land.
+   On optical flow, one fact worth having before anyone plans that step. Measured on this workstation
+   (RTX 4090, driver 615.71.09, 2026-09-11), the host Vulkan driver exposes **six** queue families, and
+   family 5 carries `VK_QUEUE_OPTICAL_FLOW_BIT_NV`. So the cheap route is not NVOFA's own API at all --
+   it is `VK_NV_optical_flow`, a Vulkan queue we are already in a position to use from the Vulkan path.
+   Wine's Vulkan is a thin pass-through to the host ICD, so the family list inside a Proton process
+   should be the same one, but that is an inference and has not been confirmed from inside a game.
+
+The earlier draft of this note had the NVOFA probe as step 1 and said the idea was dead if it failed.
+That was wrong, and wrong in an expensive direction: it put an unanswerable platform question in front
+of work that does not depend on it.
 
 ## Two facts about this tree, measured from outside
 
