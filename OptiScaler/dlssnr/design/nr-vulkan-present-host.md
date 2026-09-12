@@ -112,6 +112,9 @@ down, and ties the DLSS-G/menu interlock to actual overlay ownership. Current
 `DxOverlayOwnsBackend:192` and the reverse guard in `menu_overlay_dx.cpp` preserve that separation.
 An NR pass that never opens ImGui also never automatically benefits from an interlock keyed to
 menu visibility. It cannot assume FG is suspended merely because its own UI is absent.
+Conversely, `QueuePresent` returns before GPU work when `RenderMenu` produces no frame. Opening
+the menu therefore changes both ImGui activity and GPU submission: a failure on menu-open alone
+does not isolate which caused it.
 
 **Adjudication:** removing ImGui removes the backend/context hazards; it does not establish that
 the pacing/submission hazard disappears. A correct NR-only semaphore chain may coexist, but this
@@ -206,6 +209,9 @@ The Vulkan implementation also has gaps that 150 recorded frames cannot discharg
   before frees. Apply the fail-closed drain/abandon rule, including partial initialization.
   `FramesVk` increments before checking the evaluate result and before resolve; it is not a
   completed-composition counter. Report attempted, recorded, submitted and completed work distinctly.
+- `Transition`/`TransitionForeign` use shader access masks and ignored queue-family indices;
+  they are not general transfer/WSI/ownership barriers. Add the actual transfer access scopes
+  and same-layout memory dependencies where needed rather than copying those helpers unchanged.
 
 ## Zero guides and colour, in Vulkan terms
 
@@ -449,4 +455,6 @@ keeps the D3D12 host relevant; none justifies silently enabling the legacy Vulka
 
 This note's evidence is a manual source/history audit and the cited public documentation/report,
 not a new GPU run. No implementation, marker edit, installation or game launch is part of this task.
+Local documentation links, whitespace and the fourteen-suite registry listing were checked; the
+suites themselves were not run for this documentation change.
 Eventual C++ uses the pinned `/usr/lib/llvm20/bin/clang-format`; this documentation needs no build.
