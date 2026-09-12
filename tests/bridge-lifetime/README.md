@@ -65,3 +65,19 @@ their existing global subsystems. Bridge-initiated cleanup is delayed and checke
 against current presenter/context identity, but this does not repair independent
 teardown/reinitialization paths in those subsystems or prove completion of private
 SDK queues. Those are a remaining boundary of the lifetime guarantee.
+
+## Validation recorded 2026-09-12
+
+- Pinned `/usr/lib/llvm20/bin/clang-format --dry-run --Werror` passed on both
+  production files.
+- `./build-local.sh` passed in Release with the final bridge source recompiled.
+  The existing watchdog recovered a Wine compiler stall; existing linker warnings
+  remained. No DLL was installed into a game.
+- `python3 tests/run_all.py` passed 12/12 host suites: all eleven pre-existing
+  suites plus this suite. No Wine-tier coverage of this bridge is claimed.
+- Manual lifetime review checked all bridge-owned destructive paths, preserved
+  presenter reuse, distinct queue fences, partial resize recovery and retirement
+  without callbacks under the retirement mutex. NR config, shaders, hooks and
+  passthrough are unchanged; this is an unconditional bridge correctness repair.
+  Other subsystems' concurrent global-state changes and independent FG/ImGui
+  teardown remain outside this review's safety guarantee.
