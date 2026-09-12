@@ -625,7 +625,10 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
 
     const auto drainResult = _DrainForTeardown(5000);
     if (FAILED(drainResult))
+    {
+        LOG_ERROR("bridge resize preflight failed: {:X}; resources and swapchains retained", (UINT) drainResult);
         return drainResult;
+    }
 
     if (_OwnsOverlay())
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
@@ -843,7 +846,10 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
 
     const auto drainResult = _DrainForTeardown(5000);
     if (FAILED(drainResult))
+    {
+        LOG_ERROR("bridge resize preflight failed: {:X}; resources and swapchains retained", (UINT) drainResult);
         return drainResult;
+    }
 
     if (_OwnsOverlay())
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
@@ -1198,7 +1204,11 @@ HRESULT Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
 {
     if (slot >= _copyAllocatorFenceValues.size())
         return E_INVALIDARG;
-    return WaitForBridgeFence(_copyFence, _dx12Device, _copyFenceEvent, _copyAllocatorFenceValues[slot], 5000);
+    const auto result =
+        WaitForBridgeFence(_copyFence, _dx12Device, _copyFenceEvent, _copyAllocatorFenceValues[slot], 5000);
+    if (FAILED(result))
+        LOG_ERROR("bridge slot {} fence {} wait failed: {:X}", slot, _copyAllocatorFenceValues[slot], (UINT) result);
+    return result;
 }
 
 bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)

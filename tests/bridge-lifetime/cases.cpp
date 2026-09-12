@@ -284,6 +284,38 @@ void partialResizeCase()
     assert(!f.sc->_resizeIncomplete && f.sc->refreshes == 1);
 }
 
+void resizeErrorCases()
+{
+    for (bool waitFailed : { false, true })
+    {
+        Fixture f;
+        f.sc->_hasInteropWork = true;
+        f.sc->_copyAllocatorFenceValues[0] = 6;
+        if (waitFailed)
+            wakes.push_back(
+                [](DWORD)
+                {
+                    lastError = 87;
+                    return WAIT_FAILED;
+                });
+        else
+            f.copyFence.registration = -88;
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == (waitFailed ? -87 : -88));
+        assert(f.real.resizes == 0 && f.presenter.resizes == 0 && f.shadow.releases == 0);
+        f.copyFence.completed = 6;
+    }
+    {
+        Fixture f;
+        // D3D11 wrote a shadow, but its Signal failed before any D3D12 copy was submitted.
+        f.sc->_hasInteropWork = true;
+        f.context.signalResult = -90;
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == -90);
+        assert(f.real.resizes == 0 && f.shadow.releases == 0);
+        f.context.signalResult = S_OK;
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == S_OK);
+    }
+}
+
 void retirementRecoveryCase()
 {
     Fixture f;
@@ -314,6 +346,7 @@ int main()
     preservedPresenterCase();
     drainCases();
     partialResizeCase();
+    resizeErrorCases();
     retirementRecoveryCase();
     assert(Dx11wDx12SC::_retired == nullptr);
     std::cout << "bridge lifetime: production wait, copy, resize, release and retirement cases passed\n";
