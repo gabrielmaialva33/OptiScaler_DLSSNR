@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include <misc/Localization.h>
 #include "menu_common.h"
 #include <dlssnr/DlssNr_ExposureScan.h>
@@ -3358,10 +3358,14 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     nvngxOptions = {
         { FGNvngxReplacement::None, "None (Real DLSSG)", "Real DLSSG, For RTX 40xx and above"},
         { FGNvngxReplacement::Nukems, "Nukem's", "FSR 3 FG" },
-        { FGNvngxReplacement::Arturs, "Enabler", "FSR 3 MFG" },
-        { FGNvngxReplacement::FFX, "FSR 3/4 FG", "FSR 3/4 FG using the FFX" },
-        { FGNvngxReplacement::Combo, "FFX + Enabler", "FFX for the middle fake frame, Enabler for the rest\n\n"
-                                                      "2x - FFX\n3x - Enabler\n4x - FFX + Enabler\n5x - Enabler\n6x - FFX + Enabler" },
+        { FGNvngxReplacement::Arturs, "Enabler", "FSR 3 MFG mod" },
+        { FGNvngxReplacement::FFX, "FSR 3/4 FG", "FSR 3/4 FG using the FFX upgrade\n\n"
+                                                 "Partially based on Nukems, uses SL swapchain\n"
+                                                 "Possibly better performance and frame pacing compared to FSR-FG output"},
+        { FGNvngxReplacement::Combo, "FFX + Enabler", "Use if FSR4-FG is supported, otherwise stick to Enabler\n\n"
+                                                      "FFX used for the middle fake frame, Enabler for the rest\n\n"
+                                                      "2x - FFX\n3x - Enabler\n4x - FFX + Enabler\n5x - Enabler\n6x - FFX + Enabler\n\n"
+                                                      "Due to pacing, only odd number of fake frames are able to use FFX"},
     };
 
     // clang-format on
