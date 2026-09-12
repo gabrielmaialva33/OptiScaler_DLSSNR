@@ -82,3 +82,8 @@ summary = "Builds a real DLL and drives real Vulkan to exercise overlay lifetime
 tier = "wine"
 timeout = 600
 summary = "Drives the production NGX exports on a real D3D12 device and exercises the post-stage settling gate by sweeping the output extent. Runs under the local Proton (--runtime proton); bare wine reaches NR but its feature create returns FAIL_PlatformError. Includes successful shutdown and rejects runs without NR composition."
+
+[bridge-lifetime]
+tier = "host"
+timeout = 300
+summary = "Production D3D11/D3D12 bridge waits, failed submissions, resize preflight, ownership and retirement under scripted COM/Win32 fakes."

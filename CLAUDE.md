@@ -173,18 +173,18 @@ for the same reason. The tree is currently clean under version 20.
 
 ### Tests
 
-`tests/README.md` is the index; read it before adding or changing a suite. Fourteen directories under
+`tests/README.md` is the index; read it before adding or changing a suite. Fifteen directories under
 `tests/`, each self-contained with its own `run.py` and README, registered in `tests/suites.toml`.
 
 ```bash
-python3 tests/run_all.py            # host tier, the default; 11 suites, ~50 s
+python3 tests/run_all.py            # host tier, the default; 12 suites, ~50 s
 python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
 python3 tests/run_all.py --tier all # adds the three wine suites
 python3 tests/<name>/run.py         # one suite, unchanged
 ```
 
 Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the eleven `nr-*`
-suites. **wine** needs the msvc-wine prefix and runs serially, because these suites contend for the
+suites plus `bridge-lifetime`. **wine** needs the msvc-wine prefix and runs serially, because these suites contend for the
 same prefix `build-local.sh` uses: `nr-gpu-timing-d3d12`, `vulkan-overlay` (which also needs a
 graphical session and a working Vulkan loader), and `dlssnr-loopback` (real NGX/NR under Proton).
 There are currently no **wip** suites.
