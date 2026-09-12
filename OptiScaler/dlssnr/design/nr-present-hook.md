@@ -399,3 +399,63 @@ enhancement per real frame, FG only where ordering is proved — earns those cos
 ownership, bounded submission lifetime or usable images cannot be demonstrated, stop there. Keep
 the existing upscale path as the default and leave dummy/synthesized contracts and guide generation
 to the explicitly sequenced follow-up.
+
+---
+
+## Independent review (2026-09-12)
+
+This note was reviewed by a second agent on a different model, read-only, against the same tree and
+the same five donor commits. Its brief was adversarial: find what is wrong or missing, not what is
+good. Full text at the time of writing: `agy-review-present-hook.md` in the session scratchpad.
+
+**What it confirmed.** Every code claim above was audited against the source and none was wrong — the
+merge base, the 159/33 rev counts, `bc223dae` at 10 files and 754 insertions, the marker check at
+`dllmain.cpp:947-960`, the exact bypass predicate at `wrapped_swapchain.cpp:455`, the `Dispatch`
+signature, the internal symbols, the suite counts. The mechanical/semantic split across the 13 diff3
+regions was judged sound, with nothing filed as mechanical that is secretly semantic. All nine
+DEVELOPMENT.md §1 invariants were judged satisfied by the proposed contract.
+
+**What it found missing.** Five structural hazards the conclusion above understates. They do not
+change the verdict — the host is still worth pursuing and the patches still must not ship verbatim —
+but each is a thing the port has to answer, not a thing to discover in a game.
+
+1. **Swapchain resize is an unguarded drain.** D3D12 requires every in-flight command referencing a
+   backbuffer to have completed before `ResizeBuffers`. The donor's private list ring submits work
+   that references backbuffers through `CopyResource`, and neither `WrappedIDXGISwapChain4::ResizeBuffers`
+   (`wrapped_swapchain.cpp:665`) nor `FGHooks::hkFGRelease` (`FG_Hooks.cpp:241`) waits on
+   `g_presentList.fence`. Alt+Enter or a resolution change during a pass is `DXGI_ERROR_INVALID_CALL`
+   and device loss. A mandatory fence drain inside `ResizeBuffers` and `CleanupRenderTarget` is part
+   of the port, not an optimisation.
+
+2. **The present host's state is global, and swapchains are not.** `g_presentList`, `g_bbCopy`,
+   `g_temporal` and `g_compose` are file statics. A game with a second swapchain — a launcher, a tool
+   window, a secondary viewport — interleaves calls from both into one four-slot ring: mismatched
+   copies, index collisions, crashes. The state has to hang off the swapchain instance.
+
+3. **`ALLOW_UNORDERED_ACCESS` is not free on a backbuffer format.** `CreateScratch`
+   (`DlssNr_Dx12.cpp:1331`) hardcodes the flag. Swapchains are commonly `B8G8R8A8_UNORM`, and on
+   drivers without typed UAV load for it `CreateCommittedResource` returns `E_INVALIDARG`, which
+   latches `g_nr.failed = true` permanently. The port needs format validation or an `R8G8B8A8_UNORM`
+   cast, decided before the first allocation.
+
+4. **Queue identity is assumed, not established.** `menu_overlay_dx.cpp:490` submits the overlay's
+   list on `currentSCCommandQueue`; the donor's present hook uses the `cq` it gets from the device.
+   Where those differ, the menu's backbuffer transitions and the NR transitions are on two queues with
+   no fence between them.
+
+5. **Guides may be captured on another queue.** `EvaluateAfterUpscale` snapshots depth and motion on
+   the game's upscale list, which can be async compute; `RunPresentPass` reads them on the present
+   queue. Without a cross-queue barrier and fence that is a read-after-write hazard — and the
+   `vulkan-overlay` suite now runs with synchronization validation on, so this class of mistake is
+   catchable rather than mysterious.
+
+**And one thing synchronization cannot fix**, which sharpens the tradeoff already named above: without
+a HUD-less backbuffer the model will denoise text, crosshairs and damage numbers. That is not a bug to
+be fixed later; it is a property of running at present time, and either a HUD mask exists or the mode
+is only honest for content without a HUD.
+
+**One correction to the placement discussion.** Moving `RunPresentPass` ahead of `MenuOverlayDx::Present`
+is not only about whether the model sees our menu — it changes the arrival state. Before the overlay,
+the backbuffer arrives in `PRESENT`, is processed, and is restored to `PRESENT`, after which the
+overlay does its own clean `PRESENT -> RENDER_TARGET -> PRESENT`. After the overlay, the donor's
+arrival assumption does not hold against this tree's overlay, which leaves the backbuffer in `PRESENT`.
