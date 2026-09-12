@@ -233,6 +233,12 @@ ULONG STDMETHODCALLTYPE Dx11wDx12SC::Release()
 
     if (ret == 0)
     {
+        // Whether the globals below describe this instance. A game can hold more than one of these
+        // -- a launcher window, a tool window, a second viewport -- and releasing one of them must
+        // not tell the rest of OptiScaler that there is no interop swapchain any more.
+        const bool wasCurrent =
+            State::Instance().currentSwapchain == this || State::Instance().currentWrappedSwapchain == this;
+
         if (State::Instance().currentSwapchain == this)
             State::Instance().currentSwapchain = nullptr;
 
@@ -250,7 +256,10 @@ ULONG STDMETHODCALLTYPE Dx11wDx12SC::Release()
         if (State::Instance().currentD3D11Device == _dx11Device)
             State::Instance().currentD3D11Device = nullptr;
 
-        State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
+        // Guarded like every other global above it. This line used to run unconditionally, so
+        // releasing any instance cleared the interop mode for all of them.
+        if (wasCurrent)
+            State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
 
         auto fg = State::Instance().currentFG;
         if (fg != nullptr && fg->Mutex.getOwner() != 1 && fg->SwapchainContext() != nullptr)
@@ -307,6 +316,15 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     auto dx11Index = _GetDx11BackBufferIndexForPresent();
 
     if (!_RequestSharedBackBuffer(dx11Index))
+        return DXGI_ERROR_DEVICE_REMOVED;
+
+    // Before D3D11 writes the shadow, not after. _CopyDx11BackBufferToShared copies into
+    // _sharedDx11BackBufferCopies[_currentFakeIndex], and the only wait on that slot used to be the
+    // one inside _CopyDx11SharedToDx12FGBackBuffer, which runs two steps later -- so D3D11 could
+    // overwrite a shadow D3D12 was still reading for an earlier frame that reused the slot. The
+    // fence value is per slot, so in steady state the ring has already come round and this returns
+    // at once; it only blocks when the GPU is genuinely still behind.
+    if (!_WaitForCopyAllocator(_currentFakeIndex))
         return DXGI_ERROR_DEVICE_REMOVED;
 
     if (!_CopyDx11BackBufferToShared(dx11Index))
