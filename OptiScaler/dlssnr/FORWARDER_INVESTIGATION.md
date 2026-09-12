@@ -21,8 +21,9 @@ Each entry: what was tried, what the log said, what it rules out.
 
 - The caller check is **not** the proxy path's blocker. The proxy is past it; `0xBAD0000B` is a real
   "could not build the feature", downstream of the caller check.
-- The core routes feature 18 (it does not answer "unknown feature"), so the snippet is being reached.
-  It is the *initialisation* of the feature that fails.
+- The core routes feature 18 (it does not answer "unknown feature"). **This was read as "so the
+  snippet is being reached", and that inference was wrong** -- see "The answer" below. The core
+  accepts 18 as a known id and then has nothing to build it with.
 - Re-initialising the core with `Init_Ext` is idempotent: it returns success and changes nothing,
   reporting the app id and SDK version the core first came up with. So the proxy path cannot change
   the app id or SDK version out from under the game's own DLSS. (log: "re-init at SDK 0x15 returned
@@ -39,31 +40,73 @@ with the game's own DLSS running (core fully warm).
 Result: all 20 attempts returned `0xBAD0000B`, none succeeded.
 Rules out: a transient warm-up window as the cause. The failure is stable, not timing.
 
-## Theories not yet tried
+## The answer (2026-09-12) — the proxy path was never possible
 
-- **Snippet discovery path.** The core loads snippets from the path list it was given at `Init` (the
-  game's DLSS directory) plus the app directory. If `nvngx_dlssnr.dll` is not on a path the core
-  searches, it finds feature 18 and has nothing to build it from -> UnableToInitialize. Since Init is
-  idempotent we cannot add a path after the game's own Init; the snippet would have to sit where the
-  core already looks. Test: place `nvngx_dlssnr.dll` beside the exe / in the game's DLSS plugin dir
-  and check whether the core loads it (Streamline/NGX log should show the load).
-- **Feature registration / discovery step.** The game only ever registers the SR/RR/FG snippets with
-  the core, never NR. Feature 18 may need a discovery call (`GetFeatureRequirements` /
-  `UpdateFeature`) before `CreateFeature` will build it. Test: call the D3D12 requirements query for
-  feature 18 through the core before creating, and see whether that changes the create result.
-- **Scratch buffer.** `CreateFeature` may need `GetScratchBufferSize(18)` satisfied first. Untested.
-- **Answer the caller-path check instead of satisfying it.** The forwarder exists because the snippet
-  rejects a caller whose module path lacks `nvngx.dll`, so we give it a module named that. There is
-  another way to make that check pass, and a shipping project says it works:
-  `SAOG0721/DaVinci-Resolve-DLSS5` (an OpenFX filter running feature 18 over video in DaVinci Resolve)
-  lists among its verified contract "scoped `GetModuleFileNameW` IAT compatibility" -- it hooks the
-  import the check goes through, scoped to the window in which the NGX call runs, rather than shipping a
-  second DLL to be the answer. That is a different mechanism from everything tried above: the theories
-  here are all about *why the proxy's CreateFeature fails* (`0xBAD0000B`), while this is about *removing
-  the reason the forwarder exists at all*. Worth reading their implementation before assuming it
-  generalises -- same-resolution creation, application ID `0x0876232C`, and SEH guards are listed as part
-  of the same contract, so the IAT scoping may be load-bearing only together with the rest of it.
-  Found 2026-09-11 while surveying the ecosystem; not tried here.
+`SAOG0721/Magpie` (the experimental fork behind the DaVinci Resolve DLSS 5 filter) runs feature 18 in
+production and documented its route. `bmitch87/DLSS5VKLayer` carries that write-up as
+`extracted_pipeline_notes.md`, mined from Magpie's source with file and line references. It states,
+flatly:
+
+> Feature 18 is **not** created through the Core `nvngx.dll` route. Magpie uses a "signed snippet"
+> route. Core is used only for parameter-block allocation and process-global init.
+
+and records the same failure code this log has been chasing:
+
+> Core `CreateFeature(18)` -> `0xbad0000b` (**Core has no NR implementation**).
+> Direct `Init_Ext` without correct AppID / data dir / caller hook -> `0xbad00002`.
+> Working route: `created=true path=signed-snippet`, Evaluate `result=0x1`.
+
+So `0xBAD0000B` is not a snippet that failed to initialise. It is the driver core saying it has no
+feature 18 to build. **The proxy path cannot be made to work**, and the three theories that used to be
+listed here -- snippet discovery path, a discovery/registration call before Create, and
+`GetScratchBufferSize(18)` -- were all hunting for a cause that does not exist. They are dropped, not
+untested.
+
+That also disposes of the premise this document opened with: "let the core call the snippet, and the
+snippet sees the core as its caller". The core never calls the snippet for feature 18.
+
+## The route that does work, and how to drop the forwarder
+
+The same notes give the whole recipe, verified against a shipped binary:
+
+1. `LoadLibraryExW(appDir\nvngx_dlssnr.dll, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)`.
+2. `GetProcAddress` for exactly five exports: `NVSDK_NGX_D3D12_Init_Ext`, `..._CreateFeature`,
+   `..._EvaluateFeature`, `..._ReleaseFeature`, `..._Shutdown1`. All five are present in the model we
+   ship against (checked here, 310.8.SF).
+3. **Patch the snippet's own import table.** Find its `KERNEL32!GetModuleFileNameW` IAT slot and point
+   it at a replacement that answers `L"nvngx.dll"` when the snippet asks about our module. Restore it
+   on teardown.
+4. `Init_Ext(0x0876232C, applicationDirectory, device12, NVSDK_NGX_Version_API, nullptr)` -- the AppID
+   is a constant, and the DaVinci filter independently lists the same one. The data path is the DLL's
+   own directory. No capability parameter block.
+5. Create / Evaluate / Release / Shutdown all through the **snippet's** exports. The core is used only
+   for `AllocateParameters` / `GetCapabilityParameters` / `DestroyParameters` and process-global init.
+6. Teardown order is fixed: GPU drain -> snippet `ReleaseFeature` -> core `DestroyParameters` ->
+   snippet `Shutdown1` -> restore the IAT -> `FreeLibrary` -> core `Shutdown1`.
+7. Every call crosses a `__try/__except` boundary, fail-closed to pass-through.
+
+### Why patching the second half of the check is enough
+
+This log said the snippet resolves its caller with `RtlPcToFileHeader`. That is true and it is only
+half of it: `RtlPcToFileHeader` turns a return address into a module base, and `GetModuleFileNameW`
+turns that base into a path to compare. Both are imported by the model shipped here -- verified with
+`winedump -j import`: `RtlPcToFileHeader` at ordinal 1279 and `GetModuleFileNameW` at 657, from
+`KERNEL32.dll`.
+
+The first half cannot be faked from outside; the second half is an ordinary IAT slot. That is the
+whole trick, and it is why the forwarder is avoidable without a second DLL.
+
+### What is still ours to establish
+
+None of the above has been run in this tree. Before it replaces the forwarder:
+
+- Under Wine/Proton, not just Windows. Every source above is a Windows project.
+- Alongside the game's own NGX use. Magpie owns its process and its own D3D12 device; we live inside a
+  game that is already talking to the core. An IAT patch on the snippet is process-global for as long
+  as it is installed, which is why the teardown order above restores it.
+- The forwarder is not only a caller-check answer here: it is also the ABI v2 handshake boundary
+  (`dlssnr_set_host_abi`, `dlssnr_abi_version`) and the caller gate that keeps a mismatched host from
+  running. Dropping the DLL means finding a new home for that, or accepting its loss deliberately.
 
 ## How to reproduce
 Set `[DlssNr] UseProxy=true`. The path is off by default and does not fall back automatically, so a

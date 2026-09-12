@@ -100,9 +100,31 @@ it. Porting it is its own design note and its own review.
    hook never fires.
 2. A synthesized same-resolution contract with **zero-filled motion and depth**, behind a config key
    that is off by default and inert when off, like every other `[DlssNr]` key. This is the cheapest
-   thing that can possibly work, two shipping projects say it does work, and it settles the only
-   question that actually matters — whether the model produces something worth having on a frame we
-   assembled ourselves — before a single line of guide-synthesis is written.
+   thing that can possibly work, it settles the only question that actually matters — whether the model
+   produces something worth having on a frame we assembled ourselves — and it no longer has to be
+   guessed at. `SAOG0721/Magpie` ships it and the write-up in `bmitch87/DLSS5VKLayer`'s
+   `extracted_pipeline_notes.md` §6 gives the contract in full:
+
+   | resource | format | bound to NGX |
+   |---|---|---|
+   | Depth | `R32_FLOAT`, source extent | yes, as `DLSSNR.Depth` |
+   | Motion | `R16G16_FLOAT` | yes, as `DLSSNR.MVec` |
+   | Confidence | `R8_UNORM` | **no** — never passed; it only drives their own downsample blending |
+
+   Created `BIND_SHADER_RESOURCE | BIND_UNORDERED_ACCESS`, cleared **once** with
+   `ClearUnorderedAccessViewFloat(..., {0,0,0,0})` and never rewritten, so they are permanently zero
+   and cost nothing per frame. History reset is raised on initialise, resize, scene change, capture
+   interruption, device recreation and long pause. The motion contract they declare alongside is
+   `CurrentToPrevious`, `SourcePixels`, `RelativeInverse`, `depthInverted = true`.
+
+   Their selector is worth copying rather than inventing: `guidanceMode` 0 = use what is available,
+   1 = force zero, 2 = motion only with zero depth, 3 = depth only with zero motion. That is one key
+   with four values instead of two independent booleans, which is also what this module's
+   one-quantity-one-control invariant would push us to.
+
+   Note what this does *not* settle: everything above is D3D11-to-D3D12 interop inside a Windows
+   process that owns its own device. Ours would be a D3D12 or Vulkan path inside a game's device. The
+   formats, the clear-once trick and the mode taxonomy carry over; the interop does not.
 3. Only if step 2 earns it: guides. Consecutive-frame motion reconstruction first, because it needs no
    hardware feature and no Proton unknowns; a depth-selection heuristic over the existing
    `OMSetRenderTargets` observations second; optical flow last.
