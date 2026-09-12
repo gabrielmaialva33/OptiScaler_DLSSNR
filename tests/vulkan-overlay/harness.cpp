@@ -326,7 +326,12 @@ struct Test
         b.image = images[index];
         b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        // TRANSFER, not TOP_OF_PIPE, as the source stage: the acquire semaphore below is waited at
+        // TRANSFER, and a transition sourced at TOP_OF_PIPE sits earlier than that wait, so it may
+        // run before the image has actually been acquired. Synchronization validation reports it as
+        // WRITE_AFTER_READ against vkAcquireNextImageKHR. The wait stage and the transition's source
+        // stage have to agree.
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &b);
         VkClearColorValue color{{0.04f, 0.12f, 0.2f, 1.0f}};
         vkCmdClearColorImage(cmd, images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1, &b.subresourceRange);

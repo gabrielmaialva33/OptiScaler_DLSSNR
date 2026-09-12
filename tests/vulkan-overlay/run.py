@@ -163,6 +163,14 @@ def execute():
     env = dict(os.environ, WINEPREFIX=str(OUT / 'wineprefix'), WINEDEBUG='-all',
                WINEDLLOVERRIDES='dxgi=n,b;vcruntime140=n;vcruntime140_1=n;msvcp140=n',
                VK_INSTANCE_LAYERS='VK_LAYER_KHRONOS_validation',
+               # Synchronization validation, on top of the core checks. Core only asks whether a
+               # stage or access mask is a legal value; SYNC-HAZARD-* comes from sync validation,
+               # and that is the class of defect this suite exists to catch on an overlay render
+               # pass that shares swapchain images with the presentation engine. It is enabled
+               # here, host-side, because the layer is the native one loaded by Wine's host loader:
+               # VK_EXT_validation_features is not visible to vkCreateInstance inside the Wine
+               # process, which fails it with VK_ERROR_EXTENSION_NOT_PRESENT.
+               VK_LAYER_ENABLES='VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT',
                VK_LOADER_LAYERS_DISABLE='~implicit~', ENABLE_GAMESCOPE_WSI='0')
     # Native layers are enabled through Wine's host loader. The rejected-fence negative control
     # must reach the error callback; finding the JSON or setting an environment variable is not proof.
