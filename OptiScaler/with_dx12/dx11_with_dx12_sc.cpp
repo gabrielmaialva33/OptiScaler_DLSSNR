@@ -70,7 +70,10 @@ HRESULT WaitForBridgeFence(ID3D12Fence* fence, ID3D12Device* device, HANDLE even
                 return result;
             registered = true;
         }
-        const auto result = WaitForSingleObject(event, static_cast<DWORD>(deadline - now));
+        const auto beforeWait = GetTickCount64();
+        if (beforeWait >= deadline)
+            continue;
+        const auto result = WaitForSingleObject(event, static_cast<DWORD>(deadline - beforeWait));
         if (result == WAIT_FAILED)
             return HRESULT_FROM_WIN32(GetLastError());
         if (result != WAIT_OBJECT_0 && result != WAIT_TIMEOUT)
@@ -129,6 +132,8 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
     _CollectRetired();
     _id = ++scCount;
     _lastFlags = flags;
+    _fg = State::Instance().currentFG;
+    _fgSwapchainContext = _fg != nullptr ? _fg->SwapchainContext() : nullptr;
 
     if (_real != nullptr)
     {
@@ -291,6 +296,7 @@ ULONG STDMETHODCALLTYPE Dx11wDx12SC::Release()
             LOG_ERROR("retaining bridge {} after unproven teardown: {:X}", _id, (UINT) result);
             // Keep the entire wrapper, including explicit destination, device and queue references.
             // No worker thread or saved HWND callback may tear down a later FG generation.
+            _DetachWrapperGlobals();
             std::lock_guard lock(_retiredMutex);
             _nextRetired = _retired;
             _retired = this;
@@ -305,8 +311,8 @@ ULONG STDMETHODCALLTYPE Dx11wDx12SC::Release()
 
 bool Dx11wDx12SC::_OwnsFgPresenter() const
 {
-    return _fgSwapChain != nullptr && State::Instance().currentFGSwapchain == _fgSwapChain &&
-           State::Instance().currentFG != nullptr;
+    return _fgSwapChain != nullptr && State::Instance().currentFGSwapchain == _fgSwapChain && _fg != nullptr &&
+           State::Instance().currentFG == _fg && _fg->SwapchainContext() == _fgSwapchainContext;
 }
 
 bool Dx11wDx12SC::_OwnsOverlay() const
@@ -325,15 +331,8 @@ bool Dx11wDx12SC::_DevicesRemoved() const
            FAILED(_dx11Device->GetDeviceRemovedReason());
 }
 
-void Dx11wDx12SC::_FinishRelease(bool deviceLost)
+void Dx11wDx12SC::_DetachWrapperGlobals()
 {
-    // Whether the globals below describe this instance. A game can hold more than one of these
-    // -- a launcher window, a tool window, a second viewport -- and releasing one of them must
-    // not tell the rest of OptiScaler that there is no interop swapchain any more.
-    auto fg = State::Instance().currentFG;
-    const auto fgContext = fg != nullptr ? fg->SwapchainContext() : nullptr;
-    const bool ownsFg = _OwnsFgPresenter();
-    _wasCurrentOnRelease = _OwnsOverlay();
     const bool wasCurrent =
         State::Instance().currentSwapchain == this || State::Instance().currentWrappedSwapchain == this;
 
@@ -345,11 +344,6 @@ void Dx11wDx12SC::_FinishRelease(bool deviceLost)
 
     if (State::Instance().currentRealSwapchain == _real)
         State::Instance().currentRealSwapchain = nullptr;
-
-    FGHooks::ClearDx12InteropPresentSC(_fgSwapChain);
-
-    if (State::Instance().currentFGSwapchain == _fgSwapChain)
-        State::Instance().currentFGSwapchain = nullptr;
 
     // Pointer equality is not ownership here, and this is the one guard above where that
     // distinction bites: the swapchain, wrapper and presenter comparisons each match an object
@@ -363,6 +357,23 @@ void Dx11wDx12SC::_FinishRelease(bool deviceLost)
     // releasing any instance cleared the interop mode for all of them.
     if (wasCurrent)
         State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
+}
+
+void Dx11wDx12SC::_FinishRelease(bool deviceLost)
+{
+    // Whether the globals below describe this instance. A game can hold more than one of these
+    // -- a launcher window, a tool window, a second viewport -- and releasing one of them must
+    // not tell the rest of OptiScaler that there is no interop swapchain any more.
+    auto fg = State::Instance().currentFG;
+    const auto fgContext = fg != nullptr ? fg->SwapchainContext() : nullptr;
+    const bool ownsFg = _OwnsFgPresenter();
+    _wasCurrentOnRelease = _OwnsOverlay();
+    _DetachWrapperGlobals();
+
+    FGHooks::ClearDx12InteropPresentSC(_fgSwapChain);
+
+    if (State::Instance().currentFGSwapchain == _fgSwapChain)
+        State::Instance().currentFGSwapchain = nullptr;
 
     // FG ownership is presenter identity, not HWND identity or game-facing wrapper identity.
     if (!deviceLost && ownsFg && fg->Mutex.getOwner() != 1 && fg->SwapchainContext() == fgContext)
@@ -376,21 +387,32 @@ void Dx11wDx12SC::_FinishRelease(bool deviceLost)
 
 void Dx11wDx12SC::_CollectRetired()
 {
-    std::lock_guard lock(_retiredMutex);
-    auto link = &_retired;
-    while (*link != nullptr)
+    for (;;)
     {
-        auto item = *link;
-        const auto result = item->_DrainForTeardown(0);
-        const bool deviceLost = item->_DevicesRemoved();
-        if (FAILED(result) && !deviceLost)
+        Dx11wDx12SC* ready = nullptr;
+        bool deviceLost = false;
         {
-            link = &item->_nextRetired;
-            continue;
+            std::lock_guard lock(_retiredMutex);
+            auto link = &_retired;
+            while (*link != nullptr)
+            {
+                auto item = *link;
+                const auto result = item->_DrainForTeardown(0);
+                deviceLost = item->_DevicesRemoved();
+                if (SUCCEEDED(result) || deviceLost)
+                {
+                    *link = item->_nextRetired;
+                    ready = item;
+                    break;
+                }
+                link = &item->_nextRetired;
+            }
         }
-        *link = item->_nextRetired;
-        item->_FinishRelease(deviceLost);
-        delete item;
+        if (ready == nullptr)
+            return;
+        // Backend cleanup can re-enter Release. Never call it while holding the retirement lock.
+        ready->_FinishRelease(deviceLost);
+        delete ready;
     }
 }
 
@@ -425,7 +447,12 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
         return DXGI_ERROR_DEVICE_REMOVED;
 
     if (_fg == nullptr)
+    {
         _fg = State::Instance().currentFG;
+        _fgSwapchainContext = _fg != nullptr ? _fg->SwapchainContext() : nullptr;
+    }
+    if (_fg != State::Instance().currentFG)
+        return E_UNEXPECTED;
 
     if ((Flags & DXGI_PRESENT_TEST) != 0)
         return _real->Present(SyncInterval, Flags);

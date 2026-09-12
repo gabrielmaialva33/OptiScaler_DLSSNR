@@ -86,6 +86,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     bool _OwnsFgPresenter() const;
     bool _OwnsOverlay() const;
     void _FinishRelease(bool deviceLost);
+    void _DetachWrapperGlobals();
     static void _CollectRetired();
     void _ReleaseInteropBackBuffers();
     void _ReleaseInteropObjects();
@@ -107,6 +108,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     UINT _lastFlags = 0;
 
     IFGFeature_Dx12* _fg = nullptr;
+    void* _fgSwapchainContext = nullptr;
 
     ID3D11Device* _dx11Device = nullptr;
     ID3D11Device5* _dx11Device5 = nullptr;
