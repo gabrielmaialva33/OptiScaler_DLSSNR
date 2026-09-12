@@ -899,7 +899,7 @@ void AnchorClear()
 float AnchoredWhitePoint(float scanNow, bool inverted, float trim)
 {
     EnsureAnchorsLoaded();
-    trim = std::clamp(trim, 0.25f, 4.0f);
+    trim = std::clamp(trim, 0.01f, 4.0f);
 
     std::lock_guard<std::mutex> lock(g_scanMutex);
 

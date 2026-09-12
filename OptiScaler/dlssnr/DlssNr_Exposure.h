@@ -11,7 +11,7 @@ inline bool ValidSample(float value) { return std::isfinite(value) && value > 1e
 
 inline float PreExposure(float value) { return std::isfinite(value) && value > 1e-6f ? value : 1.0f; }
 
-inline float Trim(float value) { return std::isfinite(value) ? std::clamp(value, 0.25f, 4.0f) : 1.0f; }
+inline float Trim(float value) { return std::isfinite(value) ? std::clamp(value, 0.01f, 4.0f) : 1.0f; }
 
 inline bool MeterWanted(uint32_t source, bool usableTexture, bool holdingColor)
 {
