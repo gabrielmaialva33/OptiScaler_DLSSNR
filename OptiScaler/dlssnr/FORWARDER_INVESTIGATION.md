@@ -52,6 +52,18 @@ Rules out: a transient warm-up window as the cause. The failure is stable, not t
   `UpdateFeature`) before `CreateFeature` will build it. Test: call the D3D12 requirements query for
   feature 18 through the core before creating, and see whether that changes the create result.
 - **Scratch buffer.** `CreateFeature` may need `GetScratchBufferSize(18)` satisfied first. Untested.
+- **Answer the caller-path check instead of satisfying it.** The forwarder exists because the snippet
+  rejects a caller whose module path lacks `nvngx.dll`, so we give it a module named that. There is
+  another way to make that check pass, and a shipping project says it works:
+  `SAOG0721/DaVinci-Resolve-DLSS5` (an OpenFX filter running feature 18 over video in DaVinci Resolve)
+  lists among its verified contract "scoped `GetModuleFileNameW` IAT compatibility" -- it hooks the
+  import the check goes through, scoped to the window in which the NGX call runs, rather than shipping a
+  second DLL to be the answer. That is a different mechanism from everything tried above: the theories
+  here are all about *why the proxy's CreateFeature fails* (`0xBAD0000B`), while this is about *removing
+  the reason the forwarder exists at all*. Worth reading their implementation before assuming it
+  generalises -- same-resolution creation, application ID `0x0876232C`, and SEH guards are listed as part
+  of the same contract, so the IAT scoping may be load-bearing only together with the rest of it.
+  Found 2026-09-11 while surveying the ecosystem; not tried here.
 
 ## How to reproduce
 Set `[DlssNr] UseProxy=true`. The path is off by default and does not fall back automatically, so a
