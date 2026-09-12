@@ -127,6 +127,30 @@ It compared these requests on family zero:
   still had one validation error and exited 9. An earlier candidate attempt did
   not obtain distinct handles. Success of a submit does not excuse that error.
 
+The decisive final comparison is preserved here so it survives cleaning the ignored
+artifacts. `0` for create/submit/wait is `VK_SUCCESS`; `distinct queues=1` means two
+non-null, different handles. Both requests used family 0 on the same GPU/runtime:
+
+| Measurement | Ordinary control | Internally synchronized candidate |
+|---|---:|---:|
+| Wine-visible physical-device API | 1.4.351 | 1.4.351 |
+| Extension exposed / feature value | yes / 1 | yes / 1 |
+| Queue requests (count, flags) | (2, 0) | (1, 0) + (1, 0x4) |
+| `vkCreateDevice` result | 0 | 0 |
+| `distinct queues` | 1 | 1 |
+| `vkQueueSubmit` / `vkQueueWaitIdle` result | 0 / 0 | 0 / 0 |
+| Unexpected validation errors | 0 | 1 |
+| Process exit | 0 | 9 |
+
+The candidate's decisive diagnostic occurred between the probe's
+`BEGIN vkCreateDevice` and `internal device create=0` messages, before
+`BEGIN application vkGetDeviceQueue`:
+
+```text
+VALIDATION ERROR: vkGetDeviceQueue(): queueFamilyIndex (0) was created with a non-zero VkDeviceQueueCreateFlags in vkCreateDevice::pCreateInfo->pQueueCreateInfos[1]. Need to use vkGetDeviceQueue2 instead.
+VUID-vkGetDeviceQueue-flags-01841
+```
+
 This localizes a problem below the application's explicit retrieval in this runtime
 path; it does not establish which Wine/loader component is defective. No production
 workaround or validation exception is justified by this experiment. The repository's
