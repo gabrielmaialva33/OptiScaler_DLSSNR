@@ -375,6 +375,98 @@ These can be changed from the in-game menu with real-time results.
 
 ![root certificate](images/cs.png)
 
+### DLSS Neural Rendering
+These `[DlssNr]` controls configure application of the model, white-point calibration,
+and comparison of the NR edit with the upscaler's output. The full section, including
+`Enabled`, model settings and stage selection, is in the distributed [OptiScaler.ini](OptiScaler.ini).
+`auto` uses the declared default; the entries below do not enable NR.
+
+```ini
+[DlssNr]
+; Apply the model's edit. Off shows the clean upscaler frame while the NR pass keeps running,
+; so ApplyModel can be toggled with HoldFrame for a frozen-frame comparison.
+; true or false - Default (auto) is true
+ApplyModel=auto
+
+; Experimental: run NR through the driver's own nvngx.dll instead of the forwarder.
+; Disabled until this path is shown to produce the same picture.
+; true or false - Default (auto) is false
+UseProxy=auto
+
+; Where the white point comes from: 0 paper white only, 1 the game's exposure texture,
+; 2 a buffer found by the exposure scan. Source 2 needs anchoring and validation in the game.
+; Source 1 falls back to paper white when the game supplies no usable exposure.
+; 0 to 2 - Default (auto) is 1 (the game's own exposure)
+WhitePointSource=auto
+
+; Multiply the white point derived from the game's exposure (WhitePointSource=1).
+; 1.0 leaves it unchanged; this is separate from the manual paper white and the scan's trim.
+; 0.01 to 4.0 - Default (auto) is 1.0
+WhitePointTrim=auto
+
+; Calibrate WhitePointSource=2 with pairs of scan value and chosen white point.
+; The menu's Anchor here button records points; multiple points interpolate the white point.
+; Up to 8 scan:white pairs separated by semicolons - Default (auto) is empty (no anchors)
+ScanAnchors=auto
+
+; Reverse how the scan drives white point when exactly one anchor is set.
+; With two or more anchors the direction is determined by the points instead.
+; true or false - Default (auto) is false
+ScanInverted=auto
+
+; Multiply the anchored scan's white point (WhitePointSource=2, with at least one anchor).
+; Anchor here captures the trimmed value as a new point and resets this trim to 1.0.
+; 0.01 to 4.0 - Default (auto) is 1.0
+ScanTrim=auto
+
+; Show the exposure scan's light meter and reading in the corner, even with the menu closed.
+; This is a readout only; it does not enable the scan or change the picture's exposure.
+; true or false - Default (auto) is false
+ScanMeter=auto
+
+; How a model running below full resolution is enlarged: 0 classic, 1 matched residual.
+; Matched residual carries only the model's edit onto the full-size frame's proxy, avoiding
+; the shrink's blur being treated as an edit. No effect at full resolution or above.
+; 0 or 1 - Default (auto) is 1 (matched residual)
+Transfer=auto
+
+; Freeze the input NR works on for comparing live NR settings on the same frame.
+; The upscaler is not re-run; the game's later HUD and post-processing keep updating.
+; Stays held with the menu closed; disable to resume.
+; true or false - Default (auto) is false
+HoldFrame=auto
+
+; Compare the clean upscaler frame with the NR edit: 0 off, 1 side by side, 2 wipe.
+; Both comparison modes keep working with the menu closed.
+; 0 to 2 - Default (auto) is 0 (off)
+Compare=auto
+
+; Position of the cut in wipe mode (Compare=2), as a fraction of the frame width.
+; 0.0 to 1.0 - Default (auto) is 0.5
+CompareSplit=auto
+
+; Framing in side-by-side mode (Compare=1): 1 fits the whole frame with bars,
+; 2 fills each half and crops the sides; intermediate values trade between the two.
+; 1.0 to 2.0 - Default (auto) is 1.0
+CompareZoom=auto
+
+; Swap the clean and edited sides in either comparison mode.
+; true or false - Default (auto) is false
+CompareSwap=auto
+
+; Label the clean and edited sides of a comparison, including with the menu closed.
+; Labels follow Swap sides and are clipped by the wipe along with their pictures.
+; true or false - Default (auto) is false
+CompareTags=auto
+
+; Size multiplier for the comparison labels shown by CompareTags.
+; 0.5 to 5.0 - Default (auto) is 1.5
+TagScale=auto
+```
+
+Use the in-game NR panel to capture and edit scan anchors. `UseProxy` selects an
+experimental driver path and is not evidence of equivalence with the forwarder.
+
 ### Logging
 ```ini
 [Log]
