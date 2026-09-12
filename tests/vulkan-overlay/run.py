@@ -164,6 +164,75 @@ def build(ref):
     print('Built isolated instrumentation of', ref, flush=True)
 
 
+def execute_non_graphics_control(work, env, *, exclusive):
+    name = 'non-graphics-present-exclusive' if exclusive else 'non-graphics-present'
+    sharing = 'EXCLUSIVE' if exclusive else 'CONCURRENT'
+    nongraphics = OUT / name
+    nongraphics.mkdir(exist_ok=True)
+    if (nongraphics / 'optiscaler_skip_vulkan_hooks').exists():
+        raise RuntimeError(f'marker present in {name} directory; it will not be removed')
+    if any(nongraphics.glob('sl.*.dll')) or any(nongraphics.glob('*dlssg*.dll')):
+        raise RuntimeError(f'unexpected FG DLL in {name} directory')
+    for p in work.iterdir():
+        if p.suffix.lower() in ('.dll', '.exe'):
+            shutil.copy2(p, nongraphics / p.name)
+    shutil.copy2(work / 'OptiScaler.ini', nongraphics / 'OptiScaler.ini')
+    # Reject stale evidence even if Wine fails before main(). The test owns these output logs.
+    for output_name in ('result.json', 'OptiScaler.log'):
+        (nongraphics / output_name).unlink(missing_ok=True)
+    with (OUT / (name + '.log')).open('w') as log:
+        process = subprocess.run(['wine', str(nongraphics / 'vk-overlay-harness.exe'), '--' + name],
+                                 cwd=nongraphics, env=env, stdin=subprocess.DEVNULL,
+                                 stdout=log, stderr=subprocess.STDOUT, timeout=60)
+    evidence = json.loads((nongraphics / 'result.json').read_text())
+    if evidence.get('sharing_mode') != sharing:
+        raise RuntimeError(f'{name} did not report the requested sharing mode')
+    if process.returncode == 77 and evidence.get('status') == 'SKIP' and evidence.get('reason'):
+        if evidence.get('validation_errors') != 0:
+            raise RuntimeError(f'{name} skip reported validation errors')
+        print(f'SKIP: {name}: ' + evidence['reason'], flush=True)
+    elif process.returncode == 0 and evidence.get('status') == 'PASS':
+        expected = {'frames': 1, 'present_calls': 1, 'non_graphics_bailouts': 1, 'overlay_submits': 0,
+                    'validation_active': True, 'validation_errors': 0, 'surface_support': True}
+        if any(evidence.get(key) != value for key, value in expected.items()):
+            raise RuntimeError(f'{name} control did not prove the required coverage')
+        flags = evidence.get('present_queue_flags')
+        if not isinstance(flags, int) or flags & 1:
+            raise RuntimeError(f'{name} control selected a graphics queue')
+        graphics = evidence['graphics_queue_family']
+        present = evidence['present_queue_family']
+        if graphics == present or evidence.get('clear_queue_family') != (present if exclusive else graphics):
+            raise RuntimeError(f'{name} did not clear on the required queue family')
+        if (evidence.get('live_bytes') != 0 or evidence.get('allocations', 0) <= 0 or
+                evidence.get('allocations') != evidence.get('releases') or
+                evidence.get('objects_created', 0) <= 0 or
+                evidence.get('objects_created') != evidence.get('objects_destroyed')):
+            raise RuntimeError(f'{name} did not balance overlay allocations and Vulkan objects')
+        warning = (f"present happens on queue family {evidence['present_queue_family']} "
+                   f"(flags {flags:X}), which cannot run a render pass; "
+                   "the Vulkan overlay is not possible on this swapchain")
+        detail = ("an ownership transfer -- the swapchain is EXCLUSIVE, so a release "
+                  "barrier on this queue and an acquire on the graphics one" if exclusive else
+                  "nothing more -- the swapchain is CONCURRENT and already lists that family, so it may "
+                  "write the image directly")
+        full_warning = (warning + ". Drawing it on the overlay's own "
+                        f"graphics family ({graphics}) instead would need: a semaphore so the present waits for the "
+                        "overlay's submit, and " + detail)
+        production_log = (nongraphics / 'OptiScaler.log').read_text(errors='replace')
+        warnings = production_log.count(warning)
+        if warnings != 1 or production_log.count(full_warning) != 1:
+            raise RuntimeError(f'{name} expected exactly one {sharing} bailout warning; see {nongraphics / "OptiScaler.log"}')
+        if production_log.count('swapchain image sharing mode ' + sharing) != 1:
+            raise RuntimeError(f'{name} production did not record the requested sharing mode')
+        evidence['bailout_warnings'] = warnings
+        print(f'PASS: {name} ({sharing}) family {evidence["present_queue_family"]} flags 0x{flags:X}: '
+              'one bailout, no overlay submission, zero unexpected validation errors', flush=True)
+    else:
+        raise RuntimeError(f'{name} control failed (exit {process.returncode}); '
+                           f'see {OUT / (name + ".log")}')
+    return evidence
+
+
 def execute():
     work = OUT / 'run'
     (OUT / 'results.json').write_text('{"status":"RUNNING"}\n')
@@ -217,51 +286,9 @@ def execute():
     if negative.returncode != 1 or 'ZERO COVERAGE:' not in (OUT / 'negative-control.log').read_text():
         raise RuntimeError('disabled-overlay negative control did not fail explicitly on zero coverage')
     result['zero_coverage_control'] = 'PASS (disabled overlay rejected with exit 1)'
-    # Keep the graphics lifecycle and disabled-overlay control intact. This separate process
-    # creates both graphics and non-graphics queues, and presents once from the latter.
-    nongraphics = OUT / 'non-graphics-present'
-    nongraphics.mkdir(exist_ok=True)
-    if (nongraphics / 'optiscaler_skip_vulkan_hooks').exists():
-        raise RuntimeError('marker present in non-graphics-present directory; it will not be removed')
-    if any(nongraphics.glob('sl.*.dll')) or any(nongraphics.glob('*dlssg*.dll')):
-        raise RuntimeError('unexpected FG DLL in non-graphics-present directory')
-    for p in work.iterdir():
-        if p.suffix.lower() in ('.dll', '.exe'):
-            shutil.copy2(p, nongraphics / p.name)
-    shutil.copy2(work / 'OptiScaler.ini', nongraphics / 'OptiScaler.ini')
-    # Reject stale evidence even if Wine fails before main(). The test owns these output logs.
-    for name in ('result.json', 'OptiScaler.log'):
-        (nongraphics / name).unlink(missing_ok=True)
-    with (OUT / 'non-graphics-present.log').open('w') as log:
-        process = subprocess.run(['wine', str(nongraphics / 'vk-overlay-harness.exe'), '--non-graphics-present'],
-                                 cwd=nongraphics, env=env, stdin=subprocess.DEVNULL,
-                                 stdout=log, stderr=subprocess.STDOUT, timeout=60)
-    evidence = json.loads((nongraphics / 'result.json').read_text())
-    if process.returncode == 77 and evidence.get('status') == 'SKIP' and evidence.get('reason'):
-        if evidence.get('validation_errors') != 0:
-            raise RuntimeError('non-graphics-present skip reported validation errors')
-        print('SKIP: non-graphics-present: ' + evidence['reason'], flush=True)
-    elif process.returncode == 0 and evidence.get('status') == 'PASS':
-        expected = {'frames': 1, 'present_calls': 1, 'non_graphics_bailouts': 1, 'overlay_submits': 0,
-                    'validation_active': True, 'validation_errors': 0, 'surface_support': True}
-        if any(evidence.get(key) != value for key, value in expected.items()):
-            raise RuntimeError('non-graphics-present control did not prove the required coverage')
-        flags = evidence.get('present_queue_flags')
-        if not isinstance(flags, int) or flags & 1:
-            raise RuntimeError('non-graphics-present control selected a graphics queue')
-        warning = (f"present happens on queue family {evidence['present_queue_family']} "
-                   f"(flags {flags:X}), which cannot run a render pass; "
-                   "the Vulkan overlay is not possible on this swapchain")
-        warnings = (nongraphics / 'OptiScaler.log').read_text(errors='replace').count(warning)
-        if warnings != 1:
-            raise RuntimeError(f'non-graphics-present warning count was {warnings}, expected exactly 1')
-        evidence['bailout_warnings'] = warnings
-        print(f'PASS: non-graphics-present family {evidence["present_queue_family"]} flags 0x{flags:X}: '
-              'one bailout, no overlay submission, zero unexpected validation errors', flush=True)
-    else:
-        raise RuntimeError(f'non-graphics-present control failed (exit {process.returncode}); '
-                           f'see {OUT / "non-graphics-present.log"}')
-    result['non_graphics_present_control'] = evidence
+    # Fresh processes keep the production one-shot warning independent for both sharing modes.
+    result['non_graphics_present_control'] = execute_non_graphics_control(work, env, exclusive=False)
+    result['non_graphics_present_exclusive_control'] = execute_non_graphics_control(work, env, exclusive=True)
     result['source'] = provenance
     (OUT / 'results.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2))

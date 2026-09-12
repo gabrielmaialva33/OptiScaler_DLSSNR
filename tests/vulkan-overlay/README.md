@@ -24,7 +24,7 @@ export. No production source, solution, input handler, or game install is edited
 
 A passing run exits **0** and writes **`artifacts/results.json` with `status: PASS`**.
 Logs are `artifacts/run.log`, `negative-control.log`, `non-graphics-present.log`,
-and each process directory's `OptiScaler.log`.
+`non-graphics-present-exclusive.log`, and each process directory's `OptiScaler.log`.
 It requires all of the following:
 
 - Calls to `CreateSwapchain`, `DestroyVulkanObjects`, and `QueuePresent`, plus
@@ -52,15 +52,29 @@ It requires all of the following:
   2, flags `0xE`) over other non-graphics families. The swapchain uses concurrent
   sharing between these families, with a semaphore connecting clear and present.
   Exactly one real present must reach the completed non-graphics bailout exactly
-  once, log the matching family/flags warning exactly once, and submit **zero**
+  once, log the full matching family/flags and CONCURRENT warning exactly once, and submit **zero**
   overlay draws. Overlay creation, balanced allocation/object cleanup, successful
   presentation, the validation fence probe, and zero unexpected validation errors
   are required. Results appear under `non_graphics_present_control` in the aggregate
   JSON and in `artifacts/non-graphics-present/result.json`.
+- A fourth process with `--non-graphics-present-exclusive` uses an **EXCLUSIVE**
+  swapchain. All harness image work (both layout transitions and the clear) runs
+  on the same non-graphics queue as presentation. The graphics queue is created
+  for overlay initialization; the harness never submits image work to it. No
+  harness ownership transfer is needed, so a future overlay writer on graphics
+  must handle the ownership transfer itself. The selected present family must
+  support compute or transfer commands to clear the image; other unsupported
+  capabilities fail explicitly. This control has the same bailout, validation,
+  and cleanup assertions as CONCURRENT, and additionally checks the **EXCLUSIVE**
+  warning about a release barrier on the present queue and an acquire on graphics.
+  Both controls verify production's recorded sharing mode and report/assert the
+  clear queue family (graphics for CONCURRENT, present for EXCLUSIVE). Results are
+  under `non_graphics_present_exclusive_control` and in
+  `artifacts/non-graphics-present-exclusive/result.json`.
 
 Missing dependencies, unsupported surface capabilities, crashes, timeouts, missed
 coverage, leaks, or validation errors are failures. The sole capability exception is
-the non-graphics process: if no enumerated device has a non-graphics queue supporting
+each non-graphics process: if no enumerated device has a non-graphics queue supporting
 the surface, it exits **77**, prints **SKIP** with the reason, and records **`status:
 SKIP`** for that control. The runner prints that reason loudly; the graphics tests
 still must pass, and their aggregate PASS does not claim non-graphics coverage.

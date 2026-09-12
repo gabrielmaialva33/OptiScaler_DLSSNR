@@ -75,10 +75,14 @@ struct Test
     VkDevice device = VK_NULL_HANDLE;
     VkQueue queue = VK_NULL_HANDLE;
     VkQueue graphicsQueue = VK_NULL_HANDLE;
+    VkQueue clearQueue = VK_NULL_HANDLE;
     uint32_t family = 0;
     uint32_t graphicsFamily = 0;
+    uint32_t clearFamily = 0;
     VkQueueFlags presentQueueFlags = 0;
     bool nonGraphicsPresent = false;
+    bool exclusivePresent = false;
+    VkSharingMode sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     std::vector<VkImage> images;
     std::vector<bool> initialized;
@@ -200,8 +204,14 @@ struct Test
         Require(found, "no combined graphics/present queue");
         Require(graphicsFamily != UINT32_MAX, "no graphics queue for overlay initialization");
         if (!nonGraphicsPresent) graphicsFamily = family;
-        std::printf("PRESENT family=%u flags=0x%X graphics_family=%u mode=%s\n", family, presentQueueFlags,
-                    graphicsFamily, nonGraphicsPresent ? "non-graphics-present" : "graphics-present");
+        if (exclusivePresent)
+            Require((presentQueueFlags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT)) != 0,
+                    "EXCLUSIVE present queue cannot execute the harness image clear");
+        clearFamily = exclusivePresent ? family : graphicsFamily;
+        std::printf("PRESENT family=%u flags=0x%X graphics_family=%u clear_family=%u mode=%s\n", family,
+                    presentQueueFlags, graphicsFamily, clearFamily,
+                    exclusivePresent ? "non-graphics-present-exclusive" :
+                    nonGraphicsPresent ? "non-graphics-present" : "graphics-present");
         float priority = 1.0f;
         VkDeviceQueueCreateInfo queues[2]{};
         for (auto& q : queues)
@@ -230,6 +240,7 @@ struct Test
                 "validation negative control failed: expected fence error was not intercepted");
         vkGetDeviceQueue(device, family, 0, &queue);
         vkGetDeviceQueue(device, graphicsFamily, 0, &graphicsQueue);
+        vkGetDeviceQueue(device, clearFamily, 0, &clearQueue);
         Check(vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &n, nullptr), "surface formats");
         Require(n > 0, "no surface formats");
         std::vector<VkSurfaceFormatKHR> formats(n);
@@ -276,7 +287,7 @@ struct Test
         info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         const uint32_t sharingFamilies[] = {graphicsFamily, family};
-        if (nonGraphicsPresent)
+        if (nonGraphicsPresent && !exclusivePresent)
         {
             // Clear on graphics, present on the selected queue. Concurrent sharing avoids implicit
             // cross-family ownership assumptions and works even for a present-only queue family.
@@ -284,6 +295,7 @@ struct Test
             info.queueFamilyIndexCount = 2;
             info.pQueueFamilyIndices = sharingFamilies;
         }
+        sharingMode = info.imageSharingMode;
         info.preTransform = caps.currentTransform;
         for (auto alpha : {VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
                            VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR})
@@ -340,8 +352,9 @@ struct Test
             previousImageCount = count;
             previousExtent = extent;
         }
-        std::printf("SWAPCHAIN extent=%ux%u requested=%u actual=%u fault=%u live_bytes=%llu\n",
-                    extent.width, extent.height, requested, count, fault, after.liveBytes);
+        std::printf("SWAPCHAIN extent=%ux%u requested=%u actual=%u fault=%u live_bytes=%llu sharing=%s\n",
+                    extent.width, extent.height, requested, count, fault, after.liveBytes,
+                    sharingMode == VK_SHARING_MODE_EXCLUSIVE ? "EXCLUSIVE" : "CONCURRENT");
         std::fflush(stdout);
     }
     void Frame()
@@ -355,7 +368,9 @@ struct Test
         auto acquire = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, acquired, VK_NULL_HANDLE, &index);
         Require(acquire == VK_SUCCESS || acquire == VK_SUBOPTIMAL_KHR, "acquire failed");
         VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-        poolInfo.queueFamilyIndex = graphicsFamily;
+        // EXCLUSIVE control: all harness image commands run on the present family, which owns the image.
+        // The graphics queue exists only for the overlay's initialization, never our image work.
+        poolInfo.queueFamilyIndex = clearFamily;
         VkCommandPool pool = VK_NULL_HANDLE;
         Check(vkCreateCommandPool(device, &poolInfo, nullptr, &pool), "create frame command pool");
         VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -398,7 +413,7 @@ struct Test
         submit.pCommandBuffers = &cmd;
         submit.signalSemaphoreCount = 1;
         submit.pSignalSemaphores = &rendered;
-        Check(vkQueueSubmit(graphicsQueue, 1, &submit, VK_NULL_HANDLE), "submit clear frame");
+        Check(vkQueueSubmit(clearQueue, 1, &submit, VK_NULL_HANDLE), "submit clear frame");
         VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         present.waitSemaphoreCount = 1;
         present.pWaitSemaphores = &rendered;
@@ -420,7 +435,7 @@ struct Test
         else
             Require(after.overlaySubmits > before.overlaySubmits, "ZERO COVERAGE: frame had no overlay submission");
         Check(vkQueueWaitIdle(queue), "wait for real presentation");
-        if (nonGraphicsPresent) Check(vkQueueWaitIdle(graphicsQueue), "wait for graphics clear");
+        if (clearQueue != queue) Check(vkQueueWaitIdle(clearQueue), "wait for image clear");
         vkDestroyCommandPool(device, pool, nullptr);
         vkDestroySemaphore(device, acquired, nullptr);
         vkDestroySemaphore(device, rendered, nullptr);
@@ -436,6 +451,14 @@ struct Test
                 "ZERO COVERAGE: required overlay lifecycle function was not reached");
         if (nonGraphicsPresent)
         {
+            Require(graphicsFamily != family, "non-graphics present must use a different family from graphics");
+            Require(sharingMode == (exclusivePresent ? VK_SHARING_MODE_EXCLUSIVE : VK_SHARING_MODE_CONCURRENT),
+                    "swapchain sharing mode did not match the requested control");
+            Require(clearFamily == (exclusivePresent ? family : graphicsFamily),
+                    "harness image work ran on the wrong queue family");
+            Require(exclusivePresent ? (clearQueue == queue && clearQueue != graphicsQueue) :
+                                       (clearQueue == graphicsQueue && clearQueue != queue),
+                    "harness image work did not use the required device queue");
             Require(frames == 1 && final.presentCalls == 1 && final.nonGraphicsBailouts == 1,
                     "expected exactly one non-graphics present and bailout");
             Require(final.overlaySubmits == 0, "non-graphics control drew the overlay");
@@ -475,13 +498,18 @@ int main(int argc, char** argv)
     try
     {
         Test test;
-        Require(argc == 1 || (argc == 2 && !strcmp(argv[1], "--non-graphics-present")), "unknown harness argument");
+        Require(argc == 1 || (argc == 2 && (!strcmp(argv[1], "--non-graphics-present") ||
+                                          !strcmp(argv[1], "--non-graphics-present-exclusive"))),
+                "unknown harness argument");
         test.nonGraphicsPresent = argc == 2;
+        test.exclusivePresent = argc == 2 && !strcmp(argv[1], "--non-graphics-present-exclusive");
         if (!test.Init())
         {
             test.CleanupInstance();
-            std::fprintf(stderr, "SKIP: non-graphics-present: %s\n", nonGraphicsSkipReason);
-            std::ofstream("result.json") << "{\"status\":\"SKIP\",\"validation_errors\":0,\"reason\":\""
+            const char* sharing = test.exclusivePresent ? "EXCLUSIVE" : "CONCURRENT";
+            std::fprintf(stderr, "SKIP: non-graphics-present %s: %s\n", sharing, nonGraphicsSkipReason);
+            std::ofstream("result.json") << "{\"status\":\"SKIP\",\"sharing_mode\":\"" << sharing
+                                         << "\",\"validation_errors\":0,\"reason\":\""
                                          << nonGraphicsSkipReason << "\"}\n";
             return 77;
         }
@@ -494,6 +522,9 @@ int main(int argc, char** argv)
             std::ofstream out("result.json");
             out << "{\n  \"status\": \"PASS\",\n  \"validation_active\": true,\n  \"validation_errors\": " << validationErrors
                 << ",\n  \"graphics_queue_family\": " << test.graphicsFamily
+                << ",\n  \"clear_queue_family\": " << test.clearFamily
+                << ",\n  \"sharing_mode\": \""
+                << (test.sharingMode == VK_SHARING_MODE_EXCLUSIVE ? "EXCLUSIVE" : "CONCURRENT") << "\""
                 << ",\n  \"present_queue_family\": " << test.family
                 << ",\n  \"present_queue_flags\": " << test.presentQueueFlags
                 << ",\n  \"surface_support\": true,\n  \"frames\": " << test.frames
@@ -504,7 +535,8 @@ int main(int argc, char** argv)
                 << ",\n  \"live_bytes\": " << s.liveBytes
                 << ",\n  \"objects_created\": " << s.objectsCreated
                 << ",\n  \"objects_destroyed\": " << s.objectsDestroyed << "\n}\n";
-            std::puts("PASS: non-graphics-present completed exactly one bailout, no overlay submission, clean teardown and zero validation errors");
+            std::printf("PASS: non-graphics-present %s completed exactly one bailout, no overlay submission, clean teardown and zero validation errors\n",
+                        test.exclusivePresent ? "EXCLUSIVE" : "CONCURRENT");
             return 0;
         }
         for (unsigned generation = 0; generation < 13; ++generation)
