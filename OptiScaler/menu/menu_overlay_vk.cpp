@@ -49,6 +49,16 @@ static std::mutex _deviceQueueCountsMutex;
 static std::unordered_map<VkQueue, uint32_t> _queueFamilyOfQueue;
 static std::vector<VkQueueFamilyProperties> _familyProps;
 
+// How the game created its swapchain images. Recorded here because CreateVulkanObjects is the only
+// place that sees VkSwapchainCreateInfoKHR, and read by the present hook, which is where it decides
+// whether the overlay can draw: under CONCURRENT any listed family may write an image directly, while
+// under EXCLUSIVE one family owns it and a writer from another family needs an ownership transfer --
+// a release barrier on the owner's queue and an acquire on the writer's. That is the difference
+// between "submit on a graphics queue and have the present wait on a semaphore" and a full transfer
+// dance, so the warning below says which one this swapchain would need.
+static VkSharingMode _scSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+static std::vector<uint32_t> _scSharedFamilies;
+
 // The family the overlay's command pools were created from. vkd3d-proton does not present on the
 // first graphics queue, so this is corrected to the presenting queue's family on first use.
 static uint32_t _overlayQueueFamily = UINT32_MAX;
@@ -224,6 +234,23 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
             (UINT64) device, (UINT64) pCreateInfo, (UINT64) *pSwapchain);
         return;
     }
+
+    // Before the early returns below: this is worth knowing even on a swapchain the Vulkan overlay
+    // never draws on. pQueueFamilyIndices is only meaningful under CONCURRENT; ignored otherwise.
+    _scSharingMode = pCreateInfo->imageSharingMode;
+    _scSharedFamilies.clear();
+
+    if (pCreateInfo->imageSharingMode == VK_SHARING_MODE_CONCURRENT && pCreateInfo->pQueueFamilyIndices != nullptr)
+        _scSharedFamilies.assign(pCreateInfo->pQueueFamilyIndices,
+                                 pCreateInfo->pQueueFamilyIndices + pCreateInfo->queueFamilyIndexCount);
+
+    LOG_INFO("swapchain image sharing mode {0}{1}",
+             _scSharingMode == VK_SHARING_MODE_CONCURRENT ? "CONCURRENT" : "EXCLUSIVE",
+             _scSharedFamilies.empty() ? "" : " across the families listed in the next line");
+
+    if (!_scSharedFamilies.empty())
+        LOG_INFO("swapchain shared across {0} queue families, first {1}", _scSharedFamilies.size(),
+                 _scSharedFamilies[0]);
 
     // Below the teardown, so a swapchain recreate still releases the objects of the old one. ImGui
     // holds one renderer backend at a time in io.BackendRendererUserData; leaving it unclaimed is what
@@ -912,10 +939,25 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
             if (!warnedNonGraphics)
             {
                 warnedNonGraphics = true;
+                const bool concurrent = _scSharingMode == VK_SHARING_MODE_CONCURRENT;
+                const bool sharedWithOverlay =
+                    concurrent && std::find(_scSharedFamilies.begin(), _scSharedFamilies.end(), _overlayQueueFamily) !=
+                                      _scSharedFamilies.end();
+
                 LOG_WARN("present happens on queue family {0} (flags {1:X}), which cannot run a render pass; "
-                         "the Vulkan overlay is not possible on this swapchain",
+                         "the Vulkan overlay is not possible on this swapchain. Drawing it on the overlay's own "
+                         "graphics family ({2}) instead would need: a semaphore so the present waits for the "
+                         "overlay's submit, and {3}",
                          presentFamily,
-                         presentFamily < _familyProps.size() ? (UINT) _familyProps[presentFamily].queueFlags : 0u);
+                         presentFamily < _familyProps.size() ? (UINT) _familyProps[presentFamily].queueFlags : 0u,
+                         _overlayQueueFamily,
+                         sharedWithOverlay
+                             ? "nothing more -- the swapchain is CONCURRENT and already lists that family, so it may "
+                               "write the image directly"
+                         : concurrent ? "an ownership transfer -- the swapchain is CONCURRENT but does not list "
+                                        "that family"
+                                      : "an ownership transfer -- the swapchain is EXCLUSIVE, so a release "
+                                        "barrier on this queue and an acquire on the graphics one");
             }
 
             ImGui::Render();
