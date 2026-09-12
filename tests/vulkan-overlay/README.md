@@ -23,7 +23,8 @@ test teardown calls the public `DestroyVulkanObjects(false)` through a test-only
 export. No production source, solution, input handler, or game install is edited.
 
 A passing run exits **0** and writes **`artifacts/results.json` with `status: PASS`**.
-Logs are `artifacts/run.log`, `negative-control.log`, and `run/OptiScaler.log`.
+Logs are `artifacts/run.log`, `negative-control.log`, `non-graphics-present.log`,
+and each process directory's `OptiScaler.log`.
 It requires all of the following:
 
 - Calls to `CreateSwapchain`, `DestroyVulkanObjects`, and `QueuePresent`, plus
@@ -44,10 +45,26 @@ It requires all of the following:
   works and is reported separately; all other errors fail the run.
 - A second process with `OverlayMenu=false` must exit **1** with **`ZERO COVERAGE`**.
   This negative control uses another isolated directory and no marker file.
+- A third process with `--non-graphics-present` creates both a graphics queue for
+  overlay initialization/clearing and a non-graphics queue for presentation. It
+  queries `vkGetPhysicalDeviceSurfaceSupportKHR` for the actual Win32 surface,
+  preferring a compute-capable non-graphics family (such as DOOM Eternal's family
+  2, flags `0xE`) over other non-graphics families. The swapchain uses concurrent
+  sharing between these families, with a semaphore connecting clear and present.
+  Exactly one real present must reach the completed non-graphics bailout exactly
+  once, log the matching family/flags warning exactly once, and submit **zero**
+  overlay draws. Overlay creation, balanced allocation/object cleanup, successful
+  presentation, the validation fence probe, and zero unexpected validation errors
+  are required. Results appear under `non_graphics_present_control` in the aggregate
+  JSON and in `artifacts/non-graphics-present/result.json`.
 
 Missing dependencies, unsupported surface capabilities, crashes, timeouts, missed
-coverage, leaks, or validation errors are failures, never skips. A failed or interrupted
-run cannot leave an aggregate PASS from an earlier execution.
+coverage, leaks, or validation errors are failures. The sole capability exception is
+the non-graphics process: if no enumerated device has a non-graphics queue supporting
+the surface, it exits **77**, prints **SKIP** with the reason, and records **`status:
+SKIP`** for that control. The runner prints that reason loudly; the graphics tests
+still must pass, and their aggregate PASS does not claim non-graphics coverage.
+A failed or interrupted run cannot leave an aggregate PASS from an earlier execution.
 
 ## Scope and packaging
 

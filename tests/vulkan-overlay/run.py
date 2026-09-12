@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build and run an isolated, fail-closed Vulkan overlay integration test."""
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -62,6 +63,16 @@ def instrument(ref):
     if source.count(anchor) != 1:
         raise RuntimeError('overlay submit instrumentation anchor changed')
     source = source.replace(anchor, anchor + '\n    ++VkLifetimeProbe::stats.overlaySubmits;')
+    # Count the completed non-graphics bailout, not just QueuePresent entry or its warning.
+    anchor = '''            ImGui::Render();
+            return true;
+        }
+
+        LOG_WARN("present happens on queue family {0}, not {1}; moving the overlay's command pools to it",'''
+    if source.count(anchor) != 1:
+        raise RuntimeError('non-graphics present bailout instrumentation anchor changed')
+    source = source.replace(anchor, anchor.replace('            return true;',
+                            '            ++VkLifetimeProbe::stats.nonGraphicsBailouts;\n            return true;'))
     source += r'''
 // Test exports exist only in this generated translation unit, never in production.
 extern void KeyUp(UINT vKey);
@@ -106,6 +117,16 @@ def build(ref):
     ET.SubElement(group, 'ClCompile', Remove='menu\\menu_overlay_vk.cpp')
     item = ET.SubElement(group, 'ClCompile', Include=win(OUT / 'menu_overlay_vk.instrumented.cpp'))
     ET.SubElement(item, 'AdditionalIncludeDirectories').text = win(ROOT / 'OptiScaler/menu') + ';%(AdditionalIncludeDirectories)'
+    # A fresh worktree has no ignored pre-build headers. Generate them here, since running the
+    # production pre-build event would write under OptiScaler/ and defeat this build's isolation.
+    (OUT / 'resource_build_date.h').write_text(
+        '#define VER_BUILD_DATE "' + datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S') + '"\n')
+    (OUT / 'resource_build_commit.h').write_text(
+        '#define VER_BUILD_COMMIT "' + json.loads((OUT / 'source.json').read_text())['commit'][:8] + '"\n')
+    definitions = ET.SubElement(project, 'ItemDefinitionGroup')
+    for tool in ('ClCompile', 'ResourceCompile'):
+        definition = ET.SubElement(definitions, tool)
+        ET.SubElement(definition, 'AdditionalIncludeDirectories').text = win(OUT) + ';%(AdditionalIncludeDirectories)'
     ET.ElementTree(project).write(OUT / 'overlay.targets', encoding='utf-8', xml_declaration=True)
     env = dict(os.environ, WINEPREFIX=str(BUILD_PREFIX), WINEDEBUG='-all')
     run([MSVC / 'msbuild', ROOT / 'OptiScaler/OptiScaler.vcxproj', '/nologo', '/v:minimal',
@@ -196,6 +217,51 @@ def execute():
     if negative.returncode != 1 or 'ZERO COVERAGE:' not in (OUT / 'negative-control.log').read_text():
         raise RuntimeError('disabled-overlay negative control did not fail explicitly on zero coverage')
     result['zero_coverage_control'] = 'PASS (disabled overlay rejected with exit 1)'
+    # Keep the graphics lifecycle and disabled-overlay control intact. This separate process
+    # creates both graphics and non-graphics queues, and presents once from the latter.
+    nongraphics = OUT / 'non-graphics-present'
+    nongraphics.mkdir(exist_ok=True)
+    if (nongraphics / 'optiscaler_skip_vulkan_hooks').exists():
+        raise RuntimeError('marker present in non-graphics-present directory; it will not be removed')
+    if any(nongraphics.glob('sl.*.dll')) or any(nongraphics.glob('*dlssg*.dll')):
+        raise RuntimeError('unexpected FG DLL in non-graphics-present directory')
+    for p in work.iterdir():
+        if p.suffix.lower() in ('.dll', '.exe'):
+            shutil.copy2(p, nongraphics / p.name)
+    shutil.copy2(work / 'OptiScaler.ini', nongraphics / 'OptiScaler.ini')
+    # Reject stale evidence even if Wine fails before main(). The test owns these output logs.
+    for name in ('result.json', 'OptiScaler.log'):
+        (nongraphics / name).unlink(missing_ok=True)
+    with (OUT / 'non-graphics-present.log').open('w') as log:
+        process = subprocess.run(['wine', str(nongraphics / 'vk-overlay-harness.exe'), '--non-graphics-present'],
+                                 cwd=nongraphics, env=env, stdin=subprocess.DEVNULL,
+                                 stdout=log, stderr=subprocess.STDOUT, timeout=60)
+    evidence = json.loads((nongraphics / 'result.json').read_text())
+    if process.returncode == 77 and evidence.get('status') == 'SKIP' and evidence.get('reason'):
+        if evidence.get('validation_errors') != 0:
+            raise RuntimeError('non-graphics-present skip reported validation errors')
+        print('SKIP: non-graphics-present: ' + evidence['reason'], flush=True)
+    elif process.returncode == 0 and evidence.get('status') == 'PASS':
+        expected = {'frames': 1, 'present_calls': 1, 'non_graphics_bailouts': 1, 'overlay_submits': 0,
+                    'validation_active': True, 'validation_errors': 0, 'surface_support': True}
+        if any(evidence.get(key) != value for key, value in expected.items()):
+            raise RuntimeError('non-graphics-present control did not prove the required coverage')
+        flags = evidence.get('present_queue_flags')
+        if not isinstance(flags, int) or flags & 1:
+            raise RuntimeError('non-graphics-present control selected a graphics queue')
+        warning = (f"present happens on queue family {evidence['present_queue_family']} "
+                   f"(flags {flags:X}), which cannot run a render pass; "
+                   "the Vulkan overlay is not possible on this swapchain")
+        warnings = (nongraphics / 'OptiScaler.log').read_text(errors='replace').count(warning)
+        if warnings != 1:
+            raise RuntimeError(f'non-graphics-present warning count was {warnings}, expected exactly 1')
+        evidence['bailout_warnings'] = warnings
+        print(f'PASS: non-graphics-present family {evidence["present_queue_family"]} flags 0x{flags:X}: '
+              'one bailout, no overlay submission, zero unexpected validation errors', flush=True)
+    else:
+        raise RuntimeError(f'non-graphics-present control failed (exit {process.returncode}); '
+                           f'see {OUT / "non-graphics-present.log"}')
+    result['non_graphics_present_control'] = evidence
     result['source'] = provenance
     (OUT / 'results.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2))

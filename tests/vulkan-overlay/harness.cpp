@@ -17,6 +17,9 @@
 static std::atomic<unsigned> validationErrors{0};
 static std::atomic<bool> validationActive{false};
 static std::atomic<bool> validationProbe{false};
+static constexpr const char* nonGraphicsSkipReason =
+    "No non-graphics queue family with queues supports this Win32 surface on any enumerated Vulkan device "
+    "(vkGetPhysicalDeviceSurfaceSupportKHR returned false); non-graphics present was NOT exercised";
 
 static void Require(bool condition, const char* message)
 {
@@ -71,7 +74,11 @@ struct Test
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     VkQueue queue = VK_NULL_HANDLE;
+    VkQueue graphicsQueue = VK_NULL_HANDLE;
     uint32_t family = 0;
+    uint32_t graphicsFamily = 0;
+    VkQueueFlags presentQueueFlags = 0;
+    bool nonGraphicsPresent = false;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     std::vector<VkImage> images;
     std::vector<bool> initialized;
@@ -89,10 +96,10 @@ struct Test
     {
         VkLifetimeStats s;
         get(&s);
-        Require(s.abi == 1, "wrong instrumentation ABI");
+        Require(s.abi == 2, "wrong instrumentation ABI");
         return s;
     }
-    void Init()
+    bool Init()
     {
         WNDCLASSW cls{};
         cls.lpfnWndProc = WindowProc;
@@ -152,35 +159,63 @@ struct Test
         Require(n > 0, "no Vulkan physical device under Wine");
         std::vector<VkPhysicalDevice> devices(n);
         Check(vkEnumeratePhysicalDevices(instance, &n, devices.data()), "vkEnumeratePhysicalDevices");
-        physical = devices[0];
-        VkPhysicalDeviceProperties properties{};
-        vkGetPhysicalDeviceProperties(physical, &properties);
-        std::printf("GPU: %s\n", properties.deviceName);
-        vkGetPhysicalDeviceQueueFamilyProperties(physical, &n, nullptr);
-        std::vector<VkQueueFamilyProperties> families(n);
-        vkGetPhysicalDeviceQueueFamilyProperties(physical, &n, families.data());
         bool found = false;
-        for (uint32_t i = 0; i < n; ++i)
+        for (auto candidate : devices)
         {
-            VkBool32 supportsPresent = false;
-            Check(vkGetPhysicalDeviceSurfaceSupportKHR(physical, i, surface, &supportsPresent), "surface support");
-            if (supportsPresent && (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT))
+            physical = candidate;
+            VkPhysicalDeviceProperties properties{};
+            vkGetPhysicalDeviceProperties(physical, &properties);
+            std::printf("GPU: %s\n", properties.deviceName);
+            vkGetPhysicalDeviceQueueFamilyProperties(physical, &n, nullptr);
+            std::vector<VkQueueFamilyProperties> families(n);
+            vkGetPhysicalDeviceQueueFamilyProperties(physical, &n, families.data());
+            graphicsFamily = UINT32_MAX;
+            for (uint32_t i = 0; i < n; ++i)
             {
-                family = i;
-                found = true;
-                break;
+                VkBool32 supportsPresent = false;
+                Check(vkGetPhysicalDeviceSurfaceSupportKHR(physical, i, surface, &supportsPresent), "surface support");
+                const auto flags = families[i].queueFlags;
+                if (nonGraphicsPresent)
+                    std::printf("QUEUE family=%u flags=0x%X count=%u surface_support=%u\n",
+                                i, flags, families[i].queueCount, supportsPresent);
+                if (!families[i].queueCount) continue;
+                if ((flags & VK_QUEUE_GRAPHICS_BIT) && graphicsFamily == UINT32_MAX) graphicsFamily = i;
+                if (!supportsPresent) continue;
+                if (nonGraphicsPresent ? !(flags & VK_QUEUE_GRAPHICS_BIT) : (flags & VK_QUEUE_GRAPHICS_BIT))
+                {
+                    // Prefer a compute/present family (the DOOM Eternal case), then any other
+                    // present-capable non-graphics family. No family index is hard-coded.
+                    if (!found || (!(presentQueueFlags & VK_QUEUE_COMPUTE_BIT) && (flags & VK_QUEUE_COMPUTE_BIT)))
+                    {
+                        family = i;
+                        presentQueueFlags = flags;
+                        found = true;
+                    }
+                    if (!nonGraphicsPresent) break;
+                }
             }
+            if (found || !nonGraphicsPresent) break; // Preserve the normal run's first-device selection.
         }
+        if (!found && nonGraphicsPresent) return false;
         Require(found, "no combined graphics/present queue");
+        Require(graphicsFamily != UINT32_MAX, "no graphics queue for overlay initialization");
+        if (!nonGraphicsPresent) graphicsFamily = family;
+        std::printf("PRESENT family=%u flags=0x%X graphics_family=%u mode=%s\n", family, presentQueueFlags,
+                    graphicsFamily, nonGraphicsPresent ? "non-graphics-present" : "graphics-present");
         float priority = 1.0f;
-        VkDeviceQueueCreateInfo q{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
-        q.queueFamilyIndex = family;
-        q.queueCount = 1;
-        q.pQueuePriorities = &priority;
+        VkDeviceQueueCreateInfo queues[2]{};
+        for (auto& q : queues)
+        {
+            q.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+            q.queueCount = 1;
+            q.pQueuePriorities = &priority;
+        }
+        queues[0].queueFamilyIndex = graphicsFamily;
+        queues[1].queueFamilyIndex = family;
         const char* deviceExtensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
         VkDeviceCreateInfo d{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-        d.queueCreateInfoCount = 1;
-        d.pQueueCreateInfos = &q;
+        d.queueCreateInfoCount = nonGraphicsPresent ? 2 : 1;
+        d.pQueueCreateInfos = queues;
         d.enabledExtensionCount = 1;
         d.ppEnabledExtensionNames = deviceExtensions;
         Check(vkCreateDevice(physical, &d, nullptr, &device), "vkCreateDevice");
@@ -194,6 +229,7 @@ struct Test
         Require(validationActive && probeResult == VK_ERROR_VALIDATION_FAILED_EXT,
                 "validation negative control failed: expected fence error was not intercepted");
         vkGetDeviceQueue(device, family, 0, &queue);
+        vkGetDeviceQueue(device, graphicsFamily, 0, &graphicsQueue);
         Check(vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &n, nullptr), "surface formats");
         Require(n > 0, "no surface formats");
         std::vector<VkSurfaceFormatKHR> formats(n);
@@ -203,6 +239,7 @@ struct Test
             if (f.format == VK_FORMAT_B8G8R8A8_UNORM) chosen = f;
         format = chosen.format;
         colorSpace = chosen.colorSpace;
+        return true;
     }
     void Recreate(unsigned generation, unsigned fault = 0)
     {
@@ -216,7 +253,8 @@ struct Test
         Check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &caps), "surface capabilities");
         const uint32_t low = std::max(2u, caps.minImageCount);
         const uint32_t limit = caps.maxImageCount ? std::min(8u, caps.maxImageCount) : 8u;
-        Require(low < limit, "device cannot supply two legal image counts within overlay's limit of 8");
+        Require(nonGraphicsPresent ? low <= limit : low < limit,
+                "device cannot supply required image counts within overlay's limit of 8");
         const uint32_t requested = generation % 2 ? low + 1 : low;
         extent = caps.currentExtent;
         if (extent.width == UINT32_MAX)
@@ -237,6 +275,15 @@ struct Test
         info.imageArrayLayers = 1;
         info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        const uint32_t sharingFamilies[] = {graphicsFamily, family};
+        if (nonGraphicsPresent)
+        {
+            // Clear on graphics, present on the selected queue. Concurrent sharing avoids implicit
+            // cross-family ownership assumptions and works even for a present-only queue family.
+            info.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+            info.queueFamilyIndexCount = 2;
+            info.pQueueFamilyIndices = sharingFamilies;
+        }
         info.preTransform = caps.currentTransform;
         for (auto alpha : {VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
                            VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR})
@@ -308,7 +355,7 @@ struct Test
         auto acquire = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, acquired, VK_NULL_HANDLE, &index);
         Require(acquire == VK_SUCCESS || acquire == VK_SUBOPTIMAL_KHR, "acquire failed");
         VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-        poolInfo.queueFamilyIndex = family;
+        poolInfo.queueFamilyIndex = graphicsFamily;
         VkCommandPool pool = VK_NULL_HANDLE;
         Check(vkCreateCommandPool(device, &poolInfo, nullptr, &pool), "create frame command pool");
         VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -351,7 +398,7 @@ struct Test
         submit.pCommandBuffers = &cmd;
         submit.signalSemaphoreCount = 1;
         submit.pSignalSemaphores = &rendered;
-        Check(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE), "submit clear frame");
+        Check(vkQueueSubmit(graphicsQueue, 1, &submit, VK_NULL_HANDLE), "submit clear frame");
         VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         present.waitSemaphoreCount = 1;
         present.pWaitSemaphores = &rendered;
@@ -361,9 +408,19 @@ struct Test
         auto before = Stats();
         auto result = vkQueuePresentKHR(queue, &present);
         Require(result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR, "present failed");
-        Require(Stats().presentCalls > before.presentCalls, "ZERO COVERAGE: overlay QueuePresent not called");
-        Require(Stats().overlaySubmits > before.overlaySubmits, "ZERO COVERAGE: frame had no overlay submission");
+        auto after = Stats();
+        Require(after.presentCalls > before.presentCalls, "ZERO COVERAGE: overlay QueuePresent not called");
+        if (nonGraphicsPresent)
+        {
+            Require(after.presentCalls == before.presentCalls + 1, "expected exactly one overlay present call");
+            Require(after.nonGraphicsBailouts == before.nonGraphicsBailouts + 1,
+                    "ZERO COVERAGE: expected exactly one completed non-graphics present bailout");
+            Require(after.overlaySubmits == 0, "non-graphics present unexpectedly submitted overlay drawing");
+        }
+        else
+            Require(after.overlaySubmits > before.overlaySubmits, "ZERO COVERAGE: frame had no overlay submission");
         Check(vkQueueWaitIdle(queue), "wait for real presentation");
+        if (nonGraphicsPresent) Check(vkQueueWaitIdle(graphicsQueue), "wait for graphics clear");
         vkDestroyCommandPool(device, pool, nullptr);
         vkDestroySemaphore(device, acquired, nullptr);
         vkDestroySemaphore(device, rendered, nullptr);
@@ -377,34 +434,79 @@ struct Test
         auto final = Stats();
         Require(final.createCalls > 0 && final.destroyCalls > 0 && final.teardownCalls > 0 && final.presentCalls > 0,
                 "ZERO COVERAGE: required overlay lifecycle function was not reached");
-        Require(final.overlaySubmits > 0, "ZERO COVERAGE: overlay never submitted a rendered frame");
-        Require(countChanges > 0, "ZERO COVERAGE: actual image count never changed");
-        Require(extentChanges > 0, "ZERO COVERAGE: actual surface extent never changed");
+        if (nonGraphicsPresent)
+        {
+            Require(frames == 1 && final.presentCalls == 1 && final.nonGraphicsBailouts == 1,
+                    "expected exactly one non-graphics present and bailout");
+            Require(final.overlaySubmits == 0, "non-graphics control drew the overlay");
+        }
+        else
+        {
+            Require(final.overlaySubmits > 0, "ZERO COVERAGE: overlay never submitted a rendered frame");
+            Require(final.nonGraphicsBailouts == 0, "graphics control reached non-graphics bailout");
+            Require(countChanges > 0, "ZERO COVERAGE: actual image count never changed");
+            Require(extentChanges > 0, "ZERO COVERAGE: actual surface extent never changed");
+        }
         Require(final.allocations > 0 && final.allocations == final.releases && final.liveBytes == 0,
                 "LEAK: overlay backing allocations do not balance");
         Require(final.objectsCreated == final.objectsDestroyed, "LEAK: overlay Vulkan objects do not balance");
         vkDestroySwapchainKHR(device, swapchain, nullptr);
         vkDestroyDevice(device, nullptr);
+        CleanupInstance();
+        return final;
+    }
+    void CleanupInstance()
+    {
         vkDestroySurfaceKHR(instance, surface, nullptr);
         auto destroyDebug = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
             vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT"));
         destroyDebug(instance, messenger, nullptr);
         vkDestroyInstance(instance, nullptr);
-        Require(validationErrors == 0, "Vulkan validation reported errors; see run.log");
+        Require(validationErrors == 0, "Vulkan validation reported errors; see mode's run log");
         DestroyWindow(window);
         DestroyWindow(owner);
-        return final;
     }
 };
 
-int main()
+int main(int argc, char** argv)
 {
     // Never let a previous PASS survive a crash, an environment failure or a coverage failure.
     std::ofstream("result.json") << "{\"status\":\"RUNNING\"}\n";
     try
     {
         Test test;
-        test.Init();
+        Require(argc == 1 || (argc == 2 && !strcmp(argv[1], "--non-graphics-present")), "unknown harness argument");
+        test.nonGraphicsPresent = argc == 2;
+        if (!test.Init())
+        {
+            test.CleanupInstance();
+            std::fprintf(stderr, "SKIP: non-graphics-present: %s\n", nonGraphicsSkipReason);
+            std::ofstream("result.json") << "{\"status\":\"SKIP\",\"validation_errors\":0,\"reason\":\""
+                                         << nonGraphicsSkipReason << "\"}\n";
+            return 77;
+        }
+        if (test.nonGraphicsPresent)
+        {
+            test.Recreate(0);
+            test.openMenu();
+            test.Frame();
+            auto s = test.Finish();
+            std::ofstream out("result.json");
+            out << "{\n  \"status\": \"PASS\",\n  \"validation_active\": true,\n  \"validation_errors\": " << validationErrors
+                << ",\n  \"graphics_queue_family\": " << test.graphicsFamily
+                << ",\n  \"present_queue_family\": " << test.family
+                << ",\n  \"present_queue_flags\": " << test.presentQueueFlags
+                << ",\n  \"surface_support\": true,\n  \"frames\": " << test.frames
+                << ",\n  \"present_calls\": " << s.presentCalls
+                << ",\n  \"non_graphics_bailouts\": " << s.nonGraphicsBailouts
+                << ",\n  \"overlay_submits\": " << s.overlaySubmits
+                << ",\n  \"allocations\": " << s.allocations << ",\n  \"releases\": " << s.releases
+                << ",\n  \"live_bytes\": " << s.liveBytes
+                << ",\n  \"objects_created\": " << s.objectsCreated
+                << ",\n  \"objects_destroyed\": " << s.objectsDestroyed << "\n}\n";
+            std::puts("PASS: non-graphics-present completed exactly one bailout, no overlay submission, clean teardown and zero validation errors");
+            return 0;
+        }
         for (unsigned generation = 0; generation < 13; ++generation)
         {
             test.Recreate(generation);
