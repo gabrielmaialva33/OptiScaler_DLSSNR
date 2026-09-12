@@ -243,10 +243,12 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         MenuOverlayBase::Init(hwnd, false, true);
     }
 
-    // Starts here, not above: MenuOverlayBase::Init reaches D3D12 device creation, which re-enters the
-    // Vulkan hooks and DestroyVulkanObjects on this thread. Everything below is Vulkan object creation
-    // and the ImGui backend, with no path back into the hooks.
-    std::lock_guard<std::mutex> lock(_vkCleanMutex);
+    // No lock is taken here. CreateSwapchain, the one caller, already holds _vkPresentMutex and
+    // _vkCleanMutex across this whole call, and std::mutex is not recursive -- MSVC's lock() detects
+    // the re-entry and throws resource_deadlock_would_occur, which unwinds out through the Vulkan
+    // hook. This once took _vkCleanMutex late, after MenuOverlayBase::Init, because Init reached
+    // D3D12 device creation and re-entered the hooks on this thread; Init now takes nativeVulkan and
+    // skips that probe, so there is no re-entry left to order against.
 
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize.x = static_cast<float>(pCreateInfo->imageExtent.width);
