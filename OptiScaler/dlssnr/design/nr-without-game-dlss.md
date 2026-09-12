@@ -140,6 +140,28 @@ The earlier draft of this note had the NVOFA probe as step 1 and said the idea w
 That was wrong, and wrong in an expensive direction: it put an unanswerable platform question in front
 of work that does not depend on it.
 
+### Correction (2026-09-12): zero guides are bring-up, not a mode
+
+The sequencing above treats zero-filled guides as the cheapest thing that could work and defers real
+ones to step 3. Independent review of [nr-dx11-bridge-host.md](nr-dx11-bridge-host.md) says that is
+too generous, for a reason that is structural rather than a matter of tuning:
+
+> DLSS-NR was trained as a denoising reconstruction filter over linear HDR buffers with valid optical
+> flow and depth. With permanently zeroed motion the model's recurrent temporal accumulator interprets
+> all movement as static noise, producing severe ghosting and smearing during any camera or object
+> motion.
+
+The evidence that persuaded this note to start from zeros was the DaVinci Resolve filter — but its
+content is video, usually watched rather than played. The one project here aimed at *interactive*
+content, `perseval-BLR/DLSS5-NeuralScreen`, had the same choice and computed motion instead: OpenCV DIS
+optical flow at roughly 320 px wide, upscaled on the GPU, with the CPU cost measured and engineered
+around (`guides.py`).
+
+So step 2 stands as the first slice to **build**, because it proves transport, cold bootstrap and the
+fence contract with no guide producer in the way. It does not stand as something to put in front of a
+player. Consecutive-frame motion reconstruction moves out of step 3 and becomes part of the first
+result anyone is asked to judge. Depth selection and hardware optical flow stay where they are.
+
 ## Two facts about this tree, measured from outside
 
 The Feeder's `feed_opti.h` records a measurement of *our* module that we never took ourselves —

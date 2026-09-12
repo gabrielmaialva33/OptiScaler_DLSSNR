@@ -371,3 +371,79 @@ only Opti's menu. Zero guidance and conservative history resets can alter motion
 as style. The extra shared copy, colour conversions and second presentation path add cost and
 failure modes even without NR. Those are reasons to require image and latency evidence before
 general use, not reasons to postpone a small, honest no-upscaler experiment behind an explicit gate.
+
+---
+
+## Independent review (2026-09-12)
+
+Reviewed read-only by the agent that raised the five hazards in the first place, so the adjudication
+below is by their author. Full text at the time of writing: `agy-review-dx11-bridge.md` in the
+session scratchpad.
+
+**The refutation above is upheld on all five**, with source that settles each: the drain at
+`dx11_with_dx12_sc.cpp:399` and `:607` logs a warning and proceeds, and `_ReleaseInteropObjects:1165`
+discards the return value outright; the NR pipeline's own state is still `g_nr` / `g_compose` /
+`g_chainSchedule`, and `Dx11wDx12SC::Release:247` resets `State::swapchainInteropApi` globally when
+*any* instance goes; `_RequestSharedBackBuffer:859` keeps the game's format and `:1051` copies it
+without conversion, so `CreateScratch:1331` still meets `B8G8R8A8`; and the ImGui D3D12 backend caches
+its queue at creation (`menu_overlay_dx.cpp:401`), so passing a different one later changes nothing.
+Every code citation in this note was checked and none was wrong.
+
+### Two defects in shipped code, found on the way
+
+Neither belongs to this feature. Both are in the bridge that already runs in D3D11 titles using FSR4
+or XeSS, and both should be fixed on their own merits, before and independently of anything here.
+
+- **Reverse overwrite race**, `dx11_with_dx12_sc.cpp:1015`. `Present` queues the D3D11 shadow copy
+  before `_WaitForCopyAllocator` has established that D3D12's previous read of that slot finished.
+  D3D11 can overwrite memory D3D12 is still reading.
+- **Global teardown from a secondary instance**, `dx11_with_dx12_sc.cpp:247`. Releasing any
+  `Dx11wDx12SC` clears `State::swapchainInteropApi` and the current-swapchain pointers, including when
+  another instance is still live.
+
+### What the review added
+
+- **Two Vulkan swapchains, one compositor.** Under Proton the hidden D3D11 chain presents through
+  DXVK (`:344`) while the visible D3D12 chain presents through vkd3d-proton. Two runtimes submitting
+  presentation for one window on one GPU: frame-pacing judder, and overlays or limiters reading
+  inconsistent intervals. No Windows project in this space meets this, so no prior art covers it.
+- **No `TickFrozenCheck`.** The ordinary wrapper calls it at `wrapped_swapchain.cpp:491`; the bridge
+  has no equivalent, so frozen-renderer detection and recovery do not exist on this path.
+- **VRAM.** D3D11 backbuffers, D3D11 shared shadows, D3D12 opened shares, D3D12 presenter backbuffers,
+  plus RGBA scratch, native output, an HDR copy and the zero guides — over 500 MB at 4K before the
+  model's weights.
+
+### The finding that should change the plan
+
+> DLSS-NR was trained as a denoising reconstruction filter over linear HDR buffers with valid optical
+> flow and depth. On tone-mapped SDR backbuffers with permanently zeroed motion, the model's recurrent
+> temporal accumulator interprets all movement as static noise, producing severe ghosting and smearing
+> during any camera or object motion. This is a property of the model when unguided, not a tuning
+> problem.
+
+This note, and step 2 of [nr-without-game-dlss.md](nr-without-game-dlss.md), both treat zero guides as
+the cheapest thing that could work and defer real guides to a later step. That ordering came from the
+DaVinci Resolve filter, which ships zero-filled motion and depth — but its content is video, usually
+watched rather than played, where the camera path is whatever the footage already contains.
+
+The one project in this space that targets *interactive* content did not choose zeros.
+`perseval-BLR/DLSS5-NeuralScreen`, applying feature 18 to arbitrary windows, computes motion with
+OpenCV DIS optical flow (`guides.py`: `DISOpticalFlow_create(DISOPTICAL_FLOW_PRESET_FAST)`,
+`setUseSpatialPropagation(True)`) at roughly 320 px wide and upscales the field on the GPU, with the
+cost measured and engineered around. Its author had the same choice and made the opposite one.
+
+So the honest reading is that **zero guides are a bring-up aid, not a shippable mode**. They are still
+the right first slice — they prove the transport, the cold bootstrap and the fence contract without a
+guide producer in the way — but the plan should stop calling them a candidate for general use, and a
+synthesized motion field should move from "step 3, if step 2 earns it" to "part of the first thing a
+player would be asked to look at". Whether that field is computed on the GPU here rather than on the
+CPU with OpenCV is an implementation question; that it is needed at all is now the expectation.
+
+### Prerequisites the review states plainly
+
+1. Fail-closed fence synchronisation in `ResizeBuffers` and `_ReleaseInteropObjects`.
+2. BGRA to RGBA conversion before the UAV scratch allocation.
+3. An explicit bypass of `_WaitForInteropCopyOnPresentQueue`'s `_fg != nullptr` check, which today
+   makes `Present` return `DXGI_ERROR_DEVICE_REMOVED` when no FG object exists (`:1087`, `:313`).
+4. A cold NGX capability init that does not depend on a game having called `NVSDK_NGX_D3D12_Init`
+   (`State.h:219` holds only `NVNGX_ApplicationId = 1337`, an empty data path and a zeroed version).
