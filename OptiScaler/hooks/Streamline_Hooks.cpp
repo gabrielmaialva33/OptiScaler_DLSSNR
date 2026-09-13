@@ -1264,7 +1264,14 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
             auto overrideCount = Config::Instance()->FGDLSSGOverrideInterpolationCount.value();
             if (overrideCount != 0)
             {
-                if (newOptions.numFramesToGenerate != (uint32_t) overrideCount)
+                // On the transition, not on every rewrite. The game asks for 1 every call and we
+                // answer 3 every call, so "did this call change the value" is true forever: the first
+                // version of this line wrote 1115 entries into one session. What is worth recording is
+                // the pair changing, which happens when the user picks a different multiplier.
+                static std::atomic<uint64_t> lastPair { 0 };
+                const uint64_t pair = ((uint64_t) newOptions.numFramesToGenerate << 32) | (uint32_t) overrideCount;
+
+                if (lastPair.exchange(pair, std::memory_order_relaxed) != pair)
                     LOG_INFO("DLSSG override applied: numFramesToGenerate {} -> {} ({}x)",
                              newOptions.numFramesToGenerate, overrideCount, overrideCount + 1);
 

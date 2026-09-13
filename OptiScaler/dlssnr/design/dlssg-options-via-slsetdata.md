@@ -209,3 +209,14 @@ design resting on an inference:
 - getter only -> the interesting case, and the one the original evidence could not have distinguished.
 
 Do not implement any of the design above until one of those three is observed.
+
+### Observed (2026-09-13): both lines present, and the whole question resolved
+
+The probe fired on both entry points — `the game calls slDLSSGGetState (viewport 0, struct v3)` and
+`the game calls slDLSSGSetOptions (viewport 0, struct v3, mode eOff, numFramesToGenerate 1)`. The
+wrapper is reached. This note's premise is false and nothing here will be implemented.
+
+What the override actually needed was for something to ask for a count. See
+[mfg-count-override.md](mfg-count-override.md): MFG at 4x is now measured working on Ada under
+Proton, there is no latch on this path, and the struct v3 the probe reported also exposed an
+out-of-bounds read fixed in `9f49fe70`.
