@@ -94,9 +94,16 @@ They cost nothing per frame and they are the reason any of this was answerable; 
 
 ## Still open
 
-- **Whether 4x is worth using.** It works; frame pacing, input latency and the software flip metering
-  on Ada are unmeasured. Working is not the same as good.
+- **Whether 4x is worth using.** Frame pacing, input latency and Ada's software flip metering are
+  still unmeasured, and working is not the same as good. What is no longer open is whether it
+  *holds*: a later session the same day ran **4.00 presents per rendered frame across 33 consecutive
+  five-second windows**, median 4.00, min 3.96, max 4.01, NR coverage 100% throughout. It survived
+  four eOff -> eOn cycles and two menu open/close pairs without dropping. An earlier session that
+  fell back to 2.00 is unexplained; it also showed windows at 1.00, which looks more like the game
+  disabling DLSS-G itself than the override failing, and it is not being chased without a
+  reproducible symptom.
 - **Whether other titles reach this path at all.** One game has been checked. The gate that matters is
   `dlssgMfgMax` being populated, which needs DLSS-G potentially active at the moment the hook runs.
-- **`OverrideInterpolationCount` does not persist.** It was set from the menu; the ini still says
-  `auto`. A count that has to be re-picked every launch is a setting only its author will use.
+- ~~`OverrideInterpolationCount` does not persist.~~ Closed the same day: written to the test
+  install's ini as `[DLSSG] OverrideInterpolationCount=3`, and a later session came up at 4x from the
+  first frame with no menu interaction — the probe's first decision line already reads `override 3`.

@@ -558,6 +558,40 @@ Less than "emulators" suggests, and the note should not have implied otherwise:
 Most modern emulators prefer Vulkan or OpenGL. On this workstation the practical question is whether
 the *Windows* build runs acceptably under Proton, which is a separate investigation.
 
+## The target exists: measured in Xenia, 2026-09-13
+
+The re-audit above says a DXGI D3D12 host reaches PCSX2, Dolphin and xenia, and that xenia is the
+strongest case. That was research; this is a run on this workstation.
+
+xenia-canary (Windows build, `canary_experimental@44cb87328`) under Proton Experimental, with this
+fork's `OptiScaler.dll` installed as `dxgi.dll` and the full NR kit beside it. Its own log:
+
+```
+CheckWorkingMode OptiScaler working as dxgi.dll, system dll loaded
+VulkanSpoofing::hkvkCreateInstance Skipping because DXVK/VKD3D is creating a D3D device
+WrappedIDXGISwapChain4::WrappedIDXGISwapChain4 1 created, real: 10A8210, refCount: 1
+DlssNr::ExposureScan::NoteResource DLSS-NR scan near-miss #1: UAV dim 1 10485760x1x1
+```
+
+Window up at 3396x1356, **zero errors**. So: we load, xenia really is on D3D12 through vkd3d-proton,
+**our swapchain wrapper is installed on its swapchain** — the exact object a present host would work
+on — and the resource tracker is already observing its resources. The pass does not run, because
+nothing calls an upscaler, which is the whole reason this note exists.
+
+Two corrections to the research this replaces:
+
+- **A native Linux build does exist.** `xenia_canary_linux.AppImage` ships in the same release, dated
+  the same day. The claim that 100% of Linux users run the Windows build does not hold. The weaker
+  form survives — xenia's D3D12 backend is the maintained one and its Vulkan backend is experimental,
+  so someone wanting the good backend still runs the Windows build — but that is now an inference,
+  not a fact, and nobody has checked what the AppImage actually uses.
+- **The overlay took the Vulkan path** (`CreateVulkanObjects swapchain image sharing mode EXCLUSIVE`),
+  because the scratch directory has no `optiscaler_skip_vulkan_hooks` marker. Under vkd3d that marker
+  is this fork's own Linux patch and every deployed game carries it. Any xenia work needs it too.
+
+Environment kept at `~/Games/xenia-nr-test` — emulator, NR kit, its own Proton prefix, minimal ini.
+It is a scratch target, not a deployment.
+
 ## Cost, now that the pass has been measured
 
 [model-cost-vs-working-scale.md](model-cost-vs-working-scale.md) measured the inference at **2.90 ms
@@ -606,6 +640,15 @@ default **1.0** (`shaders/dlssnr/DlssNr_Dx12.cpp:2344`). Migrating a user from t
 the present host would silently quadruple the model's pixel area — roughly doubling its work, taking
 the after-RR measurements as the reference, since nothing has been measured on the new host. The menu
 has to make that visible.
+
+**This is not a hypothetical about a future host: it happened, without one.** A Cyberpunk session on
+2026-09-13 ran with `RRWorkingScale=0.50` in the ini and produced 209 timing samples at
+`working_scale=1`, because the game was no longer running Ray Reconstruction and the route had moved
+to `after`, where `WorkingScale` governs. Nothing on screen said so; the stage had to be read out of
+the log. The menu now greys the RR controls and names the governing control when the route is not
+theirs, mirroring what the after-upscale slider already did in the opposite case. Whatever the present
+host does about route selection, it inherits this: **two similar-looking controls, one of which is
+inert, and the route decides which** — not the checkbox next to them.
 
 ## Two answers from outside that this note wanted
 

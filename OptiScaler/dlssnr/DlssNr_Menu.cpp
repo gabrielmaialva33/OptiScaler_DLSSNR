@@ -412,6 +412,24 @@ void RenderMenu(Config* config, float menuResScale)
 
             if (applyAfterRR)
             {
+                // Ticking the box is not the same as being on the route, and the two controls below
+                // only govern when the route is actually taken -- the code that chooses reads
+                // frame.AfterRayReconstruction, not this checkbox (shaders/dlssnr/DlssNr_Dx12.cpp:2344).
+                // In a title running without ray reconstruction these read live, accept any value, and
+                // change nothing, while "Model resolution" further down is the one in charge. That
+                // asymmetry cost a session: an ini with RRWorkingScale=0.50 produced 209 samples at
+                // scale 1.0 and the only way to see why was to read the stage out of the log. The
+                // opposite case already greys its slider and says so; say so here too.
+                const bool onRrRoute = DlssNr::RunningAfterRayReconstruction();
+
+                if (!onRrRoute)
+                {
+                    ImGui::TextDisabled(Localization::Tr(
+                        "Not on this route right now: the game is not running Ray Reconstruction, so "
+                        "\"Model resolution\" below is what governs. These two take effect if it starts."));
+                    ImGui::BeginDisabled();
+                }
+
                 int rrPasses = static_cast<int>(config->DlssNrRRPasses.value_or_default());
                 if (ImGui::SliderInt(Localization::Label("RR Passes###nrRRPasses"), &rrPasses, 1, 3))
                     config->DlssNrRRPasses = static_cast<unsigned int>(std::clamp(rrPasses, 1, 3));
@@ -447,6 +465,9 @@ void RenderMenu(Config* config, float menuResScale)
                     ImGui::TextDisabled(Localization::Tr(
                         "Above 1x the model supersamples: no new detail, and cost grows with the area. "
                         "Ray Reconstruction already denoises this frame."));
+
+                if (!onRrRoute)
+                    ImGui::EndDisabled();
             }
         }
 
