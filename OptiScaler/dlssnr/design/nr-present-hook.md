@@ -1,7 +1,9 @@
 # Present-time NR — port the host, preserve this fork's contracts
 
-Status: **design only, awaiting review; no implementation or deployment.** Written 2026-09-12 against
-`393cd0b04e80d16923969c1a9d302983318c51e9` in `gabrielmaialva33/OptiScaler_DLSSNR`.
+Status: **design only, reviewed twice; no implementation or deployment.** Written 2026-09-12 against
+`393cd0b04e80d16923969c1a9d302983318c51e9`, re-audited 2026-09-13 against `150b49d0` — see the
+2026-09-13 update at the end, which changes the recommended first slice and settles the one hazard
+that could have killed the approach.
 This is step 1 of [NR without a game DLSS call](nr-without-game-dlss.md), under
 [DEVELOPMENT.md](DEVELOPMENT.md). The recommendation is a **manual, opt-in port**, not a cherry-pick
 of the sibling implementation. Its host is useful; several of its lifetime and state assumptions
@@ -459,3 +461,152 @@ is not only about whether the model sees our menu — it changes the arrival sta
 the backbuffer arrives in `PRESENT`, is processed, and is restored to `PRESENT`, after which the
 overlay does its own clean `PRESENT -> RENDER_TARGET -> PRESENT`. After the overlay, the donor's
 arrival assumption does not hold against this tree's overlay, which leaves the backbuffer in `PRESENT`.
+
+
+---
+
+# Update, 2026-09-13: the feedback loop is solved upstream, and the first slice has to change
+
+Re-audited against `150b49d0`, fifteen commits after this note was written, with a second external
+survey. Three things changed: a hazard that could have ended the approach was closed by the donor, a
+new use case moved the target, and the pass finally has a measured cost.
+
+## The colour feedback loop is not a barrier — the donor fixed it today
+
+Between this note and now, the donor spent four commits on a symptom that would have sunk the host:
+DLSS-NR at present time "compounding then snapping", the enhancement accumulating frame over frame
+until it blew out. `b24389ca`, `4bb376e5` and `276a2e13` are instrumentation; **`afad5195` is the
+fix**, dated 2026-09-13.
+
+The diagnosis is worth reading because it exonerates the obvious suspect. With a probe withholding
+the write-back to the backbuffer the symptom vanished completely, and the fingerprinting was clean —
+fresh render each run, alternating physical buffers, stateless model, one evaluate per base frame.
+So it was never the model's temporal accumulator. In the donor's words:
+
+> the pass submits its GPU work on the presenting queue but never waits, so under a
+> frame-generation interposer that paces the client queue the write can retire after the flip
+> consumed the buffer and land on a later frame's content, where the next pass then re-reads it.
+
+The fix is `DlssNr.PresentSync`, default on, 41 lines across three files: after `SubmitPresentList`
+the present thread waits on the slot fence before the hook returns, so the flip reads a fully written
+buffer. **This must be part of the port from the start, not a follow-up.** It also has a cost — a
+synchronous wait on the present thread every processed frame — which is exactly what `555ed6db`
+("stop stalling the present thread") had removed, so the two commits pull against each other and the
+port inherits that tension rather than resolving it.
+
+Two agents disagreed about this and one was working from a stale fetch. Verified directly:
+`git fetch scottmudge` brought `276a2e13..afad5195`, and the commit is real. Worth recording because
+the disagreement was the load-bearing question, and the resolution was a fetch, not an argument.
+
+## The target moved: emulators, and the first slice does not reach them
+
+The question that prompted this re-audit was whether the neural pass can run in emulators — PCSX2,
+RPCS3, Dolphin, xenia. It cannot today, and the reason is structural: every dispatch originates in
+`inputs/NVNGX_DLSS_*.cpp` or the `IFeature_*wDx12.cpp` bridges, so **something must call an upscaler**.
+Emulators call none. The few with FSR have FSR 1, which is spatial and never reaches this path.
+
+This note's first slice — "D3D12 SDR, fresh captured guides, one enhancement per real frame" —
+**does not cover that case**, and the re-audit was explicit that it does not cover it by accident
+either: the slice deliberately waits for guides rather than falling back to zeroes, so implemented
+literally it would still produce nothing in an emulator. The slice has to split:
+
+1. **Technical proof.** Explicit D3D12 SDR host, no FG, no Auto, one selected swapchain, independent
+   NGX initialisation, and **its own zeroed guides** — depth `R32_FLOAT` and motion `R16G16_FLOAT`,
+   cleared once with valid descriptors and actually submitted. Confidence is not allocated and not
+   passed to NGX. This proves initialisation, transport, completion and what the image looks like.
+2. **First playable mode.** Reconstructed motion from consecutive frames, plus temporal and HUD
+   quality criteria. This is the sequence already corrected in
+   [nr-without-game-dlss.md](nr-without-game-dlss.md) — zero guides are bring-up, not a mode to put
+   in front of a player.
+
+Step 1 removes this note's queue-ownership conflict over guide capture entirely, which makes it
+cheaper than the slice it replaces, not more expensive.
+
+### Two prerequisites the original slice did not need
+
+**Cold NGX initialisation is unproven.** `EnsureCapabilityParams` calls `NVNGXProxy::InitDx12`
+(`shaders/dlssnr/DlssNr_Dx12.cpp:711`, `proxies/NVNGX_Proxy.h:777`), which uses metadata normally
+filled in by the game's own NGX init. In an emulator there is no such init. Nothing demonstrates the
+defaults suffice; find out before building on it.
+
+**A Present is not a new frame.** Under pause, frame limiting or a repeated display, the hook fires
+on content the pass already modified. The host needs presentation identity, not a present count.
+
+### What a DXGI D3D12 host actually reaches
+
+Less than "emulators" suggests, and the note should not have implied otherwise:
+
+| emulator / backend | reach |
+|---|---|
+| PCSX2, Dolphin, xenia on D3D12 | candidates for this host |
+| RPCS3 on Vulkan/OpenGL | **outside it** — needs a different presentation point |
+| any **native Linux** build | **never loads this Windows DLL at all**, whatever it presents with |
+
+Most modern emulators prefer Vulkan or OpenGL. On this workstation the practical question is whether
+the *Windows* build runs acceptably under Proton, which is a separate investigation.
+
+## Cost, now that the pass has been measured
+
+[model-cost-vs-working-scale.md](model-cost-vs-working-scale.md) gives the inference:
+`1.9 ms + 0.89 ms/Mpx`, so 2.90 ms at 0.50x and 6.36 ms at 1.00x, with the model itself accounting
+for 93-97% of the pass depending on scale.
+
+Moving that inference to present time does not make it cheaper. It adds transport, and the
+re-audit quantified what this note described only as "two full-resolution copies":
+
+| operation | size | queue |
+|---|---|---|
+| backbuffer -> `g_bbCopy` | 1 `CopyResource`, full resolution and format | private DIRECT list, on the queue `RunPresentPass` receives |
+| encode, reduction, model, composition | NR pipeline, model at working scale | same list |
+| `g_bbCopy` -> backbuffer | 1 `CopyResource`, full resolution | same list |
+| typeless guide clones | up to two more copies, at guide dimensions | inside `Dispatch`, same list |
+
+At 3440x1440 and 4 bytes per pixel one image is 19.81 MB, so the two outer copies move **39.63 MB per
+processed present**. **Lowering the working scale does not shrink them** — they are full resolution
+whatever the model runs at. That is a fixed floor the scale lever cannot reach, and it is not counted
+in the `outside_model_ms` measured on the after-upscale route.
+
+Note also that the donor's capture takes **no** snapshot copies — it AddRefs and records metadata
+(`555ed6db:shaders/dlssnr/DlssNr_Dx12.cpp:1702`). The safe snapshot copies this note proposes are
+therefore additional work the port introduces, not something already implemented.
+
+### The 4x interaction, which is new since this note
+
+MFG at 4x is now measured working (see [mfg-count-override.md](mfg-count-override.md)). If the host
+processed every presentation of a 4x cycle that is **four inferences per real frame** — 11.60 ms at
+0.50x, 25.44 ms at 1.00x, before anything else. This is conditional arithmetic and it has not been
+verified that all four presentations traverse the hook. It is, however, the concrete reason to reject
+the donor's global-sequence deduplication and require per-swapchain, per-real-frame identity.
+
+### A config trap worth catching in the menu
+
+This note correctly says to clear `AfterRayReconstruction` in the new host. That also changes which
+key selects the working scale — from `DlssNrRRWorkingScale`, default **0.5**, to `DlssNrWorkingScale`,
+default **1.0** (`shaders/dlssnr/DlssNr_Dx12.cpp:2344`). Migrating a user from the after-RR route to
+the present host would silently move them from 2.90 ms to 6.36 ms. The menu has to make that visible.
+
+## Two answers from outside that this note wanted
+
+**HUD and text protection already exists in the model.** `DLSSNR.UseAutoMask = 1` makes the model's
+own classifier detect high-contrast edges without coherent scene motion — health bars, minimaps,
+static text — and give them passthrough weights. Independently confirmed in Magpie,
+DaVinci-Resolve-DLSS5 and DLSS5VKLayer. **This tree already ships the key** as `[DlssNr] AutoMask`.
+That does not make the concern in "Is this a bad idea?" disappear, but it stops it being unanswered.
+
+**Overlay ordering is a hard rule, not a preference.** Our ImGui must draw *after* the pass. Drawing
+before it hands the model our own menu's glyphs to denoise. This note already reaches that conclusion
+from the barrier states; the outside evidence agrees for a second, independent reason.
+
+**And the quality question has a partial answer.** Magpie's zero provider — null depth, zeroed motion —
+is reported clean on static and low-motion content, with a temporary softness on fast camera motion
+rather than geometric artifacts, and NVIDIA Optical Flow available as the upgrade. That is a
+plausibility argument for step 1 above, not evidence about our route.
+
+Magpie is GPL-3.0 and can be read as a reference. DLSS5VKLayer is AGPL-3.0 and cannot.
+
+## Verdict, unchanged in direction
+
+The host is still worth pursuing and the patches still must not ship verbatim. What changed is that
+the worst unknown closed in the port's favour, the first slice is now cheaper and aimed at a case
+that is unreachable today, and the transport cost has a number. The five hazards from the first
+review stand; none was fixed incidentally by the fifteen intervening commits.

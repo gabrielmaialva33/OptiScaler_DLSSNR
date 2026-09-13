@@ -86,7 +86,10 @@ the model's area by four again and returns 0.58 ms. That is image quality spent 
 ## What this settles
 
 **1. Host-side optimisation of this pass is not worth doing.** `outside_model_ms` is ~0.20 ms against
-6.36 ms at full resolution: **96.9% of the pass is inside the NGX model.** Every candidate that
+6.36 ms at full resolution: **96.9% of the pass is inside the NGX model** at 1.00x. That share is
+scale-dependent and the figure should not be quoted bare -- `outside_model_ms` barely moves with
+scale, so at 0.50x it is 2.90 / (2.90 + 0.205) = **93.4%**, and it keeps falling as the model shrinks.
+Either number retires the same candidates. Every candidate that
 targeted our own code — descriptor caching (`708f1dd8`), the exposure scan's mutex on `NoteUav`,
 selective HUD bookkeeping in `ResTrack_dx12`, caching `CheckFeatureSupport` in `ExposureTextureUsable`
 — competes for a slice of 3%, and several of them for a fraction of that slice. They were declined
@@ -108,8 +111,13 @@ Resolution instance, and claims it takes the pass from ~4.5 ms to under 1.8 ms.
   `EnlargeMatchedResidual` in its `DlssNr_Dx12_Run.cpp:381`. The private SR pass the mode exists to add
   is outside the number the mode is advertised by.
 - Its published tests are Windows on an RTX 5090; nothing establishes Ada under Proton.
-- Arithmetically, 6.36 x 0.25 = 1.59 ms. Their figure is approximately what this tree already gets by
-  setting a config key it already ships.
+- Their figure is close to what this tree already gets from a config key it ships -- but not for the
+  reason a first pass of this note gave. It said "6.36 x 0.25 = 1.59 ms", which is the linear
+  extrapolation this note's own blind test **disproved**: 0.50x measures **2.90 ms**, not 1.59, and
+  0.25x measures 2.32 rather than the 2.05 the line predicted. Quoting the extrapolation against
+  their claim was using a model this page exists to correct. The honest comparison is 2.90 ms
+  measured against their claimed 1.8, and the floor argument above, which does not depend on the
+  line.
 
 None of that makes the mode worthless. It relocates what it is: **not a speed feature, a quality
 feature** — a better answer to "what does the frame look like when the model only saw a quarter of it".
