@@ -11,6 +11,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 OUT = HERE / 'artifacts'
+RUN = OUT / 'run'
 MSVC = Path(os.environ.get('MSVC_BIN', str(Path.home() / '.local/opt/msvc/bin/x64')))
 PREFIX = Path(os.environ.get('WINEPREFIX', str(Path.home() / '.local/opt/msvc-wineprefix')))
 
@@ -91,7 +92,7 @@ def check_nr_coverage():
     """Reaching EvaluateFeature is not the point; reaching the NR pass is. Without this the harness
     reports PASS while the module it exists to exercise never ran once -- the silent pass the Vulkan
     harness was built to rule out."""
-    log = OUT / 'run/OptiScaler.log'
+    log = RUN / 'OptiScaler.log'
     if not log.exists():
         raise SystemExit('ZERO COVERAGE: OptiScaler wrote no log')
     text = log.read_text(errors='replace')
@@ -104,7 +105,17 @@ def check_nr_coverage():
     print(f'  NR compositions: {compositions}')
 
 
-def run_under_proton():
+def check_cold_coverage(harness):
+    # Upscale/composition logs cannot attest to this mode. The forwarder evaluates feature 18
+    # directly; demand both successful NGX returns and completed GPU submissions.
+    import re
+    match = re.search(r'^COLD-NR PASS: core_init=1 feature18=1 attempts=(\d+) '
+                      r'successes=(\d+) gpu_completed=(\d+)$', harness, re.M)
+    if not match or tuple(map(int, match.groups())) != (48, 48, 48):
+        raise SystemExit('ZERO COVERAGE: cold NR did not complete 48 successful feature-18 evaluations')
+
+
+def run_under_proton(cold_nr=False):
     """Run the harness the way a Steam game runs: through Proton, in a compatdata prefix of its own.
 
     Hand-mirroring what Proton provides (vkd3d-proton, dxvk-nvapi, the driver's nvngx pair and the
@@ -129,16 +140,23 @@ def run_under_proton():
                # Proton refuses to create its per-process log without SteamGameId. Zero
                # labels this standalone harness without opting into a game's compatibility fixes.
                SteamGameId='0', PROTON_LOG='1', PROTON_LOG_DIR=str(OUT))
-    for stale in ('run/OptiScaler.log', 'run/dlssnr-loopback.log'):
-        (OUT / stale).unlink(missing_ok=True)
+    for stale in ('OptiScaler.log', 'dlssnr-loopback.log'):
+        (RUN / stale).unlink(missing_ok=True)
     print(f'running under {proton.parent.name}')
-    p = subprocess.run([str(proton), 'run', str(OUT / 'run/dlssnr-loopback.exe'), 'OptiScaler.dll'],
-                       cwd=OUT / 'run', env=env, timeout=600)
-    hlog = OUT / 'run/dlssnr-loopback.log'
+    p = subprocess.run([str(proton), 'run', str(RUN / 'dlssnr-loopback.exe'), 'OptiScaler.dll'] +
+                       (['--cold-nr'] if cold_nr else []),
+                       cwd=RUN, env=env, timeout=600)
+    hlog = RUN / 'dlssnr-loopback.log'
     harness = hlog.read_text(errors='replace') if hlog.exists() else ''
     if harness:
         print('--- harness log ---')
         print(harness.rstrip())
+
+    if cold_nr:
+        if p.returncode != 0:
+            raise SystemExit(f'cold NR probe exited {p.returncode}; see {RUN / "dlssnr-loopback.log"}')
+        check_cold_coverage(harness)
+        return
 
     # A crash inside NGX shutdown is a real finding, not a broken test: everything the suite exists
     # to exercise already ran. Report it as its own failure so it is neither masked nor confused
@@ -160,6 +178,7 @@ def run_under_proton():
 
 
 def main():
+    global RUN
     ap = argparse.ArgumentParser()
     ap.add_argument('--dll', default=str(ROOT / 'x64/out/OptiScaler.dll'),
                     help='OptiScaler build whose NGX exports are driven')
@@ -169,16 +188,22 @@ def main():
                          'gets them. wine: bare prefix with only vkd3d-proton borrowed; reaches '
                          'NR but its feature create fails with FAIL_PlatformError.')
     ap.add_argument('--skip-build', action='store_true',
-                    help='reuse artifacts/run/dlssnr-loopback.exe instead of compiling')
+                    help='reuse the selected mode\'s artifacts/{run,cold-run}/dlssnr-loopback.exe')
+    ap.add_argument('--cold-nr', action='store_true',
+                    help='probe core cold defaults and NR feature 18 through the production forwarder; '
+                         'no OptiScaler Init, DLSS or RR feature; isolated artifacts/cold-run')
     args = ap.parse_args()
+    if args.cold_nr:
+        RUN = OUT / 'cold-run'
 
     dll = Path(args.dll)
     if not dll.exists():
         raise SystemExit(f'no OptiScaler build at {dll} — run ./build-local.sh Release first')
 
     OUT.mkdir(exist_ok=True)
-    (OUT / 'run').mkdir(exist_ok=True)
-    shutil.copy2(dll, OUT / 'run/OptiScaler.dll')
+    RUN.mkdir(exist_ok=True)
+    if not args.cold_nr:
+        shutil.copy2(dll, RUN / 'OptiScaler.dll')
 
     env = dict(os.environ, WINEPREFIX=str(PREFIX), WINEDEBUG='-all')
     if not args.skip_build:
@@ -191,10 +216,10 @@ def main():
       run_watched([MSVC / 'cl', '/nologo', '/std:c++20', '/EHsc', '/MD', '/W4',
          '/I' + str(ROOT / 'external/nvngx_dlss_sdk'), HERE / 'harness.cpp',
          '/Fo' + str(OUT / 'harness.obj'),
-         '/Fe' + str(OUT / 'run/dlssnr-loopback.exe'),
+         '/Fe' + str(RUN / 'dlssnr-loopback.exe'),
          '/link', 'd3d12.lib', 'dxgi.lib', 'user32.lib'],
         env=dict(env, WINE_MSVC_RAW_STDOUT='1'), log=OUT / 'build.log')
-    if not (OUT / 'run/dlssnr-loopback.exe').exists():
+    if not (RUN / 'dlssnr-loopback.exe').exists():
         raise SystemExit('no harness binary; run without --skip-build first')
 
     # NR needs the forwarder beside the DLL (the NVIDIA snippet rejects callers whose module path
@@ -206,22 +231,29 @@ def main():
     donor = Path(os.environ.get(
         'LOOPBACK_DONOR',
         str(Path.home() / '.local/share/Steam/steamapps/common/Crimson Desert/bin64')))
-    if donor.is_dir():
+    if donor.is_dir() and not args.cold_nr:
         for src in sorted(donor.glob('sl.*.dll')) + [donor / 'nvngx_dlss.dll']:
             if src.exists():
-                link = OUT / 'run' / src.name
+                link = RUN / src.name
                 link.unlink(missing_ok=True)
                 link.symlink_to(src)
     for name in ('nvngx.dll_dlssnr.dll', 'nvngx_dlssnr.dll', '_nvngx.dll'):
         src = kit / name
+        # Cold bring-up should test the installed driver, not a possibly stale kit copy.
+        # Leave the legacy sweep's dependency selection unchanged.
+        installed_core = Path('/usr/lib/nvidia/wine/_nvngx.dll')
+        if args.cold_nr and name == '_nvngx.dll' and installed_core.exists():
+            src = installed_core
         # Test the forwarder built alongside this DLL. The kit remains a fallback
         # for external builds that do not ship their matching forwarder.
         if name == 'nvngx.dll_dlssnr.dll' and (dll.parent / name).exists():
             src = (dll.parent / name).resolve()
         if not src.exists():
+            if args.cold_nr:
+                raise SystemExit(f'SETUP FAILURE: missing cold NR dependency {src}; no NGX result')
             print(f'  warning: {name} not in {kit} — NR will report itself unavailable')
             continue
-        link = OUT / 'run' / name
+        link = RUN / name
         link.unlink(missing_ok=True)
         link.symlink_to(src)
 
@@ -229,11 +261,12 @@ def main():
     # disabling the menu. Keep the swapchain-overlay route selected: this harness has
     # no swapchain, so it does not initialize unrelated ImGui rendering during the sweep.
     # The harness only reads NR behaviour; it never writes into a game install.
-    (OUT / 'run/OptiScaler.ini').write_text(
-        '[Menu]\nOverlayMenu=true\n[DlssNr]\nEnabled=true\n[Log]\nLogToFile=true\nLogLevel=2\n')
+    if not args.cold_nr:
+        (RUN / 'OptiScaler.ini').write_text(
+            '[Menu]\nOverlayMenu=true\n[DlssNr]\nEnabled=true\n[Log]\nLogToFile=true\nLogLevel=2\n')
 
     if args.runtime == 'proton':
-        return run_under_proton()
+        return run_under_proton(args.cold_nr)
 
     # A separate runtime prefix: the compiler prefix is configured for MSVC, not for graphics, and
     # running the app there conflates "the harness is wrong" with "this prefix has no D3D12".
@@ -262,11 +295,17 @@ def main():
     print(f'vkd3d-proton from {vkd3d.parents[2].parents[1].name}')
 
     print(f'running against {dll}')
-    p = subprocess.run(['wine', str(OUT / 'run/dlssnr-loopback.exe'), 'OptiScaler.dll'],
-                       cwd=OUT / 'run', env=renv, timeout=300)
+    if args.cold_nr:
+        (RUN / 'dlssnr-loopback.log').unlink(missing_ok=True)
+    p = subprocess.run(['wine', str(RUN / 'dlssnr-loopback.exe'), 'OptiScaler.dll'] +
+                       (['--cold-nr'] if args.cold_nr else []),
+                       cwd=RUN, env=renv, timeout=300)
     if p.returncode != 0:
         raise SystemExit(p.returncode)
-    check_nr_coverage()
+    if args.cold_nr:
+        check_cold_coverage((RUN / 'dlssnr-loopback.log').read_text(errors='replace'))
+    else:
+        check_nr_coverage()
     raise SystemExit(0)
 
 
