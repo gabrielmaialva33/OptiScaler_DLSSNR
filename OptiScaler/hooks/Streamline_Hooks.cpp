@@ -1195,6 +1195,45 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     LOG_TRACE("DLSSG Modified Mode: {}", magic_enum::enum_name(newOptions.mode));
 
+    // What this hook decided, at INFO, whenever the decision changes -- not once, because the
+    // interesting moment is the user picking a multiplier mid-session, and not per call, because the
+    // game drives this from nine threads. Everything the override does is otherwise TRACE-only, and
+    // reading a filtered level as "it did not run" has already produced one withdrawn design note
+    // today. `sent` is what goes to the plugin; `asked` is what the game wanted.
+    {
+        struct Decision
+        {
+            bool active;
+            bool haveMax;
+            unsigned int max;
+            bool haveOverride;
+            int override;
+            uint32_t asked;
+            sl::DLSSGMode mode;
+
+            bool operator==(const Decision&) const = default;
+        };
+
+        static std::mutex decisionMutex;
+        static std::optional<Decision> lastLogged;
+
+        const auto& cfgOverride = Config::Instance()->FGDLSSGOverrideInterpolationCount;
+        const Decision now { dlssgPotentiallyActive,  state.dlssgMfgMax.has_value(), state.dlssgMfgMax.value_or(0),
+                             cfgOverride.has_value(), cfgOverride.value_or(-1),      newOptions.numFramesToGenerate,
+                             newOptions.mode };
+
+        std::lock_guard<std::mutex> lock(decisionMutex);
+        if (lastLogged != now)
+        {
+            lastLogged = now;
+            LOG_INFO("DLSSG override state: mode {} active {} sl>=2.7.1 {} mfgMax {} override {} asked {}",
+                     magic_enum::enum_name(now.mode), now.active,
+                     state.streamlineVersion >= feature_version { 2, 7, 1 },
+                     now.haveMax ? std::to_string(now.max) : std::string("unset"),
+                     now.haveOverride ? std::to_string(now.override) : std::string("unset"), now.asked);
+        }
+    }
+
     if (dlssgPotentiallyActive && state.streamlineVersion >= feature_version { 2, 7, 1 })
     {
         // Populate dlssgMfgMax once
@@ -1224,7 +1263,13 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
         {
             auto overrideCount = Config::Instance()->FGDLSSGOverrideInterpolationCount.value();
             if (overrideCount != 0)
+            {
+                if (newOptions.numFramesToGenerate != (uint32_t) overrideCount)
+                    LOG_INFO("DLSSG override applied: numFramesToGenerate {} -> {} ({}x)",
+                             newOptions.numFramesToGenerate, overrideCount, overrideCount + 1);
+
                 newOptions.numFramesToGenerate = overrideCount;
+            }
             else if (!enableDynamicMode)
                 newOptions.mode = sl::DLSSGMode::eOff;
         }
