@@ -1116,6 +1116,24 @@ unsigned int StreamlineHooks::reflexOptionsGeneration()
 
 sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options)
 {
+    // One line, at INFO, once per process. Everything else in this hook logs at TRACE, and a session
+    // spent reading "hkslDLSSGSetOptions never appears" out of a LogLevel=1 capture concluded the game
+    // did not use this entry point at all -- a design note was written on that. TRACE is level 0 and
+    // debug is level 1, so the hook could have run every frame and logged nothing. Whether a title
+    // drives DLSS-G through this wrapper or through the plugin's own slSetData is a real question with
+    // real consequences for the override, and it should not need a trace-level capture to answer.
+    {
+        static std::once_flag once;
+        std::call_once(once,
+                       [&]
+                       {
+                           LOG_INFO("DLSSG entry: the game calls slDLSSGSetOptions (viewport {}, struct v{}, "
+                                    "mode {}, numFramesToGenerate {})",
+                                    (unsigned int) viewport, (unsigned int) options.structVersion,
+                                    magic_enum::enum_name(options.mode), options.numFramesToGenerate);
+                       });
+    }
+
     g_dlssgOptionsGeneration.fetch_add(1, std::memory_order_relaxed);
 
     lastDlssgViewport = viewport;
@@ -1213,6 +1231,17 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& state,
                                               const sl::DLSSGOptions* options)
 {
+    // See the setter: this one also populates dlssgMfgMax, so "the menu control never appeared" does
+    // not narrow down which of the two hooks failed to run. Say which ones the game actually reaches.
+    {
+        static std::once_flag once;
+        std::call_once(once,
+                       [&]
+                       {
+                           LOG_INFO("DLSSG entry: the game calls slDLSSGGetState (viewport {}, struct v{})",
+                                    (unsigned int) viewport, (unsigned int) state.structVersion);
+                       });
+    }
 
     sl::Result result {};
 

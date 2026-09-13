@@ -1,8 +1,10 @@
 # Reaching DLSS-G options in games that call slSetData instead of slDLSSGSetOptions
 
-Status: **design, not implemented.** Written after a measurement session on 2026-09-13 showed that
-none of this fork's DLSS-G option handling reaches Cyberpunk 2077, and that the reason is not what
-two days of analysis had assumed.
+Status: **premise withdrawn, design not implemented.** Read the correction at the bottom before
+anything else: the evidence this note was built on turned out to be a filtered log level, so the
+claim that Cyberpunk 2077 bypasses `slDLSSGSetOptions` is *not established*. The body is kept as
+written, because the mechanism research in it is still correct and the reasoning error is worth
+being able to see.
 
 ## What was assumed, and what is actually true
 
@@ -151,3 +153,59 @@ grep -oE "dlss_gEntry\.cpp:[0-9]+\[[a-zA-Z]+\]" OptiScaler.log | sort | uniq -c 
 
 The second line reads the plugin's own logging, which this fork forwards through
 `StreamlineHooks::streamlineLogCallback`, and is what named `slSetData` as the entry point in use.
+
+---
+
+## Correction (2026-09-13, same day): the diagnosis above is not established
+
+An adversarial review of this note found the central evidence unsound, and the finding is verified.
+
+**`hkslDLSSGSetOptions` logs only at TRACE** — `Streamline_Hooks.cpp:1171` and `:1187`, both
+`LOG_TRACE`, which `SysUtils.h:89` maps to `spdlog::trace`, level 0. The capture that this note was
+built on ran at `LogLevel=1`, which is `debug`, level 1. **The hook could have run on every frame and
+written nothing.** Its absence from the log is not evidence that it did not run, and every conclusion
+drawn from that absence is withdrawn.
+
+This is the same mistake twice in one session, one level apart: first reading a filtered `LOG_DEBUG`
+at `LogLevel=2` as proof that F7 never registered, then reading a filtered `LOG_TRACE` at
+`LogLevel=1` as proof that the wrapper is never called.
+
+Three further errors in the note, all confirmed against the source:
+
+- **The causal chain is wrong.** `dlssgMfgMax` is not populated only by the setter;
+  `hkslDLSSGGetState` assigns it too (`Streamline_Hooks.cpp:1269`). "The menu control never appeared"
+  therefore does not identify which hook failed to run.
+- **The override does not depend on that query succeeding.** The setter applies
+  `FGDLSSGOverrideInterpolationCount` regardless of the capability lookup's result
+  (`Streamline_Hooks.cpp:1198`), so a missing maximum does not by itself block an ini override.
+- **The 13 `hkdlss_slGetPluginFunction` calls are DLSS SR, not DLSS-G.** The DLSS-G factory hook is
+  `hkdlssg_slGetPluginFunction` and its `LOG_DEBUG` is commented out (`Streamline_Hooks.cpp:1390`),
+  so that count says nothing about DLSS-G either.
+
+And one architectural premise is wrong independently of the evidence problem: **there is no global
+`slSetData` in the interposer.** It is a per-plugin function handed out by each plugin's
+`slGetPluginFunction`; DLSS SR has its own. So "one hook on slSetData covers every Streamline data
+write" is false, and with it the main argument for hooking at that level rather than at the DLSS-G
+plugin. If a hook is ever warranted here, it should target the active DLSS-G plugin, with the
+supported struct types and versions named explicitly.
+
+The chain design was also broken as written: making the options copy the chain head with
+`copy.next = original.next` **drops the ViewportHandle**, which precedes the options in the chain the
+wrapper builds. Re-linking the caller's predecessor would write into caller memory, and cloning
+unknown nodes is impossible because `BaseStructure` carries no size. A working design must enumerate
+which prefixes and versions it supports and pass the original through untouched for everything else.
+
+### What replaces it
+
+`3e8ae685`'s premise is unproven, so nothing is implemented. Instead, a one-shot `LOG_INFO` was added
+at the top of both `hkslDLSSGSetOptions` and `hkslDLSSGGetState` reporting entry, viewport and struct
+version. One ordinary `LogLevel=2` session then answers, without a trace-level capture and without a
+design resting on an inference:
+
+- both lines present -> the wrapper is reached, this note's premise is false, and the MFG override
+  question is about policy or the latch, not about the entry point;
+- neither -> the wrapper genuinely is not reached, and the plugin-level design becomes worth writing
+  properly;
+- getter only -> the interesting case, and the one the original evidence could not have distinguished.
+
+Do not implement any of the design above until one of those three is observed.
