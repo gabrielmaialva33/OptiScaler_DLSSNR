@@ -1137,7 +1137,6 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
     g_dlssgOptionsGeneration.fetch_add(1, std::memory_order_relaxed);
 
     lastDlssgViewport = viewport;
-    lastDlssgOptions = options;
 
     // Avoid reading past the game's struct's size
     sl::DLSSGOptions newOptions {};
@@ -1153,6 +1152,14 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
         newOptions = options;
 
     newOptions.structVersion = newStructVer;
+
+    // After the size-limited copy above, not before it. `lastDlssgOptions` is a full DLSSGOptions,
+    // so `lastDlssgOptions = options` read sizeof(v5) bytes out of whatever the game handed us --
+    // and Cyberpunk 2077 hands us v3, 112 bytes, which the probe above logged. That is a read off
+    // the end of the caller's struct, on the exact path the comment two lines up exists to protect.
+    // newOptions is the same content, correctly sized, and still pre-policy: this records what the
+    // game asked for, which is what the menu's replay needs.
+    lastDlssgOptions = newOptions;
 
     auto& state = State::Instance();
 
