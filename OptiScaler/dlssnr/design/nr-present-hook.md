@@ -471,12 +471,12 @@ Re-audited against `150b49d0`, fifteen commits after this note was written, with
 survey. Three things changed: a hazard that could have ended the approach was closed by the donor, a
 new use case moved the target, and the pass finally has a measured cost.
 
-## The colour feedback loop is not a barrier — the donor fixed it today
+## The colour feedback loop has a fix upstream, and it is not a barrier
 
 Between this note and now, the donor spent four commits on a symptom that would have sunk the host:
 DLSS-NR at present time "compounding then snapping", the enhancement accumulating frame over frame
-until it blew out. `b24389ca`, `4bb376e5` and `276a2e13` are instrumentation; **`afad5195` is the
-fix**, dated 2026-09-13.
+until it blew out. `4bb376e5` and `276a2e13` are instrumentation, `b24389ca` adds a functional guard by `renderSeq` as
+well as logging, and **`afad5195` is the fix**, dated 2026-09-13.
 
 The diagnosis is worth reading because it exonerates the obvious suspect. With a probe withholding
 the write-back to the backbuffer the symptom vanished completely, and the fingerprinting was clean —
@@ -489,10 +489,16 @@ So it was never the model's temporal accumulator. In the donor's words:
 
 The fix is `DlssNr.PresentSync`, default on, 41 lines across three files: after `SubmitPresentList`
 the present thread waits on the slot fence before the hook returns, so the flip reads a fully written
-buffer. **This must be part of the port from the start, not a follow-up.** It also has a cost — a
-synchronous wait on the present thread every processed frame — which is exactly what `555ed6db`
-("stop stalling the present thread") had removed, so the two commits pull against each other and the
-port inherits that tension rather than resolving it.
+buffer. Two qualifications, because the first draft of this section overstated both: it does **not**
+block every frame — it enters the wait only when the fence still reads pending — and the CPU time it
+costs is not "the price of NR", since it can absorb earlier work already queued. The timeout bounds
+that one wait; it does not prove the absence of stalls.
+
+It is the same kind of synchronisation, in nearly the same position, that `555ed6db` ("stop stalling
+the present thread") had removed, and it supersedes that no-wait policy while enabled — the donor's
+tree currently carries both, with `SubmitPresentList` still commenting that the thread must not
+block while `RunPresentPass` blocks it. That is a real question for **integration**, and it is not a
+reason to require the wait in step 1 below, which has no frame generation for the write to race.
 
 Two agents disagreed about this and one was working from a stale fetch. Verified directly:
 `git fetch scottmudge` brought `276a2e13..afad5195`, and the commit is real. Worth recording because
@@ -519,8 +525,11 @@ literally it would still produce nothing in an emulator. The slice has to split:
    [nr-without-game-dlss.md](nr-without-game-dlss.md) — zero guides are bring-up, not a mode to put
    in front of a player.
 
-Step 1 removes this note's queue-ownership conflict over guide capture entirely, which makes it
-cheaper than the slice it replaces, not more expensive.
+Step 1 removes this note's queue-ownership conflict over guide capture entirely: no engine-guide
+capture, no per-frame snapshots, no dependency between the queue producing guides and the queue
+consuming them. That is a specific simplification and should not be read as the slice being cheaper
+overall — it brings its own work in cold NGX initialisation, a synthesized contract, and descriptors
+and clears that have to be proven submitted.
 
 ### Two prerequisites the original slice did not need
 
@@ -529,8 +538,12 @@ cheaper than the slice it replaces, not more expensive.
 filled in by the game's own NGX init. In an emulator there is no such init. Nothing demonstrates the
 defaults suffice; find out before building on it.
 
-**A Present is not a new frame.** Under pause, frame limiting or a repeated display, the hook fires
-on content the pass already modified. The host needs presentation identity, not a present count.
+**A Present is not evidence of a new frame.** Under pause, frame limiting or a repeated display the
+hook *may* fire on content the pass already modified — none of that has been observed here, and an
+emulator may equally stop presenting or redraw a clean image each time. Presentation identity alone
+does not settle it either: a new presentation number does not prove the content was rewritten. For
+step 1 a controlled source that writes a known clean image before each evaluation is enough; a
+general contract for when it is safe to reprocess an image belongs to integration.
 
 ### What a DXGI D3D12 host actually reaches
 
@@ -547,9 +560,10 @@ the *Windows* build runs acceptably under Proton, which is a separate investigat
 
 ## Cost, now that the pass has been measured
 
-[model-cost-vs-working-scale.md](model-cost-vs-working-scale.md) gives the inference:
-`1.9 ms + 0.89 ms/Mpx`, so 2.90 ms at 0.50x and 6.36 ms at 1.00x, with the model itself accounting
-for 93-97% of the pass depending on scale.
+[model-cost-vs-working-scale.md](model-cost-vs-working-scale.md) measured the inference at **2.90 ms
+at 0.50x and 6.36 ms at 1.00x** (the fit `1.93 + 0.886/Mpx` describes the trend, it does not produce
+those two numbers exactly). The model's own share of the pass falls with scale: ~96.9% at 1.00x,
+93.4% at 0.50x, ~90.2% at 0.25x.
 
 Moving that inference to present time does not make it cheaper. It adds transport, and the
 re-audit quantified what this note described only as "two full-resolution copies":
@@ -561,10 +575,12 @@ re-audit quantified what this note described only as "two full-resolution copies
 | `g_bbCopy` -> backbuffer | 1 `CopyResource`, full resolution | same list |
 | typeless guide clones | up to two more copies, at guide dimensions | inside `Dispatch`, same list |
 
-At 3440x1440 and 4 bytes per pixel one image is 19.81 MB, so the two outer copies move **39.63 MB per
-processed present**. **Lowering the working scale does not shrink them** — they are full resolution
-whatever the model runs at. That is a fixed floor the scale lever cannot reach, and it is not counted
-in the `outside_model_ms` measured on the after-upscale route.
+At 3440x1440 and 4 bytes per pixel one image is 19.81 MB, so the two outer copies move **39.63 MB of
+payload per processed present** — 79.26 MB of logical accesses counting read and write, which is not
+a measurement of physical VRAM traffic. **Lowering the working scale does not shrink them**: they are
+full resolution whatever the model runs at. That is a fixed *volume* for a given resolution and
+format, not a floor in milliseconds — nothing here measured its cost — and it is not counted in the
+`outside_model_ms` measured on the after-upscale route.
 
 Note also that the donor's capture takes **no** snapshot copies — it AddRefs and records metadata
 (`555ed6db:shaders/dlssnr/DlssNr_Dx12.cpp:1702`). The safe snapshot copies this note proposes are
@@ -574,28 +590,37 @@ therefore additional work the port introduces, not something already implemented
 
 MFG at 4x is now measured working (see [mfg-count-override.md](mfg-count-override.md)). If the host
 processed every presentation of a 4x cycle that is **four inferences per real frame** — 11.60 ms at
-0.50x, 25.44 ms at 1.00x, before anything else. This is conditional arithmetic and it has not been
-verified that all four presentations traverse the hook. It is, however, the concrete reason to reject
-the donor's global-sequence deduplication and require per-swapchain, per-real-frame identity.
+0.50x, 25.44 ms at 1.00x, before anything else. Those are conditional sums of inference measurements
+taken elsewhere, not frame latency measured at present time. It has not been verified that all four
+presentations traverse the hook, and traversing it would not be enough: they would also have to pass
+the guards. The donor already refuses a captured render sequence it has processed
+(`afad5195:shaders/dlssnr/DlssNr_Dx12.cpp:3181`), though that guard is global, depends on
+`g_temporal.valid`, and provides no identity for the no-guides case. The arithmetic is a risk of
+getting integration wrong, not a description of the donor as it runs today.
 
 ### A config trap worth catching in the menu
 
 This note correctly says to clear `AfterRayReconstruction` in the new host. That also changes which
 key selects the working scale — from `DlssNrRRWorkingScale`, default **0.5**, to `DlssNrWorkingScale`,
 default **1.0** (`shaders/dlssnr/DlssNr_Dx12.cpp:2344`). Migrating a user from the after-RR route to
-the present host would silently move them from 2.90 ms to 6.36 ms. The menu has to make that visible.
+the present host would silently quadruple the model's pixel area — roughly doubling its work, taking
+the after-RR measurements as the reference, since nothing has been measured on the new host. The menu
+has to make that visible.
 
 ## Two answers from outside that this note wanted
 
-**HUD and text protection already exists in the model.** `DLSSNR.UseAutoMask = 1` makes the model's
-own classifier detect high-contrast edges without coherent scene motion — health bars, minimaps,
-static text — and give them passthrough weights. Independently confirmed in Magpie,
-DaVinci-Resolve-DLSS5 and DLSS5VKLayer. **This tree already ships the key** as `[DlssNr] AutoMask`.
-That does not make the concern in "Is this a bad idea?" disappear, but it stops it being unanswered.
+**HUD protection is still unanswered — a claim that it was already solved did not survive checking.**
+An external survey reported that `DLSSNR.UseAutoMask = 1` is the model's own HUD classifier,
+"independently confirmed" in three projects. It is not supported. This tree presents that key as
+**"Auto skin mask"** (`dlssnr/DlssNr_Menu.cpp:254,262`), declared beside `DlssNrSkinStructure`
+(`Config.h:277-278`), and Magpie and the Resolve filter both expose *Automatic Mask* and *UI
+correction* as separate controls. Passing the parameter is not the same as knowing what it does. The
+HUD concern raised in "Is this a bad idea?" above stands, unanswered.
 
-**Overlay ordering is a hard rule, not a preference.** Our ImGui must draw *after* the pass. Drawing
-before it hands the model our own menu's glyphs to denoise. This note already reaches that conclusion
-from the barrier states; the outside evidence agrees for a second, independent reason.
+**Our ImGui should draw after the pass**, so the model is not handed our own menu's glyphs to
+denoise. That is a visual-preservation decision, not a synchronisation requirement — either order
+can be made correct as long as each stage enters and leaves the backbuffer in `PRESENT`, which the
+barrier discussion above is really about. The first draft of this section conflated the two.
 
 **And the quality question has a partial answer.** Magpie's zero provider — null depth, zeroed motion —
 is reported clean on static and low-motion content, with a temporary softness on fast camera motion
@@ -610,3 +635,9 @@ The host is still worth pursuing and the patches still must not ship verbatim. W
 the worst unknown closed in the port's favour, the first slice is now cheaper and aimed at a case
 that is unreachable today, and the transport cost has a number. The five hazards from the first
 review stand; none was fixed incidentally by the fifteen intervening commits.
+
+One thing this update should not be read as saying: that the approach is cleared. A second review of
+this very section removed a "green light", a guarantee about HUD protection and a "measured floor",
+all three of which were certainty this evidence does not support. The donor has *a* fix for the
+feedback loop, running on his tree, not verified on ours. Everything downstream of that is still
+design.

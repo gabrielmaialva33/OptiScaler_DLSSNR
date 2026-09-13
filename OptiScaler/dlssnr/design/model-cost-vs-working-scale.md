@@ -67,7 +67,9 @@ Refitting on all four gives `1.93 + 0.886 x Mpx`, and even that is likely to und
 because the shape of the miss is the shape of a cost becoming dominated by launch and occupancy rather
 than by pixels.
 
-Take the floor as **at least 1.9 ms, reached asymptotically**, not as an exact constant.
+Read that as *the fit's intercept moves up when the small point is included*, and nothing stronger.
+**There is no measured floor here.** The lowest point actually measured is a median of **2.32 ms** at
+0.31 Mpx; ~1.9 ms is an extrapolated intercept, and an intercept is not a demonstrated lower bound.
 
 ### Marginal return per step
 
@@ -92,8 +94,9 @@ scale, so at 0.50x it is 2.90 / (2.90 + 0.205) = **93.4%**, and it keeps falling
 Either number retires the same candidates. Every candidate that
 targeted our own code — descriptor caching (`708f1dd8`), the exposure scan's mutex on `NoteUav`,
 selective HUD bookkeeping in `ResTrack_dx12`, caching `CheckFeatureSupport` in `ExposureTextureUsable`
-— competes for a slice of 3%, and several of them for a fraction of that slice. They were declined
-before this measurement for lack of evidence; they are declined now with it.
+— competes for what is left outside the model: about 3% at 1.00x, 6.6% at 0.50x, 9.8% at 0.25x, and
+several of them for a fraction of that. They were declined before this measurement for lack of
+evidence; they are declined now with it.
 
 One caveat worth keeping honest: `outside_model_ms` is GPU time. It does not bound the pass's CPU cost,
 and nothing here measured CPU. It does bound how much GPU time host-side work could possibly return.
@@ -105,19 +108,22 @@ On a 165 Hz display that is more than half a frame's entire budget.
 composition mode, "Matched Residual + DLSS", in which the residual is enlarged by a private DLSS Super
 Resolution instance, and claims it takes the pass from ~4.5 ms to under 1.8 ms.
 
-- 1.8 ms is **below the measured floor of this model**, which does not go under ~1.9 ms even at 0.31
-  megapixels. A number beneath the floor is not a faster path through the pixels.
-- The PR's own timer stops before the added work runs: `ngxTime->End` precedes
-  `EnlargeMatchedResidual` in its `DlssNr_Dx12_Run.cpp:381`. The private SR pass the mode exists to add
-  is outside the number the mode is advertised by.
+- 1.8 ms is below **anything measured here** — the smallest model tried, 0.31 megapixels, still costs
+  2.32 ms. That is not proof their number is impossible: it is a different GPU, a different system and
+  a different timing contract. It does mean the claim is not reproduced or established for Ada under
+  Proton, which is the only ground this page can speak from.
+- Their timer stops before the added work runs: `ngxTime->End` precedes `EnlargeMatchedResidual` in
+  their `DlssNr_Dx12_Run.cpp:381`. What follows from that is narrow and worth stating narrowly: a
+  number taken from that timer omits the private SR pass. It is not established that the advertised
+  1.8 ms came from that timer.
 - Its published tests are Windows on an RTX 5090; nothing establishes Ada under Proton.
 - Their figure is close to what this tree already gets from a config key it ships -- but not for the
   reason a first pass of this note gave. It said "6.36 x 0.25 = 1.59 ms", which is the linear
   extrapolation this note's own blind test **disproved**: 0.50x measures **2.90 ms**, not 1.59, and
   0.25x measures 2.32 rather than the 2.05 the line predicted. Quoting the extrapolation against
   their claim was using a model this page exists to correct. The honest comparison is 2.90 ms
-  measured against their claimed 1.8, and the floor argument above, which does not depend on the
-  line.
+  measured here against their claimed 1.8 there, on unlike hardware, with the timing-scope caveat
+  above.
 
 None of that makes the mode worthless. It relocates what it is: **not a speed feature, a quality
 feature** — a better answer to "what does the frame look like when the model only saw a quarter of it".
