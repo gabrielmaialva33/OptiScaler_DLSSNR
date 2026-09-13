@@ -2030,8 +2030,20 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ChainStatus("Driver proxy uses one pass and master settings; overrides are inactive");
     if (!chainEnabled)
     {
-        passSnapshot.Count =
-            frame.AfterRayReconstruction ? DlssNr::PassConfig::BoundCount(cfg.DlssNrRRPasses.value_or_default()) : 1;
+        // Ask for more than one pass only while the chain can still arm. TrackNrRecording arms it on
+        // the first NR dispatch and, the moment a dispatch is recorded without the opt-in, sets
+        // g_legacyRecorded and locks it off for the session -- that is the "Restart required" status.
+        // The proxy path is one pass by construction.
+        //
+        // Promising a count that cannot run costs twice, and the second cost is the one that hid the
+        // first. The extra-pass loop breaks on the first absent passFeature, so completed stays 1;
+        // timing then rejects every sample as partial-chain. A session that silently lost multi-pass
+        // also silently lost its measurement, and the only evidence was one log line at the moment of
+        // the change. Say one, because one is what runs.
+        const bool chainCanStillArm = !g_legacyRecorded && !useProxy;
+        passSnapshot.Count = (frame.AfterRayReconstruction && chainCanStillArm)
+                                 ? DlssNr::PassConfig::BoundCount(cfg.DlssNrRRPasses.value_or_default())
+                                 : 1;
         passSnapshot.Individual = false;
         const auto master =
             DlssNrResolvedPassSettings { cfgIntensity, cfgLocalStructure, cfgLocalTone, cfgSkinStructure,
