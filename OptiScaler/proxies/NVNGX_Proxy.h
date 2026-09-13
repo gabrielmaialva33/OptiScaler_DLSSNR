@@ -663,6 +663,21 @@ class NVNGXProxy
                Config::Instance()->DLSSEnabled.value_or_default();
     }
 
+    // The SDK version to hand the core. State's NVNGX_Version is only ever written by the game's own
+    // NGX init (inputs/NVNGX_DLSS_Dx1{1,2}.cpp, NVNGX_DLSS_Vk.cpp), so it is zero until the game has
+    // called Init -- and zero is not a version. Five call sites already knew this and substituted the
+    // API version inline (FSR2_Dx11.cpp:224, FfxApi_Dx12.cpp:267, FSR3_Dx12.cpp:271 and :476,
+    // XeSS_Dx12.cpp:112); the six proxy inits below did not, so they were the only ones that would
+    // hand the core a zero. That never showed up while something else always initialised NGX first.
+    // It matters now: reaching the neural pass without any upscaler call -- the emulator case -- goes
+    // through EnsureCapabilityParams -> InitDx12 with nothing having populated this.
+    //
+    // A no-op wherever a game did init, since the field is then non-zero.
+    static NVSDK_NGX_Version SdkVersion()
+    {
+        return State::Instance().NVNGX_Version == 0 ? NVSDK_NGX_Version_API : State::Instance().NVNGX_Version;
+    }
+
     // DirectX11
     static bool InitDx11(ID3D11Device* InDevice)
     {
@@ -685,14 +700,14 @@ class NVNGXProxy
             nvResult = _module.D3D11_Init_ProjectID(
                 State::Instance().NVNGX_ProjectId.c_str(), State::Instance().NVNGX_Engine,
                 State::Instance().NVNGX_EngineVersion.c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                InDevice, State::Instance().NVNGX_Version, &fcInfo);
+                InDevice, SdkVersion(), &fcInfo);
         }
         else if (_module.D3D11_Init_Ext != nullptr)
         {
             LOG_DEBUG("_module.D3D11_Init_Ext!");
             nvResult = _module.D3D11_Init_Ext(State::Instance().NVNGX_ApplicationId,
                                               State::Instance().NVNGX_ApplicationDataPath.c_str(), InDevice,
-                                              State::Instance().NVNGX_Version, &fcInfo);
+                                              SdkVersion(), &fcInfo);
         }
 
         LOG_DEBUG("result: {0:X}", (UINT) nvResult);
@@ -795,14 +810,14 @@ class NVNGXProxy
             nvResult = _module.D3D12_Init_ProjectID(
                 State::Instance().NVNGX_ProjectId.c_str(), State::Instance().NVNGX_Engine,
                 State::Instance().NVNGX_EngineVersion.c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                InDevice, State::Instance().NVNGX_Version, &fcInfo);
+                InDevice, SdkVersion(), &fcInfo);
         }
         else if (_module.D3D12_Init_Ext != nullptr)
         {
             LOG_INFO("_module.D3D12_Init_Ext!");
             nvResult = _module.D3D12_Init_Ext(State::Instance().NVNGX_ApplicationId,
                                               State::Instance().NVNGX_ApplicationDataPath.c_str(), InDevice,
-                                              State::Instance().NVNGX_Version, &fcInfo);
+                                              SdkVersion(), &fcInfo);
         }
 
         LOG_INFO("result: {0:X}", (UINT) nvResult);
@@ -905,14 +920,14 @@ class NVNGXProxy
             nvResult = _module.VULKAN_Init_ProjectID(
                 State::Instance().NVNGX_ProjectId.c_str(), State::Instance().NVNGX_Engine,
                 State::Instance().NVNGX_EngineVersion.c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                InInstance, InPD, InDevice, InGIPA, InGDPA, State::Instance().NVNGX_Version, &fcInfo);
+                InInstance, InPD, InDevice, InGIPA, InGDPA, SdkVersion(), &fcInfo);
         }
         else if (_module.VULKAN_Init_Ext != nullptr)
         {
             LOG_DEBUG("_module.VULKAN_Init_Ext!");
             nvResult = _module.VULKAN_Init_Ext(State::Instance().NVNGX_ApplicationId,
                                                State::Instance().NVNGX_ApplicationDataPath.c_str(), InInstance, InPD,
-                                               InDevice, State::Instance().NVNGX_Version, &fcInfo);
+                                               InDevice, SdkVersion(), &fcInfo);
         }
 
         LOG_DEBUG("result: {0:X}", (UINT) nvResult);
