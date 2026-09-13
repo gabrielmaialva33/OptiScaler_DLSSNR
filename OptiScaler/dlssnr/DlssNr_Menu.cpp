@@ -420,7 +420,12 @@ void RenderMenu(Config* config, float menuResScale)
                 // asymmetry cost a session: an ini with RRWorkingScale=0.50 produced 209 samples at
                 // scale 1.0 and the only way to see why was to read the stage out of the log. The
                 // opposite case already greys its slider and says so; say so here too.
-                const bool onRrRoute = DlssNr::RunningAfterRayReconstruction();
+                // The observed route, not the built feature. RunningAfterRayReconstruction() only
+                // becomes true after a feature is created successfully, while the working resolution
+                // is chosen from the frame's route before that -- so a creation that failed for an
+                // excessive scale would leave that flag false, and greying these out would block the
+                // one control that could recover it.
+                const bool onRrRoute = DlssNr::ObservedRayReconstructionRoute();
 
                 if (!onRrRoute)
                 {

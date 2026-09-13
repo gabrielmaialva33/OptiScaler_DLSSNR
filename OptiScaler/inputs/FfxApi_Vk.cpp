@@ -402,8 +402,8 @@ ffxReturnCode_t ffxCreateContext_Vk(ffxContext* context, ffxCreateContextDescHea
 
         auto nvResult = NVSDK_NGX_VULKAN_Init_ProjectID_Ext(
             OPTI_GUID, State::Instance().NVNGX_Engine, OPTI_VERSION, exePath.c_str(), State::Instance().VulkanInstance,
-            _vkPhysicalDevice, _vkDevice, vkGetInstanceProcAddr, _vkDeviceProcAddress, State::Instance().NVNGX_Version,
-            &fcInfo);
+            _vkPhysicalDevice, _vkDevice, vkGetInstanceProcAddr, _vkDeviceProcAddress,
+            State::Instance().NVNGX_Version == 0 ? NVSDK_NGX_Version_API : State::Instance().NVNGX_Version, &fcInfo);
 
         if (nvResult != NVSDK_NGX_Result_Success)
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;

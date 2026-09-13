@@ -182,6 +182,12 @@ const char* BeforeUpscaleStatus();
 // the ApplyAfterRR checkbox instead would be wrong -- ticking it in a title without ray
 // reconstruction does not move the route.
 bool RunningAfterRayReconstruction();
+
+// The route the last dispatch actually took, as opposed to the route of a feature that was built
+// successfully. RunningAfterRayReconstruction() above reports the latter, and the two diverge exactly
+// when it matters: the working resolution is chosen from the frame's route before the feature is
+// created, so a creation that fails leaves the built-flag false while the route was RR all along.
+bool ObservedRayReconstructionRoute();
 unsigned int ActivePassCount();
 const char* MultipassStatus();
 

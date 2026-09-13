@@ -1222,16 +1222,27 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
                              cfgOverride.has_value(), cfgOverride.value_or(-1),      newOptions.numFramesToGenerate,
                              newOptions.mode };
 
-        std::lock_guard<std::mutex> lock(decisionMutex);
-        if (lastLogged != now)
+        // Decide under the lock, log outside it. LogAsync defaults false and the logger is
+        // configured flush_on(trace), so a LOG_INFO here is a write plus a flush; holding
+        // decisionMutex across that would block every other thread entering this hook behind file
+        // I/O. Even the async logger's queue policy is block. The lock now covers one comparison and
+        // one assignment.
+        bool changed = false;
         {
-            lastLogged = now;
+            std::lock_guard<std::mutex> lock(decisionMutex);
+            if (lastLogged != now)
+            {
+                lastLogged = now;
+                changed = true;
+            }
+        }
+
+        if (changed)
             LOG_INFO("DLSSG override state: mode {} active {} sl>=2.7.1 {} mfgMax {} override {} asked {}",
                      magic_enum::enum_name(now.mode), now.active,
                      state.streamlineVersion >= feature_version { 2, 7, 1 },
                      now.haveMax ? std::to_string(now.max) : std::string("unset"),
                      now.haveOverride ? std::to_string(now.override) : std::string("unset"), now.asked);
-        }
     }
 
     if (dlssgPotentiallyActive && state.streamlineVersion >= feature_version { 2, 7, 1 })

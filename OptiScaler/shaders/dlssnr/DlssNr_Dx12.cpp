@@ -4267,6 +4267,12 @@ bool RunningAfterRayReconstruction()
     std::lock_guard<std::mutex> lock(g_nrMutex);
     return g_nr.afterRayReconstruction;
 }
+
+bool ObservedRayReconstructionRoute()
+{
+    std::lock_guard<std::mutex> lock(g_nrMutex);
+    return g_lastAfterRayReconstruction;
+}
 unsigned int ActivePassCount() { return g_activePasses.load(); }
 const char* MultipassStatus() { return g_chainStatus.load(); }
 
