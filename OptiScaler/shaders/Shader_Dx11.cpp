@@ -19,8 +19,16 @@ Shader_Dx11::~Shader_Dx11()
     SAFE_RELEASE(_srvInput);
     SAFE_RELEASE(_uavOutput);
 
-    SAFE_RELEASE(_currentInResource);
-    SAFE_RELEASE(_currentOutResource);
+    // _currentInResource and _currentOutResource are NOT released here, and used to be. Neither is
+    // owned: InitializeSRV and InitializeUAV store the caller's texture with a plain
+    // `currentResource = resource` and no AddRef, purely as a cache key so the view is not rebuilt
+    // when the same resource comes back. Releasing them decremented a refcount this class never
+    // took, on a texture belonging to the game -- an over-release that can free the game's resource
+    // out from under it.
+    //
+    // Upstream optiscaler/OptiScaler reached the same conclusion in 3a5c2073 ("Removed
+    // _currentInResource SAFE_RELEASE It's games resource") but dropped only the input. The output
+    // arrives by the identical path and is equally unowned, so both go.
 }
 
 DXGI_FORMAT Shader_Dx11::TranslateTypelessFormats(DXGI_FORMAT format)
