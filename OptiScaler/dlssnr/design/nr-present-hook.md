@@ -658,7 +658,11 @@ An external survey reported that `DLSSNR.UseAutoMask = 1` is the model's own HUD
 **"Auto skin mask"** (`dlssnr/DlssNr_Menu.cpp:254,262`), declared beside `DlssNrSkinStructure`
 (`Config.h:277-278`), and Magpie and the Resolve filter both expose *Automatic Mask* and *UI
 correction* as separate controls. Passing the parameter is not the same as knowing what it does. The
-HUD concern raised in "Is this a bad idea?" above stands, unanswered.
+HUD concern raised in "Is this a bad idea?" above stands, unanswered — but see
+[no-upscaler-titles.md](no-upscaler-titles.md), which found the parameter that actually addresses it.
+`DLSSNR.UICorrection` is a separate boolean from the skin mask, this tree already passes it through
+every forwarder create path, and the D3D12 path hard-codes it to 1 under a comment explaining that
+there is no UI in the frame on the after-upscale route. That comment stops being true here.
 
 **Our ImGui should draw after the pass**, so the model is not handed our own menu's glyphs to
 denoise. That is a visual-preservation decision, not a synchronisation requirement — either order
