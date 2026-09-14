@@ -659,10 +659,22 @@ An external survey reported that `DLSSNR.UseAutoMask = 1` is the model's own HUD
 (`Config.h:277-278`), and Magpie and the Resolve filter both expose *Automatic Mask* and *UI
 correction* as separate controls. Passing the parameter is not the same as knowing what it does. The
 HUD concern raised in "Is this a bad idea?" above stands, unanswered — but see
-[no-upscaler-titles.md](no-upscaler-titles.md), which found the parameter that actually addresses it.
+[no-upscaler-titles.md](no-upscaler-titles.md), which found a *candidate* for it.
 `DLSSNR.UICorrection` is a separate boolean from the skin mask, this tree already passes it through
 every forwarder create path, and the D3D12 path hard-codes it to 1 under a comment explaining that
 there is no UI in the frame on the after-upscale route. That comment stops being true here.
+
+**Measured 2026-09-14, and the candidate failed.** `76feb2cb` put hard-edged bitmap text, a
+translucent menu, thin minimap lines and a moving counter into a presented frame and compared
+independently created feature-18 instances at `UICorrection` 0 and 1 over identical source and
+history sequences, with repeats and runtime switches and verified parameter-block readbacks. **All
+192 presented RGB8 outputs were identical between the two flag values.** The probable reason is
+structural and does not go away with more testing: the HUD in a presented frame is *flattened into
+the colour buffer*, and the model appears to want a separate UI layer, which a present host by
+definition cannot supply — the frame arrives already composed. That measurement does not prove
+universal ineffectiveness on every model and driver, but it removes the cheap answer. **The HUD
+concern above is unanswered again, and the present host must not be planned as though a parameter
+solves it.**
 
 **Our ImGui should draw after the pass**, so the model is not handed our own menu's glyphs to
 denoise. That is a visual-preservation decision, not a synchronisation requirement — either order
@@ -673,6 +685,24 @@ barrier discussion above is really about. The first draft of this section confla
 is reported clean on static and low-motion content, with a temporary softness on fast camera motion
 rather than geometric artifacts, and NVIDIA Optical Flow available as the upgrade. That is a
 plausibility argument for step 1 above, not evidence about our route.
+
+**Step 1 ran on 2026-09-14 (`dbe6894c`) and the plausibility argument held, with one caveat worth
+more than the confirmation.** A real owned D3D12 swapchain carried 48/48 feature-18 evaluations over
+a presented frame with zeroed guides, deterministically, with geometry intact — no smear, no
+ghosting, no hallucination. Zero guides on static content degrade *safely*.
+
+The caveat: the model's colour edit **changes direction with resolution**. On the same fixture at
+1280x720 mean saturation falls 1.48%; at 960x540 it rises 1.25% (`5461a6f0`). That was found while
+falsifying a different hypothesis — that our composition's OkLab calls were distorting the frame,
+which `gReversibleMode=2` disproved by leaving the fading in place to within one RGB8 level. So the
+edit is the model's own, and it is not a fixed transform. Whatever the present host does about
+working scale, it should not assume the model's colour behaviour is stable across the scales the
+user can select. Nothing here measured that on moving content, which is where it matters most.
+
+One further scoping result from the same session, kept because it is easy to get backwards: the
+concern that our composition feeds encoded sRGB into linear-light OkLab is **real in structure and
+confined to `gPassthrough != 0`** — the production after-upscale route decodes to linear first and is
+unaffected. Present-host work inherits that question; nothing in production does.
 
 Magpie is GPL-3.0 and can be read as a reference. DLSS5VKLayer is AGPL-3.0 and cannot.
 

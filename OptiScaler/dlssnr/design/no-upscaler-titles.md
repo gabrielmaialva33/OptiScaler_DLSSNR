@@ -123,9 +123,17 @@ The present host remains the only general route, and the case for it is stronger
 nice": it is what four independent projects converged on for exactly this problem. The TAA route is
 better and permanently out of reach for a generic wrapper — worth knowing so nobody proposes it again.
 
-And the HUD problem, which [nr-present-hook.md](nr-present-hook.md) lists as unanswered, has a named
-parameter to try rather than only a compute-shader mask to write. Whether `UICorrection` is any good
-is unmeasured; what changed is that there is something specific to measure.
+And the HUD problem, which [nr-present-hook.md](nr-present-hook.md) lists as unanswered, had a named
+parameter to try rather than only a compute-shader mask to write.
+
+**It was measured on 2026-09-14 (`76feb2cb`), and it does nothing.** A presented frame carrying
+hard-edged bitmap text, a translucent menu, thin minimap lines and a moving counter was put through
+independently created feature-18 instances at `UICorrection` 0 and 1, over identical source and
+history sequences, with repeats, runtime switches and verified parameter-block readbacks. **All 192
+presented RGB8 outputs were identical.** The likely reason is structural: in a presented frame the
+HUD is flattened into the colour buffer, and the model appears to want a separate UI layer — which a
+present host cannot supply, because the frame arrives already composed. So the cheap answer is gone
+and the HUD problem is open again.
 
 ## Sources checked
 
@@ -133,3 +141,57 @@ Every claim above was put back to its primary source before being written down. 
 not: `skyrim-community-shaders` as the Creation Engine TAA replacement, and the translucent-menu
 halos. Both are corrected in place rather than removed, so the next reader can see what was believed
 and why it failed.
+
+
+## What the sibling projects actually run on an emulator (2026-09-14)
+
+Ten of these projects were cloned and read (`tmp/`, gitignored). Two findings change what this note
+concluded.
+
+**The Feeder route runs with no guides at all on an emulator.** A complete DLSS5-Feeder install was
+found on a PCSX2 — ReShade as `dxgi.dll`, `dlss5-feed.addon64` 0.12.0, `renodx-dlss5.addon64`, the NR
+model — together with the log of a real 35-second session on an RTX 3060. Feature 18 ran
+(`inline feature 18 evaluation succeeded (count=60, NR input 1920x1080)`). But its own probes report:
+
+```
+[feed] MV probe    (frame 600): mean |mv| 0,000 px, 0% non-zero  <-- DLSS is getting (almost) no motion vectors
+[feed] Depth probe (frame 600): min 0, max 0, variance 0         <-- sampled depth is flat
+```
+
+with its motion estimator enabled (`DLSS5_MV_PROVIDER=3 (LumeniteFX Kernel) -> enabled`). The
+architectural advantage this note credited the ReShade route with — real depth plus estimated motion
+— **delivered nothing on the emulator**. In practice it ran on exactly the zeroed guides step 1 uses.
+For emulators specifically, a present host with zero guides is not behind the state of the art; it is
+the state of the art, minus a ReShade dependency.
+
+**The motion-vector answer the Windows projects use is unavailable under Proton, and a better one is
+not.** `pcdofafa/dlss5-for-all` (MIT) solves motion estimation with the **D3D12 Video Motion
+Estimation** block — hardware, off the 3D queue, with measured cost (0.89 ms/frame for a 215x90 grid
+at half resolution on an RTX 4080) and an honest failure mode written down: above its search range it
+returns a *small* wrong vector, which no magnitude threshold distinguishes from slow real motion.
+
+That door is shut here. vkd3d-proton implements no part of the D3D12 Video family: there is no
+`d3d12video.idl` in its `include/`, and a repository search for `ID3D12VideoDevice` and
+`VideoMotionEstimator` returns nothing while the control term `ID3D12CommandQueue` returns hits. (An
+earlier `strings` check of Proton's `d3d12core.dll` appeared to show the same thing and was worthless
+— its control term returned nothing either. It is recorded because the conclusion was right for the
+wrong reason once.)
+
+But **`VK_NV_optical_flow` is present on this workstation's driver, with a dedicated
+`QUEUE_OPTICAL_FLOW_BIT_NV` queue family.** That is the Ada Optical Flow Accelerator reachable
+natively, on its own queue, contending with neither the 3D queue nor the video encoder. If motion
+vectors are ever fed to this pass on Linux, that is the door — and it is a route this fork would own
+rather than port. Untested; what is established is only that the extension and the queue exist.
+
+**Two interop hazards named by a sibling that read this tree.** `jlrouzies-fr/DLSS5-Feeder`'s
+`src/feed_opti.h` is 242 lines about this fork, with measurements (OptiScaler-DLSSNR v0.2.0 as
+`winmm.dll` on an RTX 5090: 300/300 evaluates, 3.4 ms with the neural pass on the dlss backend). It
+records two things worth knowing: with our LoadLibrary redirect live, anything asking for `nvngx.dll`
+receives our module, so Feeder plus this fork in one process fires **two neural passes**; and
+`[DlssNr] ScanExposure` hooks resource creation looking for an exposure buffer a bare NGX client
+never offers.
+
+Licences, since these were read as references: `dlss5-for-all`, `DLSS5-Feeder`, `dlss5-bridge`,
+`DLSS5-Swapper`, the Resolve filter and `DLSS5-Autopilot` are MIT; `DLSS5-Reshade-AIO` is Apache-2.0;
+Magpie is GPL-3.0. **`DLSS5VKLayer` is AGPL-3.0 and must not be copied from.** `DLSS5-Universal`
+carries no licence at all and was not cloned.
