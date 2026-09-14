@@ -1,0 +1,32 @@
+2026-09-14, RTX 4090, NVIDIA 615.71.09, Proton Experimental
+Production baseline: 4cbd09503081223727c55661da6eeab104bdf170
+Command: python3 tests/dlssnr-loopback/run.py --present-nr
+SHA-256 of loaded components and full-size readbacks:
+bda010710eb17e497d580102cf56e8b59e27dd638f2c27fc3e6125396a8419b7  nvngx.dll_dlssnr.dll
+172faedfd9b1c7faddf07b846667484fcf35d8a4cae17d1abada5e94714071db  _nvngx.dll
+6eb209e764f39872625debd6abaf45e2bb6322f6f270f781f70c059ae30b3927  nvngx_dlssnr.dll
+d5b6c7f0d55d1ec9db4df2a0b3f7f3f6b5368f34f081107746dabc1e8b74d53a  g3-f15-before.ppm
+ee6baecf57e223491d3cd694a63b9baf11c4f9601785fc8acf0b6f3510ee51d3  g3-f15-after.ppm
+Selected final-run observations (all 48 source checks passed):
+core Init_Ext -> 0x00000001 (success)
+core capabilities -> 0x00000001 (success)
+snippet Init -> 0x00000001 (success)
+CreateFeature(18) -> 0x00000001 (success)
+readback generation=1 frame=0 clean=exact rgb_changed=0/2764800 MAE=0.000000 max=0
+readback generation=1 frame=1 clean=exact rgb_changed=2590188/2764800 MAE=3.874175 max=68
+resize entry: generation=1 pending=18 completed=17; drain before ANY release
+readback generation=1 frame=15 clean=exact rgb_changed=2608383/2764800 MAE=3.983909 max=66
+snippet Init -> 0x00000001 (success)
+CreateFeature(18) -> 0x00000001 (success)
+readback generation=2 frame=0 clean=exact rgb_changed=0/1555200 MAE=0.000000 max=0
+readback generation=2 frame=1 clean=exact rgb_changed=1405792/1555200 MAE=5.012159 max=68
+resize entry: generation=2 pending=37 completed=36; drain before ANY release
+readback generation=2 frame=15 clean=exact rgb_changed=1443481/1555200 MAE=5.884574 max=79
+snippet Init -> 0x00000001 (success)
+CreateFeature(18) -> 0x00000001 (success)
+readback generation=3 frame=0 clean=exact rgb_changed=0/2764800 MAE=0.000000 max=0
+readback generation=3 frame=1 clean=exact rgb_changed=2590188/2764800 MAE=3.874175 max=68
+readback generation=3 frame=15 clean=exact rgb_changed=2608383/2764800 MAE=3.983909 max=66
+core DestroyParameters -> 0x00000001 (success)
+core Shutdown1 -> 0x00000001 (success)
+PRESENT-NR PASS: attempts=48 successes=48 presents=48 pending_resize_drains=2 controls=3 capture_pairs=9

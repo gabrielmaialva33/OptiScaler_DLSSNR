@@ -307,11 +307,14 @@ static void PumpMessages()
 }
 
 #include "cold_nr.h"
+#include "present_nr.h"
 
 int main(int argc, char** argv)
 {
     const bool coldNr =
         (argc == 2 && std::string(argv[1]) == "--cold-nr") || (argc == 3 && std::string(argv[2]) == "--cold-nr");
+    const bool presentNr =
+        (argc == 2 && std::string(argv[1]) == "--present-nr") || (argc == 3 && std::string(argv[2]) == "--present-nr");
     const char* dllPath = argc > 1 && std::string(argv[1]) != "--cold-nr" ? argv[1] : "OptiScaler.dll";
 
     try
@@ -359,6 +362,14 @@ int main(int argc, char** argv)
         HANDLE fenceEvent = CreateEventA(nullptr, FALSE, FALSE, nullptr);
         Require(fenceEvent != nullptr, "CreateEvent");
         UINT64 fenceValue = 0;
+
+        if (presentNr)
+        {
+            PresentNr::Run(factory, window, device, queue, alloc, list, fence, fenceEvent);
+            DestroyWindow(window);
+            CloseHandle(fenceEvent);
+            return 0;
+        }
 
         if (coldNr)
         {

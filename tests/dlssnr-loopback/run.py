@@ -115,7 +115,27 @@ def check_cold_coverage(harness):
         raise SystemExit('ZERO COVERAGE: cold NR did not complete 48 successful feature-18 evaluations')
 
 
-def run_under_proton(cold_nr=False):
+def check_present_coverage(harness):
+    import re
+    match = re.search(r'^PRESENT-NR PASS: attempts=(\d+) successes=(\d+) presents=(\d+) '
+                      r'pending_resize_drains=(\d+) controls=(\d+) capture_pairs=(\d+)$', harness, re.M)
+    if not match or tuple(map(int, match.groups())) != (48, 48, 48, 2, 3, 9):
+        raise SystemExit('ZERO COVERAGE: present NR did not complete all evaluations, controls and pending resizes')
+    # Demand new, complete readbacks, not only successful NGX return codes or stale files.
+    for generation, (w, h) in enumerate(((1280, 720), (960, 540), (1280, 720)), 1):
+        for frame in (0, 1, 15):
+            for side in ('before', 'after'):
+                path = RUN / f'g{generation}-f{frame}-{side}.ppm'
+                header = f'P6\n{w} {h}\n255\n'.encode()
+                if not path.exists():
+                    raise SystemExit(f'MISSING READBACK: {path}')
+                data = path.read_bytes()
+                if not data.startswith(header) or len(data) != len(header) + w * h * 3:
+                    raise SystemExit(f'INVALID READBACK: {path}')
+    print(f'  present transport coverage accepted; inspect before/after images in {RUN}')
+
+
+def run_under_proton(cold_nr=False, present_nr=False):
     """Run the harness the way a Steam game runs: through Proton, in a compatdata prefix of its own.
 
     Hand-mirroring what Proton provides (vkd3d-proton, dxvk-nvapi, the driver's nvngx pair and the
@@ -142,15 +162,24 @@ def run_under_proton(cold_nr=False):
                SteamGameId='0', PROTON_LOG='1', PROTON_LOG_DIR=str(OUT))
     for stale in ('OptiScaler.log', 'dlssnr-loopback.log'):
         (RUN / stale).unlink(missing_ok=True)
+    if present_nr:
+        for stale in RUN.glob('g*-f*-*.ppm'):
+            stale.unlink()
     print(f'running under {proton.parent.name}')
     p = subprocess.run([str(proton), 'run', str(RUN / 'dlssnr-loopback.exe'), 'OptiScaler.dll'] +
-                       (['--cold-nr'] if cold_nr else []),
+                       (['--present-nr'] if present_nr else ['--cold-nr'] if cold_nr else []),
                        cwd=RUN, env=env, timeout=600)
     hlog = RUN / 'dlssnr-loopback.log'
     harness = hlog.read_text(errors='replace') if hlog.exists() else ''
     if harness:
         print('--- harness log ---')
         print(harness.rstrip())
+
+    if present_nr:
+        if p.returncode != 0:
+            raise SystemExit(f'present NR probe exited {p.returncode}; see {RUN / "dlssnr-loopback.log"}')
+        check_present_coverage(harness)
+        return
 
     if cold_nr:
         if p.returncode != 0:
@@ -188,11 +217,20 @@ def main():
                          'gets them. wine: bare prefix with only vkd3d-proton borrowed; reaches '
                          'NR but its feature create fails with FAIL_PlatformError.')
     ap.add_argument('--skip-build', action='store_true',
-                    help='reuse the selected mode\'s artifacts/{run,cold-run}/dlssnr-loopback.exe')
-    ap.add_argument('--cold-nr', action='store_true',
+                    help='reuse the selected mode\'s artifacts/{run,cold-run,present-run}/dlssnr-loopback.exe')
+    modes = ap.add_mutually_exclusive_group()
+    modes.add_argument('--cold-nr', action='store_true',
                     help='probe core cold defaults and NR feature 18 through the production forwarder; '
                          'no OptiScaler Init, DLSS or RR feature; isolated artifacts/cold-run')
+    modes.add_argument('--present-nr', action='store_true',
+                       help='controlled SDR swapchain, NR, fence-drained resize and before/after readback; '
+                            'isolated artifacts/present-run; requires Proton')
     args = ap.parse_args()
+    if args.present_nr and args.runtime != 'proton':
+        ap.error('--present-nr requires --runtime proton')
+    standalone = args.cold_nr or args.present_nr
+    if args.present_nr:
+        RUN = OUT / 'present-run'
     if args.cold_nr:
         RUN = OUT / 'cold-run'
 
@@ -202,7 +240,7 @@ def main():
 
     OUT.mkdir(exist_ok=True)
     RUN.mkdir(exist_ok=True)
-    if not args.cold_nr:
+    if not standalone:
         shutil.copy2(dll, RUN / 'OptiScaler.dll')
 
     env = dict(os.environ, WINEPREFIX=str(PREFIX), WINEDEBUG='-all')
@@ -231,7 +269,7 @@ def main():
     donor = Path(os.environ.get(
         'LOOPBACK_DONOR',
         str(Path.home() / '.local/share/Steam/steamapps/common/Crimson Desert/bin64')))
-    if donor.is_dir() and not args.cold_nr:
+    if donor.is_dir() and not standalone:
         for src in sorted(donor.glob('sl.*.dll')) + [donor / 'nvngx_dlss.dll']:
             if src.exists():
                 link = RUN / src.name
@@ -242,14 +280,14 @@ def main():
         # Cold bring-up should test the installed driver, not a possibly stale kit copy.
         # Leave the legacy sweep's dependency selection unchanged.
         installed_core = Path('/usr/lib/nvidia/wine/_nvngx.dll')
-        if args.cold_nr and name == '_nvngx.dll' and installed_core.exists():
+        if standalone and name == '_nvngx.dll' and installed_core.exists():
             src = installed_core
         # Test the forwarder built alongside this DLL. The kit remains a fallback
         # for external builds that do not ship their matching forwarder.
         if name == 'nvngx.dll_dlssnr.dll' and (dll.parent / name).exists():
             src = (dll.parent / name).resolve()
         if not src.exists():
-            if args.cold_nr:
+            if standalone:
                 raise SystemExit(f'SETUP FAILURE: missing cold NR dependency {src}; no NGX result')
             print(f'  warning: {name} not in {kit} — NR will report itself unavailable')
             continue
@@ -261,12 +299,12 @@ def main():
     # disabling the menu. Keep the swapchain-overlay route selected: this harness has
     # no swapchain, so it does not initialize unrelated ImGui rendering during the sweep.
     # The harness only reads NR behaviour; it never writes into a game install.
-    if not args.cold_nr:
+    if not standalone:
         (RUN / 'OptiScaler.ini').write_text(
             '[Menu]\nOverlayMenu=true\n[DlssNr]\nEnabled=true\n[Log]\nLogToFile=true\nLogLevel=2\n')
 
     if args.runtime == 'proton':
-        return run_under_proton(args.cold_nr)
+        return run_under_proton(args.cold_nr, args.present_nr)
 
     # A separate runtime prefix: the compiler prefix is configured for MSVC, not for graphics, and
     # running the app there conflates "the harness is wrong" with "this prefix has no D3D12".
