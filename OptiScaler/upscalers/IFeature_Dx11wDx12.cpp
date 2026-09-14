@@ -158,23 +158,13 @@ bool IFeature_Dx11wDx12::ProcessDx11Textures(const NVSDK_NGX_Parameter* InParame
     }
 
     const auto allocatorFenceValue = Dx12CommandAllocatorFenceValue[frame];
-    if (allocatorFenceValue != 0 && Dx12Fence->GetCompletedValue() < allocatorFenceValue)
+    // Same five-second budget as the swapchain bridge. A wake alone is not completion.
+    result = WaitForBridgeFence(Dx12Fence, _dx11on12Device, Dx12FenceEvent, allocatorFenceValue, 5000);
+    if (FAILED(result))
     {
-        result = Dx12Fence->SetEventOnCompletion(allocatorFenceValue, Dx12FenceEvent);
-        if (result != S_OK)
-        {
-            LOG_ERROR("SetEventOnCompletion error for allocator {} fence {}: {:X}", frame, allocatorFenceValue,
-                      (UINT) result);
-            return false;
-        }
-
-        const auto waitResult = WaitForSingleObject(Dx12FenceEvent, INFINITE);
-        if (waitResult != WAIT_OBJECT_0)
-        {
-            LOG_ERROR("WaitForSingleObject failed for allocator {} fence {}: {:X}", frame, allocatorFenceValue,
-                      (UINT) waitResult);
-            return false;
-        }
+        LOG_ERROR("Allocator fence wait failed for frame {}, value {}: {:X}", frame, allocatorFenceValue,
+                  (UINT) result);
+        return false;
     }
 
     result = Dx12CommandAllocator[frame]->Reset();
@@ -208,6 +198,8 @@ bool IFeature_Dx11wDx12::Init(ID3D11Device* InDevice, ID3D11DeviceContext* InCon
 
     if (IsInited())
         return true;
+
+    SetInit(false);
 
     if (State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
         State::Instance().gameEngine == GameEngineType::Unreal ||
@@ -246,48 +238,62 @@ bool IFeature_Dx11wDx12::Init(ID3D11Device* InDevice, ID3D11DeviceContext* InCon
     // So: open the list, let Init record into it, submit it, and wait. The wait is not optional --
     // the first Evaluate resets this same allocator, and doing that under work still in flight is a
     // device removal rather than a bad picture.
-    HRESULT prep = Dx12CommandAllocator[0]->Reset();
+    // Init may be retried after an earlier submission timed out or its Signal failed.
+    // Never reset that allocator (or initialize the backend again) without completion.
+    HRESULT prep =
+        WaitForBridgeFence(Dx12Fence, _dx11on12Device, Dx12FenceEvent, Dx12CommandAllocatorFenceValue[0], 5000);
+    if (FAILED(prep))
+    {
+        LOG_ERROR("Init: previous creation fence wait failed: {:X}", (UINT) prep);
+        return false;
+    }
 
-    if (prep != S_OK)
-        LOG_WARN("Init: allocator reset before feature creation failed: {:X}", (UINT) prep);
+    prep = Dx12CommandAllocator[0]->Reset();
+    if (FAILED(prep))
+    {
+        LOG_ERROR("Init: allocator reset before feature creation failed: {:X}", (UINT) prep);
+        return false;
+    }
 
     prep = Dx12CommandList[0]->Reset(Dx12CommandAllocator[0], nullptr);
-
-    if (prep != S_OK)
-        LOG_WARN("Init: command list reset before feature creation failed: {:X}", (UINT) prep);
+    if (FAILED(prep))
+    {
+        LOG_ERROR("Init: command list reset before feature creation failed: {:X}", (UINT) prep);
+        return false;
+    }
 
     const bool initialised = dx12Feature->Init(_dx11on12Device, Dx12CommandList[0], InParameters);
 
+    prep = Dx12CommandList[0]->Close();
+    if (FAILED(prep) || Dx12CommandQueue == nullptr)
+    {
+        LOG_ERROR("Init: could not submit feature creation work (Close {:X}, queue {}): initialization incomplete",
+                  (UINT) prep, (void*) Dx12CommandQueue);
+        return false;
+    }
+
+    ID3D12CommandList* lists[] = { Dx12CommandList[0] };
+    Dx12CommandQueue->ExecuteCommandLists(1, lists);
+
+    // Work is already submitted. Preserve its pending value even if Signal fails.
+    const UINT64 signalled = ++Dx12FenceValue;
+    Dx12CommandAllocatorFenceValue[0] = signalled;
+    prep = Dx12CommandQueue->Signal(Dx12Fence, signalled);
+    if (FAILED(prep))
+    {
+        LOG_ERROR("Init: feature creation Signal failed for fence {}: {:X}", signalled, (UINT) prep);
+        return false;
+    }
+
+    prep = WaitForBridgeFence(Dx12Fence, _dx11on12Device, Dx12FenceEvent, signalled, 5000);
+    if (FAILED(prep))
+    {
+        LOG_ERROR("Init: feature creation fence {} did not complete: {:X}", signalled, (UINT) prep);
+        return false;
+    }
+
+    LOG_INFO("Init: feature creation work submitted and completed (fence {})", signalled);
     SetInit(initialised);
-
-    if (Dx12CommandList[0]->Close() == S_OK && Dx12CommandQueue != nullptr)
-    {
-        ID3D12CommandList* lists[] = { Dx12CommandList[0] };
-        Dx12CommandQueue->ExecuteCommandLists(1, lists);
-
-        // Recorded against allocator 0, so allocator 0 must not be reset until this has retired. That
-        // is what Dx12CommandAllocatorFenceValue is for, and ProcessDx11Textures already honours it.
-        const UINT64 signalled = ++Dx12FenceValue;
-
-        if (Dx12CommandQueue->Signal(Dx12Fence, signalled) == S_OK)
-        {
-            Dx12CommandAllocatorFenceValue[0] = signalled;
-
-            if (Dx12Fence->GetCompletedValue() < signalled &&
-                Dx12Fence->SetEventOnCompletion(signalled, Dx12FenceEvent) == S_OK)
-            {
-                WaitForSingleObject(Dx12FenceEvent, INFINITE);
-            }
-        }
-
-        LOG_INFO("Init: feature creation work submitted and waited on (fence {})", signalled);
-    }
-    else
-    {
-        LOG_WARN("Init: could not submit the feature creation work; a feature that records during "
-                 "creation will be missing it");
-    }
-
     return IsInited();
 }
 
@@ -514,15 +520,13 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
         commandListExecuted = true;
 
         const auto fenceValue = ++Dx12FenceValue;
+        // As in Init, failed Signal must not make the submitted allocator appear reusable.
+        Dx12CommandAllocatorFenceValue[frame] = fenceValue;
         result = Dx12CommandQueue->Signal(Dx12Fence, fenceValue);
         if (result != S_OK)
         {
             LOG_ERROR("Dx12CommandQueue Signal failed for feature fence {}: {:X}", fenceValue, (UINT) result);
             dx12EvalResult = false;
-        }
-        else
-        {
-            Dx12CommandAllocatorFenceValue[frame] = fenceValue;
         }
     }
 

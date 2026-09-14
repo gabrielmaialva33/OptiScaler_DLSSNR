@@ -8,6 +8,15 @@ retirement collector, drain and destructor/resource cleanup. The fakes script
 Win32 event wakes, time, fence completion, HRESULTs and COM reference counts.
 These are executable control-flow tests, not source-pattern assertions.
 
+The runner also compiles `IFeature_Dx11wDx12::Init`, `ProcessDx11Textures`, its
+inline `IsInited` and the intact evaluate-submission block with scripted backend
+and COM dependencies. The shared waiter is extracted from `with_dx12.cpp`.
+The upscaler cases catch false initialization success on timeout, registration
+failure, wait failure or removal; allocator reuse after stale wakes; forgotten
+pending values after a failed Signal at creation or evaluate; and an Init retry
+resetting a still-pending creation allocator. They also check completion reported
+at WAIT_TIMEOUT, backend creation refusal, and Reset/Close failure handling.
+
 Cases:
 
 - Completed and unused fences take the fast path. A missing fence/event with
@@ -80,4 +89,35 @@ SDK queues. Those are a remaining boundary of the lifetime guarantee.
   without callbacks under the retirement mutex. NR config, shaders, hooks and
   passthrough are unchanged; this is an unconditional bridge correctness repair.
   Other subsystems' concurrent global-state changes and independent FG/ImGui
-  teardown remain outside this review's safety guarantee.
+teardown remain outside this review's safety guarantee.
+
+## Upscaler fence-wait repair, 2026-09-14
+
+`WaitForBridgeFence` moved unchanged from the swapchain translation unit into
+`with_dx12.cpp`, declared in the existing `with_dx12.h`. The old helper was local
+to `Dx11wDx12SC`, so the independently implemented `IFeature_Dx11wDx12` waits had
+never acquired its completion checks. Both upscaler waits now use 5000 ms, the
+same budget as the swapchain allocator wait and teardown drain. A retry of Init
+also checks its prior submission before resetting allocator 0. An init failure
+keeps the bridge uninitialized even if backend creation had succeeded.
+
+The additional scope is deliberately narrow: it protects these wait decisions,
+allocator resets and pending-value accounting. It does **not** give the upscaler
+bridge the swapchain class's deferred retirement. `ReleaseSharedResources`,
+backend destruction/fallback and global interop-cache replacement still need a
+separate lifetime audit when completion is unknown. In particular, returning
+false from Init is not proof that a later caller may immediately destroy the
+backend's submitted resources. No end-to-end safe teardown claim is made here.
+
+The remaining waits under `with_dx12` are two D3D12 queue waits in the swapchain
+bridge and a D3D12 queue wait plus a D3D11 context wait in the shared-resource
+transport. These enqueue GPU dependencies; replacing them with CPU fence waits
+would change the synchronization contract. No other infinite CPU wait was found
+in this scope.
+
+Validation: the new timeout case first failed against `8971a31f` because Init
+returned true. After the repair, `./build-local.sh Release` completed (existing
+compiler/linker warnings), pinned clang-format 20 passed, and
+`python3 tests/run_all.py` passed 12/12 host suites. The bridge suite passed again
+after formatting the test sources. No game or Wine-tier bridge test was run and
+no DLL was installed into a game.

@@ -86,4 +86,4 @@ summary = "Drives the production NGX exports on a real D3D12 device and exercise
 [bridge-lifetime]
 tier = "host"
 timeout = 300
-summary = "Production D3D11/D3D12 bridge waits, failed submissions, resize preflight, ownership and retirement under scripted COM/Win32 fakes."
+summary = "Production D3D11/D3D12 swapchain and upscaler fence waits, initialization, failed submissions, resize preflight, ownership and retirement under scripted COM/Win32 fakes."

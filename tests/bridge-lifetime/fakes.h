@@ -111,7 +111,13 @@ struct ID3D12CommandList : Ref
 };
 struct ID3D12CommandAllocator : Ref
 {
-    HRESULT Reset() { return S_OK; }
+    int resets = 0;
+    HRESULT resetResult = S_OK;
+    HRESULT Reset()
+    {
+        ++resets;
+        return resetResult;
+    }
 };
 struct ID3D12Resource : Ref
 {
@@ -119,11 +125,13 @@ struct ID3D12Resource : Ref
 struct ID3D12GraphicsCommandList : ID3D12CommandList
 {
     HRESULT Reset(ID3D12CommandAllocator*, void*) { return S_OK; }
-    HRESULT Close() { return S_OK; }
+    HRESULT closeResult = S_OK;
+    HRESULT Close() { return closeResult; }
     void CopyResource(ID3D12Resource*, ID3D12Resource*) {}
 };
 struct ID3D12CommandQueue : Ref
 {
+    std::function<void()> beforeSignal;
     HRESULT signalResult = S_OK;
     bool completeSignals = true;
     int executions = 0, signals = 0;
@@ -131,6 +139,8 @@ struct ID3D12CommandQueue : Ref
     HRESULT Signal(ID3D12Fence* fence, UINT64 value)
     {
         ++signals;
+        if (beforeSignal)
+            beforeSignal();
         if (FAILED(signalResult))
             return signalResult;
         signaled.push_back(fence);

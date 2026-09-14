@@ -4,6 +4,10 @@
 #include <d3d11.h>
 #include <dxgi.h>
 
+// Shared CPU fence wait for the swapchain and upscaler D3D11/D3D12 bridges.
+// Returns success only on proven completion; preserves the caller's pending value.
+HRESULT WaitForBridgeFence(ID3D12Fence* fence, ID3D12Device* device, HANDLE event, UINT64 value, DWORD timeout);
+
 class WithDx12
 {
   private:
