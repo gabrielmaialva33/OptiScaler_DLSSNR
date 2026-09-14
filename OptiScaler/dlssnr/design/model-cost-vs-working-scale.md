@@ -18,6 +18,11 @@ the argument in one session.
 
 ## The measurements
 
+**One architecture.** Every point below is from the same RTX 4090 under Proton, and none of it
+transfers to another card: a second machine measured the same pass 25x more expensive per pixel on
+Ampere. See [model-cost-across-architectures.md](model-cost-across-architectures.md) before quoting
+any of these numbers as the cost of the pass.
+
 RTX 4090 (Ada, sm_89), driver 615.71.09, Arch Linux, Proton. Cyberpunk 2077 at 3440x1440, native
 DLSS-G, DLSS-NR on the after-Ray-Reconstruction route, one pass, `nvngx_dlssnr.dll` 310.8.SF, build
 `85bef821`. `[DlssNr] GpuTiming=true`, `GpuTimingInterval=30`.
