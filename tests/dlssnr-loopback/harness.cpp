@@ -313,8 +313,10 @@ int main(int argc, char** argv)
 {
     const bool coldNr =
         (argc == 2 && std::string(argv[1]) == "--cold-nr") || (argc == 3 && std::string(argv[2]) == "--cold-nr");
-    const bool presentNr =
-        (argc == 2 && std::string(argv[1]) == "--present-nr") || (argc == 3 && std::string(argv[2]) == "--present-nr");
+    const bool hudAb = (argc == 2 && std::string(argv[1]) == "--present-hud-ab") ||
+                       (argc == 3 && std::string(argv[2]) == "--present-hud-ab");
+    const bool presentNr = hudAb || (argc == 2 && std::string(argv[1]) == "--present-nr") ||
+                           (argc == 3 && std::string(argv[2]) == "--present-nr");
     const char* dllPath = argc > 1 && std::string(argv[1]) != "--cold-nr" ? argv[1] : "OptiScaler.dll";
 
     try
@@ -365,7 +367,7 @@ int main(int argc, char** argv)
 
         if (presentNr)
         {
-            PresentNr::Run(factory, window, device, queue, alloc, list, fence, fenceEvent);
+            PresentNr::Run(factory, window, device, queue, alloc, list, fence, fenceEvent, hudAb);
             DestroyWindow(window);
             CloseHandle(fenceEvent);
             return 0;

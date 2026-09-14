@@ -19,6 +19,16 @@ testing representative content; the synthetic present fixture cannot establish e
 
 ## Status
 
+**2026-09-14 — UICorrection HUD A/B: no observed effect.**
+`python3 tests/dlssnr-loopback/run.py --present-nr --hud-ab` adds bitmap text, a translucent
+menu, thin minimap roads and a moving/changing HUD counter. Six independently created model
+trials completed 192 evaluations/presents, 192 readback pairs and six exact controls.
+Create-0 versus create-1, same-setting repeats and evaluate-only switches were byte-identical
+in the presented RGB8 images: MAE=0, max=0. NR itself still changes the HUD equally for both
+settings. No separate UI/alpha layers were supplied. This is not proof the model ignores the
+key universally, nor proof of create-only latching. See [the report](ui-correction.md) for
+source evidence, method, ROI metrics, hashes, visual comparisons and limits.
+
 **2026-09-14 — controlled present transport passed; visual quality is not accepted.**
 
 `python3 tests/dlssnr-loopback/run.py --present-nr` ran on RTX 4090, driver 615.71.09,

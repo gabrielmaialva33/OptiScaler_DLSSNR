@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <thread>
+#include "hud_fixture.h"
 #include "../../OptiScaler/shaders/dlssnr/DlssNr_Common.h"
 #include "../../OptiScaler/shaders/dlssnr/precompile/DlssNr_Shader.h"
 
@@ -26,6 +27,10 @@ struct Host
     unsigned width = 0, height = 0, generation = 0, attempts = 0, successes = 0, presents = 0, drains = 0;
     unsigned controls = 0, captures = 0;
     const char* stage = "setup";
+    bool hud = false;
+    unsigned uiCorrection = 1;
+    int switchTo = -1;
+    std::string trial;
     Com<IDXGISwapChain3> swapchain;
     Com<ID3D12RootSignature> root;
     Com<ID3D12PipelineState> pipeline;
@@ -42,6 +47,9 @@ struct Host
     void* feature = nullptr;
     ColdNr::Create create = nullptr;
     ColdNr::Evaluate evaluate = nullptr;
+    using Extras = void (*)(void*, float, ID3D12Resource*, ID3D12Resource*, ID3D12Resource*, unsigned, unsigned,
+                            unsigned, unsigned);
+    Extras extras = nullptr;
     void (*release)(void*) = nullptr;
     PFN_DestroyParams destroy = nullptr;
     ColdNr::Shutdown shutdown = nullptr;
@@ -187,6 +195,8 @@ struct Host
         Require(found, "no verified core float setter");
         create = ColdNr::Export<ColdNr::Create>(forwarder, "dlssnr_call_create");
         evaluate = ColdNr::Export<ColdNr::Evaluate>(forwarder, "dlssnr_call_evaluate");
+        if (hud)
+            extras = ColdNr::Export<Extras>(forwarder, "dlssnr_call_set_extras");
         release = ColdNr::Export<void (*)(void*)>(forwarder, "dlssnr_call_release");
         lastInit = ColdNr::Export<int*>(forwarder, "dlssnr_call_last_init");
         lastCreate = ColdNr::Export<int*>(forwarder, "dlssnr_call_last_create");
@@ -301,6 +311,17 @@ struct Host
             }
     }
 
+    void UploadFixture()
+    {
+        void* mapped = nullptr;
+        const D3D12_RANGE noRead { 0, 0 };
+        Check(upload->Map(0, &noRead, &mapped), "fixture Map");
+        for (unsigned y = 0; y < height; ++y)
+            memcpy(static_cast<unsigned char*>(mapped) + footprint.Offset + y * footprint.Footprint.RowPitch,
+                   pixels.data() + static_cast<size_t>(y) * width * 4, width * 4);
+        upload->Unmap(0, nullptr);
+    }
+
     void Allocate(unsigned w, unsigned h)
     {
         stage = "generation resources and clear-once guides";
@@ -322,13 +343,7 @@ struct Host
         before.p = Buffer(bufferBytes, D3D12_HEAP_TYPE_READBACK);
         after.p = Buffer(bufferBytes, D3D12_HEAP_TYPE_READBACK);
         Fixture();
-        void* mapped = nullptr;
-        const D3D12_RANGE noRead { 0, 0 };
-        Check(upload->Map(0, &noRead, &mapped), "fixture Map");
-        for (unsigned y = 0; y < h; ++y)
-            memcpy(static_cast<unsigned char*>(mapped) + footprint.Offset + y * footprint.Footprint.RowPitch,
-                   pixels.data() + static_cast<size_t>(y) * w * 4, w * 4);
-        upload->Unmap(0, nullptr);
+        UploadFixture();
         ID3D12Resource* encode[] = { source, source, source, source, source, proxy, original };
         ID3D12Resource* resolve[] = { proxy, answer, original, motion, proxy, target, target };
         for (unsigned i = 0; i < 7; ++i)
@@ -351,12 +366,21 @@ struct Host
         stage = "CreateFeature(18)";
         Begin();
         // Production defaults: intensity/local structure/tone=1, skin follows structure, mask=1.
-        // UI correction=1 matches the production create path; our fixture includes HUD-like detail.
-        feature = create(snippetPath, L"", device, list, params, w, h, 0, 1, 0, 1, 1, 1, 1, 1);
+        // Default 1 matches production; the opt-in HUD experiment varies only this create argument.
+        if (hud)
+            extras(params, 1, nullptr, nullptr, nullptr, 0, 0, 0, 0);
+        feature = create(snippetPath, L"", device, list, params, w, h, 0, 1, 0, 1, 1, 1, 1, uiCorrection);
         Submit();
         ColdNr::NgxResult("snippet Init", static_cast<unsigned>(*lastInit));
         ColdNr::NgxResult("CreateFeature(18)", static_cast<unsigned>(*lastCreate));
         Require(feature != nullptr, "null feature18");
+        if (hud)
+        {
+            unsigned read = 99;
+            ColdNr::NgxResult("UICorrection Get after create", params->Get("DLSSNR.UICorrection", &read));
+            Require(read == uiCorrection, "create UI parameter did not round-trip");
+            Say("  HUD trial=%s create_ui=%u\n", trial.c_str(), read);
+        }
     }
 
     void Shader(unsigned slot)
@@ -386,6 +410,21 @@ struct Host
     {
         stage = "clean source -> copy-out -> encode -> NR -> resolve -> copy-back";
         Begin();
+        if (hud)
+        {
+            // Match production's explicit clearing of absent UI/UIAlpha/Backbuffer inputs.
+            extras(params, 1, nullptr, nullptr, nullptr, 0, 0, 0, 0);
+            Fixture();
+            HudFixture(pixels, width, height, frame);
+            UploadFixture(); // Begin has already proved the upload is no longer in use.
+            if (switchTo >= 0 && frame >= 8)
+            {
+                params->Set("DLSSNR.UICorrection", static_cast<unsigned>(switchTo));
+                unsigned read = 99;
+                ColdNr::NgxResult("UICorrection Get before evaluate", params->Get("DLSSNR.UICorrection", &read));
+                Require(read == static_cast<unsigned>(switchTo), "evaluate UI parameter did not round-trip");
+            }
+        }
         DlssNrConstants c[2] {};
         for (auto& item : c)
         {
@@ -497,9 +536,9 @@ struct Host
             Require(a == b, "ApplyModel=0 control changed source bytes");
             ++controls;
         }
-        if (frame == 0 || frame == 1 || frame == 15)
+        if (hud || frame == 0 || frame == 1 || frame == 15)
         {
-            auto prefix = "g" + std::to_string(generation) + "-f" + std::to_string(frame);
+            auto prefix = (hud ? trial : "g" + std::to_string(generation)) + "-f" + std::to_string(frame);
             Save(prefix + "-before.ppm", a);
             Save(prefix + "-after.ppm", b);
             ++captures;
@@ -578,31 +617,58 @@ struct Host
 };
 
 static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D12CommandQueue* queue,
-                ID3D12CommandAllocator* alloc, ID3D12GraphicsCommandList* list, ID3D12Fence* fence, HANDLE event)
+                ID3D12CommandAllocator* alloc, ID3D12GraphicsCommandList* list, ID3D12Fence* fence, HANDLE event,
+                bool hud = false)
 {
     Host host { device, queue, alloc, list, fence, event };
     try
     {
         Say("PRESENT-NR: controlled SDR source, real swapchain, production forwarder + composition bytecode\n");
-        Say("  full resolution, one pass, zero guides, no confidence, no upscaler, no FG; UICorrection=1\n");
+        Say("  full resolution, one pass, zero guides, no confidence, no upscaler, no FG\n");
+        Say(hud ? "  UICorrection A/B: per-trial create value, then optional evaluate-only switch\n"
+                : "  UICorrection=1\n");
+        host.hud = hud;
         host.Init(factory, window);
-        host.Allocate(1280, 720);
-        for (unsigned generation = 0; generation < 3; ++generation)
+        if (hud)
         {
-            for (unsigned frame = 0; frame < 16; ++frame)
+            const char* names[] = { "ui0-r0", "ui1-r0", "ui0-r1", "ui1-r1", "ui0-to1", "ui1-to0" };
+            for (unsigned trial = 0; trial < 6; ++trial)
             {
-                host.Record(frame);
-                if (frame == 15 && generation < 2)
+                host.trial = names[trial];
+                host.uiCorrection = trial % 2;
+                host.switchTo = trial >= 4 ? 1 - static_cast<int>(host.uiCorrection) : -1;
+                host.Allocate(1280, 720); // Independent feature + Reset + identical history for every trial.
+                for (unsigned frame = 0; frame < 32; ++frame)
                 {
-                    Check(queue->Wait(host.gate, host.drains + 1), "enqueue resize gate");
-                    host.Submit(false);
-                    host.Resize(generation == 0 ? 960 : 1280, generation == 0 ? 540 : 720);
-                }
-                else
-                {
+                    host.Record(frame);
                     host.Submit();
                     host.Inspect(frame);
                     host.Present();
+                }
+                Check(queue->Signal(fence, ++host.serial), "HUD post-Present Signal");
+                host.ReleaseGeneration();
+            }
+        }
+        else
+        {
+            host.Allocate(1280, 720);
+            for (unsigned generation = 0; generation < 3; ++generation)
+            {
+                for (unsigned frame = 0; frame < 16; ++frame)
+                {
+                    host.Record(frame);
+                    if (frame == 15 && generation < 2)
+                    {
+                        Check(queue->Wait(host.gate, host.drains + 1), "enqueue resize gate");
+                        host.Submit(false);
+                        host.Resize(generation == 0 ? 960 : 1280, generation == 0 ? 540 : 720);
+                    }
+                    else
+                    {
+                        host.Submit();
+                        host.Inspect(frame);
+                        host.Present();
+                    }
                 }
             }
         }
@@ -620,9 +686,13 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
         unsigned remaining = 0;
         ColdNr::NgxResult("core Shutdown1", host.shutdown(device, &remaining));
         Check(device->GetDeviceRemovedReason(), "final device health");
-        Say("PRESENT-NR PASS: attempts=%u successes=%u presents=%u pending_resize_drains=%u controls=%u "
-            "capture_pairs=%u\n",
-            host.attempts, host.successes, host.presents, host.drains, host.controls, host.captures);
+        if (hud)
+            Say("HUD-AB PASS: trials=6 attempts=%u successes=%u presents=%u controls=%u capture_pairs=%u\n",
+                host.attempts, host.successes, host.presents, host.controls, host.captures);
+        else
+            Say("PRESENT-NR PASS: attempts=%u successes=%u presents=%u pending_resize_drains=%u controls=%u "
+                "capture_pairs=%u\n",
+                host.attempts, host.successes, host.presents, host.drains, host.controls, host.captures);
     }
     catch (const std::exception& error)
     {
