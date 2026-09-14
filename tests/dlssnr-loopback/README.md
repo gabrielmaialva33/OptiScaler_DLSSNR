@@ -12,11 +12,160 @@ exists but is not wired into execution; input contents and motion are not a dete
 image fixture. The wall-clock sweep tests real initialization, NR composition, resolution
 changes and shutdown. Evaluation counts include initialization and skipped NR work.
 
-Passing this harness establishes neither image quality, deterministic pixels nor an FPS
-improvement. Analytic motion, repeatable frame contents, readback and controlled A/B timing
-remain future work. Visual acceptance also requires testing in a real title.
+Passing the default sweep establishes neither image quality, deterministic pixels nor an FPS
+improvement. `--present-nr` adds a separate deterministic, static image/readback experiment below.
+Analytic motion and controlled A/B timing remain future work. Visual acceptance also requires
+testing representative content; the synthetic present fixture cannot establish emulator quality.
 
 ## Status
+
+**2026-09-14 — passthrough chroma hypothesis falsified for the step-1 fixture.**
+`--present-nr --composition-ab` compares direct model output with composition, then sweeps
+transfer/colour strengths using the original source and three-size sequence. All 624 evaluations,
+26 pending resize drains and 39 exact controls passed. Direct mode retains the fading; composed
+versus direct differs by at most one RGB8 level in saved captures. Monotonic slider response
+also doses the model's existing edit and does not isolate HueOkLab. See
+[the report](passthrough-chroma.md) for every point's metrics, explicit gamma/luminance definitions,
+confounds, readback hashes and images. No production shader correction was made.
+
+**2026-09-14 — UICorrection HUD A/B: no observed effect.**
+`python3 tests/dlssnr-loopback/run.py --present-nr --hud-ab` adds bitmap text, a translucent
+menu, thin minimap roads and a moving/changing HUD counter. Six independently created model
+trials completed 192 evaluations/presents, 192 readback pairs and six exact controls.
+Create-0 versus create-1, same-setting repeats and evaluate-only switches were byte-identical
+in the presented RGB8 images: MAE=0, max=0. NR itself still changes the HUD equally for both
+settings. No separate UI/alpha layers were supplied. This is not proof the model ignores the
+key universally, nor proof of create-only latching. See [the report](ui-correction.md) for
+source evidence, method, ROI metrics, hashes, visual comparisons and limits.
+
+**2026-09-14 — controlled present transport passed; visual quality is not accepted.**
+
+`python3 tests/dlssnr-loopback/run.py --present-nr` ran on RTX 4090, driver 615.71.09,
+Proton Experimental, from production baseline `4cbd0950`. All changes for this experiment are
+under `tests/`; no production configuration, export, hook or runtime behaviour was changed.
+
+| observation | result |
+|---|---|
+| standalone core Init/capabilities; model Init/CreateFeature(18) | success (`0x00000001`), three model generations |
+| NR evaluations / completed presentations | **48 / 48**, one evaluation per freshly rewritten frame |
+| sizes | 1280×720 → 960×540 → 1280×720, 16 frames each |
+| source readback before NR | exact fixture bytes on **all 48 frames** |
+| `ApplyModel=0` composition controls | **3/3 byte-identical**, despite executing NR |
+| pending work on entry to resize | serial 18 vs completed 17; serial 37 vs completed 36 |
+| drain before release/ResizeBuffers | **2/2**, successful resize and final device-health checks |
+| readbacks saved | **nine before/after pairs**, frames 0, 1 and 15 of each generation |
+| DestroyParameters / Shutdown1 | both successful; process exit 0 |
+
+**What the images show:** the geometry, mortar lines and reticle remain recognizable, without
+black frames or gross corruption. There is no convincing enhancement of this synthetic scene.
+Saturated patches become duller (especially red/yellow), and texture/contrast changes. This is
+not a positive quality verdict. RGB mean absolute change at frame 15 was **3.983909/255** at
+1280×720 and **5.884574/255** at 960×540 (maximum channel changes 66 and 79). Those numbers
+measure *change*, not error against a desired image or improvement. The identical 1280×720
+fixtures and outputs at frames 1 and 15 matched byte-for-byte after resize away and back.
+The output also changes over the 16-frame history despite a static source; motion quality,
+ghosting and longer-term stability were not measured.
+
+![Source on the left, NR on the right; upper row resized to fit, lower row at 1:1](evidence/present-step1.png)
+
+[Recorded results and component/readback hashes](evidence/present-step1.txt) accompany the image.
+The retained comparison is generation 3, frame 15. Full-size, lossless originals remain in
+`artifacts/present-run/g3-f15-{before,after}.ppm`; every new run regenerates all nine pairs.
+A PPM is already an image; for PNG, Pillow can convert it without altering RGB values:
+
+```python
+from PIL import Image
+Image.open("artifacts/present-run/g3-f15-after.ppm").save("after.png")
+```
+
+### Controlled present mode: what is exercised
+
+`present_nr.h` owns one real two-buffer `FLIP_DISCARD` swapchain on the **same DIRECT queue**
+that executes the neural pass. The format is explicitly `R8G8B8A8_UNORM`, SDR G22/BT.709.
+There is no `ALLOW_UNORDERED_ACCESS` on its buffers. The CPU-authored gradient/brick/foliage/
+checkerboard/reticle fixture is uploaded afresh for **every** frame; a GPU readback asserts it
+still matches before NR. Identity is `(generation, iteration)` by construction, not a guess
+from Present count, buffer index, a global epoch or a timeout. Only this harness presents.
+
+The mode initializes the installed NGX core independently (app ID 1337 decimal, empty path,
+`NVSDK_NGX_Version_API`, matching the current production SDK fallback). It obtains the core's
+real capability block and uses the **production ABI-2 forwarder** for feature 18. It creates
+no Super Sampling, Ray Reconstruction or Frame Generation feature and loads no OptiScaler DLL
+or Streamline donor. The capability block is not a fabricated upscaler parameter adapter.
+
+The encode and resolve execute the **unchanged, committed production `DlssNr_cso` bytecode**,
+with the shared `DlssNrConstants` definition. A small test-only root signature and descriptor
+setup binds that shader. This does **not** invoke `DlssNr_Dx12::Dispatch`, its global state,
+coverage machinery, `RecordingLease`, settling gates or Submission hooks. It proves model +
+shader + owned transport, not that those production integration layers are safe for a future
+host. Neither existing production host is replaced by this experiment.
+
+Each generation owns zero depth `R32_FLOAT` and motion `R16G16_FLOAT`, at target size. Matching
+CPU and shader-visible UAV descriptors clear them **once**; that command list is submitted
+and fence-complete before feature creation/evaluation. Confidence is neither allocated nor
+passed. Reset is set on the first evaluation of each recreated model; motion scale is (1,1),
+subrect origins zero, all guide extents full size. There is no exposure texture or scan.
+
+The explicitly SDR constants set `Passthrough=1`, white point/pre-exposure multiplier 1:
+the already-tonemapped frame is not encoded a second time. Thus this route does avoid the
+HDR white-point/exposure inference problem; it does **not** guarantee colour preservation
+when the model's edit is applied. Model preset/style are 0, intensity/local strengths are 1,
+AutoMask is 1. `UICorrection=1` matches production, now on a frame with HUD-like detail;
+there is no evidence here that it protects arbitrary game UI. Composition uses the defaults
+strength=1, colour=1, max ratio=2, Transfer=1, at **full working resolution**, one pass.
+No working-scale/residual-upscaling speed claim is made.
+
+The recording order is explicit:
+
+1. Resting backbuffer `PRESENT` → `COPY_DEST`: rewrite the entire clean fixture from upload.
+2. Backbuffer → `COPY_SOURCE`: capture *before* and copy out to a private RGBA8 texture.
+3. Production encode → RGBA16F proxy/untouched copy; feature 18 → separate RGBA16F answer;
+   production resolve → private RGBA8 UAV. Read/write transitions order each consumer.
+4. Copy back to the backbuffer, capture *after*, restore `PRESENT`; submit and signal a fence
+   **after the entire recording**, including both transport copies and both readbacks.
+5. Prove completion before `Present(1, 0)`; accept only `S_OK`. The test checks the returned
+   backbuffer pixels and successful Present calls, not physical display scanout with a camera.
+
+D3D12 cannot query a backbuffer's current state. There is no assumption that an unknown game's
+buffer is a render target here: the harness owns and specifies every state transition.
+Waiting before the flip follows the donor's write-back lesson without importing its FG
+stand-down heuristic. This synchronous wait can include all queued inference; it is **not**
+claimed cheap, and this heavily instrumented probe is not a performance benchmark.
+At 1280×720 the two transport copies carry 7,372,800 bytes of payload total; source upload,
+readbacks, encode/resolve and model work are additional. Shrinking model work alone would
+not shrink the backbuffer copies. No Cyberpunk millisecond measurement is reused as a
+measurement of this fixture.
+
+For each resize request the real queue is held behind a test fence before the final
+NR/copy-back submission. The test verifies that the submission is still pending on entry.
+A separate CPU thread releases that gate after 100 ms; the resize path drains first, inspects
+and presents the completed image, then fences the queue again before releasing **any** model,
+texture or backbuffer reference and calling `ResizeBuffers`. All new resources/guides and
+the model are then recreated. A fast GPU cannot turn this into an idle-only resize test.
+Final teardown follows the same completion-first rule. Allocator, upload/constant writes and
+descriptor reuse also occur only after proven completion.
+
+Waits use one 10-second deadline, one event registration, and reread completion/removal after
+every wake, including timeout. A failed Signal is already marked pending. Any failure logs
+its stage/result and ends this diagnostic process **before unwinding outstanding GPU-owned
+objects**; there is no successful fallback or resource reuse on unknown completion. This is
+test-process failure handling, not a deferred-retirement implementation for an injected DLL.
+
+**Limits:** static synthetic content, one device/queue/swapchain, SDR RGBA8, no concurrent
+presents, no device replacement, no arbitrary-game resource-state/frame-identity proof,
+no BGRA/HDR/FG support, no engine guides, and no removal/failed-Signal fault injection.
+The two controlled pending resizes are real GPU evidence, not coverage of every driver race.
+The 12 host suites do not exercise this host. The existing `dlssnr-loopback` wine suite gains
+an opt-in mode, so `suites.toml` needs no new entry; its default remains the old upscale sweep.
+The compiler-prefix busy check and isolated Proton prefix are preserved.
+
+Verification on 2026-09-14: `./build-local.sh Release` completed successfully; the pinned
+`/usr/lib/llvm20/bin/clang-format --dry-run --Werror` passed for both touched C++ files;
+`python3 tests/run_all.py` passed **12/12**. The new Proton mode passed twice, the unchanged
+`--cold-nr` mode passed 48/48, and the default upscale sweep passed (5 creates, 4739 upscale
+evaluations, NR composition log coverage, successful Shutdown). Upscale/log counts are not
+counts of model evaluations. The runner's acceptance check also rejected missing/truncated
+PPMs and each incomplete counter in synthetic parser checks; those checks prove no GPU property.
 
 **2026-09-13 — cold start accepted under Proton.**
 `python3 tests/dlssnr-loopback/run.py --cold-nr` adds a separate experiment; the default sweep

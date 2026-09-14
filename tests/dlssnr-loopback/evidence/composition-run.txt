@@ -1,0 +1,33 @@
+2026-09-14; RTX 4090; driver 615.71.09; Proton Experimental
+Test baseline: 76feb2cb; production baseline: 4cbd0950
+Command: python3 tests/dlssnr-loopback/run.py --present-nr --composition-ab
+SHA-256 of tested executable and loaded components:
+5a3b40fbf8f345c8baeba3b8908d184765ca5a0759da3b710b9e480ac2e9b178  dlssnr-loopback.exe
+172faedfd9b1c7faddf07b846667484fcf35d8a4cae17d1abada5e94714071db  _nvngx.dll
+6eb209e764f39872625debd6abaf45e2bb6322f6f270f781f70c059ae30b3927  nvngx_dlssnr.dll
+bda010710eb17e497d580102cf56e8b59e27dd638f2c27fc3e6125396a8419b7  nvngx.dll_dlssnr.dll
+92169bb5101a9ae3b22283f551a079c2412c5e5e07fc30df80ec5a56c8ac9c41  OptiScaler/shaders/dlssnr/precompile/DlssNr_Shader.h
+1dee4f752875c0727d9e07ca16571e782160516ce72a325a1b71d9fd1ae309d6  OptiScaler/shaders/dlssnr/DlssNr_Common.h
+core Init_Ext -> 0x00000001 (success)
+core capabilities -> 0x00000001 (success)
+COMPOSITION-POINT name=composed mode=0 transfer=1.00 colour=1.00
+COMPOSITION-POINT name=direct mode=2 transfer=1.00 colour=1.00
+COMPOSITION-POINT name=t0 mode=0 transfer=0.00 colour=1.00
+COMPOSITION-POINT name=t25 mode=0 transfer=0.25 colour=1.00
+COMPOSITION-POINT name=t50 mode=0 transfer=0.50 colour=1.00
+COMPOSITION-POINT name=t75 mode=0 transfer=0.75 colour=1.00
+COMPOSITION-POINT name=c0 mode=0 transfer=1.00 colour=0.00
+COMPOSITION-POINT name=c25 mode=0 transfer=1.00 colour=0.25
+COMPOSITION-POINT name=c50 mode=0 transfer=1.00 colour=0.50
+COMPOSITION-POINT name=c75 mode=0 transfer=1.00 colour=0.75
+COMPOSITION-POINT name=c125 mode=0 transfer=1.00 colour=1.25
+COMPOSITION-POINT name=c150 mode=0 transfer=1.00 colour=1.50
+COMPOSITION-POINT name=repeat mode=0 transfer=1.00 colour=1.00
+core DestroyParameters -> 0x00000001 (success)
+core Shutdown1 -> 0x00000001 (success)
+COMPOSITION-AB PASS: trials=13 attempts=624 successes=624 presents=624 pending_resize_drains=26 controls=39 capture_pairs=117
+All source readbacks were exact; 39 ApplyModel=0 controls were exact.
+The report includes SHA-256 for 234 PPMs (117 pairs), with metrics for frames 0/1/15 per generation.
+Same-setting repeat: all nine outputs byte-identical to default.
+Direct versus composed: max channel difference 1 for every saved non-control frame.
+No production changes, no HLSL recompilation, no build-local.sh invocation.

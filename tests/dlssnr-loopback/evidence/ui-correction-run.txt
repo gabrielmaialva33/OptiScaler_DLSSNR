@@ -1,0 +1,29 @@
+2026-09-14; RTX 4090; driver 615.71.09; Proton Experimental
+Baseline: dbe6894c (production 4cbd0950)
+Command: python3 tests/dlssnr-loopback/run.py --present-nr --hud-ab
+SHA-256 of executable and loaded components:
+34df2584dc1a8b7d014e6b7d6363d8cfedeac9efeaaa7cb0ddc8fc97ca2208d5  dlssnr-loopback.exe
+172faedfd9b1c7faddf07b846667484fcf35d8a4cae17d1abada5e94714071db  _nvngx.dll
+6eb209e764f39872625debd6abaf45e2bb6322f6f270f781f70c059ae30b3927  nvngx_dlssnr.dll
+bda010710eb17e497d580102cf56e8b59e27dd638f2c27fc3e6125396a8419b7  nvngx.dll_dlssnr.dll
+core Init_Ext -> 0x00000001 (success)
+core capabilities -> 0x00000001 (success)
+CreateFeature(18) -> 0x00000001 (success)
+HUD trial=ui0-r0 create_ui=0
+CreateFeature(18) -> 0x00000001 (success)
+HUD trial=ui1-r0 create_ui=1
+CreateFeature(18) -> 0x00000001 (success)
+HUD trial=ui0-r1 create_ui=0
+CreateFeature(18) -> 0x00000001 (success)
+HUD trial=ui1-r1 create_ui=1
+CreateFeature(18) -> 0x00000001 (success)
+HUD trial=ui0-to1 create_ui=0
+CreateFeature(18) -> 0x00000001 (success)
+HUD trial=ui1-to0 create_ui=1
+core DestroyParameters -> 0x00000001 (success)
+core Shutdown1 -> 0x00000001 (success)
+HUD-AB PASS: trials=6 attempts=192 successes=192 presents=192 controls=6 capture_pairs=192
+All six create UICorrection Get calls returned success and matched the requested value.
+All 48 evaluate-time UICorrection Get calls returned success and matched the written value.
+All 384 PPM SHA-256 values and all paired metrics are in ui-correction-report.json.
+No production source, config, shader bytecode or menu changed.

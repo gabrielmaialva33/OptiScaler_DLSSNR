@@ -115,7 +115,27 @@ def check_cold_coverage(harness):
         raise SystemExit('ZERO COVERAGE: cold NR did not complete 48 successful feature-18 evaluations')
 
 
-def run_under_proton(cold_nr=False):
+def check_present_coverage(harness):
+    import re
+    match = re.search(r'^PRESENT-NR PASS: attempts=(\d+) successes=(\d+) presents=(\d+) '
+                      r'pending_resize_drains=(\d+) controls=(\d+) capture_pairs=(\d+)$', harness, re.M)
+    if not match or tuple(map(int, match.groups())) != (48, 48, 48, 2, 3, 9):
+        raise SystemExit('ZERO COVERAGE: present NR did not complete all evaluations, controls and pending resizes')
+    # Demand new, complete readbacks, not only successful NGX return codes or stale files.
+    for generation, (w, h) in enumerate(((1280, 720), (960, 540), (1280, 720)), 1):
+        for frame in (0, 1, 15):
+            for side in ('before', 'after'):
+                path = RUN / f'g{generation}-f{frame}-{side}.ppm'
+                header = f'P6\n{w} {h}\n255\n'.encode()
+                if not path.exists():
+                    raise SystemExit(f'MISSING READBACK: {path}')
+                data = path.read_bytes()
+                if not data.startswith(header) or len(data) != len(header) + w * h * 3:
+                    raise SystemExit(f'INVALID READBACK: {path}')
+    print(f'  present transport coverage accepted; inspect before/after images in {RUN}')
+
+
+def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_ab=False):
     """Run the harness the way a Steam game runs: through Proton, in a compatdata prefix of its own.
 
     Hand-mirroring what Proton provides (vkd3d-proton, dxvk-nvapi, the driver's nvngx pair and the
@@ -142,15 +162,42 @@ def run_under_proton(cold_nr=False):
                SteamGameId='0', PROTON_LOG='1', PROTON_LOG_DIR=str(OUT))
     for stale in ('OptiScaler.log', 'dlssnr-loopback.log'):
         (RUN / stale).unlink(missing_ok=True)
+    if present_nr:
+        for stale in RUN.glob('*-f*-*.ppm'):
+            stale.unlink()
+        if composition_ab:
+            (RUN / 'composition-report.json').unlink(missing_ok=True)
+            (RUN / 'composition-vs-direct.png').unlink(missing_ok=True)
+        if hud_ab:
+            (RUN / 'hud-report.json').unlink(missing_ok=True)
+            for stale in RUN.glob('hud-f*.png'):
+                stale.unlink()
     print(f'running under {proton.parent.name}')
     p = subprocess.run([str(proton), 'run', str(RUN / 'dlssnr-loopback.exe'), 'OptiScaler.dll'] +
-                       (['--cold-nr'] if cold_nr else []),
+                       (['--present-composition-ab'] if composition_ab else ['--present-hud-ab'] if hud_ab else ['--present-nr'] if present_nr else ['--cold-nr'] if cold_nr else []),
                        cwd=RUN, env=env, timeout=600)
     hlog = RUN / 'dlssnr-loopback.log'
     harness = hlog.read_text(errors='replace') if hlog.exists() else ''
     if harness:
         print('--- harness log ---')
         print(harness.rstrip())
+
+    if present_nr:
+        if p.returncode != 0:
+            raise SystemExit(f'present NR probe exited {p.returncode}; see {RUN / "dlssnr-loopback.log"}')
+        if composition_ab:
+            import re
+            if not re.search(r'^COMPOSITION-AB PASS: trials=13 attempts=624 successes=624 presents=624 pending_resize_drains=26 controls=39 capture_pairs=117$', harness, re.M):
+                raise SystemExit('ZERO COVERAGE: incomplete composition sweep')
+            run([sys.executable, HERE / 'analyze_composition.py', RUN])
+        elif hud_ab:
+            import re
+            if not re.search(r'^HUD-AB PASS: trials=6 attempts=192 successes=192 presents=192 controls=6 capture_pairs=192$', harness, re.M):
+                raise SystemExit('ZERO COVERAGE: incomplete HUD A/B')
+            run([sys.executable, HERE / 'analyze_hud.py', RUN])
+        else:
+            check_present_coverage(harness)
+        return
 
     if cold_nr:
         if p.returncode != 0:
@@ -188,11 +235,32 @@ def main():
                          'gets them. wine: bare prefix with only vkd3d-proton borrowed; reaches '
                          'NR but its feature create fails with FAIL_PlatformError.')
     ap.add_argument('--skip-build', action='store_true',
-                    help='reuse the selected mode\'s artifacts/{run,cold-run}/dlssnr-loopback.exe')
-    ap.add_argument('--cold-nr', action='store_true',
+                    help='reuse the selected mode\'s artifacts/{run,cold-run,present-run}/dlssnr-loopback.exe')
+    modes = ap.add_mutually_exclusive_group()
+    modes.add_argument('--cold-nr', action='store_true',
                     help='probe core cold defaults and NR feature 18 through the production forwarder; '
                          'no OptiScaler Init, DLSS or RR feature; isolated artifacts/cold-run')
+    modes.add_argument('--present-nr', action='store_true',
+                       help='controlled SDR swapchain, NR, fence-drained resize and before/after readback; '
+                            'isolated artifacts/present-run; requires Proton')
+    experiments = ap.add_mutually_exclusive_group()
+    experiments.add_argument('--hud-ab', action='store_true', help='with --present-nr: paired HUD/UICorrection experiment')
+    experiments.add_argument('--composition-ab', action='store_true', help='with --present-nr: direct/composed and strength sweep')
     args = ap.parse_args()
+    if args.composition_ab and not args.present_nr:
+        ap.error('--composition-ab requires --present-nr')
+    if args.hud_ab and not args.present_nr:
+        ap.error('--hud-ab requires --present-nr')
+    if args.present_nr and args.runtime != 'proton':
+        ap.error('--present-nr requires --runtime proton')
+    if args.hud_ab or args.composition_ab:
+        import importlib.util
+        for module in ('numpy', 'PIL'):
+            if importlib.util.find_spec(module) is None:
+                ap.error('image analysis requires numpy and Pillow in the runner Python environment')
+    standalone = args.cold_nr or args.present_nr
+    if args.present_nr:
+        RUN = OUT / ('composition-run' if args.composition_ab else 'hud-run' if args.hud_ab else 'present-run')
     if args.cold_nr:
         RUN = OUT / 'cold-run'
 
@@ -202,7 +270,7 @@ def main():
 
     OUT.mkdir(exist_ok=True)
     RUN.mkdir(exist_ok=True)
-    if not args.cold_nr:
+    if not standalone:
         shutil.copy2(dll, RUN / 'OptiScaler.dll')
 
     env = dict(os.environ, WINEPREFIX=str(PREFIX), WINEDEBUG='-all')
@@ -231,7 +299,7 @@ def main():
     donor = Path(os.environ.get(
         'LOOPBACK_DONOR',
         str(Path.home() / '.local/share/Steam/steamapps/common/Crimson Desert/bin64')))
-    if donor.is_dir() and not args.cold_nr:
+    if donor.is_dir() and not standalone:
         for src in sorted(donor.glob('sl.*.dll')) + [donor / 'nvngx_dlss.dll']:
             if src.exists():
                 link = RUN / src.name
@@ -242,14 +310,14 @@ def main():
         # Cold bring-up should test the installed driver, not a possibly stale kit copy.
         # Leave the legacy sweep's dependency selection unchanged.
         installed_core = Path('/usr/lib/nvidia/wine/_nvngx.dll')
-        if args.cold_nr and name == '_nvngx.dll' and installed_core.exists():
+        if standalone and name == '_nvngx.dll' and installed_core.exists():
             src = installed_core
         # Test the forwarder built alongside this DLL. The kit remains a fallback
         # for external builds that do not ship their matching forwarder.
         if name == 'nvngx.dll_dlssnr.dll' and (dll.parent / name).exists():
             src = (dll.parent / name).resolve()
         if not src.exists():
-            if args.cold_nr:
+            if standalone:
                 raise SystemExit(f'SETUP FAILURE: missing cold NR dependency {src}; no NGX result')
             print(f'  warning: {name} not in {kit} — NR will report itself unavailable')
             continue
@@ -261,12 +329,12 @@ def main():
     # disabling the menu. Keep the swapchain-overlay route selected: this harness has
     # no swapchain, so it does not initialize unrelated ImGui rendering during the sweep.
     # The harness only reads NR behaviour; it never writes into a game install.
-    if not args.cold_nr:
+    if not standalone:
         (RUN / 'OptiScaler.ini').write_text(
             '[Menu]\nOverlayMenu=true\n[DlssNr]\nEnabled=true\n[Log]\nLogToFile=true\nLogLevel=2\n')
 
     if args.runtime == 'proton':
-        return run_under_proton(args.cold_nr)
+        return run_under_proton(args.cold_nr, args.present_nr, args.hud_ab, args.composition_ab)
 
     # A separate runtime prefix: the compiler prefix is configured for MSVC, not for graphics, and
     # running the app there conflates "the harness is wrong" with "this prefix has no D3D12".
