@@ -19,6 +19,15 @@ testing representative content; the synthetic present fixture cannot establish e
 
 ## Status
 
+**2026-09-14 — passthrough chroma hypothesis falsified for the step-1 fixture.**
+`--present-nr --composition-ab` compares direct model output with composition, then sweeps
+transfer/colour strengths using the original source and three-size sequence. All 624 evaluations,
+26 pending resize drains and 39 exact controls passed. Direct mode retains the fading; composed
+versus direct differs by at most one RGB8 level in saved captures. Monotonic slider response
+also doses the model's existing edit and does not isolate HueOkLab. See
+[the report](passthrough-chroma.md) for every point's metrics, explicit gamma/luminance definitions,
+confounds, readback hashes and images. No production shader correction was made.
+
 **2026-09-14 — UICorrection HUD A/B: no observed effect.**
 `python3 tests/dlssnr-loopback/run.py --present-nr --hud-ab` adds bitmap text, a translucent
 menu, thin minimap roads and a moving/changing HUD counter. Six independently created model

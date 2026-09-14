@@ -135,7 +135,7 @@ def check_present_coverage(harness):
     print(f'  present transport coverage accepted; inspect before/after images in {RUN}')
 
 
-def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False):
+def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_ab=False):
     """Run the harness the way a Steam game runs: through Proton, in a compatdata prefix of its own.
 
     Hand-mirroring what Proton provides (vkd3d-proton, dxvk-nvapi, the driver's nvngx pair and the
@@ -165,13 +165,16 @@ def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False):
     if present_nr:
         for stale in RUN.glob('*-f*-*.ppm'):
             stale.unlink()
+        if composition_ab:
+            (RUN / 'composition-report.json').unlink(missing_ok=True)
+            (RUN / 'composition-vs-direct.png').unlink(missing_ok=True)
         if hud_ab:
             (RUN / 'hud-report.json').unlink(missing_ok=True)
             for stale in RUN.glob('hud-f*.png'):
                 stale.unlink()
     print(f'running under {proton.parent.name}')
     p = subprocess.run([str(proton), 'run', str(RUN / 'dlssnr-loopback.exe'), 'OptiScaler.dll'] +
-                       (['--present-hud-ab'] if hud_ab else ['--present-nr'] if present_nr else ['--cold-nr'] if cold_nr else []),
+                       (['--present-composition-ab'] if composition_ab else ['--present-hud-ab'] if hud_ab else ['--present-nr'] if present_nr else ['--cold-nr'] if cold_nr else []),
                        cwd=RUN, env=env, timeout=600)
     hlog = RUN / 'dlssnr-loopback.log'
     harness = hlog.read_text(errors='replace') if hlog.exists() else ''
@@ -182,7 +185,12 @@ def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False):
     if present_nr:
         if p.returncode != 0:
             raise SystemExit(f'present NR probe exited {p.returncode}; see {RUN / "dlssnr-loopback.log"}')
-        if hud_ab:
+        if composition_ab:
+            import re
+            if not re.search(r'^COMPOSITION-AB PASS: trials=13 attempts=624 successes=624 presents=624 pending_resize_drains=26 controls=39 capture_pairs=117$', harness, re.M):
+                raise SystemExit('ZERO COVERAGE: incomplete composition sweep')
+            run([sys.executable, HERE / 'analyze_composition.py', RUN])
+        elif hud_ab:
             import re
             if not re.search(r'^HUD-AB PASS: trials=6 attempts=192 successes=192 presents=192 controls=6 capture_pairs=192$', harness, re.M):
                 raise SystemExit('ZERO COVERAGE: incomplete HUD A/B')
@@ -235,20 +243,24 @@ def main():
     modes.add_argument('--present-nr', action='store_true',
                        help='controlled SDR swapchain, NR, fence-drained resize and before/after readback; '
                             'isolated artifacts/present-run; requires Proton')
-    ap.add_argument('--hud-ab', action='store_true', help='with --present-nr: paired HUD/UICorrection experiment')
+    experiments = ap.add_mutually_exclusive_group()
+    experiments.add_argument('--hud-ab', action='store_true', help='with --present-nr: paired HUD/UICorrection experiment')
+    experiments.add_argument('--composition-ab', action='store_true', help='with --present-nr: direct/composed and strength sweep')
     args = ap.parse_args()
+    if args.composition_ab and not args.present_nr:
+        ap.error('--composition-ab requires --present-nr')
     if args.hud_ab and not args.present_nr:
         ap.error('--hud-ab requires --present-nr')
     if args.present_nr and args.runtime != 'proton':
         ap.error('--present-nr requires --runtime proton')
-    if args.hud_ab:
+    if args.hud_ab or args.composition_ab:
         import importlib.util
         for module in ('numpy', 'PIL'):
             if importlib.util.find_spec(module) is None:
-                ap.error('--hud-ab analysis requires numpy and Pillow in the runner Python environment')
+                ap.error('image analysis requires numpy and Pillow in the runner Python environment')
     standalone = args.cold_nr or args.present_nr
     if args.present_nr:
-        RUN = OUT / ('hud-run' if args.hud_ab else 'present-run')
+        RUN = OUT / ('composition-run' if args.composition_ab else 'hud-run' if args.hud_ab else 'present-run')
     if args.cold_nr:
         RUN = OUT / 'cold-run'
 
@@ -322,7 +334,7 @@ def main():
             '[Menu]\nOverlayMenu=true\n[DlssNr]\nEnabled=true\n[Log]\nLogToFile=true\nLogLevel=2\n')
 
     if args.runtime == 'proton':
-        return run_under_proton(args.cold_nr, args.present_nr, args.hud_ab)
+        return run_under_proton(args.cold_nr, args.present_nr, args.hud_ab, args.composition_ab)
 
     # A separate runtime prefix: the compiler prefix is configured for MSVC, not for graphics, and
     # running the app there conflates "the harness is wrong" with "this prefix has no D3D12".

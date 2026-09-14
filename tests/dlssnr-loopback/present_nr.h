@@ -28,6 +28,9 @@ struct Host
     unsigned controls = 0, captures = 0;
     const char* stage = "setup";
     bool hud = false;
+    bool composition = false;
+    float transferStrength = 1, colourStrength = 1;
+    unsigned reversibleMode = 0;
     unsigned uiCorrection = 1;
     int switchTo = -1;
     std::string trial;
@@ -432,7 +435,9 @@ struct Host
             item.Height = height;
             item.Passthrough = 1; // Explicit SDR: no exposure texture, white-point law or tonemap.
             item.WhitePoint = item.ExposurePreMul = 1;
-            item.TransferStrength = item.ColourStrength = 1;
+            item.TransferStrength = transferStrength;
+            item.ColourStrength = colourStrength;
+            item.ReversibleMode = reversibleMode;
             item.MaxRatio = 2;
             item.Transfer = 1;
             item.ApplyModel = frame != 0; // One negative composition control per generation.
@@ -538,7 +543,8 @@ struct Host
         }
         if (hud || frame == 0 || frame == 1 || frame == 15)
         {
-            auto prefix = (hud ? trial : "g" + std::to_string(generation)) + "-f" + std::to_string(frame);
+            auto prefix = (hud ? trial : (composition ? trial + "-" : "") + "g" + std::to_string(generation)) + "-f" +
+                          std::to_string(frame);
             Save(prefix + "-before.ppm", a);
             Save(prefix + "-after.ppm", b);
             ++captures;
@@ -614,11 +620,34 @@ struct Host
         Check(device->GetDeviceRemovedReason(), "device health after ResizeBuffers");
         Allocate(w, h);
     }
+    void OriginalSequence()
+    {
+        Allocate(1280, 720);
+        for (unsigned extentStep = 0; extentStep < 3; ++extentStep)
+        {
+            for (unsigned frame = 0; frame < 16; ++frame)
+            {
+                Record(frame);
+                if (frame == 15 && extentStep < 2)
+                {
+                    Check(queue->Wait(gate, drains + 1), "enqueue resize gate");
+                    Submit(false);
+                    Resize(extentStep == 0 ? 960 : 1280, extentStep == 0 ? 540 : 720);
+                }
+                else
+                {
+                    Submit();
+                    Inspect(frame);
+                    Present();
+                }
+            }
+        }
+    }
 };
 
 static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D12CommandQueue* queue,
                 ID3D12CommandAllocator* alloc, ID3D12GraphicsCommandList* list, ID3D12Fence* fence, HANDLE event,
-                bool hud = false)
+                bool hud = false, bool composition = false)
 {
     Host host { device, queue, alloc, list, fence, event };
     try
@@ -628,6 +657,7 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
         Say(hud ? "  UICorrection A/B: per-trial create value, then optional evaluate-only switch\n"
                 : "  UICorrection=1\n");
         host.hud = hud;
+        host.composition = composition;
         host.Init(factory, window);
         if (hud)
         {
@@ -649,28 +679,37 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
                 host.ReleaseGeneration();
             }
         }
+        else if (composition)
+        {
+            struct Point
+            {
+                const char* name;
+                unsigned mode;
+                float transfer;
+                float colour;
+            };
+            const Point points[] = { { "composed", 0, 1, 1 }, { "direct", 2, 1, 1 },   { "t0", 0, 0, 1 },
+                                     { "t25", 0, .25f, 1 },   { "t50", 0, .5f, 1 },    { "t75", 0, .75f, 1 },
+                                     { "c0", 0, 1, 0 },       { "c25", 0, 1, .25f },   { "c50", 0, 1, .5f },
+                                     { "c75", 0, 1, .75f },   { "c125", 0, 1, 1.25f }, { "c150", 0, 1, 1.5f },
+                                     { "repeat", 0, 1, 1 } };
+            for (const auto& point : points)
+            {
+                host.trial = point.name;
+                host.reversibleMode = point.mode;
+                host.transferStrength = point.transfer;
+                host.colourStrength = point.colour;
+                host.generation = 0;
+                Say("COMPOSITION-POINT name=%s mode=%u transfer=%.2f colour=%.2f\n", point.name, point.mode,
+                    point.transfer, point.colour);
+                host.OriginalSequence();
+                Check(queue->Signal(fence, ++host.serial), "composition post-Present Signal");
+                host.ReleaseGeneration();
+            }
+        }
         else
         {
-            host.Allocate(1280, 720);
-            for (unsigned generation = 0; generation < 3; ++generation)
-            {
-                for (unsigned frame = 0; frame < 16; ++frame)
-                {
-                    host.Record(frame);
-                    if (frame == 15 && generation < 2)
-                    {
-                        Check(queue->Wait(host.gate, host.drains + 1), "enqueue resize gate");
-                        host.Submit(false);
-                        host.Resize(generation == 0 ? 960 : 1280, generation == 0 ? 540 : 720);
-                    }
-                    else
-                    {
-                        host.Submit();
-                        host.Inspect(frame);
-                        host.Present();
-                    }
-                }
-            }
+            host.OriginalSequence();
         }
         // Keep the final frame visible briefly; no additional NR evaluations or resubmissions.
         for (unsigned i = 0; i < 100; ++i)
@@ -689,6 +728,10 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
         if (hud)
             Say("HUD-AB PASS: trials=6 attempts=%u successes=%u presents=%u controls=%u capture_pairs=%u\n",
                 host.attempts, host.successes, host.presents, host.controls, host.captures);
+        else if (composition)
+            Say("COMPOSITION-AB PASS: trials=13 attempts=%u successes=%u presents=%u pending_resize_drains=%u "
+                "controls=%u capture_pairs=%u\n",
+                host.attempts, host.successes, host.presents, host.drains, host.controls, host.captures);
         else
             Say("PRESENT-NR PASS: attempts=%u successes=%u presents=%u pending_resize_drains=%u controls=%u "
                 "capture_pairs=%u\n",
