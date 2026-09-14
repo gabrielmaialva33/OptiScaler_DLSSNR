@@ -5,6 +5,50 @@
 #include <proxies/DXGI_Proxy.h>
 #include <proxies/D3D12_Proxy.h>
 
+// An event wake is not a completion proof: removal and an old timed-out registration
+// can both wake it. Keep one deadline across all such wakes.
+HRESULT WaitForBridgeFence(ID3D12Fence* fence, ID3D12Device* device, HANDLE event, UINT64 value, DWORD timeout)
+{
+    if (value == 0)
+        return S_OK;
+    if (fence == nullptr || event == nullptr)
+        return E_UNEXPECTED;
+
+    const auto deadline = GetTickCount64() + timeout;
+    bool registered = false;
+    for (;;)
+    {
+        const auto completed = fence->GetCompletedValue();
+        if (completed == UINT64_MAX)
+        {
+            const auto reason = device != nullptr ? device->GetDeviceRemovedReason() : S_OK;
+            return FAILED(reason) ? reason : DXGI_ERROR_DEVICE_REMOVED;
+        }
+        if (completed >= value)
+            return S_OK;
+
+        const auto now = GetTickCount64();
+        if (now >= deadline)
+            return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        if (!registered)
+        {
+            const auto result = fence->SetEventOnCompletion(value, event);
+            if (FAILED(result))
+                return result;
+            registered = true;
+        }
+        const auto beforeWait = GetTickCount64();
+        if (beforeWait >= deadline)
+            continue;
+        const auto result = WaitForSingleObject(event, static_cast<DWORD>(deadline - beforeWait));
+        if (result == WAIT_FAILED)
+            return HRESULT_FROM_WIN32(GetLastError());
+        if (result != WAIT_OBJECT_0 && result != WAIT_TIMEOUT)
+            return E_FAIL;
+        // Including WAIT_TIMEOUT: recheck removal/completion before returning a timeout.
+    }
+}
+
 HRESULT CreateD3D12DeviceOnAdapter(IDXGIAdapter* adapter, D3D_FEATURE_LEVEL featureLevel, ID3D12Device** device)
 {
     if (device == nullptr)

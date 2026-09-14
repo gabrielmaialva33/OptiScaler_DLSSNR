@@ -142,7 +142,8 @@ class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
     };
     bool IsInited() override
     {
-        return CallFeature([](auto f) { return f->IsInited(); }, bool {});
+        // Backend creation can succeed while bridge submission/completion fails.
+        return IFeature::IsInited() && CallFeature([](auto f) { return f->IsInited(); }, bool {});
     }
     float Sharpness() override
     {
