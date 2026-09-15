@@ -669,12 +669,19 @@ translucent menu, thin minimap lines and a moving counter into a presented frame
 independently created feature-18 instances at `UICorrection` 0 and 1 over identical source and
 history sequences, with repeats and runtime switches and verified parameter-block readbacks. **All
 192 presented RGB8 outputs were identical between the two flag values.** The probable reason is
-structural and does not go away with more testing: the HUD in a presented frame is *flattened into
-the colour buffer*, and the model appears to want a separate UI layer, which a present host by
-definition cannot supply — the frame arrives already composed. That measurement does not prove
-universal ineffectiveness on every model and driver, but it removes the cheap answer. **The HUD
-concern above is unanswered again, and the present host must not be planned as though a parameter
-solves it.**
+structural — but not the structure assumed at the time. **Corrected 2026-09-15:** `UICorrection` is a
+**gate**, not an effect. A third party's probing of the contract
+(`kibblerz/DLSS5-Reshade-AIO`, `lab/PRIVATE-CONTRACT-FINDINGS.md:112-127`) reports that it makes
+`DLSSNR.UI`, `UIAlpha` and `Backbuffer` live, and that with it on, `UI`'s alpha is a protected-pixel
+mask — alpha one bypasses NR, `Backbuffer`'s RGB supplies what is restored there, and their test
+recovered the original pixels inside a rectangle while keeping NR outside it. This tree clears all
+three inputs (`76feb2cb`'s own message: *"Explicitly clear the absent separate UI/alpha/backbuffer
+inputs"*), so the flag had nothing to gate. The measurement was sound and the inference from it was
+not.
+
+Unverified here, and worth reproducing cheaply in the loopback harness. And even when it
+reproduces it is a **mechanism, not a mask**: a present host still has to work out *where* the HUD
+is. What it removes is the need to invent a protection path — one already exists and is documented.
 
 **Our ImGui should draw after the pass**, so the model is not handed our own menu's glyphs to
 denoise. That is a visual-preservation decision, not a synchronisation requirement — either order

@@ -130,10 +130,29 @@ parameter to try rather than only a compute-shader mask to write.
 hard-edged bitmap text, a translucent menu, thin minimap lines and a moving counter was put through
 independently created feature-18 instances at `UICorrection` 0 and 1, over identical source and
 history sequences, with repeats, runtime switches and verified parameter-block readbacks. **All 192
-presented RGB8 outputs were identical.** The likely reason is structural: in a presented frame the
-HUD is flattened into the colour buffer, and the model appears to want a separate UI layer — which a
-present host cannot supply, because the frame arrives already composed. So the cheap answer is gone
-and the HUD problem is open again.
+presented RGB8 outputs were identical.** That measurement stands. **The reading of it was wrong, and
+is corrected here the next day.**
+
+`UICorrection` is not a dead parameter. It is a **gate**. `kibblerz/DLSS5-Reshade-AIO`'s
+`lab/PRIVATE-CONTRACT-FINDINGS.md:112-127` reports, from its own probing of the contract, that
+`UICorrection=0` makes `DLSSNR.UI`, `DLSSNR.UIAlpha` and `DLSSNR.Backbuffer` output-inert, and that
+with it enabled the alpha channel of `UI` becomes a protected-pixel mask: alpha zero leaves NR
+active, alpha one bypasses it, a spatial alpha mask bypasses it only where marked, and the RGB of
+`Backbuffer` supplies the pixels restored in the protected region. Their coherent test fed the
+original input as `Backbuffer` with a rectangular `UIAlpha` and got the original pixels back inside
+the rectangle with NR retained outside it.
+
+That is exactly why our own measurement found nothing: this tree clears those three inputs, and
+`76feb2cb` says so in its own commit message — *"Explicitly clear the absent separate UI/alpha/
+backbuffer inputs, matching production."* **We measured a gate with nothing behind it.** Flipping it
+could not have changed anything.
+
+Two limits on this correction, both real. It is **a third party's testing, not ours**; nothing here
+reproduces it, and the obvious reproduction is cheap — supply `Backbuffer` and a rectangular
+`UIAlpha` in the loopback harness and see whether the rectangle comes back unprocessed. And even if
+it reproduces, it supplies a **mechanism, not a mask**: a present host still does not know where the
+HUD is. What changes is that protecting the HUD stops being "write a compute shader and hope the
+model cooperates" and becomes "produce a mask and hand it to a documented contract".
 
 ## Sources checked
 
