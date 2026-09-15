@@ -16,8 +16,21 @@ repo), which adds Linux/Proton overlay patches on top.
   already set in the repo config; keep it.
 - Commit subjects use prefixes seen in history: `DLSS-NR:` for the module, `linux:` for Proton
   patches, `ci:` for workflows.
-- **Local until asked.** Never push to any remote unless the user asks for that specific ref
-  (`dlssnr/design/DEVELOPMENT.md` invariant 9).
+- **Do not push. But do not believe the tree is private either.** Never run `git push` unless the
+  user asks for that specific ref (`dlssnr/design/DEVELOPMENT.md` invariant 9). That rule governs
+  *your* actions and still holds.
+  **What it no longer describes is the repository.** Something on this machine mirrors
+  `dlss-neural-rendering` to `origin` on its own, one to six minutes after each commit — verified on
+  2026-09-15 against `git ls-remote`, with the reflog showing `update by push` back to 2026-09-13.
+  It was not identified: not a git hook, not `core.hooksPath`, not a Claude Code hook, not cron, not
+  a systemd timer, and not an editor (no VS Code config exists here and none was running).
+  **It is scoped to that one branch.** A commit on a scratch branch sat for nine minutes and was
+  never pushed; `origin` carries exactly one head. A ten-minute connection trace over that window
+  caught only `git-upload-pack` — reads — and no `git-receive-pack` at all.
+  So the control you actually have is **which branch receives the commit**, not whether it leaves
+  the machine. Production changes and anything unproven go on a branch and merge to
+  `dlss-neural-rendering` once they are measured; committing straight to the default branch
+  publishes the tip of a public repository that other projects reference.
 - **Never commit** `OptiScaler/resource_build_date.h`, `OptiScaler/resource_build_commit.h`, `x64/`,
   or `.winx/`. All are gitignored.
 - **The tree layout is upstream's, and stays that way.** The usual C++ advice (Pitchfork, the

@@ -38,7 +38,12 @@ review for its change type below, against the specs here.**
 8. **Vulkan lifetime.** Never free a Vulkan resource the GPU may still use: drain (`vkDeviceWaitIdle`)
    before a resize/teardown on a live device, and ABANDON (never `vkDestroy`/`.reset()`) handles that
    belong to a device that has gone away.
-9. **Local until asked.** No push without the user asking for that ref. See `push-discipline` memory.
+9. **Local until asked — for you. The branch is mirrored regardless.** No push without the user
+   asking for that ref; see `push-discipline` memory. But `dlss-neural-rendering` is pushed to
+   `origin` automatically a few minutes after every commit by something unidentified on this
+   machine (see CLAUDE.md for what was ruled out and how it was measured). It is scoped to that
+   branch, so unproven work belongs on its own branch — not because pushing is forbidden, but
+   because the default branch's tip is public the moment you commit to it.
 
 ---
 
