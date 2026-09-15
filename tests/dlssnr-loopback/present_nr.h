@@ -38,6 +38,10 @@ struct Host
     // Baked in at create time. Every trial releases and recreates the model, so varying it per trial
     // is honest; varying it between evaluations of one feature would not be.
     unsigned style = 0;
+    // Frames per generation. Sixteen is enough to show transport and a stable cost, and may be too
+    // few for the model's temporal state to settle -- ngxGym runs 1800 for its colour scenarios.
+    // A comparison that depends on settled history has to say which number it used.
+    unsigned framesPerGeneration = 16;
     // Linear, non-passthrough input. The SDR fixture reaches the encode through the swapchain buffer,
     // which is eight bits and tone-mapped, so Passthrough must be 1 and the proxy modes never run.
     // In this mode a linear copy of the same scene is uploaded straight into `source` instead, and the
@@ -515,7 +519,11 @@ struct Host
         // Default 1 matches production; the opt-in HUD experiment varies only this create argument.
         if (hud)
             extras(params, 1, nullptr, nullptr, nullptr, 0, 0, 0, 0);
-        feature = create(snippetPath, L"", device, list, params, w, h, 0, 1, static_cast<int>(style), 1, 1, 1, 1,
+        // SkinStructure is -1, not 1. Minus one means "follow local structure", which is the model's
+        // own default; one is an explicit strength. Passing 1 here made every measurement taken with
+        // this harness a measurement of a configuration no user runs. Found by reading NIGos/ngxGym's
+        // scenario files (MIT), which set NRSkinStructure=-1 throughout.
+        feature = create(snippetPath, L"", device, list, params, w, h, 0, 1, static_cast<int>(style), 1, 1, -1, 1,
                          uiCorrection);
         Submit();
         ColdNr::NgxResult("snippet Init", static_cast<unsigned>(*lastInit));
@@ -804,7 +812,9 @@ struct Host
                 Require(a == b, "ApplyModel=0 control changed source bytes");
             ++controls;
         }
-        if (hud || frame == 0 || frame == 1 || frame == 15)
+        // First, second and last. At the default sixteen the last is frame 15, so the names the
+        // analyzer anchors on are unchanged; a longer run moves that name and needs the analyzer told.
+        if (hud || frame == 0 || frame == 1 || frame == framesPerGeneration - 1)
         {
             auto prefix = (hud ? trial : (composition ? trial + "-" : "") + "g" + std::to_string(generation)) + "-f" +
                           std::to_string(frame);
@@ -888,10 +898,10 @@ struct Host
         Allocate(1280, 720);
         for (unsigned extentStep = 0; extentStep < 3; ++extentStep)
         {
-            for (unsigned frame = 0; frame < 16; ++frame)
+            for (unsigned frame = 0; frame < framesPerGeneration; ++frame)
             {
                 Record(frame);
-                if (frame == 15 && extentStep < 2)
+                if (frame == framesPerGeneration - 1 && extentStep < 2)
                 {
                     Check(queue->Wait(gate, drains + 1), "enqueue resize gate");
                     Submit(false);
