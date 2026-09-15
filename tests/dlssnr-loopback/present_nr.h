@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <thread>
+#include <tuple>
 #include "hud_fixture.h"
 #include "../../OptiScaler/shaders/dlssnr/DlssNr_Common.h"
 #include "../../OptiScaler/shaders/dlssnr/precompile/DlssNr_Shader.h"
@@ -50,12 +51,27 @@ struct Host
     // and a number from a game's log mean the same thing: model is the NGX evaluate alone, outside is
     // our encode and resolve. The harness's own fixture upload and readbacks are test scaffolding and
     // are deliberately outside both. Reading is trivial here only because every Submit already waits.
+    //
+    // LOCK THE GPU CLOCKS BEFORE BELIEVING ANY NUMBER FROM HERE. This harness runs sixteen frames,
+    // pauses, recreates and repeats: a low duty cycle that leaves the GPU dropping to its idle power
+    // state between trials, so the clock is ramping through most of the samples. Unlocked, three
+    // points with IDENTICAL settings measured 2.84, 14.09 and 15.63 ms; locked, the same three
+    // measured 3.615, 3.553 and 3.561. A game does not have this problem because its load is
+    // sustained, which is why the in-game numbers were stable and these were not.
+    //
+    //     sudo nvidia-smi -lgc 2100,2100 && sudo nvidia-smi -lmc 10501   # before
+    //     sudo nvidia-smi -rgc && sudo nvidia-smi -rmc                   # after
+    //
+    // The composition sweep carries "mode0", "composed" and "repeat" as the SAME configuration for
+    // exactly this reason. Read those three first. If they disagree, nothing else in the table means
+    // anything, and that is a fact about the machine rather than about the settings.
     Com<ID3D12QueryHeap> timestamps;
     Com<ID3D12Resource> timings;
     UINT64 gpuHz = 0;
     bool timed = false; // Set per recording; a torn recording (failed evaluate, resize) reports nothing.
     struct Sample
     {
+        std::string trial;
         unsigned generation, frame, width, height;
         double modelMs, outsideMs;
     };
@@ -543,7 +559,7 @@ struct Host
             return;
         }
         const auto ms = [&](UINT64 a, UINT64 b) { return (b - a) * 1000.0 / static_cast<double>(gpuHz); };
-        samples.push_back({ generation, frame, width, height, ms(t[1], t[2]), ms(t[0], t[1]) + ms(t[2], t[3]) });
+        samples.push_back({ trial, generation, frame, width, height, ms(t[1], t[2]), ms(t[0], t[1]) + ms(t[2], t[3]) });
     }
 
     void ReportTiming()
@@ -553,16 +569,20 @@ struct Host
             Say("TIMING: no samples\n");
             return;
         }
-        // Group by model extent; a median over mixed resolutions is meaningless.
-        std::vector<std::pair<unsigned, unsigned>> extents;
+        // Group by trial AND model extent. A median across configurations, or across resolutions,
+        // is not a measurement of either.
+        std::vector<std::tuple<std::string, unsigned, unsigned>> groups;
         for (const auto& s : samples)
-            if (std::find(extents.begin(), extents.end(), std::make_pair(s.width, s.height)) == extents.end())
-                extents.push_back({ s.width, s.height });
-        for (auto [w, h] : extents)
+        {
+            auto key = std::make_tuple(s.trial, s.width, s.height);
+            if (std::find(groups.begin(), groups.end(), key) == groups.end())
+                groups.push_back(key);
+        }
+        for (auto& [trialName, w, h] : groups)
         {
             std::vector<double> model, outside;
             for (const auto& s : samples)
-                if (s.width == w && s.height == h)
+                if (s.trial == trialName && s.width == w && s.height == h)
                 {
                     model.push_back(s.modelMs);
                     outside.push_back(s.outsideMs);
@@ -570,8 +590,10 @@ struct Host
             std::sort(model.begin(), model.end());
             std::sort(outside.begin(), outside.end());
             const auto pick = [](std::vector<double>& v, double q) { return v[static_cast<size_t>(v.size() * q)]; };
-            Say("TIMING model=%ux%u n=%zu model_ms p10=%.3f median=%.3f p90=%.3f outside_model_ms median=%.3f\n", w, h,
-                model.size(), pick(model, 0.1), model[model.size() / 2], pick(model, 0.9), outside[outside.size() / 2]);
+            Say("TIMING trial=%s model=%ux%u n=%zu model_ms p10=%.3f median=%.3f p90=%.3f "
+                "outside_model_ms median=%.3f\n",
+                trialName.empty() ? "-" : trialName.c_str(), w, h, model.size(), pick(model, 0.1),
+                model[model.size() / 2], pick(model, 0.9), outside[outside.size() / 2]);
         }
     }
 
@@ -771,11 +793,12 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
                 float transfer;
                 float colour;
             };
-            const Point points[] = { { "composed", 0, 1, 1 }, { "direct", 2, 1, 1 },   { "t0", 0, 0, 1 },
-                                     { "t25", 0, .25f, 1 },   { "t50", 0, .5f, 1 },    { "t75", 0, .75f, 1 },
-                                     { "c0", 0, 1, 0 },       { "c25", 0, 1, .25f },   { "c50", 0, 1, .5f },
-                                     { "c75", 0, 1, .75f },   { "c125", 0, 1, 1.25f }, { "c150", 0, 1, 1.5f },
-                                     { "repeat", 0, 1, 1 } };
+            const Point points[] = { { "mode0", 0, 1, 1 },   { "mode1", 1, 1, 1 },    { "mode3", 3, 1, 1 },
+                                     { "mode4", 4, 1, 1 },   { "composed", 0, 1, 1 }, { "direct", 2, 1, 1 },
+                                     { "t0", 0, 0, 1 },      { "t25", 0, .25f, 1 },   { "t50", 0, .5f, 1 },
+                                     { "t75", 0, .75f, 1 },  { "c0", 0, 1, 0 },       { "c25", 0, 1, .25f },
+                                     { "c50", 0, 1, .5f },   { "c75", 0, 1, .75f },   { "c125", 0, 1, 1.25f },
+                                     { "c150", 0, 1, 1.5f }, { "repeat", 0, 1, 1 } };
             for (const auto& point : points)
             {
                 host.trial = point.name;
@@ -812,7 +835,7 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
             Say("HUD-AB PASS: trials=6 attempts=%u successes=%u presents=%u controls=%u capture_pairs=%u\n",
                 host.attempts, host.successes, host.presents, host.controls, host.captures);
         else if (composition)
-            Say("COMPOSITION-AB PASS: trials=13 attempts=%u successes=%u presents=%u pending_resize_drains=%u "
+            Say("COMPOSITION-AB PASS: trials=17 attempts=%u successes=%u presents=%u pending_resize_drains=%u "
                 "controls=%u capture_pairs=%u\n",
                 host.attempts, host.successes, host.presents, host.drains, host.controls, host.captures);
         else
