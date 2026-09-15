@@ -45,6 +45,21 @@ struct Host
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
     UINT64 bufferBytes = 0;
     UINT stride = 0;
+
+    // GPU timing. Four timestamps bracket the same spans production reports, so a number from here
+    // and a number from a game's log mean the same thing: model is the NGX evaluate alone, outside is
+    // our encode and resolve. The harness's own fixture upload and readbacks are test scaffolding and
+    // are deliberately outside both. Reading is trivial here only because every Submit already waits.
+    Com<ID3D12QueryHeap> timestamps;
+    Com<ID3D12Resource> timings;
+    UINT64 gpuHz = 0;
+    bool timed = false; // Set per recording; a torn recording (failed evaluate, resize) reports nothing.
+    struct Sample
+    {
+        unsigned generation, frame, width, height;
+        double modelMs, outsideMs;
+    };
+    std::vector<Sample> samples;
     std::vector<unsigned char> pixels;
     NVSDK_NGX_Parameter* params = nullptr;
     void* feature = nullptr;
@@ -258,6 +273,14 @@ struct Host
         stride = device->GetDescriptorHandleIncrementSize(hd.Type);
         constants.p = Buffer(2 * sizeof(DlssNrConstants), D3D12_HEAP_TYPE_UPLOAD);
         Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)), "resize gate fence");
+
+        D3D12_QUERY_HEAP_DESC qd {};
+        qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        qd.Count = 4;
+        Check(device->CreateQueryHeap(&qd, IID_PPV_ARGS(&timestamps)), "timestamp query heap");
+        timings.p = Buffer(4 * sizeof(UINT64), D3D12_HEAP_TYPE_READBACK);
+        // A DIRECT queue's own frequency. Do not reuse one read from another queue.
+        Check(queue->GetTimestampFrequency(&gpuHz), "GetTimestampFrequency");
     }
 
     // Static synthetic SDR scene: gradients, textured ground, a brick wall, foliage silhouettes,
@@ -463,9 +486,12 @@ struct Host
         Readback(back, before);
         list->CopyResource(source, back); // Full-resolution copy-out, no UAV on swapchain buffers.
         Transition(list, source, D3D12_RESOURCE_STATE_COPY_DEST, Srv);
+        timed = false;
+        list->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, 0);
         Shader(0);
         Transition(list, proxy, Uav, Srv);
         Transition(list, original, Uav, Srv);
+        list->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, 1);
         ++attempts;
         auto result = evaluate(list, feature, params, proxy, depth, motion, answer, width, height, width, height, width,
                                height, 0, 0, 0, 0, 0, frame == 0 ? 1 : 0, 1, 0, 1, 1, 1, 1, 1, 1);
@@ -478,8 +504,12 @@ struct Host
             ColdNr::NgxResult("EvaluateFeature(18)", static_cast<unsigned>(result));
         }
         ++successes;
+        list->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, 2);
         Transition(list, answer, Uav, Srv);
         Shader(1);
+        list->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, 3);
+        list->ResolveQueryData(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, 0, 4, timings, 0);
+        timed = true;
         Transition(list, target, Uav, D3D12_RESOURCE_STATE_COPY_SOURCE);
         Transition(list, back, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
         list->CopyResource(back, target);
@@ -491,6 +521,58 @@ struct Host
         Transition(list, original, Srv, Uav);
         Transition(list, answer, Srv, Uav);
         Transition(list, source, Srv, D3D12_RESOURCE_STATE_COPY_DEST);
+    }
+
+    // Called only after a Submit that waited. Four resolved timestamps on one queue, so the
+    // differences are directly comparable; no cross-queue arithmetic is attempted.
+    void ReadTiming(unsigned frame)
+    {
+        if (!timed || gpuHz == 0)
+            return;
+        void* mapped = nullptr;
+        const D3D12_RANGE read { 0, 4 * sizeof(UINT64) };
+        Check(timings->Map(0, &read, &mapped), "timings Map");
+        UINT64 t[4] {};
+        memcpy(t, mapped, sizeof(t));
+        const D3D12_RANGE noWrite { 0, 0 };
+        timings->Unmap(0, &noWrite);
+        // A non-monotonic quadruple is a broken sample, not a fast one. Drop it rather than report it.
+        if (!(t[0] <= t[1] && t[1] <= t[2] && t[2] <= t[3]))
+        {
+            Say("  timing sample dropped (non-monotonic) generation=%u frame=%u\n", generation, frame);
+            return;
+        }
+        const auto ms = [&](UINT64 a, UINT64 b) { return (b - a) * 1000.0 / static_cast<double>(gpuHz); };
+        samples.push_back({ generation, frame, width, height, ms(t[1], t[2]), ms(t[0], t[1]) + ms(t[2], t[3]) });
+    }
+
+    void ReportTiming()
+    {
+        if (samples.empty())
+        {
+            Say("TIMING: no samples\n");
+            return;
+        }
+        // Group by model extent; a median over mixed resolutions is meaningless.
+        std::vector<std::pair<unsigned, unsigned>> extents;
+        for (const auto& s : samples)
+            if (std::find(extents.begin(), extents.end(), std::make_pair(s.width, s.height)) == extents.end())
+                extents.push_back({ s.width, s.height });
+        for (auto [w, h] : extents)
+        {
+            std::vector<double> model, outside;
+            for (const auto& s : samples)
+                if (s.width == w && s.height == h)
+                {
+                    model.push_back(s.modelMs);
+                    outside.push_back(s.outsideMs);
+                }
+            std::sort(model.begin(), model.end());
+            std::sort(outside.begin(), outside.end());
+            const auto pick = [](std::vector<double>& v, double q) { return v[static_cast<size_t>(v.size() * q)]; };
+            Say("TIMING model=%ux%u n=%zu model_ms p10=%.3f median=%.3f p90=%.3f outside_model_ms median=%.3f\n", w, h,
+                model.size(), pick(model, 0.1), model[model.size() / 2], pick(model, 0.9), outside[outside.size() / 2]);
+        }
     }
 
     std::vector<unsigned char> Bytes(ID3D12Resource* buffer)
@@ -637,6 +719,7 @@ struct Host
                 else
                 {
                     Submit();
+                    ReadTiming(frame);
                     Inspect(frame);
                     Present();
                 }
@@ -736,6 +819,7 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
             Say("PRESENT-NR PASS: attempts=%u successes=%u presents=%u pending_resize_drains=%u controls=%u "
                 "capture_pairs=%u\n",
                 host.attempts, host.successes, host.presents, host.drains, host.controls, host.captures);
+        host.ReportTiming();
     }
     catch (const std::exception& error)
     {
