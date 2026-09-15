@@ -33,6 +33,9 @@ struct Host
     float transferStrength = 1, colourStrength = 1;
     unsigned reversibleMode = 0;
     unsigned uiCorrection = 1;
+    // Baked in at create time. Every trial releases and recreates the model, so varying it per trial
+    // is honest; varying it between evaluations of one feature would not be.
+    unsigned style = 0;
     int switchTo = -1;
     std::string trial;
     Com<IDXGISwapChain3> swapchain;
@@ -62,9 +65,18 @@ struct Host
     //     sudo nvidia-smi -lgc 2100,2100 && sudo nvidia-smi -lmc 10501   # before
     //     sudo nvidia-smi -rgc && sudo nvidia-smi -rmc                   # after
     //
-    // The composition sweep carries "mode0", "composed" and "repeat" as the SAME configuration for
-    // exactly this reason. Read those three first. If they disagree, nothing else in the table means
-    // anything, and that is a fact about the machine rather than about the settings.
+    // The composition sweep carries "mode0", "composed", "repeat" and "style0" as the SAME
+    // configuration for exactly this reason. Read those four first. If they disagree, nothing else in
+    // the table means anything, and that is a fact about the machine rather than about the settings.
+    //
+    // A SECOND LIMIT, structural rather than statistical: this fixture is SDR and runs with
+    // Passthrough=1, and the encode returns before any ReversibleMode branch in that case
+    // (dlssnr.hlsl:658-662, whose own comment says the branch is "reached only when the frame is not
+    // passthrough"). So ReversibleMode 0, 1 and 3 are IDENTICAL here by construction -- their effect
+    // lives in the encode -- while 2 and 4 differ only because theirs lives in the resolve. Measuring
+    // the proxy modes needs a linear, non-passthrough fixture that this harness does not have. Any
+    // parameter whose effect is in the encode is invisible to this sweep; do not read its flat
+    // numbers as "the setting does nothing".
     Com<ID3D12QueryHeap> timestamps;
     Com<ID3D12Resource> timings;
     UINT64 gpuHz = 0;
@@ -411,7 +423,8 @@ struct Host
         // Default 1 matches production; the opt-in HUD experiment varies only this create argument.
         if (hud)
             extras(params, 1, nullptr, nullptr, nullptr, 0, 0, 0, 0);
-        feature = create(snippetPath, L"", device, list, params, w, h, 0, 1, 0, 1, 1, 1, 1, uiCorrection);
+        feature = create(snippetPath, L"", device, list, params, w, h, 0, 1, static_cast<int>(style), 1, 1, 1, 1,
+                         uiCorrection);
         Submit();
         ColdNr::NgxResult("snippet Init", static_cast<unsigned>(*lastInit));
         ColdNr::NgxResult("CreateFeature(18)", static_cast<unsigned>(*lastCreate));
@@ -792,22 +805,25 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
                 unsigned mode;
                 float transfer;
                 float colour;
+                unsigned style;
             };
-            const Point points[] = { { "mode0", 0, 1, 1 },   { "mode1", 1, 1, 1 },    { "mode3", 3, 1, 1 },
-                                     { "mode4", 4, 1, 1 },   { "composed", 0, 1, 1 }, { "direct", 2, 1, 1 },
-                                     { "t0", 0, 0, 1 },      { "t25", 0, .25f, 1 },   { "t50", 0, .5f, 1 },
-                                     { "t75", 0, .75f, 1 },  { "c0", 0, 1, 0 },       { "c25", 0, 1, .25f },
-                                     { "c50", 0, 1, .5f },   { "c75", 0, 1, .75f },   { "c125", 0, 1, 1.25f },
-                                     { "c150", 0, 1, 1.5f }, { "repeat", 0, 1, 1 } };
+            const Point points[] = { { "mode0", 0, 1, 1, 0 },   { "mode1", 1, 1, 1, 0 },    { "mode3", 3, 1, 1, 0 },
+                                     { "mode4", 4, 1, 1, 0 },   { "composed", 0, 1, 1, 0 }, { "direct", 2, 1, 1, 0 },
+                                     { "t0", 0, 0, 1, 0 },      { "t25", 0, .25f, 1, 0 },   { "t50", 0, .5f, 1, 0 },
+                                     { "t75", 0, .75f, 1, 0 },  { "c0", 0, 1, 0, 0 },       { "c25", 0, 1, .25f, 0 },
+                                     { "c50", 0, 1, .5f, 0 },   { "c75", 0, 1, .75f, 0 },   { "c125", 0, 1, 1.25f, 0 },
+                                     { "c150", 0, 1, 1.5f, 0 }, { "repeat", 0, 1, 1, 0 },   { "style0", 0, 1, 1, 0 },
+                                     { "style1", 0, 1, 1, 1 },  { "style2", 0, 1, 1, 2 } };
             for (const auto& point : points)
             {
                 host.trial = point.name;
                 host.reversibleMode = point.mode;
                 host.transferStrength = point.transfer;
                 host.colourStrength = point.colour;
+                host.style = point.style;
                 host.generation = 0;
-                Say("COMPOSITION-POINT name=%s mode=%u transfer=%.2f colour=%.2f\n", point.name, point.mode,
-                    point.transfer, point.colour);
+                Say("COMPOSITION-POINT name=%s mode=%u transfer=%.2f colour=%.2f style=%u\n", point.name, point.mode,
+                    point.transfer, point.colour, point.style);
                 host.OriginalSequence();
                 Check(queue->Signal(fence, ++host.serial), "composition post-Present Signal");
                 host.ReleaseGeneration();
@@ -835,7 +851,7 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
             Say("HUD-AB PASS: trials=6 attempts=%u successes=%u presents=%u controls=%u capture_pairs=%u\n",
                 host.attempts, host.successes, host.presents, host.controls, host.captures);
         else if (composition)
-            Say("COMPOSITION-AB PASS: trials=17 attempts=%u successes=%u presents=%u pending_resize_drains=%u "
+            Say("COMPOSITION-AB PASS: trials=20 attempts=%u successes=%u presents=%u pending_resize_drains=%u "
                 "controls=%u capture_pairs=%u\n",
                 host.attempts, host.successes, host.presents, host.drains, host.controls, host.captures);
         else

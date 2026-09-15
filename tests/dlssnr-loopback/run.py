@@ -187,7 +187,7 @@ def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_
             raise SystemExit(f'present NR probe exited {p.returncode}; see {RUN / "dlssnr-loopback.log"}')
         if composition_ab:
             import re
-            if not re.search(r'^COMPOSITION-AB PASS: trials=17 attempts=816 successes=816 presents=816 pending_resize_drains=34 controls=51 capture_pairs=153$', harness, re.M):
+            if not re.search(r'^COMPOSITION-AB PASS: trials=20 attempts=960 successes=960 presents=960 pending_resize_drains=40 controls=60 capture_pairs=180$', harness, re.M):
                 raise SystemExit('ZERO COVERAGE: incomplete composition sweep')
             run([sys.executable, HERE / 'analyze_composition.py', RUN])
         elif hud_ab:

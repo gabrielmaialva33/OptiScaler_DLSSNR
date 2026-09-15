@@ -9,9 +9,14 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-POINTS = dict(composed=(0, 1, 1), direct=(2, 1, 1), t0=(0, 0, 1), t25=(0, .25, 1),
-              t50=(0, .5, 1), t75=(0, .75, 1), c0=(0, 1, 0), c25=(0, 1, .25),
-              c50=(0, 1, .5), c75=(0, 1, .75), c125=(0, 1, 1.25), c150=(0, 1, 1.5), repeat=(0, 1, 1))
+# (ReversibleMode, TransferStrength, ColourStrength, Style), in the order the harness runs them.
+# mode0, composed, repeat and style0 are deliberately the SAME configuration: they are the control.
+# If their numbers disagree, the machine is the variable and nothing else in the table is readable.
+POINTS = dict(mode0=(0, 1, 1, 0), mode1=(1, 1, 1, 0), mode3=(3, 1, 1, 0), mode4=(4, 1, 1, 0),
+              composed=(0, 1, 1, 0), direct=(2, 1, 1, 0), t0=(0, 0, 1, 0), t25=(0, .25, 1, 0),
+              t50=(0, .5, 1, 0), t75=(0, .75, 1, 0), c0=(0, 1, 0, 0), c25=(0, 1, .25, 0),
+              c50=(0, 1, .5, 0), c75=(0, 1, .75, 0), c125=(0, 1, 1.25, 0), c150=(0, 1, 1.5, 0),
+              repeat=(0, 1, 1, 0), style0=(0, 1, 1, 0), style1=(0, 1, 1, 1), style2=(0, 1, 1, 2))
 
 
 def saturation(rgb):
@@ -51,8 +56,9 @@ def main(directory):
     root = Path(directory)
     hashes, records, comparisons = {}, {}, {}
     log = (root / 'dlssnr-loopback.log').read_text(errors='replace')
-    observed = re.findall(r'^COMPOSITION-POINT name=(\w+) mode=(\d+) transfer=(\d+\.\d+) colour=(\d+\.\d+)$', log, re.M)
-    actual = [(name, (int(mode), float(t), float(c))) for name, mode, t, c in observed]
+    observed = re.findall(
+        r'^COMPOSITION-POINT name=(\w+) mode=(\d+) transfer=(\d+\.\d+) colour=(\d+\.\d+) style=(\d+)$', log, re.M)
+    actual = [(name, (int(mode), float(t), float(c), int(st))) for name, mode, t, c, st in observed]
     if actual != list(POINTS.items()):
         raise RuntimeError('missing, duplicated or unexpected composition point settings in anchored log')
 
@@ -93,7 +99,7 @@ def main(directory):
                 delta = np.abs(outputs[p].astype(np.int16) - outputs[q].astype(np.int16))
                 comparisons[f'{label}-g{gen}-f{frame}'] = {
                     'mae': float(delta.mean()), 'max': int(delta.max()), 'changed_channels': int(np.count_nonzero(delta))}
-    report = {'points_mode_transfer_colour': POINTS,
+    report = {'points_mode_transfer_colour_style': POINTS,
               'definitions': {'saturation': 'mean HSV S of encoded RGB, black S=0',
                               'linear_Y': 'mean BT.709 Y after piecewise sRGB decoding',
                               'encoded_Yprime': 'mean dot(encoded RGB, BT.709 weights); NOT physical luminance',
