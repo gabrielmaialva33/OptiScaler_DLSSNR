@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <thread>
+#include <map>
 #include <tuple>
+#include <cmath>
 #include "hud_fixture.h"
 #include "../../OptiScaler/shaders/dlssnr/DlssNr_Common.h"
 #include "../../OptiScaler/shaders/dlssnr/precompile/DlssNr_Shader.h"
@@ -36,6 +38,19 @@ struct Host
     // Baked in at create time. Every trial releases and recreates the model, so varying it per trial
     // is honest; varying it between evaluations of one feature would not be.
     unsigned style = 0;
+    // Linear, non-passthrough input. The SDR fixture reaches the encode through the swapchain buffer,
+    // which is eight bits and tone-mapped, so Passthrough must be 1 and the proxy modes never run.
+    // In this mode a linear copy of the same scene is uploaded straight into `source` instead, and the
+    // backbuffer still carries the tone-mapped one for presentation and for the before image.
+    bool linearInput = false;
+    std::vector<float> linearPixels;
+    // First linear ApplyModel=0 frame PER EXTENT. The sweep runs 1280x720, 960x540 and 1280x720 in
+    // every trial, so one global control compares images of different sizes -- which is exactly the
+    // mistake this key exists to prevent.
+    std::map<std::pair<unsigned, unsigned>, std::vector<unsigned char>> linearControl;
+    Com<ID3D12Resource> linearUpload;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT linearFootprint {};
+    UINT64 linearBytes = 0;
     int switchTo = -1;
     std::string trial;
     Com<IDXGISwapChain3> swapchain;
@@ -314,6 +329,69 @@ struct Host
     // Static synthetic SDR scene: gradients, textured ground, a brick wall, foliage silhouettes,
     // one-pixel detail, saturated patches and a HUD-like reticle. Exact bytes reused every frame.
     // This can reveal corruption and changes to fine detail; it is not a photorealism benchmark.
+    // The same scene as Fixture(), in linear light, with WhitePoint at 1.0 so display white is 1.0 and
+    // the bright patches sit above it. Those highlights are the entire reason this mode exists: the
+    // proxy modes differ in how much gradation they preserve above white, and an SDR fixture has none
+    // to preserve. This is a procedural scene, not a photometric reference -- it can show that the
+    // modes differ and by how much, and cannot say which looks better.
+    void FixtureLinear()
+    {
+        linearPixels.resize(static_cast<size_t>(width) * height * 4);
+        for (unsigned y = 0; y < height; ++y)
+            for (unsigned x = 0; x < width; ++x)
+            {
+                const size_t index = (static_cast<size_t>(y) * width + x) * 4;
+                const size_t sdr = (static_cast<size_t>(y) * width + x) * 4;
+                // Start from the tone-mapped scene decoded back to linear, so both fixtures show the
+                // same picture, then push the emissive regions above white.
+                const auto decode = [](unsigned char v)
+                {
+                    const float c = v / 255.0f;
+                    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+                };
+                float r = decode(pixels[sdr]), g = decode(pixels[sdr + 1]), b = decode(pixels[sdr + 2]);
+                // Sky gradient carries a mild overbright; the saturated bar strip and a lamp disc go
+                // well past white, which is where the knee and the two reversible curves disagree.
+                const float sky = 1.0f + 0.6f * (1.0f - static_cast<float>(y) / height);
+                if (y < height / 8 && x < width / 2)
+                {
+                    r *= 3.5f;
+                    g *= 3.5f;
+                    b *= 3.5f;
+                }
+                else if (y < height / 3)
+                {
+                    r *= sky;
+                    g *= sky;
+                    b *= sky;
+                }
+                const float dx = static_cast<float>(x) - width * 0.82f, dy = static_cast<float>(y) - height * 0.22f;
+                if (dx * dx + dy * dy < (width * 0.035f) * (width * 0.035f))
+                {
+                    r += 8.0f;
+                    g += 7.4f;
+                    b += 5.2f;
+                }
+                linearPixels[index] = r;
+                linearPixels[index + 1] = g;
+                linearPixels[index + 2] = b;
+                linearPixels[index + 3] = 1.0f;
+            }
+    }
+
+    void UploadLinear()
+    {
+        void* mapped = nullptr;
+        const D3D12_RANGE noRead { 0, 0 };
+        Check(linearUpload->Map(0, &noRead, &mapped), "linear upload Map");
+        for (unsigned y = 0; y < height; ++y)
+            memcpy(static_cast<unsigned char*>(mapped) + linearFootprint.Offset +
+                       y * linearFootprint.Footprint.RowPitch,
+                   linearPixels.data() + static_cast<size_t>(y) * width * 4,
+                   static_cast<size_t>(width) * 4 * sizeof(float));
+        linearUpload->Unmap(0, nullptr);
+    }
+
     void Fixture()
     {
         pixels.resize(static_cast<size_t>(width) * height * 4);
@@ -384,20 +462,34 @@ struct Host
         ++generation;
         for (unsigned i = 0; i < backs.size(); ++i)
             Check(swapchain->GetBuffer(i, IID_PPV_ARGS(&backs[i].p)), "GetBuffer");
-        source.p = MakeTexture(device, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, false, D3D12_RESOURCE_STATE_COPY_DEST);
+        source.p = MakeTexture(device, w, h, linearInput ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM,
+                               false, D3D12_RESOURCE_STATE_COPY_DEST);
         target.p = MakeTexture(device, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, true, Uav);
         proxy.p = MakeTexture(device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, true, Uav);
         original.p = MakeTexture(device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, true, Uav);
         answer.p = MakeTexture(device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, true, Uav);
         depth.p = MakeTexture(device, w, h, DXGI_FORMAT_R32_FLOAT, true, Uav);
         motion.p = MakeTexture(device, w, h, DXGI_FORMAT_R16G16_FLOAT, true, Uav);
-        const auto desc = source->GetDesc();
+        // This footprint describes the EIGHT-BIT backbuffer upload and the readbacks, so it must be
+        // taken from that format and not from `source`, which the linear mode widens to four floats.
+        // Deriving it from `source` silently repitched every row of the fixture upload.
+        auto desc = source->GetDesc();
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bufferBytes);
         upload.p = Buffer(bufferBytes, D3D12_HEAP_TYPE_UPLOAD);
         before.p = Buffer(bufferBytes, D3D12_HEAP_TYPE_READBACK);
         after.p = Buffer(bufferBytes, D3D12_HEAP_TYPE_READBACK);
         Fixture();
         UploadFixture();
+        if (linearInput)
+        {
+            // Derived from `pixels`, so it has to come after Fixture() has filled it for this extent.
+            const auto linearDesc = source->GetDesc();
+            device->GetCopyableFootprints(&linearDesc, 0, 1, 0, &linearFootprint, nullptr, nullptr, &linearBytes);
+            linearUpload.p = Buffer(linearBytes, D3D12_HEAP_TYPE_UPLOAD);
+            FixtureLinear();
+            UploadLinear();
+        }
         ID3D12Resource* encode[] = { source, source, source, source, source, proxy, original };
         ID3D12Resource* resolve[] = { proxy, answer, original, motion, proxy, target, target };
         for (unsigned i = 0; i < 7; ++i)
@@ -485,7 +577,10 @@ struct Host
         {
             item.Width = width;
             item.Height = height;
-            item.Passthrough = 1; // Explicit SDR: no exposure texture, white-point law or tonemap.
+            // Passthrough 1 is the explicit SDR contract: no exposure texture, white-point law or
+            // tonemap. Clearing it is the whole point of the linear mode -- it is what lets the encode
+            // reach its proxy branches at all.
+            item.Passthrough = linearInput ? 0 : 1;
             item.WhitePoint = item.ExposurePreMul = 1;
             item.TransferStrength = transferStrength;
             item.ColourStrength = colourStrength;
@@ -513,7 +608,21 @@ struct Host
         list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
         Transition(list, back, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
         Readback(back, before);
-        list->CopyResource(source, back); // Full-resolution copy-out, no UAV on swapchain buffers.
+        if (linearInput)
+        {
+            // The encode reads linear light that never passed through the eight-bit backbuffer. The
+            // backbuffer still received the tone-mapped fixture above, so presentation and the before
+            // image are unchanged and every existing comparison still means what it meant.
+            D3D12_TEXTURE_COPY_LOCATION lin {}, linTo {};
+            lin.pResource = linearUpload;
+            lin.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            lin.PlacedFootprint = linearFootprint;
+            linTo.pResource = source;
+            linTo.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            list->CopyTextureRegion(&linTo, 0, 0, 0, &lin, nullptr);
+        }
+        else
+            list->CopyResource(source, back); // Full-resolution copy-out, no UAV on swapchain buffers.
         Transition(list, source, D3D12_RESOURCE_STATE_COPY_DEST, Srv);
         timed = false;
         list->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, 0);
@@ -655,7 +764,44 @@ struct Host
             changed, a.size() / 4 * 3, static_cast<double>(delta) / (a.size() / 4 * 3), maximum);
         if (frame == 0)
         {
-            Require(a == b, "ApplyModel=0 control changed source bytes");
+            if (linearInput)
+            {
+                // The SDR control asserts the output equals the backbuffer, which only holds while the
+                // pipeline reads the backbuffer. Here it reads a linear source instead, so an
+                // ApplyModel=0 frame is that linear light passed through and written to eight bits --
+                // legitimately not the tone-mapped fixture. The invariant that still bites is
+                // determinism: the clean frame must not depend on which proxy mode is selected, since
+                // the model's edit is the only thing a mode is allowed to change.
+                auto& control = linearControl[{ width, height }];
+                if (control.empty())
+                    control = b;
+                else
+                {
+                    // RGB only, matching the MAE loop above, which skips alpha on purpose. The encode
+                    // writes opaque alpha for every mode but 0 (dlssnr.hlsl: alpha = gReversibleMode
+                    // != 0 ? 1.0 : source.a), so an alpha difference here is the documented behaviour
+                    // rather than a broken control. It is reported instead of asserted, so that
+                    // hiding it is a choice on the record.
+                    size_t rgb = 0, alpha = 0;
+                    for (size_t i = 0; i < b.size(); ++i)
+                        (i % 4 == 3 ? alpha : rgb) += (b[i] != control[i]);
+                    if (alpha != 0)
+                        Say("  linear control: %zu alpha bytes differ from the first trial (expected for "
+                            "ReversibleMode != 0)\n",
+                            alpha);
+                    if (rgb != 0)
+                    {
+                        // Save both sides before failing. A control that fails without leaving the two
+                        // images behind cannot be diagnosed without another full run.
+                        Save(trial + "-control-observed.ppm", b);
+                        Save("linear-control-expected.ppm", control);
+                        Say("  linear control: %zu RGB bytes differ; both images saved\n", rgb);
+                    }
+                    Require(rgb == 0, "ApplyModel=0 control differs in RGB between linear trials");
+                }
+            }
+            else
+                Require(a == b, "ApplyModel=0 control changed source bytes");
             ++controls;
         }
         if (hud || frame == 0 || frame == 1 || frame == 15)
@@ -814,6 +960,13 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
                                      { "c50", 0, 1, .5f, 0 },   { "c75", 0, 1, .75f, 0 },   { "c125", 0, 1, 1.25f, 0 },
                                      { "c150", 0, 1, 1.5f, 0 }, { "repeat", 0, 1, 1, 0 },   { "style0", 0, 1, 1, 0 },
                                      { "style1", 0, 1, 1, 1 },  { "style2", 0, 1, 1, 2 } };
+            // The four proxy modes again, this time with a linear non-passthrough source so the encode
+            // actually reaches them. lin0 repeats lin0b as the control for this half of the table.
+            const Point linearPoints[] = { { "lin0", 0, 1, 1, 0 },
+                                           { "lin1", 1, 1, 1, 0 },
+                                           { "lin3", 3, 1, 1, 0 },
+                                           { "lin4", 4, 1, 1, 0 },
+                                           { "lin0b", 0, 1, 1, 0 } };
             for (const auto& point : points)
             {
                 host.trial = point.name;
@@ -828,6 +981,22 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
                 Check(queue->Signal(fence, ++host.serial), "composition post-Present Signal");
                 host.ReleaseGeneration();
             }
+            host.linearInput = true;
+            for (const auto& point : linearPoints)
+            {
+                host.trial = point.name;
+                host.reversibleMode = point.mode;
+                host.transferStrength = point.transfer;
+                host.colourStrength = point.colour;
+                host.style = point.style;
+                host.generation = 0;
+                Say("COMPOSITION-POINT name=%s mode=%u transfer=%.2f colour=%.2f style=%u\n", point.name, point.mode,
+                    point.transfer, point.colour, point.style);
+                host.OriginalSequence();
+                Check(queue->Signal(fence, ++host.serial), "linear composition post-Present Signal");
+                host.ReleaseGeneration();
+            }
+            host.linearInput = false;
         }
         else
         {
@@ -851,7 +1020,7 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
             Say("HUD-AB PASS: trials=6 attempts=%u successes=%u presents=%u controls=%u capture_pairs=%u\n",
                 host.attempts, host.successes, host.presents, host.controls, host.captures);
         else if (composition)
-            Say("COMPOSITION-AB PASS: trials=20 attempts=%u successes=%u presents=%u pending_resize_drains=%u "
+            Say("COMPOSITION-AB PASS: trials=25 attempts=%u successes=%u presents=%u pending_resize_drains=%u "
                 "controls=%u capture_pairs=%u\n",
                 host.attempts, host.successes, host.presents, host.drains, host.controls, host.captures);
         else

@@ -16,7 +16,14 @@ POINTS = dict(mode0=(0, 1, 1, 0), mode1=(1, 1, 1, 0), mode3=(3, 1, 1, 0), mode4=
               composed=(0, 1, 1, 0), direct=(2, 1, 1, 0), t0=(0, 0, 1, 0), t25=(0, .25, 1, 0),
               t50=(0, .5, 1, 0), t75=(0, .75, 1, 0), c0=(0, 1, 0, 0), c25=(0, 1, .25, 0),
               c50=(0, 1, .5, 0), c75=(0, 1, .75, 0), c125=(0, 1, 1.25, 0), c150=(0, 1, 1.5, 0),
-              repeat=(0, 1, 1, 0), style0=(0, 1, 1, 0), style1=(0, 1, 1, 1), style2=(0, 1, 1, 2))
+              repeat=(0, 1, 1, 0), style0=(0, 1, 1, 0), style1=(0, 1, 1, 1), style2=(0, 1, 1, 2),
+              # Linear, non-passthrough source: the only half of the table where the encode's
+              # proxy branches actually run. lin0 and lin0b are this half's control pair.
+              lin0=(0, 1, 1, 0), lin1=(1, 1, 1, 0), lin3=(3, 1, 1, 0), lin4=(4, 1, 1, 0),
+              lin0b=(0, 1, 1, 0))
+
+
+LINEAR = ('lin0', 'lin1', 'lin3', 'lin4', 'lin0b')
 
 
 def saturation(rgb):
@@ -54,7 +61,7 @@ def gamma_fit(a, b):
 
 def main(directory):
     root = Path(directory)
-    hashes, records, comparisons = {}, {}, {}
+    hashes, records, comparisons, linear_controls = {}, {}, {}, {}
     log = (root / 'dlssnr-loopback.log').read_text(errors='replace')
     observed = re.findall(
         r'^COMPOSITION-POINT name=(\w+) mode=(\d+) transfer=(\d+\.\d+) colour=(\d+\.\d+) style=(\d+)$', log, re.M)
@@ -86,8 +93,21 @@ def main(directory):
                 before, after = read(point, gen, frame, 'before'), read(point, gen, frame, 'after')
                 if not np.array_equal(before, clean):
                     raise RuntimeError(f'source mismatch {point} g{gen} f{frame}')
-                if frame == 0 and not np.array_equal(before, after):
-                    raise RuntimeError(f'ApplyModel=0 control not exact: {point} g{gen}')
+                if frame == 0:
+                    if point in LINEAR:
+                        # The linear points feed the encode a float source that never passed through
+                        # the eight-bit backbuffer, so an ApplyModel=0 frame is that linear light
+                        # written to eight bits -- correctly not equal to the tone-mapped `before`.
+                        # The invariant that still holds is that the clean frame does not depend on
+                        # which proxy mode is selected: a mode may only change the model's edit.
+                        key = (gen, before.shape)
+                        if key in linear_controls:
+                            if not np.array_equal(after, linear_controls[key]):
+                                raise RuntimeError(f'linear ApplyModel=0 control differs: {point} g{gen}')
+                        else:
+                            linear_controls[key] = after
+                    elif not np.array_equal(before, after):
+                        raise RuntimeError(f'ApplyModel=0 control not exact: {point} g{gen}')
                 outputs[point] = after
                 b = after.astype(np.float64) / 255
                 entry = {'full': stats(a, b), 'gamma': gamma_fit(a, b)}
