@@ -25,6 +25,41 @@ POINTS = dict(mode0=(0, 1, 1, 0), mode1=(1, 1, 1, 0), mode3=(3, 1, 1, 0), mode4=
 
 LINEAR = ('lin0', 'lin1', 'lin3', 'lin4', 'lin0b')
 
+# The fixture's bar strip, in reading order, as the eight values Fixture() writes: each channel is
+# 235 where the patch index has that bit set and 20 where it does not. They are known inputs, which
+# is what makes an output claim about them checkable rather than descriptive.
+BAR_PATCHES = [(235 if i & 1 else 20, 235 if i & 2 else 20, 235 if i & 4 else 20) for i in range(8)]
+
+# Ported in spirit from NIGos/ngxGym's check-colour.py (MIT): the useful idea there is a two-sided
+# test -- the input must be exactly what was written, and the output is allowed to change while a
+# collapsed gamut still fails. Their version works in HDR10 nits; this fixture is SDR and linear, so
+# the quantity here is chroma retention rather than absolute luminance.
+CHROMA_FLOOR = .5  # A guard against collapse, not a quality bar. The measured value is the result.
+
+
+def bar_gamut(before, after, width, height):
+    """Per-patch chroma retention at the centre of each known bar patch.
+
+    Chroma is max(RGB) - min(RGB) on the encoded values: zero for the two neutral patches, large for
+    the six saturated ones. The model is free to move luminance and hue; what this catches is the
+    saturated patches going grey, which is the specific failure 'washed out' names.
+    """
+    out, worst = {}, None
+    y = height // 16                       # vertical centre of the strip (it spans y < height/8)
+    for i, known in enumerate(BAR_PATCHES):
+        x = (2 * i + 1) * (width // 2) // 16   # centre of patch i within the left half
+        src, dst = before[y, x].astype(int), after[y, x].astype(int)
+        if tuple(src) != known:
+            raise RuntimeError(f'bar patch {i} input {tuple(src)} != written {known}')
+        c_in, c_out = int(src.max() - src.min()), int(dst.max() - dst.min())
+        entry = {'known': list(known), 'out': dst.tolist(), 'chroma_in': c_in, 'chroma_out': c_out,
+                 'retained': (c_out / c_in) if c_in else None}
+        out[f'patch{i}'] = entry
+        if entry['retained'] is not None and (worst is None or entry['retained'] < worst[1]):
+            worst = (i, entry['retained'])
+    out['worst_saturated_patch'] = {'index': worst[0], 'retained': worst[1]} if worst else None
+    return out
+
 
 def saturation(rgb):
     maximum = rgb.max(axis=-1)
@@ -110,7 +145,8 @@ def main(directory):
                         raise RuntimeError(f'ApplyModel=0 control not exact: {point} g{gen}')
                 outputs[point] = after
                 b = after.astype(np.float64) / 255
-                entry = {'full': stats(a, b), 'gamma': gamma_fit(a, b)}
+                entry = {'full': stats(a, b), 'gamma': gamma_fit(a, b),
+                         'bar_gamut': bar_gamut(before, after, w, h)}
                 for name, mask in masks.items():
                     entry[name] = stats(a[mask], b[mask])
                 records[f'{point}-g{gen}-f{frame}'] = entry
@@ -119,6 +155,12 @@ def main(directory):
                 delta = np.abs(outputs[p].astype(np.int16) - outputs[q].astype(np.int16))
                 comparisons[f'{label}-g{gen}-f{frame}'] = {
                     'mae': float(delta.mean()), 'max': int(delta.max()), 'changed_channels': int(np.count_nonzero(delta))}
+    for name, entry in records.items():
+        worst = entry['bar_gamut']['worst_saturated_patch']
+        if worst and worst['retained'] < CHROMA_FLOOR and not name.endswith('-f0'):
+            raise RuntimeError(f"gamut collapse: {name} patch {worst['index']} kept "
+                               f"{worst['retained']:.3f} of its chroma (floor {CHROMA_FLOOR})")
+
     report = {'points_mode_transfer_colour_style': POINTS,
               'definitions': {'saturation': 'mean HSV S of encoded RGB, black S=0',
                               'linear_Y': 'mean BT.709 Y after piecewise sRGB decoding',
@@ -130,13 +172,14 @@ def main(directory):
                               'neutral': 'source HSV S <= .05; rest_of_scene is a separate, coloured region'},
               'records': records, 'comparisons': comparisons, 'sha256_ppm': hashes}
     (root / 'composition-report.json').write_text(json.dumps(report, indent=2) + '\n')
-    print('point       Sat delta%  linearY delta% gamma RGB        bars MAE  neutral MAE (g3 f15)')
+    print('point       Sat delta%  linearY delta% gamma RGB        bars MAE  neutral MAE  worst chroma (g3 f15)')
     for point in POINTS:
         r = records[f'{point}-g3-f15']; full = r['full']
         print(f"{point:10s} {100*(full['saturation_after']/full['saturation_before']-1):9.4f} "
               f"{100*(full['linear_Y_after']/full['linear_Y_before']-1):13.4f} "
               + '/'.join(f"{v['gamma']:.4f}" for v in r['gamma'])
-              + f" {r['bar_band']['mae']:9.4f} {r['neutral']['mae']:11.4f}")
+              + f" {r['bar_band']['mae']:9.4f} {r['neutral']['mae']:11.4f}"
+              + f" {r['bar_gamut']['worst_saturated_patch']['retained']:12.3f}")
     print('direct / repeat comparisons:', json.dumps(comparisons))
     # These are for inspection only: every metric above came from full-resolution readbacks.
     canvas = Image.new('RGB', (1440, 800))
