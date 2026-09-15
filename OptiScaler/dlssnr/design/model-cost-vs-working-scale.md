@@ -18,6 +18,13 @@ the argument in one session.
 
 ## The measurements
 
+**One route, as well as one architecture.** Every point below was taken on the **after-Ray-
+Reconstruction** route. A 2026-09-15 session measured the **after-upscale** route at the same model
+size and got **7.03 ms against this note's 6.36** — 142 samples, p10-p90 spread 0.56 ms. The law here
+is at best the law for one of the two routes; see
+[stage-before-upscale-measured.md](stage-before-upscale-measured.md) before quoting 6.36 as the cost
+of the pass.
+
 **One architecture.** Every point below is from the same RTX 4090 under Proton, and none of it
 transfers to another card: a second machine measured the same pass 25x more expensive per pixel on
 Ampere. See [model-cost-across-architectures.md](model-cost-across-architectures.md) before quoting
