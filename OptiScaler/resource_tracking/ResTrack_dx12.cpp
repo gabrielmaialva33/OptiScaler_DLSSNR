@@ -161,6 +161,20 @@ bool ResTrack_Dx12::CheckResource(ID3D12Resource* resource)
     if (resDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
         return false;
 
+    // depth etc
+    if (resDesc.DepthOrArraySize != 1 || resDesc.SampleDesc.Count != 1)
+        return false;
+
+    // depth, rt, video etc
+    constexpr auto unsupportedFlags =
+        D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
+        D3D12_RESOURCE_FLAG_VIDEO_DECODE_REFERENCE_ONLY | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE |
+        D3D12_RESOURCE_FLAG_VIDEO_ENCODE_REFERENCE_ONLY;
+
+    // Early reject
+    if ((resDesc.Flags & unsupportedFlags) != 0)
+        return false;
+
     auto& s = State::Instance();
 
     if (resDesc.Height != s.currentSwapchainDesc.BufferDesc.Height ||
@@ -1433,10 +1447,9 @@ void ResTrack_Dx12::hkDrawInstanced(ID3D12GraphicsCommandList* This, UINT Vertex
             if (Config::Instance()->FGHudfixDisableDI.value_or_default())
                 break;
 
+            std::lock_guard<std::mutex> lock(_drawMutex);
             for (auto& [key, val] : val0)
             {
-                std::lock_guard<std::mutex> lock(_drawMutex);
-
                 val.captureInfo |= CaptureInfo::DrawInstanced;
 
                 if (Hudfix_Dx12::CheckForHudless(This, &val, val.state))
@@ -1544,11 +1557,10 @@ void ResTrack_Dx12::hkDrawIndexedInstanced(ID3D12GraphicsCommandList* This, UINT
             if (Config::Instance()->FGHudfixDisableDII.value_or_default())
                 break;
 
+            std::lock_guard<std::mutex> lock(_drawMutex);
             for (auto& [key, val] : val0)
             {
                 // LOG_DEBUG("Waiting _drawMutex {:X}", (size_t)val.buffer);
-                std::lock_guard<std::mutex> lock(_drawMutex);
-
                 val.captureInfo |= CaptureInfo::DrawIndexedInstanced;
 
                 if (Hudfix_Dx12::CheckForHudless(This, &val, val.state))
@@ -1727,11 +1739,10 @@ void ResTrack_Dx12::hkDispatch(ID3D12GraphicsCommandList* This, UINT ThreadGroup
             if (Config::Instance()->FGHudfixDisableDispatch.value_or_default())
                 break;
 
+            std::lock_guard<std::mutex> lock(_drawMutex);
             for (auto& [key, val] : val0)
             {
                 // LOG_DEBUG("Waiting _drawMutex {:X}", (size_t)val.buffer);
-                std::lock_guard<std::mutex> lock(_drawMutex);
-
                 val.captureInfo |= CaptureInfo::Dispatch;
                 if (Hudfix_Dx12::CheckForHudless(This, &val, val.state))
                 {
