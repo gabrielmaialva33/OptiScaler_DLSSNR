@@ -121,3 +121,18 @@ compiler/linker warnings), pinned clang-format 20 passed, and
 `python3 tests/run_all.py` passed 12/12 host suites. The bridge suite passed again
 after formatting the test sources. No game or Wine-tier bridge test was run and
 no DLL was installed into a game.
+
+## The neural present host
+
+When the bridge was built to host the neural pass rather than frame generation, the pass is recorded
+onto the same DIRECT list as the interop copy and executed on the same queue, and what reaches the
+presenter is the pass's answer instead of the frame that came in. The pass adds no transfer; it
+changes what is transferred.
+
+The host is the one thing on this path that can be half-done: its guide initialization is recorded
+onto that same list, so whether the list executed is the difference between zeros that exist and
+zeros that do not, and only the bridge knows which happened. The cases here cover the ordinary frame,
+a pass that declined, a pass that recorded but produced nothing, a list that could not be closed, a
+teardown, and a bridge with no host at all. Five mutations of the bridge were confirmed to fail them:
+never confirming execution, not telling the host about a dropped list, ignoring the host's output,
+showing that output on a frame the host declined, and leaking its textures at teardown.

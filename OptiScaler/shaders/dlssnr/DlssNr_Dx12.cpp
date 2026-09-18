@@ -3764,6 +3764,84 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 }
 
 // ---------------------------------------------------------------------------------------------
+// At present, with no upscaler anywhere in the frame.
+// ---------------------------------------------------------------------------------------------
+
+int GuideRestState(bool motionVectors)
+{
+    const Config& cfg = *Config::Instance();
+    const auto value = motionVectors ? cfg.MVResourceBarrier : cfg.DepthResourceBarrier;
+    return value.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+}
+
+bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
+                       ID3D12Resource* motion, bool reset)
+{
+    if (!Config::Instance()->DlssNrEnabled.value_or_default())
+        return false;
+
+    if (cmdList == nullptr || colour == nullptr || depth == nullptr || motion == nullptr)
+        return false;
+
+    ID3D12Device* device = nullptr;
+    if (FAILED(colour->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
+    {
+        ReportSkipOnce("the present host's colour belongs to no D3D12 device");
+        return false;
+    }
+
+    if (g_compose == nullptr)
+        g_compose = std::make_unique<DlssNr_Dx12>("Neural Rendering", device);
+
+    device->Release();
+
+    if (g_compose == nullptr)
+    {
+        ReportSkipOnce("the pass could not be created for the present host");
+        return false;
+    }
+
+    const auto desc = colour->GetDesc();
+
+    DlssNrFrameInfo frame {};
+
+    // What this host knows, stated rather than defaulted.
+    //
+    // The frame is a backbuffer: whatever the game rendered, it has already been through its
+    // tonemapper, so the encode is the identity and the model is shown the picture as it is. Saying
+    // otherwise would encode an encoded frame a second time, which is the washed-out, banded failure
+    // the flag exists to prevent.
+    frame.ColourIsLinearHdr = false;
+
+    // Colour is read and written in place, as the after-upscale path does, and this host rests it in
+    // UNORDERED_ACCESS because it owns it and put it there.
+    frame.OutputState = (int) D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    // The guides are zeros at the frame's own size, so there is no render subrect smaller than the
+    // resource and no motion encoding to describe. Saying nothing here is not a default: it is the
+    // truthful answer, and the pass reads the resources' own sizes when a subrect is zero.
+    frame.MotionVectorsLowResolution = false;
+    frame.DepthInverted = false;
+    frame.MvScaleX = 1.0f;
+    frame.MvScaleY = 1.0f;
+
+    // History has nothing to carry over from on the first frame, after a resize, and after any gap
+    // the host could not bridge. The caller knows which of those happened; this side cannot.
+    frame.Reset = reset;
+
+    DlssNr::Detail::CoverageSample sample {};
+    sample.width = static_cast<uint32_t>(desc.Width);
+    sample.height = desc.Height;
+
+    const bool recorded = g_compose->Dispatch(cmdList, colour, depth, motion, colour, frame, nullptr, &sample);
+
+    if (recorded)
+        sample.reason = "composition recorded at present, with no upscaler in the frame";
+
+    return recorded;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Before the upscaler.
 // ---------------------------------------------------------------------------------------------
 

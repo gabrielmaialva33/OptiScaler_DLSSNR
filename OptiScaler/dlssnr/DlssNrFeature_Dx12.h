@@ -42,6 +42,27 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
                           ID3D12CommandQueue* timingQueue = nullptr, bool preUpscaleDeclined = false,
                           bool isRayReconstruction = false);
 
+// The same model over a frame nobody asked an upscaler for.
+//
+// A title that never calls DLSS never reaches either entry above, because both hang off an
+// upscaler's evaluate. This one is called by a host that assembled the frame itself -- a present-time
+// dispatch on the D3D11-to-D3D12 bridge -- and so it is handed resources rather than a parameter
+// block: there is no block, and nothing in it would be true if there were.
+//
+// colour is read and written in place, which is the shape the after-upscale path uses, and it must
+// arrive in UNORDERED_ACCESS. depth and motion are the caller's to supply and to rest in
+// GuideRestState() below; a host with no engine buffers has DlssNr::ZeroGuides for that.
+//
+// Returns whether the pass recorded anything. False is ordinary -- the model may be off, still
+// building, or already failed for the session -- and the caller still owes its frame a transfer.
+bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
+                       ID3D12Resource* motion, bool reset);
+
+// Where a caller that owns its guides must leave them, so the pass transitions them from where they
+// actually are. It reads config keys written for a game's own buffers; a host that guessed the
+// default instead would be right until someone carried an ini over from a game that set them.
+int GuideRestState(bool motionVectors);
+
 // The other place the model can run: before the upscaler, over the game's render-resolution colour.
 //
 // Stage 1 in the config. The model is shown the colour the game is about to hand the upscaler --

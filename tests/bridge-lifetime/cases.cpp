@@ -337,6 +337,85 @@ void retirementRecoveryCase()
     assert(State::Instance().currentFGSwapchain == &replacement);
 }
 
+// What the bridge owes the neural host, and what it must show while it owes it.
+//
+// The host is the only thing on this path that can be half-done: its guide initialization is
+// recorded onto the same list as the frame, so whether that list ran is the difference between
+// zeros that exist and zeros that do not. Only the bridge knows which happened.
+void neuralHostCases()
+{
+    // The ordinary frame: the pass recorded, the list executed, and what reaches the presenter is
+    // the pass's answer rather than the frame that came in.
+    {
+        Fixture f;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        auto* host = f.sc->_nrHost.get();
+        f.sc->_hasInteropWork = true;
+        assert(f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(host->records == 1 && host->confirms == 1 && host->abandons == 0);
+        assert(host->lastSource == f.sc->_openedDx11BackBuffers[0]);
+        assert(f.list.copiedFrom == &host->composed && f.list.copiedTo == &f.presenter.buffer);
+        assert(!host->recordingOutstanding);
+    }
+
+    // The pass declined this frame. The frame still has to be shown, and what is shown is the
+    // game's own colour -- not a half-composed working copy, and not nothing.
+    {
+        Fixture f;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        auto* host = f.sc->_nrHost.get();
+        host->recordSucceeds = false;
+        f.sc->_hasInteropWork = true;
+        assert(f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(host->records == 1 && host->confirms == 1);
+        assert(f.list.copiedFrom == f.sc->_openedDx11BackBuffers[0]);
+    }
+
+    // Recorded, but produced no output. Same answer: show the game's frame.
+    {
+        Fixture f;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        auto* host = f.sc->_nrHost.get();
+        host->producesOutput = false;
+        f.sc->_hasInteropWork = true;
+        assert(f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(f.list.copiedFrom == f.sc->_openedDx11BackBuffers[0]);
+        assert(host->confirms == 1);
+    }
+
+    // The list could not be closed, so nothing on it ran. The host must be told, or it will spend
+    // the rest of the session believing it wrote zeros it never wrote.
+    {
+        Fixture f;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        auto* host = f.sc->_nrHost.get();
+        f.sc->_hasInteropWork = true;
+        f.list.closeResult = E_FAIL;
+        assert(!f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(host->records == 1 && host->abandons == 1 && host->confirms == 0);
+        assert(!host->recordingOutstanding);
+    }
+
+    // Teardown frees the host's textures behind the same proved drain as the rest of the interop.
+    {
+        Fixture f;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        auto* host = f.sc->_nrHost.get();
+        f.sc->_ReleaseInteropObjects();
+        assert(host->releases == 1);
+    }
+
+    // And a bridge built for frame generation has no host at all, which must remain an ordinary
+    // frame rather than a null dereference.
+    {
+        Fixture f;
+        f.sc->_hasInteropWork = true;
+        assert(f.sc->_nrHost == nullptr);
+        assert(f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(f.list.copiedFrom == f.sc->_openedDx11BackBuffers[0]);
+    }
+}
+
 int main()
 {
     waitCases();
@@ -348,6 +427,7 @@ int main()
     partialResizeCase();
     resizeErrorCases();
     retirementRecoveryCase();
+    neuralHostCases();
     assert(Dx11wDx12SC::_retired == nullptr);
-    std::cout << "bridge lifetime: production wait, copy, resize, release and retirement cases passed\n";
+    std::cout << "bridge lifetime: production wait, copy, resize, release, retirement and neural host cases passed\n";
 }

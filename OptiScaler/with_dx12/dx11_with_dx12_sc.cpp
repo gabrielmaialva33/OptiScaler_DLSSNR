@@ -157,6 +157,14 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
         LOG_ERROR("failed to resolve D3D12 device/queue");
     }
 
+    // Read once, here, and never again. This decides what this swapchain is for, and a menu toggle
+    // cannot replace a game's swapchain while it is presenting.
+    if (Dx11wDx12::WantedForNeuralRendering())
+    {
+        _nrHost = std::make_unique<DlssNr::PresentHost>();
+        LOG_INFO("bridge {} hosts the neural pass: no upscaler in this title", _id);
+    }
+
     {
         std::lock_guard lock(_retiredMutex);
         _nextLive = _live;
@@ -1243,7 +1251,22 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     TransitionResource(_copyCommandLists[copySlot], fgBackBuffer, D3D12_RESOURCE_STATE_PRESENT,
                        D3D12_RESOURCE_STATE_COPY_DEST);
 
-    _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, _openedDx11BackBuffers[copySlot]);
+    // What gets shown. Ordinarily the game's frame as it arrived; with the neural pass hosted here,
+    // the pass's answer instead. Either way it is one copy into the presenter's backbuffer -- the
+    // pass does not add a transfer, it changes what is transferred.
+    //
+    // Recorded onto this same DIRECT list and executed on this same queue below, which is what
+    // orders the neural work before the flip without the present thread waiting on it.
+    ID3D12Resource* transferSource = _openedDx11BackBuffers[copySlot];
+
+    if (_nrHost != nullptr && _nrHost->Record(_dx12Device, _copyCommandLists[copySlot],
+                                              _openedDx11BackBuffers[copySlot], D3D12_RESOURCE_STATE_COPY_SOURCE))
+    {
+        if (auto* composed = _nrHost->Output(); composed != nullptr)
+            transferSource = composed;
+    }
+
+    _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, transferSource);
 
     TransitionResource(_copyCommandLists[copySlot], fgBackBuffer, D3D12_RESOURCE_STATE_COPY_DEST,
                        D3D12_RESOURCE_STATE_PRESENT);
@@ -1261,11 +1284,20 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     if (FAILED(result))
     {
         LOG_ERROR("copy command list close failed: {:X}", (UINT) result);
+        // This list will not execute, so nothing recorded onto it happened -- including the neural
+        // host's one-time guide initialization, which must stay owed rather than be assumed done.
+        if (_nrHost != nullptr)
+            _nrHost->AbandonRecording();
         return false;
     }
 
     ID3D12CommandList* lists[] = { _copyCommandLists[copySlot] };
     _dx12CommandQueue->ExecuteCommandLists(1, lists);
+
+    // Submitted. Whatever the neural host put on this list is now the GPU's, so its bookkeeping may
+    // advance: its guides are initialized and its frame serial moves for a frame the model saw.
+    if (_nrHost != nullptr)
+        _nrHost->ConfirmExecuted();
 
     const auto signalValue = ++_copyFenceValue;
 
@@ -1414,6 +1446,12 @@ void Dx11wDx12SC::_ReleaseInteropObjects()
 {
     // Only called after the preflight drain, or confirmed loss of both participating devices.
     _ResetTeardownDrain();
+
+    // The neural host's textures were read by the same queue the drain above covers, so this is the
+    // one place they can be freed without asking the GPU again.
+    if (_nrHost != nullptr)
+        _nrHost->Release();
+
     _ReleaseInteropBackBuffers();
 
     _lastInteropCopyFenceValue = 0;

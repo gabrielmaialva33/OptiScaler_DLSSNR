@@ -2,12 +2,14 @@
 
 #include "SysUtils.h"
 #include <Config.h>
+#include <dlssnr/DlssNr_PresentHost.h>
 
 #include "dxgi1_6.h"
 #include "d3d11_4.h"
 #include "d3d12.h"
 
 #include <vector>
+#include <memory>
 #include <mutex>
 
 using Microsoft::WRL::ComPtr;
@@ -181,6 +183,13 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     ID3D12Fence* _drainFences[2] {};
     bool _drainSignaled[2] {};
     ID3D12CommandQueue* _presentQueue = nullptr;
+
+    // The neural pass, when this bridge was built for it rather than for frame generation. One per
+    // wrapper: it owns its working colour, its zero guides and its own frame serial, and never
+    // reaches for a global. Null unless Dx11wDx12::WantedForNeuralRendering() was true at creation,
+    // which is read once, because this decides a swapchain's topology and a menu toggle cannot
+    // replace a game's swapchain in flight.
+    std::unique_ptr<DlssNr::PresentHost> _nrHost;
     std::vector<ID3D12Resource*> _copyDestinations;
 
     // Intrusive retirement needs no allocation at the failure boundary. Deliberately no static

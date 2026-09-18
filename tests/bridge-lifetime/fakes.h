@@ -127,7 +127,13 @@ struct ID3D12GraphicsCommandList : ID3D12CommandList
     HRESULT Reset(ID3D12CommandAllocator*, void*) { return S_OK; }
     HRESULT closeResult = S_OK;
     HRESULT Close() { return closeResult; }
-    void CopyResource(ID3D12Resource*, ID3D12Resource*) {}
+    ID3D12Resource* copiedFrom = nullptr;
+    ID3D12Resource* copiedTo = nullptr;
+    void CopyResource(ID3D12Resource* destination, ID3D12Resource* source)
+    {
+        copiedTo = destination;
+        copiedFrom = source;
+    }
 };
 struct ID3D12CommandQueue : Ref
 {
@@ -249,6 +255,53 @@ struct DeathCounter
 {
     ~DeathCounter() { ++deaths; }
 };
+// The neural present host, reduced to the lifecycle the bridge is responsible for. Everything it
+// actually does needs a GPU; what it is owed by its caller does not.
+namespace DlssNr
+{
+struct PresentHost
+{
+    bool recordSucceeds = true;
+    bool producesOutput = true;
+    ID3D12Resource composed {};
+
+    unsigned records = 0, confirms = 0, abandons = 0, releases = 0;
+    ID3D12Resource* lastSource = nullptr;
+    int lastSourceState = -1;
+    bool recordingOutstanding = false;
+
+    bool Record(void* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source, int sourceState)
+    {
+        assert(device != nullptr && cmdList != nullptr && source != nullptr);
+        // Recording again over an outstanding recording would lose whichever answer came first.
+        assert(!recordingOutstanding && "a second Record before the last one was resolved");
+        ++records;
+        lastSource = source;
+        lastSourceState = sourceState;
+        recordingOutstanding = true;
+        return recordSucceeds;
+    }
+
+    ID3D12Resource* Output() { return recordSucceeds && producesOutput ? &composed : nullptr; }
+
+    void ConfirmExecuted()
+    {
+        ++confirms;
+        recordingOutstanding = false;
+    }
+    void AbandonRecording()
+    {
+        ++abandons;
+        recordingOutstanding = false;
+    }
+    void Release()
+    {
+        ++releases;
+        recordingOutstanding = false;
+    }
+};
+} // namespace DlssNr
+
 class Dx11wDx12SC
 {
   public:
@@ -298,6 +351,7 @@ class Dx11wDx12SC
     void* _fgSwapchainContext = nullptr;
     UINT _currentFakeIndex = 0;
     Dx11wDx12SC* _nextLive = nullptr;
+    std::unique_ptr<DlssNr::PresentHost> _nrHost;
     inline static Dx11wDx12SC* _live = nullptr;
     Dx11wDx12SC* _nextRetired = nullptr;
     inline static Dx11wDx12SC* _retired = nullptr;
