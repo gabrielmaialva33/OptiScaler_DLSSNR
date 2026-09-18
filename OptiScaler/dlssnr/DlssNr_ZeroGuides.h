@@ -45,8 +45,16 @@ class ZeroGuides
     // which is the shape the donor's version of this got wrong. This binds its own heap; a caller
     // that had one bound must rebind afterwards.
     //
+    // restState is where the guides are left once cleared, and it is the caller's to state rather
+    // than ours to assume. The pass transitions a guide from the state it says the guide arrives in,
+    // and for the shape this host uses that state is DepthResourceBarrier / MVResourceBarrier out of
+    // the config -- keys meant for a game's own buffers, which default to where we would have left
+    // them anyway but do not have to. Resting a guide somewhere the pass will not transition it from
+    // is a barrier from a state the resource was never in.
+    //
     // Returns false only on a real failure. Nothing owed is success.
-    bool RecordClear(ID3D12GraphicsCommandList* cmdList);
+    bool RecordClear(ID3D12GraphicsCommandList* cmdList,
+                     D3D12_RESOURCE_STATES restState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     // The clear is initialization, and initialization that was recorded onto a list nobody ran is
     // not initialization. The caller says which happened, so a dropped list leaves the guides owing
@@ -55,7 +63,7 @@ class ZeroGuides
     void AbandonRecording();
 
     // Null until Ensure has succeeded. In D3D12_RESOURCE_STATE_UNORDERED_ACCESS while the clear is
-    // owed and NON_PIXEL_SHADER_RESOURCE once it has run, which is the state the pass reads them in.
+    // owed, and in whatever RecordClear was given as restState once it has run.
     ID3D12Resource* Depth() const { return _depth; }
     ID3D12Resource* Motion() const { return _motion; }
 
@@ -74,6 +82,7 @@ class ZeroGuides
     uint32_t _descriptorStride = 0;
     uint32_t _width = 0;
     uint32_t _height = 0;
+    D3D12_RESOURCE_STATES _restState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     bool _clearOwed = false;
     bool _clearRecorded = false;
 };

@@ -25,11 +25,18 @@ The other half is that a clear is initialization, and a clear recorded onto a li
 not initialization. `ConfirmExecuted` and `AbandonRecording` are how the caller says which happened;
 an abandoned recording leaves the zeros owed and a later confirm cannot claim them.
 
-Nine mutations of the production code were confirmed to fail this suite: the CPU handle taken from
+Where the guides come to rest after the clear is the caller's to state, not this file's to assume.
+The pass transitions a guide out of the state it believes the guide arrived in, and for the shape the
+present host uses that state comes from `DepthResourceBarrier` / `MVResourceBarrier` — config keys
+meant for a game's own buffers, whose defaults happen to match but need not. A barrier from a state
+to itself is rejected rather than ignored, so asking for the state they are already in records none.
+
+Eleven mutations of the production code were confirmed to fail this suite: the CPU handle taken from
 the shader-visible heap (the shape the donor's version got wrong), an unbound heap, a depth cleared to
 one instead of zero, a descriptor offset that ignores the heap stride, recording treated as execution,
-an abandon that forgives the debt, an untyped view, a missing transition to the read state, and an
-allocation failure that leaks what it acquired.
+an abandon that forgives the debt, an untyped view, a missing transition to the read state, an
+allocation failure that leaks what it acquired, a rest state that ignores what the caller asked for,
+and a barrier emitted from a state to itself.
 
 ## What it does not cover
 

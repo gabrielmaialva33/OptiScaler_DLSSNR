@@ -81,6 +81,39 @@ int main()
         CASE("confirming execution makes the guides ready, and the clear is never repeated");
     }
 
+    // --- the caller decides where the guides come to rest ----------------
+    {
+        // The pass transitions a guide out of the state it believes the guide arrived in, and for
+        // the shape this host uses that state comes from config keys meant for a game's own buffers.
+        // Resting a guide anywhere else is a barrier from a state it was never in.
+        ID3D12Device device;
+        ID3D12GraphicsCommandList list;
+        list.device = &device;
+        ZeroGuides guides;
+        assert(guides.Ensure(&device, 320, 180));
+        assert(guides.RecordClear(&list, D3D12_RESOURCE_STATE_COMMON));
+        assert(list.barriers.size() == 2);
+        for (const auto& barrier : list.barriers)
+            assert(barrier.Transition.StateAfter == D3D12_RESOURCE_STATE_COMMON);
+        assert(guides.Depth()->state == D3D12_RESOURCE_STATE_COMMON);
+        CASE("the guides rest where the caller asked, not where this file would have guessed");
+    }
+
+    // --- resting where they already are ----------------------------------
+    {
+        // A barrier from a state to itself is rejected, not ignored, so asking for the clear state
+        // must record the clear and no transition at all.
+        ID3D12Device device;
+        ID3D12GraphicsCommandList list;
+        list.device = &device;
+        ZeroGuides guides;
+        assert(guides.Ensure(&device, 320, 180));
+        assert(guides.RecordClear(&list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+        assert(list.clears.size() == 2 && list.barriers.empty());
+        assert(guides.Depth()->state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        CASE("asking for the state they are already in records no barrier");
+    }
+
     // --- the dropped list ------------------------------------------------
     {
         ID3D12Device device;

@@ -13,8 +13,7 @@ namespace
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_R32_FLOAT;
 constexpr DXGI_FORMAT kMotionFormat = DXGI_FORMAT_R16G16_FLOAT;
 
-// Where the pass reads a guide from, and where a guide sits while its clear is still owed.
-constexpr D3D12_RESOURCE_STATES kReadState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+// Where a guide sits while its clear is still owed. Where it goes afterwards is the caller's call.
 constexpr D3D12_RESOURCE_STATES kClearState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
 ID3D12Resource* CreateGuide(ID3D12Device* device, DXGI_FORMAT format, uint32_t width, uint32_t height)
@@ -172,7 +171,7 @@ bool ZeroGuides::_Allocate(ID3D12Device* device, uint32_t width, uint32_t height
     return true;
 }
 
-bool ZeroGuides::RecordClear(ID3D12GraphicsCommandList* cmdList)
+bool ZeroGuides::RecordClear(ID3D12GraphicsCommandList* cmdList, D3D12_RESOURCE_STATES restState)
 {
     // Before the owed check, not after. With nothing allocated there is nothing owed either, and
     // answering success to a caller that just asked us to initialize guides we do not have reads as
@@ -205,9 +204,14 @@ bool ZeroGuides::RecordClear(ID3D12GraphicsCommandList* cmdList)
         gpu.ptr += static_cast<UINT64>(i) * _descriptorStride;
 
         cmdList->ClearUnorderedAccessViewFloat(gpu, cpu, guides[i], zero, 0, nullptr);
-        Transition(cmdList, guides[i], kClearState, kReadState);
+
+        // A guide already in restState needs no barrier, and asking for one from a state to itself
+        // is a barrier D3D12 rejects rather than ignores.
+        if (restState != kClearState)
+            Transition(cmdList, guides[i], kClearState, restState);
     }
 
+    _restState = restState;
     _clearRecorded = true;
     return true;
 }
