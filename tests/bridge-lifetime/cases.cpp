@@ -342,6 +342,52 @@ void retirementRecoveryCase()
 // The host is the only thing on this path that can be half-done: its guide initialization is
 // recorded onto the same list as the frame, so whether that list ran is the difference between
 // zeros that exist and zeros that do not. Only the bridge knows which happened.
+// Which queue a present goes on, which is the line the whole no-FG path died on.
+//
+// Measured in Divinity: Original Sin 2 before this existed: the bridge was created, the neural host
+// was attached, and then every single Present returned E_UNEXPECTED -- 51338 of them in two minutes,
+// one per frame -- because the queue was asked of a frame-generation object that a game with no
+// frame generation never has. Nothing downstream needed FG. One line did.
+void presentQueueCases()
+{
+    ID3D12CommandQueue fgQueue;
+
+    // Frame generation running: its queue, and nothing else's.
+    {
+        Fixture f;
+        f.fg.queue = &fgQueue;
+        assert(f.sc->_PresentQueueForFrame() == &fgQueue);
+    }
+
+    // No frame generation, hosting the neural pass: the queue this wrapper already owns, which is
+    // the one the interop copy executes on and the overlay presents through.
+    {
+        Fixture f;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        f.sc->_fg = nullptr;
+        assert(f.sc->_PresentQueueForFrame() == &f.copyQueue);
+        f.sc->_fg = &f.fg;
+    }
+
+    // No frame generation and no neural host: there is nothing this bridge is for, and answering a
+    // queue anyway would present a frame nobody composed.
+    {
+        Fixture f;
+        f.sc->_fg = nullptr;
+        assert(f.sc->_nrHost == nullptr);
+        assert(f.sc->_PresentQueueForFrame() == nullptr);
+        f.sc->_fg = &f.fg;
+    }
+
+    // An FG object with no queue, on a bridge built for frame generation. Falling back would hide a
+    // bridge in trouble behind a queue that was never meant to carry its presentation.
+    {
+        Fixture f;
+        f.fg.queue = nullptr;
+        assert(f.sc->_PresentQueueForFrame() == nullptr);
+    }
+}
+
 void neuralHostCases()
 {
     // The ordinary frame: the pass recorded, the list executed, and what reaches the presenter is
@@ -427,6 +473,7 @@ int main()
     partialResizeCase();
     resizeErrorCases();
     retirementRecoveryCase();
+    presentQueueCases();
     neuralHostCases();
     assert(Dx11wDx12SC::_retired == nullptr);
     std::cout << "bridge lifetime: production wait, copy, resize, release, retirement and neural host cases passed\n";

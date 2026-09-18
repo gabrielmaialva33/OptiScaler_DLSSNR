@@ -107,6 +107,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     bool _CopyDx11BackBufferToShared(UINT index);
     bool _WaitDx11ThenDx12();
     bool _CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index);
+    ID3D12CommandQueue* _PresentQueueForFrame();
     HRESULT _WaitForCopyQueueIdle(DWORD timeout);
     HRESULT _WaitForCopyAllocator(UINT slot);
     HRESULT _DrainForTeardown(DWORD timeout);

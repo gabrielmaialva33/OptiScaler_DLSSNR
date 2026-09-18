@@ -467,6 +467,33 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetDevice(REFIID riid, void** ppDevice)
     return _real != nullptr ? _real->GetDevice(riid, ppDevice) : DXGI_ERROR_DEVICE_REMOVED;
 }
 
+// The queue the visible presentation is submitted on.
+//
+// Frame generation owns one, and when it is running its queue is the only correct answer. With no FG
+// object there is nobody to ask, and every present in a no-FG bridge used to fail here: measured in
+// Divinity: Original Sin 2, 51338 E_UNEXPECTED returns in two minutes, one per frame, before the
+// interop copy was ever reached. Nothing downstream needed FG -- the presenter, the overlay and the
+// copy all use objects this wrapper owns -- so the whole no-FG path died on the one line that asked
+// an object that was never going to exist.
+//
+// The wrapper already owns a DIRECT queue for exactly this work. It is the one the interop copy
+// executes on and the one the overlay presents through, so a bridge hosting the neural pass presents
+// on it too, which makes the ordering claim literal rather than approximate: the neural work and the
+// flip are the same queue in submission order, with no fence between them.
+//
+// Only offered when this bridge hosts the neural pass. A bridge built for frame generation whose FG
+// object has no queue is a bridge in trouble, and quietly presenting on a different queue would hide
+// it.
+ID3D12CommandQueue* Dx11wDx12SC::_PresentQueueForFrame()
+{
+    auto* queue = _fg != nullptr ? _fg->GetCommandQueue() : nullptr;
+
+    if (queue == nullptr && _nrHost != nullptr)
+        queue = _dx12CommandQueue;
+
+    return queue;
+}
+
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 {
     if (_resizeIncomplete)
@@ -497,7 +524,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (!_InitInteropObjects())
         return DXGI_ERROR_DEVICE_REMOVED;
 
-    auto presentQueue = _fg != nullptr ? _fg->GetCommandQueue() : nullptr;
+    auto presentQueue = _PresentQueueForFrame();
     if (presentQueue == nullptr || (_presentQueue != nullptr && _presentQueue != presentQueue))
         return E_UNEXPECTED;
     if (_presentQueue == nullptr)

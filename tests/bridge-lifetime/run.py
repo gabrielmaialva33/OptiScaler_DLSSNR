@@ -40,6 +40,7 @@ signatures = [
     'void Dx11wDx12SC::_ReleaseInteropObjects()',
     'void Dx11wDx12SC::_ReleaseInteropBackBuffers()',
     'bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(',
+    'ID3D12CommandQueue* Dx11wDx12SC::_PresentQueueForFrame()',
 ]
 wait_source = (root / 'OptiScaler/with_dx12/with_dx12.cpp').read_text()
 waiter = function('HRESULT WaitForBridgeFence(', wait_source)

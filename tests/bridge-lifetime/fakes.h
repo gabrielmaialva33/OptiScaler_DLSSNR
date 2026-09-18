@@ -202,6 +202,10 @@ struct FG
     void* context = reinterpret_cast<void*>(123);
     int deactivations = 0, releases = 0;
     void* SwapchainContext() { return context; }
+    // Frame generation's own queue. Null models an FG object that has not got one, which is a
+    // bridge in trouble rather than a case to paper over.
+    ID3D12CommandQueue* queue = nullptr;
+    ID3D12CommandQueue* GetCommandQueue() { return queue; }
     void Deactivate() { ++deactivations; }
     void ReleaseSwapchain(HWND) { ++releases; }
 };
@@ -324,6 +328,7 @@ class Dx11wDx12SC
     void _ReleaseInteropObjects();
     void _ReleaseInteropBackBuffers();
     bool _CopyDx11SharedToDx12FGBackBuffer(UINT);
+    ID3D12CommandQueue* _PresentQueueForFrame();
     int refreshes = 0;
     void _RefreshCachedSwapchainDesc() { ++refreshes; }
     Swapchain *_real = nullptr, *_real1 = nullptr, *_real2 = nullptr, *_real3 = nullptr, *_real4 = nullptr;
