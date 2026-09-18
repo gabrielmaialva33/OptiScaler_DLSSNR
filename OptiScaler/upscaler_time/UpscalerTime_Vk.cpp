@@ -40,9 +40,21 @@ void UpscalerTimeVk::ReadUpscalingTime(VkDevice device)
     if (_vkUpscaleTrig && _queryPool != VK_NULL_HANDLE)
     {
         // Retrieve timestamps
-        uint64_t timestamps[2];
-        vkGetQueryPoolResults(device, _queryPool, 0, 2, sizeof(timestamps), timestamps, sizeof(uint64_t),
-                              VK_QUERY_RESULT_64_BIT);
+        uint64_t timestamps[2] {};
+        const auto result = vkGetQueryPoolResults(device, _queryPool, 0, 2, sizeof(timestamps), timestamps,
+                                                  sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+
+        // Keep the pending read without waiting; unavailable timestamps must not be used.
+        if (result == VK_NOT_READY)
+            return;
+
+        if (result != VK_SUCCESS)
+        {
+            _vkUpscaleTrig = false;
+            return;
+        }
+
+        // Readiness alone does not identify the frame: the recorded reset may not have executed yet.
 
         // Calculate elapsed time in milliseconds
         double elapsedTimeMs = (timestamps[1] - timestamps[0]) * _timeStampPeriod / 1e6;
