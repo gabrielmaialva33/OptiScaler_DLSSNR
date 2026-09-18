@@ -28,7 +28,7 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the eleven `nr-*` suites plus `bridge-lifetime` |
+| `host` | Python, `g++`, `clang++` | the twelve `nr-*` suites plus `bridge-lifetime` |
 | `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** All twelve build real production code with local fakes under
+**Host tier.** All thirteen build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
@@ -51,6 +51,9 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   expressions.
 - `nr-localization` — the real portable `.lang` parser and the repository ImGui
   hash. Slowest suite, around 45 seconds.
+- `nr-log-rate` — the log rate limiter against injected time points, a recorded
+  session replay, and the four real report classifications/initializers extracted
+  from the renderer, including manual configuration changes and reversals.
 - `nr-menu` — pass-menu control flow driven by scripted ImGui events.
 - `nr-multipass` — portable multi-pass chain helpers.
 - `nr-pass-config` — the pass-settings codec and the four-point Config round trip

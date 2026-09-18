@@ -33,6 +33,11 @@ tier = "host"
 timeout = 300
 summary = "Config GPU-timing transactions and the INI expressions that back them."
 
+[nr-log-rate]
+tier = "host"
+timeout = 300
+summary = "Production NR log rate limiter against injected time points, and the four drift call sites that gate on it."
+
 [nr-localization]
 tier = "host"
 timeout = 600

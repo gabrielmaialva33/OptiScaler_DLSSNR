@@ -20,6 +20,7 @@
 #include <proxies/NVNGX_Proxy.h>
 #include <hooks/D3D12_Hooks.h>
 #include <dlssnr/DlssNr_GpuTiming.h>
+#include <dlssnr/DlssNr_LogRate.h>
 
 #include <mutex>
 #include <optional>
@@ -3290,7 +3291,6 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // one left on is indistinguishable from a bug.
         struct ComposeReport
         {
-            bool valid;
             float whitePoint;
             float transfer;
             float colour;
@@ -3301,33 +3301,66 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             unsigned int residual;
             unsigned int workW;
             unsigned int workH;
+            int whiteSource;
+            float whiteScale;
+            float whiteTrim;
+            bool scanInverted;
+            float scanTrim;
+            bool scanEnabled;
+            bool hold;
+            std::vector<DlssNr::ExposureScan::AnchorPoint> anchors;
+
+            bool SameAs(const ComposeReport& other) const { return whitePoint == other.whitePoint && SameShape(other); }
+
+            // The computed white point can drift OR change because a control moved.
+            // Keep its configuration separately so manual edits/reversals never wait.
+            bool SameShape(const ComposeReport& other) const
+            {
+                return transfer == other.transfer && colour == other.colour && maxRatio == other.maxRatio &&
+                       passthrough == other.passthrough && debugView == other.debugView &&
+                       compareMode == other.compareMode && residual == other.residual && workW == other.workW &&
+                       workH == other.workH && whiteSource == other.whiteSource && whiteScale == other.whiteScale &&
+                       whiteTrim == other.whiteTrim && scanInverted == other.scanInverted &&
+                       scanTrim == other.scanTrim && scanEnabled == other.scanEnabled && hold == other.hold &&
+                       std::equal(anchors.begin(), anchors.end(), other.anchors.begin(), other.anchors.end(),
+                                  [](const auto& a, const auto& b) { return a.scan == b.scan && a.white == b.white; });
+            }
         };
 
-        static ComposeReport loggedCompose {};
+        static DlssNr::LogRate::Reporter<ComposeReport> composeReporter;
 
         // Quantised to the precision it is printed at. Comparing raw floats logged 2376 lines in one
         // Enshrouded session, because a measured white point drifts continuously and every drift was a
         // change. A line per meaningful change is the point; a line per frame is a different problem.
-        const ComposeReport composeNow { true,
-                                         std::round(resolveParams.WhitePoint * 100.0f) / 100.0f,
-                                         resolveParams.TransferStrength,
-                                         resolveParams.ColourStrength,
-                                         resolveParams.MaxRatio,
-                                         resolveParams.Passthrough,
-                                         resolveParams.DebugView,
-                                         resolveParams.CompareMode,
-                                         resolveParams.Transfer,
-                                         g_nr.workWidth,
-                                         g_nr.workHeight };
+        //
+        // Quantisation is a precision limit, not a rate limit. A measured white point still crosses a
+        // 0.01 boundary about nine times a second, which is what the 486 composition lines of one
+        // Crimson Desert session contained, alongside one model-size change. The Reporter holds
+        // measured drift to one line a second; configuration and dimension changes pass immediately.
+        // Source-specific controls are normalized out when inactive. design/nr-log-rate.md.
+        const ComposeReport composeNow {
+            std::round(resolveParams.WhitePoint * 100.0f) / 100.0f,
+            resolveParams.TransferStrength,
+            resolveParams.ColourStrength,
+            resolveParams.MaxRatio,
+            resolveParams.Passthrough,
+            resolveParams.DebugView,
+            resolveParams.CompareMode,
+            resolveParams.Transfer,
+            g_nr.workWidth,
+            g_nr.workHeight,
+            whitePointSource,
+            std::isfinite(whitePointScale) && whitePointScale > 0.0f ? whitePointScale : 1.0f,
+            whitePointSource == 1 ? DlssNr::Exposure::Trim(whitePointTrim) : 1.0f,
+            whitePointSource == 2 && scanInverted,
+            whitePointSource == 2 ? std::clamp(scanTrim, 0.01f, 4.0f) : 1.0f,
+            whitePointSource == 2 && cfg.DlssNrScanExposure.value_or_default(),
+            holdFrame,
+            whitePointSource == 2 ? DlssNr::ExposureScan::Anchors() : std::vector<DlssNr::ExposureScan::AnchorPoint>()
+        };
 
-        if (!loggedCompose.valid || loggedCompose.whitePoint != composeNow.whitePoint ||
-            loggedCompose.transfer != composeNow.transfer || loggedCompose.colour != composeNow.colour ||
-            loggedCompose.maxRatio != composeNow.maxRatio || loggedCompose.passthrough != composeNow.passthrough ||
-            loggedCompose.debugView != composeNow.debugView || loggedCompose.compareMode != composeNow.compareMode ||
-            loggedCompose.residual != composeNow.residual || loggedCompose.workW != composeNow.workW ||
-            loggedCompose.workH != composeNow.workH)
+        if (composeReporter.Observe(composeNow, DlssNr::LogRate::Clock::now()))
         {
-            loggedCompose = composeNow;
             LOG_INFO("DLSS-NR composition: paper white {:.2f}x, detail {:.2f}, colour {:.2f}, guard "
                      "{:.1f}x, colour transform {}, transfer {}, model {}x{}, debug view {}, compare {}",
                      composeNow.whitePoint, composeNow.transfer, composeNow.colour, composeNow.maxRatio,
@@ -3570,22 +3603,29 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
 
         struct ExposureReport
         {
-            bool valid;
             float pre;
             bool havePre;
             bool haveTexture;
             bool autoFlag;
+
+            bool SameAs(const ExposureReport& other) const
+            {
+                return SameShape(other) && std::abs(pre - other.pre) <= std::max(0.01f * std::abs(pre), 1e-4f);
+            }
+
+            // What the game supplies, as opposed to how much of it. A change here is the game
+            // changing its mind, which is worth a line the moment it happens.
+            bool SameShape(const ExposureReport& other) const
+            {
+                return havePre == other.havePre && haveTexture == other.haveTexture && autoFlag == other.autoFlag;
+            }
         };
 
-        static ExposureReport logged {};
-        const ExposureReport now { true, havePre ? preExposure : 0.0f, havePre, exposureTex != nullptr,
-                                   autoExposureFlag };
+        static LogRate::Reporter<ExposureReport> exposureReporter;
+        const ExposureReport now { havePre ? preExposure : 0.0f, havePre, exposureTex != nullptr, autoExposureFlag };
 
-        if (!logged.valid || logged.havePre != now.havePre || logged.haveTexture != now.haveTexture ||
-            logged.autoFlag != now.autoFlag ||
-            std::abs(logged.pre - now.pre) > std::max(0.01f * std::abs(now.pre), 1e-4f))
+        if (exposureReporter.Observe(now, LogRate::Clock::now()))
         {
-            logged = now;
             LOG_INFO("DLSS-NR exposure from the game: DLSS.Pre.Exposure {}, ExposureTexture {}, "
                      "auto-exposure flag {}",
                      now.havePre ? std::to_string(now.pre) : std::string("not supplied"),
@@ -3595,12 +3635,22 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
         // The value itself, once it has come back off the GPU. Separate from the line above because
         // that one says what the game offers and this one says what it actually reads -- and because
         // the reading arrives three frames after the offer.
-        static float loggedExposure = -1.0f;
-
-        if (g_nr.gameExposure > 1e-6f &&
-            std::abs(loggedExposure - g_nr.gameExposure) > std::max(0.02f * g_nr.gameExposure, 1e-5f))
+        struct ExposureValueReport
         {
-            loggedExposure = g_nr.gameExposure;
+            LogRate::Drift exposure;
+            LogRate::Drift pre;
+            bool SameShape(const ExposureValueReport&) const { return true; }
+            bool SameAs(const ExposureValueReport& other) const
+            {
+                return exposure.SameAs(other.exposure) && pre.SameAs(other.pre);
+            }
+        };
+        static LogRate::Reporter<ExposureValueReport> exposureValue;
+        const ExposureValueReport exposureNow { { g_nr.gameExposure, 0.02f, 1e-5f },
+                                                { g_nr.gamePreExposure, 0.01f, 1e-4f } };
+
+        if (g_nr.gameExposure > 1e-6f && exposureValue.Observe(exposureNow, LogRate::Clock::now()))
+        {
             LOG_INFO("DLSS-NR game exposure {:.5f} (pre-exposure {:.3f}) -> white point would be {:.2f}",
                      g_nr.gameExposure, g_nr.gamePreExposure, g_nr.gamePreExposure / g_nr.gameExposure);
         }
@@ -3617,12 +3667,33 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
             float low = 0.0f, high = 0.0f;
             const float scanned = DlssNr::ExposureScan::BestValue(&which, &low, &high);
 
-            static float loggedScan = -1.0f;
-
-            if (scanned > 0.0f && std::abs(loggedScan - scanned) > std::max(0.02f * scanned, 1e-6f))
+            struct ScanReport
             {
-                loggedScan = scanned;
+                LogRate::Drift value, low, high, game;
+                int candidate;
+                bool scanning;
+                bool haveGame;
+                bool SameShape(const ScanReport& other) const
+                {
+                    return candidate == other.candidate && scanning == other.scanning && haveGame == other.haveGame;
+                }
+                bool SameAs(const ScanReport& other) const
+                {
+                    return SameShape(other) && value.SameAs(other.value) && low.SameAs(other.low) &&
+                           high.SameAs(other.high) && game.SameAs(other.game);
+                }
+            };
+            static LogRate::Reporter<ScanReport> scanValue;
+            const ScanReport scanNow { { scanned, 0.02f, 1e-6f },
+                                       { low, 0.02f, 1e-6f },
+                                       { high, 0.02f, 1e-6f },
+                                       { g_nr.gameExposure, 0.02f, 1e-5f },
+                                       which,
+                                       ExposureScan::Scanning(),
+                                       g_nr.gameExposure > 1e-6f };
 
+            if (scanned > 0.0f && scanValue.Observe(scanNow, LogRate::Clock::now()))
+            {
                 if (g_nr.gameExposure > 1e-6f)
                     LOG_INFO("DLSS-NR exposure scan: candidate {} = {:.5f} ({:.5f}..{:.5f})  |  the "
                              "game's own exposure is {:.5f}  |  ratio {:.4f}",
