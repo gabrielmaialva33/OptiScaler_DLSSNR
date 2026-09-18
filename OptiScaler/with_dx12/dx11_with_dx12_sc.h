@@ -12,6 +12,33 @@
 
 using Microsoft::WRL::ComPtr;
 
+// Why a D3D11 swapchain gets the D3D12 bridge, in one place.
+//
+// The expression used to be written out at all four construction sites -- two in
+// hooks/DxgiFactory_Hooks.cpp, two in hooks/DxgiFactory_WrappedCalls.cpp, across legacy CreateSwapChain
+// and CreateSwapChainForHwnd, through both hooked and wrapped factories. A second reason to build the
+// bridge would have meant a fifth, sixth, seventh and eighth copy of a condition that must agree
+// everywhere or the bridge appears on some routes and not others.
+namespace Dx11wDx12
+{
+// Frame generation: an upscaler feeds it and an FG output consumes it. Unchanged.
+bool WantedForFrameGeneration();
+
+// Neural rendering in a title that never calls an upscaler.
+//
+// The pass has one caller today, an upscaler's evaluate, so a game with no upscaler leaves the module
+// inert. The bridge already lands the game's D3D11 frame on a D3D12 presenter, which is a D3D12
+// command list over that frame -- the thing the pass needs and the only thing it is missing.
+//
+// Deliberately not expressed by setting activeFgInput. Frame generation state means an FG object, an
+// FG backend and an FG queue, and none of that is wanted or created here; borrowing the flag to open
+// a gate would make every later reader of it wrong.
+bool WantedForNeuralRendering();
+
+// Either reason. What the factory sites ask.
+bool Wanted();
+} // namespace Dx11wDx12
+
 class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : public IDXGISwapChain4
 {
   public:

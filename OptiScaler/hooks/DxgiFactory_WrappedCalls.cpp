@@ -23,12 +23,6 @@
 #endif
 #include <misc/IdentifyGpu.h>
 
-static bool ShouldCreateDx11wDx12Swapchain()
-{
-    return State::Instance().activeFgInput == FGInput::Upscaler && State::Instance().activeFgOutput != FGOutput::NoFG &&
-           State::Instance().activeFgInput != FGInput::NvngxFG;
-}
-
 static bool PrepareDx12InteropDesc(DXGI_SWAP_CHAIN_DESC& desc)
 {
     if (desc.SampleDesc.Count > 1)
@@ -239,7 +233,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
             D3D11Hooks::HookToDevice(device);
             State::Instance().currentD3D11Device = device;
 
-            if (!_skipFGSwapChainCreation && ShouldCreateDx11wDx12Swapchain())
+            if (!_skipFGSwapChainCreation && Dx11wDx12::Wanted())
             {
                 auto hiddenHwnd = CreateHiddenSwapchainWindow();
 
@@ -627,7 +621,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
             D3D11Hooks::HookToDevice(device);
             State::Instance().currentD3D11Device = device;
 
-            if (!_skipFGSwapChainCreation && ShouldCreateDx11wDx12Swapchain())
+            if (!_skipFGSwapChainCreation && Dx11wDx12::Wanted())
             {
                 auto hiddenHwnd = CreateHiddenSwapchainWindow();
 

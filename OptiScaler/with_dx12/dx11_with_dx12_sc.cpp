@@ -16,6 +16,31 @@
 
 #pragma intrinsic(_ReturnAddress)
 
+namespace Dx11wDx12
+{
+bool WantedForFrameGeneration()
+{
+    const auto& state = State::Instance();
+    return state.activeFgInput == FGInput::Upscaler && state.activeFgOutput != FGOutput::NoFG &&
+           state.activeFgInput != FGInput::NvngxFG;
+}
+
+bool WantedForNeuralRendering()
+{
+    const auto& cfg = *Config::Instance();
+
+    if (!cfg.DlssNrEnabled.value_or_default() || !cfg.DlssNrDx11BridgeHost.value_or_default())
+        return false;
+
+    // Never alongside frame generation in this slice. FG owns the presenter, the submission order and
+    // the buffer rotation, and an NR dispatch placed into that without its own design is a second
+    // writer on the frame rather than a second reason for the transport.
+    return !WantedForFrameGeneration();
+}
+
+bool Wanted() { return WantedForFrameGeneration() || WantedForNeuralRendering(); }
+} // namespace Dx11wDx12
+
 static int scCount = 0;
 
 namespace

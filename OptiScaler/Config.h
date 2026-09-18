@@ -380,6 +380,25 @@ class Config
     // D3D12 and the two bridges only. Native Vulkan stays on stage 0.
     CustomOptional<uint32_t> DlssNrStage { 0 };
 
+    // Run the pass in a D3D11 title that never calls an upscaler, by hosting it on the existing
+    // D3D11-to-D3D12 swapchain bridge.
+    //
+    // The pass has exactly one caller today -- an upscaler's evaluate -- so a game with no upscaler
+    // leaves the module correctly inert and unreachable. This admits a second caller: the bridge in
+    // with_dx12/dx11_with_dx12_sc.cpp already copies the game's D3D11 backbuffer through a shared
+    // handle onto a D3D12 presenter, which is a D3D12 command list over the frame, which is what the
+    // pass needs. The bridge exists for frame generation; this asks for it for a different reason.
+    //
+    // Off by default and inert when off, and it changes a swapchain's topology at creation, so it is
+    // read once when the swapchain is made and never re-read. A menu toggle cannot replace a game's
+    // swapchain in flight.
+    //
+    // See dlssnr/design/nr-dx11-bridge-host.md. Guides are the open question, not transport: the
+    // model has no engine depth or motion on this path, and with both zero-filled it reads movement
+    // as static noise and smears. Zero guides are how transport is brought up, not what a player is
+    // shown.
+    CustomOptional<bool> DlssNrDx11BridgeHost { false };
+
     // Ask the driver's own nvngx.dll whether it will dispatch Neural Rendering, once per session.
     //
     // Everything here drives the model's DLL directly through a forwarder, because the model refuses
