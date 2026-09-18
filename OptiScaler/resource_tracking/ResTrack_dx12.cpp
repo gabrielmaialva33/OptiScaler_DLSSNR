@@ -64,7 +64,7 @@ typedef void(STDMETHODCALLTYPE* PFN_CopyDescriptorsSimple)(ID3D12Device* This, U
                                                            D3D12_CPU_DESCRIPTOR_HANDLE SrcDescriptorRangeStart,
                                                            D3D12_DESCRIPTOR_HEAP_TYPE DescriptorHeapsType);
 
-// Command list hooks for FG
+// Command list hooks for HUDfix
 typedef void(STDMETHODCALLTYPE* PFN_OMSetRenderTargets)(ID3D12GraphicsCommandList* This,
                                                         UINT NumRenderTargetDescriptors,
                                                         D3D12_CPU_DESCRIPTOR_HANDLE* pRenderTargetDescriptors,
@@ -84,13 +84,6 @@ typedef void(STDMETHODCALLTYPE* PFN_DrawInstanced)(ID3D12GraphicsCommandList* Th
                                                    UINT StartInstanceLocation);
 typedef void(STDMETHODCALLTYPE* PFN_Dispatch)(ID3D12GraphicsCommandList* This, UINT ThreadGroupCountX,
                                               UINT ThreadGroupCountY, UINT ThreadGroupCountZ);
-typedef void(STDMETHODCALLTYPE* PFN_ExecuteBundle)(ID3D12GraphicsCommandList* This,
-                                                   ID3D12GraphicsCommandList* pCommandList);
-typedef HRESULT(STDMETHODCALLTYPE* PFN_Close)(ID3D12GraphicsCommandList* This);
-
-typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandLists)(ID3D12CommandQueue* This, UINT NumCommandLists,
-                                                         ID3D12CommandList* const* ppCommandLists);
-
 typedef ULONG(STDMETHODCALLTYPE* PFN_Release)(ID3D12Resource* This);
 
 // Original method calls for device
@@ -110,11 +103,19 @@ static PFN_CopyDescriptorsSimple o_CopyDescriptorsSimple = nullptr;
 static PFN_Dispatch o_Dispatch = nullptr;
 static PFN_DrawInstanced o_DrawInstanced = nullptr;
 static PFN_DrawIndexedInstanced o_DrawIndexedInstanced = nullptr;
+<<<<<<< HEAD
 static PFN_ExecuteBundle o_ExecuteBundle = nullptr;
 static PFN_Close o_Close = nullptr;
 
 static PFN_ExecuteCommandLists o_ExecuteCommandLists = nullptr;
 static std::atomic<void*> nrQueueImplementation { nullptr };
+||||||| parent of e8c9834d (Removed JustTrackCmdList and hooks needed for it)
+static PFN_ExecuteBundle o_ExecuteBundle = nullptr;
+static PFN_Close o_Close = nullptr;
+
+static PFN_ExecuteCommandLists o_ExecuteCommandLists = nullptr;
+=======
+>>>>>>> e8c9834d (Removed JustTrackCmdList and hooks needed for it)
 static PFN_Release o_Release = nullptr;
 
 static PFN_OMSetRenderTargets o_OMSetRenderTargets = nullptr;
@@ -130,9 +131,6 @@ static ankerl::unordered_dense::map<ID3D12GraphicsCommandList*,
 
 static std::shared_mutex _heapRegistryMutex;
 static std::vector<std::shared_ptr<HeapInfo>> fgHeaps;
-
-static std::set<void*> _notFoundCmdLists;
-static std::unordered_map<FG_ResourceType, void*> _resCmdList[BUFFER_COUNT];
 
 struct HeapCacheTLS
 {
@@ -653,80 +651,9 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
                                           ID3D12CommandList* const* ppCommandLists)
 {
     DlssNr::Submission::Batch nrSubmission(This, NumCommandLists, ppCommandLists);
-    auto fg = State::Instance().currentFG;
-
-    if (fg != nullptr && fg->IsActive() && !fg->IsPaused())
-    {
-        LOG_TRACK("NumCommandLists: {}", NumCommandLists);
-
-        std::vector<FG_ResourceType> found;
-        auto fIndex = fg->GetIndex();
-
-        do
-        {
-            std::lock_guard<std::mutex> lock2(_resourceCommandListMutex);
-
-            if (!_notFoundCmdLists.empty())
-            {
-                for (size_t i = 0; i < NumCommandLists; i++)
-                {
-                    if (_notFoundCmdLists.contains(ppCommandLists[i]))
-                    {
-                        LOG_WARN("Found last frames cmdList: {:X}", (size_t) ppCommandLists[i]);
-                        _notFoundCmdLists.erase(ppCommandLists[i]);
-                    }
-                }
-            }
-
-            if (_resCmdList[fIndex].empty())
-                break;
-
-            for (size_t i = 0; i < NumCommandLists; i++)
-            {
-                LOG_TRACK("ppCommandLists[{}]: {:X}", i, (size_t) ppCommandLists[i]);
-
-                for (const auto& pair : _resCmdList[fIndex])
-                {
-                    if (pair.second == ppCommandLists[i])
-                    {
-                        LOG_DEBUG("found {} cmdList: {:X}, queue: {:X}", (UINT) pair.first, (size_t) pair.second,
-                                  (size_t) This);
-                        fg->SetResourceReady(pair.first);
-                        found.push_back(pair.first);
-                    }
-                }
-
-                for (size_t i = 0; i < found.size(); i++)
-                {
-                    _resCmdList[fIndex].erase(found[i]);
-                }
-
-                if (_resCmdList[fIndex].empty())
-                    break;
-            }
-
-        } while (false);
-
-        if (!found.empty())
-        {
-            o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
-            nrSubmission.Submitted();
-
-            for (size_t i = 0; i < found.size(); i++)
-            {
-                fg->SetCommandQueue(found[i], This);
-            }
-
-            return;
-        }
-    }
-
-    LOG_TRACK("Done NumCommandLists: {}", NumCommandLists);
-
     o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
     nrSubmission.Submitted();
 }
-
 #pragma region Heap hooks
 
 static ULONG STDMETHODCALLTYPE hkHeapRelease(ID3D12DescriptorHeap* This)
@@ -1567,79 +1494,6 @@ void ResTrack_Dx12::hkDrawIndexedInstanced(ID3D12GraphicsCommandList* This, UINT
     }
 }
 
-void ResTrack_Dx12::hkExecuteBundle(ID3D12GraphicsCommandList* This, ID3D12GraphicsCommandList* pCommandList)
-{
-    LOG_FUNC();
-
-    IFGFeature_Dx12* fg = State::Instance().currentFG;
-    auto index = fg != nullptr ? fg->GetIndex() : 0;
-
-    {
-        std::lock_guard<std::mutex> lock(_resourceCommandListMutex);
-
-        if (fg != nullptr && fg->IsActive() && (_resourceCommandList[index].size() > 0 || !_resCmdList[index].empty()))
-        {
-            if (_notFoundCmdLists.contains(pCommandList))
-                LOG_WARN("Found last frames cmdList: {:X}", (size_t) This);
-
-            auto& frameCmdList = _resourceCommandList[index];
-            for (std::unordered_map<FG_ResourceType, ID3D12GraphicsCommandList*>::iterator it = frameCmdList.begin();
-                 it != frameCmdList.end(); ++it)
-            {
-                if (it->second == pCommandList)
-                    it->second = This;
-            }
-
-            for (std::unordered_map<FG_ResourceType, void*>::iterator it = _resCmdList[index].begin();
-                 it != _resCmdList[index].end(); ++it)
-            {
-                if (it->second == pCommandList)
-                    it->second = This;
-            }
-        }
-    }
-
-    o_ExecuteBundle(This, pCommandList);
-}
-
-HRESULT ResTrack_Dx12::hkClose(ID3D12GraphicsCommandList* This)
-{
-    auto fg = State::Instance().currentFG;
-    auto index = fg != nullptr ? fg->GetIndex() : 0;
-
-    if (fg != nullptr && fg->IsActive() && !fg->IsPaused() && _resourceCommandList[index].size() > 0)
-    {
-        LOG_TRACK("CmdList: {:X}", (size_t) This);
-
-        std::lock_guard<std::mutex> lock(_resourceCommandListMutex);
-
-        if (_notFoundCmdLists.contains(This))
-            LOG_WARN("Found last frames cmdList: {:X}", (size_t) This);
-
-        std::vector<FG_ResourceType> found;
-
-        for (const auto& pair : _resourceCommandList[index])
-        {
-            if (This == pair.second)
-            {
-                if (!fg->IsResourceReady(pair.first))
-                {
-                    LOG_DEBUG("{} cmdList: {:X}", (UINT) pair.first, (size_t) This);
-                    _resCmdList[index][pair.first] = pair.second;
-                    found.push_back(pair.first);
-                }
-            }
-        }
-
-        for (size_t i = 0; i < found.size(); i++)
-        {
-            _resourceCommandList[index].erase(found[i]);
-        }
-    }
-
-    return o_Close(This);
-}
-
 void ResTrack_Dx12::hkDispatch(ID3D12GraphicsCommandList* This, UINT ThreadGroupCountX, UINT ThreadGroupCountY,
                                UINT ThreadGroupCountZ)
 {
@@ -1818,12 +1672,9 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
             o_DrawInstanced = (PFN_DrawInstanced) pVTable[12];
             o_DrawIndexedInstanced = (PFN_DrawIndexedInstanced) pVTable[13];
             o_Dispatch = (PFN_Dispatch) pVTable[14];
-            o_Close = (PFN_Close) pVTable[9];
 
             // hudless compute
             o_SetComputeRootDescriptorTable = (PFN_SetComputeRootDescriptorTable) pVTable[31];
-
-            o_ExecuteBundle = (PFN_ExecuteBundle) pVTable[27];
 
             if (o_OMSetRenderTargets != nullptr)
             {
@@ -1852,12 +1703,6 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
                         DetourAttach(&(PVOID&) o_Dispatch, hkDispatch);
                 }
 
-                if (o_Close != nullptr)
-                    DetourAttach(&(PVOID&) o_Close, hkClose);
-
-                if (o_ExecuteBundle != nullptr)
-                    DetourAttach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
-
                 auto detourResult = DetourTransactionCommit();
                 if (detourResult != NO_ERROR)
                 {
@@ -1867,9 +1712,7 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
                     o_DrawInstanced = nullptr;
                     o_DrawIndexedInstanced = nullptr;
                     o_Dispatch = nullptr;
-                    o_Close = nullptr;
                     o_SetComputeRootDescriptorTable = nullptr;
-                    o_ExecuteBundle = nullptr;
                 }
             }
 
@@ -1945,7 +1788,6 @@ IUnknown* ResTrack_Dx12::NrRealObject(IUnknown* object)
     IUnknown* real = nullptr;
     return CheckForRealObject("NR submission", object, &real) ? real : object;
 }
-
 void ResTrack_Dx12::HookDevice(ID3D12Device* device)
 {
     if (o_CreateDescriptorHeap != nullptr || State::Instance().activeFgInput == FGInput::NvngxFG)
@@ -2030,7 +1872,6 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
         }
     }
 
-    HookToQueue(device);
     HookCommandList(device);
     HookResource(device);
 }
@@ -2063,7 +1904,6 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
     // Queue
     if (o_ExecuteCommandLists != nullptr && !DlssNr::Submission::Active())
         DetourDetach(&(PVOID&) o_ExecuteCommandLists, hkExecuteCommandLists);
-
     // CommandList
     if (o_OMSetRenderTargets != nullptr)
         DetourDetach(&(PVOID&) o_OMSetRenderTargets, hkOMSetRenderTargets);
@@ -2082,12 +1922,6 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
 
     if (o_Dispatch != nullptr)
         DetourDetach(&(PVOID&) o_Dispatch, hkDispatch);
-
-    if (o_Close != nullptr)
-        DetourDetach(&(PVOID&) o_Close, hkClose);
-
-    if (o_ExecuteBundle != nullptr)
-        DetourDetach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
 
     // Resource
     if (o_Release != nullptr)
@@ -2114,7 +1948,6 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
             o_ExecuteCommandLists = nullptr;
             nrQueueImplementation.store(nullptr, std::memory_order_release);
         }
-
         // CommandList
         o_OMSetRenderTargets = nullptr;
         o_SetGraphicsRootDescriptorTable = nullptr;
@@ -2122,8 +1955,6 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
         o_DrawIndexedInstanced = nullptr;
         o_DrawInstanced = nullptr;
         o_Dispatch = nullptr;
-        o_Close = nullptr;
-        o_ExecuteBundle = nullptr;
 
         // Resource
         o_Release = nullptr;
@@ -2162,11 +1993,6 @@ void ResTrack_Dx12::ReleaseHooks()
     // o_CopyDescriptors = nullptr;
     // o_CopyDescriptorsSimple = nullptr;
 
-    // if (o_ExecuteCommandLists != nullptr)
-    //     DetourAttach(&(PVOID&) o_ExecuteCommandLists, hkExecuteCommandLists);
-
-    // o_ExecuteCommandLists = nullptr;
-
     // if (o_Release != nullptr)
     //     DetourAttach(&(PVOID&) o_Release, hkRelease);
 
@@ -2190,12 +2016,6 @@ void ResTrack_Dx12::ReleaseHooks()
     if (o_Dispatch != nullptr)
         DetourDetach(&(PVOID&) o_Dispatch, hkDispatch);
 
-    if (o_Close != nullptr)
-        DetourDetach(&(PVOID&) o_Close, hkClose);
-
-    if (o_ExecuteBundle != nullptr)
-        DetourDetach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
-
     auto detourResult = DetourTransactionCommit();
     if (detourResult != NO_ERROR)
     {
@@ -2209,8 +2029,6 @@ void ResTrack_Dx12::ReleaseHooks()
         o_DrawIndexedInstanced = nullptr;
         o_DrawInstanced = nullptr;
         o_Dispatch = nullptr;
-        o_Close = nullptr;
-        o_ExecuteBundle = nullptr;
     }
 }
 
@@ -2235,48 +2053,5 @@ void ResTrack_Dx12::ClearPossibleHudless()
 
             shard.map.clear();
         }
-    }
-
-    std::lock_guard<std::mutex> lock2(_resourceCommandListMutex);
-
-    auto fg = State::Instance().currentFG;
-    if (fg != nullptr)
-    {
-        auto fIndex = fg->GetIndex();
-
-        if (_notFoundCmdLists.size() > 10)
-            _notFoundCmdLists.clear();
-
-        for (const auto& pair : _resourceCommandList[fIndex])
-        {
-            LOG_WARN("{} cmdList: {:X}, not closed!", (UINT) pair.first, (size_t) pair.second);
-            _notFoundCmdLists.insert(pair.second);
-        }
-
-        _resourceCommandList[fIndex].clear();
-
-        for (const auto& pair : _resCmdList[fIndex])
-        {
-            LOG_WARN("{} cmdList: {:X}, not executed!", (UINT) pair.first, (size_t) pair.second);
-            _notFoundCmdLists.insert(pair.second);
-        }
-
-        _resCmdList[fIndex].clear();
-    }
-}
-
-void ResTrack_Dx12::SetResourceCmdList(FG_ResourceType type, ID3D12GraphicsCommandList* cmdList)
-{
-    auto fg = State::Instance().currentFG;
-    if (fg != nullptr && fg->IsActive())
-    {
-        auto index = fg->GetIndex();
-
-        ID3D12GraphicsCommandList* realCmdList = nullptr;
-        if (!CheckForRealObject(__FUNCTION__, cmdList, (IUnknown**) &realCmdList))
-            realCmdList = cmdList;
-
-        _resourceCommandList[index][type] = realCmdList;
-        LOG_DEBUG("_resourceCommandList[{}][{}]: {:X}", index, magic_enum::enum_name(type), (size_t) realCmdList);
     }
 }
