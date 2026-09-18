@@ -1579,5 +1579,8 @@
     <ClCompile Include="dlssnr\DlssNr_Consumers.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="dlssnr\DlssNr_ZeroGuides.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

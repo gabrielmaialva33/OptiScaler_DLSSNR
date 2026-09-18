@@ -18,6 +18,11 @@ tier = "host"
 timeout = 300
 summary = "Pre-upscale boundary functions against strict host fakes, under ASan/UBSan."
 
+[nr-zero-guides]
+tier = "host"
+timeout = 300
+summary = "Zero depth/motion for a caller with no engine buffers, and the two-heap clear contract."
+
 [nr-gpu-timing]
 tier = "host"
 timeout = 300
