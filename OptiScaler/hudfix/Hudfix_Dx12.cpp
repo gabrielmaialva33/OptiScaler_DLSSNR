@@ -279,10 +279,8 @@ void Hudfix_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D
     InCommandList->ResourceBarrier(1, &barrier);
 }
 
-bool Hudfix_Dx12::CheckCapture()
+bool Hudfix_Dx12::CheckCapture(int fIndex)
 {
-    auto fIndex = GetIndex();
-
     {
         std::lock_guard<std::mutex> lock(_counterMutex);
 
@@ -449,15 +447,13 @@ bool Hudfix_Dx12::CheckResource(ResourceInfo* resource)
     // return false;
 }
 
-int Hudfix_Dx12::GetIndex() { return _upscaleCounter % BUFFER_COUNT; }
-
-void Hudfix_Dx12::HudlessFound(ID3D12GraphicsCommandList* cmdList)
+void Hudfix_Dx12::HudlessFound(UINT64 upscaleCounter)
 {
-    LOG_DEBUG("_upscaleCounter: {}, _fgCounter: {}", _upscaleCounter, _fgCounter);
+    LOG_DEBUG("_upscaleCounter: {}, _fgCounter: {}", upscaleCounter, _fgCounter.load(std::memory_order_acquire));
 
     std::lock_guard<std::mutex> lock(_counterMutex);
 
-    auto index = GetIndex();
+    const auto index = static_cast<int>(upscaleCounter % BUFFER_COUNT);
     if (_captureCounter[index] > 1000)
         return;
 
@@ -465,9 +461,9 @@ void Hudfix_Dx12::HudlessFound(ID3D12GraphicsCommandList* cmdList)
     _captureCounter[index] = 9999;
 
     // Increase counter
-    _fgCounter = _upscaleCounter;
+    _fgCounter.store(upscaleCounter, std::memory_order_release);
 
-    _skipHudlessChecks = false;
+    _skipHudlessChecks.store(false, std::memory_order_release);
 }
 
 void Hudfix_Dx12::UpscaleStart()
@@ -493,28 +489,35 @@ void Hudfix_Dx12::UpscaleStart()
 
 void Hudfix_Dx12::UpscaleEnd(UINT64 frameId, double lastFGFrameTime)
 {
+    std::lock_guard<std::mutex> checkLock(_checkMutex);
+    std::lock_guard<std::mutex> counterLock(_counterMutex);
 
     // Update counter after upscaling so _upscaleCounter == _fgCounter check at IsResourceCheckActive will work
-    _upscaleCounter++; // = frameId;
+    const auto nextUpscaleCounter = _upscaleCounter.load(std::memory_order_relaxed) + 1; // = frameId;
     _frameTime = lastFGFrameTime;
 
-    // Get new index and clear resources
-    auto index = GetIndex();
+    // Reset the target slot before publishing the new frame number to tracking threads.
+    const auto index = static_cast<int>(nextUpscaleCounter % BUFFER_COUNT);
     _captureCounter[index] = 0;
-    _skipHudlessChecks = false;
+    _skipHudlessChecks.store(false, std::memory_order_release);
+    _upscaleCounter.store(nextUpscaleCounter, std::memory_order_release);
 }
 
-void Hudfix_Dx12::PresentStart() { _fgCounter = _upscaleCounter; }
+void Hudfix_Dx12::PresentStart()
+{
+    std::lock_guard<std::mutex> checkLock(_checkMutex);
+    _fgCounter.store(_upscaleCounter.load(std::memory_order_acquire), std::memory_order_release);
+}
 
 void Hudfix_Dx12::PresentEnd() { LOG_DEBUG(""); }
 
-UINT64 Hudfix_Dx12::ActiveUpscaleFrame() { return _upscaleCounter; }
+UINT64 Hudfix_Dx12::ActiveUpscaleFrame() { return _upscaleCounter.load(std::memory_order_acquire); }
 
-UINT64 Hudfix_Dx12::ActivePresentFrame() { return _fgCounter; }
+UINT64 Hudfix_Dx12::ActivePresentFrame() { return _fgCounter.load(std::memory_order_acquire); }
 
 bool Hudfix_Dx12::IsResourceCheckActive()
 {
-    if (_skipTracking)
+    if (_skipTracking.load(std::memory_order_acquire))
     {
         // LOG_TRACK("_skipHudlessChecks");
         return false;
@@ -526,7 +529,10 @@ bool Hudfix_Dx12::IsResourceCheckActive()
         return false;
     }
 
-    if (_upscaleCounter <= _fgCounter)
+    const auto upscaleCounter = _upscaleCounter.load(std::memory_order_acquire);
+    const auto fgCounter = _fgCounter.load(std::memory_order_acquire);
+
+    if (upscaleCounter <= fgCounter)
     {
         // LOG_TRACK("_upscaleCounter <= _fgCounter: {} <= {}", _upscaleCounter, _fgCounter);
         return false;
@@ -554,7 +560,7 @@ bool Hudfix_Dx12::IsResourceCheckActive()
     return true;
 }
 
-bool Hudfix_Dx12::SkipHudlessChecks() { return _skipHudlessChecks; }
+bool Hudfix_Dx12::SkipHudlessChecks() { return _skipHudlessChecks.load(std::memory_order_acquire); }
 
 void Hudfix_Dx12::RemoveResourceFromTracking(ID3D12Resource* resource)
 {
@@ -596,6 +602,12 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
         std::lock_guard<std::mutex> lock(_checkMutex);
         ScopedBoolFlag checkOwnership(_checkMutexOwned);
 
+        const auto upscaleCounter = _upscaleCounter.load(std::memory_order_acquire);
+        if (upscaleCounter <= _fgCounter.load(std::memory_order_acquire))
+            break;
+
+        const auto fIndex = static_cast<int>(upscaleCounter % BUFFER_COUNT);
+
         CapturedHudlessInfo* capturedHudlessInfo = nullptr;
         auto it = s.capturedHudlesses.find(resource->buffer);
         if (it != s.capturedHudlesses.end())
@@ -619,24 +631,24 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                 if (info->ignore && !info->dontReuse)
                 {
                     // check resource once per frame
-                    if (info->lastTriedFrame != _upscaleCounter)
+                    if (info->lastTriedFrame != upscaleCounter)
                     {
                         // start retry period
                         if (info->retryStartFrame == 0)
                         {
                             LOG_WARN("Retry for {:X} as hudless, current frame: {}", (size_t) resource->buffer,
-                                     _upscaleCounter);
-                            info->retryStartFrame = _upscaleCounter;
-                            info->lastTriedFrame = _upscaleCounter;
+                                     upscaleCounter);
+                            info->retryStartFrame = upscaleCounter;
+                            info->lastTriedFrame = upscaleCounter;
                             info->retryCount = 0;
                             break;
                         }
 
                         info->retryCount++;
-                        info->lastTriedFrame = _upscaleCounter;
+                        info->lastTriedFrame = upscaleCounter;
 
                         // If still in retry period (70 frames)
-                        if ((_upscaleCounter - info->retryStartFrame) < 69)
+                        if ((upscaleCounter - info->retryStartFrame) < 69)
                         {
                             // and used at least 20 times (around every 3rd frame)
                             // try reusing the resource
@@ -644,10 +656,10 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                             {
                                 LOG_WARN("Reusing {:X} as hudless, retry start frame: {}, current frame: {}, reuse "
                                          "count: {}",
-                                         (size_t) resource->buffer, info->retryStartFrame, _upscaleCounter,
+                                         (size_t) resource->buffer, info->retryStartFrame, upscaleCounter,
                                          info->retryCount);
 
-                                info->lastUsedFrame = _upscaleCounter;
+                                info->lastUsedFrame = upscaleCounter;
                                 info->retryStartFrame = 0;
                                 info->useCount = 0;
                                 info->retryCount = 0;
@@ -660,7 +672,7 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                             // Retry period ended without success, reset values
 
                             LOG_WARN("Retry failed for {:X} as hudless, current frame: {}", (size_t) resource->buffer,
-                                     _upscaleCounter);
+                                     upscaleCounter);
 
                             info->useCount = 0;
                             info->retryCount = 0;
@@ -674,16 +686,16 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                     break;
 
                 // if buffer is not used in last 5 frames stop using it
-                if ((_upscaleCounter - info->lastUsedFrame) > 6 && info->useCount < 100)
+                if ((upscaleCounter - info->lastUsedFrame) > 6 && info->useCount < 100)
                 {
                     LOG_WARN("Blocked {:X} as hudless, last used frame: {}, current frame: {}, use count: {}",
-                             (size_t) resource->buffer, info->lastUsedFrame, _upscaleCounter, info->useCount);
+                             (size_t) resource->buffer, info->lastUsedFrame, upscaleCounter, info->useCount);
 
                     info->ignore = true;
                     info->retryCount = 0;
                     info->lastTriedFrame = 0;
                     info->retryStartFrame = 0;
-                    info->lastUsedFrame = _upscaleCounter;
+                    info->lastUsedFrame = upscaleCounter;
 
                     // don't reuse more than 2 times
                     if (info->reuseCount > 1)
@@ -693,19 +705,17 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                 }
 
                 // update the info
-                info->lastUsedFrame = _upscaleCounter;
+                info->lastUsedFrame = upscaleCounter;
                 info->useCount++;
             }
             else
             {
-                _hudlessList[resource->buffer] = { _upscaleCounter, 0, 0, 0, 0, 1, false, false };
+                _hudlessList[resource->buffer] = { upscaleCounter, 0, 0, 0, 0, 1, false, false };
             }
         }
 
-        if (!CheckCapture())
+        if (!CheckCapture(fIndex))
             break;
-
-        auto fIndex = GetIndex();
 
         LOG_TRACE("Capture resource: {:X}, index: {}", (size_t) resource->buffer, fIndex);
 
@@ -834,7 +844,7 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
 
                 // This will prevent resource tracker to check these operations
                 // Will reset after FG dispatch
-                _skipHudlessChecks = true;
+                _skipHudlessChecks.store(true, std::memory_order_release);
 
                 ResourceBarrier(fgCmdList, _captureBuffer[fIndex], D3D12_RESOURCE_STATE_COPY_DEST,
                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -873,7 +883,7 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
         {
             // This will prevent resource tracker to check these operations
             // Will reset after FG dispatch
-            _skipHudlessChecks = true;
+            _skipHudlessChecks.store(true, std::memory_order_release);
             LOG_DEBUG("Using _captureBuffer");
 
             if (fg != nullptr)
@@ -905,8 +915,8 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
 
         // This will prevent resource tracker to check these operations
         // Will reset after FG dispatch
-        _skipHudlessChecks = true;
-        HudlessFound(cmdList);
+        _skipHudlessChecks.store(true, std::memory_order_release);
+        HudlessFound(upscaleCounter);
 
         if (capturedHudlessInfo != nullptr)
         {
@@ -935,8 +945,8 @@ void Hudfix_Dx12::ResetCounters()
     std::lock_guard<std::mutex> checkLock(_checkMutex);
     std::lock_guard<std::mutex> counterLock(_counterMutex);
 
-    _fgCounter = 0;
-    _upscaleCounter = 0;
+    _fgCounter.store(0, std::memory_order_release);
+    _upscaleCounter.store(0, std::memory_order_release);
 
     _lastDiffTime = 0.0;
     _upscaleEndTime = 0.0;
