@@ -324,3 +324,38 @@ motion and frame dumps for controlled run-to-run comparison.
 
 A stage that cannot reach its own instrumentation must fail loudly rather than pass quietly;
 that is the `ZERO COVERAGE` rule the Vulkan harness established and this one inherits.
+
+## Cold-NR knobs, and the drift they exposed (2026-09-18)
+
+`--cold-size WxH`, `--cold-ui-correction N` and `--cold-core-sdk N` make the three things this mode
+used to hardcode into variables. They exist because the production present host reached
+`CreateFeature(18)` in Divinity: Original Sin 2 and was refused with `FAIL_PlatformError`, on a path
+this mode reports as passing.
+
+Running them one at a time against the game's own configuration eliminated, with evidence:
+
+| varied to production's value | result |
+|---|---|
+| 3440x1440 instead of 640x360 | PASS 48/48 |
+| UI correction 1 instead of 0 | PASS 48/48 |
+| core SDK 0x15 instead of 0 | PASS 48/48 |
+| all three together | PASS 48/48 |
+
+Also eliminated without a knob: NVAPI (this mode stages none at all and passes, so feature 18 does
+not need it, and the game falling back to fakenvapi is not the cause), the NGX core version (the
+`_nvngx.dll` in the game folder, in Crimson Desert and in the driver store are one file), and the
+application id and data path (the latter is only ever written by a game's own NGX init, so it is
+empty on both sides in a title that has none).
+
+Writing `--cold-core-sdk` exposed drift worth recording on its own. This mode's comment said it
+deliberately passed the cold `State` metadata "as NVNGXProxy::InitDx12 passes it", naming commit
+`bd6d66d3`. `NVNGXProxy::SdkVersion` has since substituted `NVSDK_NGX_Version_API` for a zero
+version, and its own comment says the case that exercises it is reaching the neural pass with no
+upscaler call -- this one. So the mode was proving metadata production had stopped using. The
+default is still 0, so every earlier result still means what it meant; it is the claim that the
+default mirrors production that had expired.
+
+What remains unexplained is therefore structural, not parametric: production runs on a D3D12 device
+created from a D3D11 device through the interop bridge, records the create onto a command list that
+already carries barriers, a clear and a dispatch, and does all of it inside a process where
+OptiScaler's hooks are installed. This mode does none of those three.

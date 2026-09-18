@@ -135,7 +135,8 @@ def check_present_coverage(harness):
     print(f'  present transport coverage accepted; inspect before/after images in {RUN}')
 
 
-def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_ab=False):
+def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_ab=False, cold_size=None,
+                     cold_ui=None, cold_sdk=None):
     """Run the harness the way a Steam game runs: through Proton, in a compatdata prefix of its own.
 
     Hand-mirroring what Proton provides (vkd3d-proton, dxvk-nvapi, the driver's nvngx pair and the
@@ -174,7 +175,10 @@ def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_
                 stale.unlink()
     print(f'running under {proton.parent.name}')
     p = subprocess.run([str(proton), 'run', str(RUN / 'dlssnr-loopback.exe'), 'OptiScaler.dll'] +
-                       (['--present-composition-ab'] if composition_ab else ['--present-hud-ab'] if hud_ab else ['--present-nr'] if present_nr else ['--cold-nr'] if cold_nr else []),
+                       (['--present-composition-ab'] if composition_ab else ['--present-hud-ab'] if hud_ab else ['--present-nr'] if present_nr else ['--cold-nr'] if cold_nr else [])
+                       + (['--cold-size', cold_size] if cold_nr and cold_size else [])
+                       + (['--cold-ui-correction', cold_ui] if cold_nr and cold_ui else [])
+                       + (['--cold-core-sdk', cold_sdk] if cold_nr and cold_sdk else []),
                        cwd=RUN, env=env, timeout=600)
     hlog = RUN / 'dlssnr-loopback.log'
     harness = hlog.read_text(errors='replace') if hlog.exists() else ''
@@ -234,6 +238,17 @@ def main():
                          'vkd3d-proton, dxvk-nvapi and the NGXCore registry exactly as a game '
                          'gets them. wine: bare prefix with only vkd3d-proton borrowed; reaches '
                          'NR but its feature create fails with FAIL_PlatformError.')
+    ap.add_argument('--cold-size', default=None, metavar='WxH',
+                    help="with --cold-nr: the size to create and evaluate at (default 640x360). "
+                         "The production present host was refused at 3440x1440 on metadata this mode "
+                         "proves accepted at 640x360, so the size is a variable now, not a constant.")
+    ap.add_argument('--cold-ui-correction', default=None, metavar='N',
+                    help='with --cold-nr: the UI-correction argument to create with (default 0). '
+                         'Production passes 1.')
+    ap.add_argument('--cold-core-sdk', default=None, metavar='N',
+                    help='with --cold-nr: the SDK version to initialise the CORE with (default 0). '
+                         'Production passes NVSDK_NGX_Version_API (0x15) whenever no game NGX init '
+                         'populated State, which is exactly the no-upscaler case.')
     ap.add_argument('--skip-build', action='store_true',
                     help='reuse the selected mode\'s artifacts/{run,cold-run,present-run}/dlssnr-loopback.exe')
     modes = ap.add_mutually_exclusive_group()
@@ -334,7 +349,8 @@ def main():
             '[Menu]\nOverlayMenu=true\n[DlssNr]\nEnabled=true\n[Log]\nLogToFile=true\nLogLevel=2\n')
 
     if args.runtime == 'proton':
-        return run_under_proton(args.cold_nr, args.present_nr, args.hud_ab, args.composition_ab)
+        return run_under_proton(args.cold_nr, args.present_nr, args.hud_ab, args.composition_ab, args.cold_size,
+                                args.cold_ui_correction, args.cold_core_sdk)
 
     # A separate runtime prefix: the compiler prefix is configured for MSVC, not for graphics, and
     # running the app there conflates "the harness is wrong" with "this prefix has no D3D12".

@@ -99,9 +99,14 @@ static void Submit(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Graphi
 }
 
 static void Run(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12CommandAllocator* alloc,
-                ID3D12GraphicsCommandList* list, ID3D12Fence* fence, HANDLE event)
+                ID3D12GraphicsCommandList* list, ID3D12Fence* fence, HANDLE event, unsigned width = 640,
+                unsigned height = 360, int uiCorrection = 0, unsigned coreSdk = 0)
 {
-    constexpr unsigned width = 640, height = 360, iterations = 48;
+    // The size is a parameter because it turned out to be a variable. The production present host
+    // reached CreateFeature(18) in Divinity: Original Sin 2 at 3440x1440 and was refused with
+    // FAIL_PlatformError, on the same metadata this mode proves accepted at 640x360. Whether the
+    // refusal is about the resolution is a question only a run at that resolution answers.
+    constexpr unsigned iterations = 48;
     unsigned attempts = 0, successes = 0, completedEvaluations = 0;
     bool coreReady = false, featureReady = false;
     const char* stage = "load core";
@@ -111,9 +116,13 @@ static void Run(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12CommandAl
     {
         Say("COLD-NR: standalone core + production forwarder; no DLSS or RR creation\n");
         Say("  fixture=%ux%u iterations=%u; no confidence resource or parameter\n", width, height, iterations);
-        // State.h cold metadata at bd6d66d3, passed by NVNGXProxy::InitDx12. Deliberately
-        // NOT the old harness's 0x1337 / L"." / NVSDK_NGX_Version_API. There is no retry
-        // with a newer SDK or different ID that could hide a refusal of these defaults.
+        // State.h cold metadata at bd6d66d3, passed by NVNGXProxy::InitDx12 as it stood then.
+        //
+        // The SDK version is a parameter because production stopped agreeing with this default.
+        // NVNGXProxy::SdkVersion now substitutes NVSDK_NGX_Version_API (0x15) when State's version is
+        // zero -- that change was made precisely because zero is not a version -- so a cold NR run in
+        // a title with no game NGX init initialises the core with 0x15 while this mode kept proving
+        // 0. There is still no retry with a different ID or path that could hide a refusal.
         auto core = Load(L".\\_nvngx.dll");
         auto init = Export<InitExt>(core, "NVSDK_NGX_D3D12_Init_Ext");
         auto caps = Export<GetCaps>(core, "NVSDK_NGX_D3D12_GetCapabilityParameters");
@@ -122,8 +131,8 @@ static void Run(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12CommandAl
         NVSDK_NGX_FeatureCommonInfo info {};
         info.LoggingInfo = { CoreLog, NVSDK_NGX_LOGGING_LEVEL_ON, true };
         stage = "core Init_Ext";
-        Say("  calling core Init_Ext: appId=1337 (decimal), dataPath=empty, sdk=0, searchPaths=0\n");
-        NgxResult(stage, init(1337, L"", device, static_cast<NVSDK_NGX_Version>(0), &info));
+        Say("  calling core Init_Ext: appId=1337 (decimal), dataPath=empty, sdk=0x%X, searchPaths=0\n", coreSdk);
+        NgxResult(stage, init(1337, L"", device, static_cast<NVSDK_NGX_Version>(coreSdk), &info));
         coreReady = true;
         stage = "core GetCapabilityParameters";
         NVSDK_NGX_Parameter* params = nullptr;
@@ -224,9 +233,14 @@ static void Run(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12CommandAl
         Require(pathLength != 0 && pathLength < MAX_PATH, "snippet module path cannot be resolved");
         stage = "snippet Init_Ext / CreateFeature(18)";
         begin();
-        Say("  calling production dlssnr_call_create (feature 18 only)\n");
+        // The last argument is UI correction. This mode has always passed 0; production passes 1, and
+        // that is the one create argument the two disagree on once the data path is accounted for
+        // (it is only ever written by a game's own NGX init, so in a title with none it is empty on
+        // both sides). Parameterised to find out whether it is what feature 18 is refusing.
+        Say("  calling production dlssnr_call_create (feature 18 only), uiCorrection=%d\n", uiCorrection);
         auto feature =
-            create(snippetPath, L"", device, list, params, width, height, 0, 0.5f, 0, 0.5f, 0.5f, 0.5f, 1, 0);
+            create(snippetPath, L"", device, list, params, width, height, 0, 0.5f, 0, 0.5f, 0.5f, 0.5f, 1,
+                   uiCorrection);
         Say("  snippet Init_Ext -> 0x%08X; CreateFeature(18) -> 0x%08X; handle=%p\n", static_cast<unsigned>(*lastInit),
             static_cast<unsigned>(*lastCreate), feature);
         // Create can record work even on refusal; finish the recording before interpreting it.
@@ -285,7 +299,8 @@ static void Run(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12CommandAl
 } // namespace ColdNr
 
 static void RunColdNr(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12CommandAllocator* alloc,
-                      ID3D12GraphicsCommandList* list, ID3D12Fence* fence, HANDLE event)
+                      ID3D12GraphicsCommandList* list, ID3D12Fence* fence, HANDLE event, unsigned width = 640,
+                      unsigned height = 360, int uiCorrection = 0, unsigned coreSdk = 0)
 {
-    ColdNr::Run(device, queue, alloc, list, fence, event);
+    ColdNr::Run(device, queue, alloc, list, fence, event, width, height, uiCorrection, coreSdk);
 }

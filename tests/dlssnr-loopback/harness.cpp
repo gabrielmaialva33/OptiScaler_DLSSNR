@@ -311,15 +311,70 @@ static void PumpMessages()
 
 int main(int argc, char** argv)
 {
-    const bool coldNr =
-        (argc == 2 && std::string(argv[1]) == "--cold-nr") || (argc == 3 && std::string(argv[2]) == "--cold-nr");
-    const bool hudAb = (argc == 2 && std::string(argv[1]) == "--present-hud-ab") ||
-                       (argc == 3 && std::string(argv[2]) == "--present-hud-ab");
-    const bool compositionAb = (argc == 2 && std::string(argv[1]) == "--present-composition-ab") ||
-                               (argc == 3 && std::string(argv[2]) == "--present-composition-ab");
-    const bool presentNr = compositionAb || hudAb || (argc == 2 && std::string(argv[1]) == "--present-nr") ||
-                           (argc == 3 && std::string(argv[2]) == "--present-nr");
-    const char* dllPath = argc > 1 && std::string(argv[1]) != "--cold-nr" ? argv[1] : "OptiScaler.dll";
+    // Mode selection used to be positional -- argv[1] or argv[2], and only at argc 2 or 3. Adding a
+    // third argument silently unselected the mode: --cold-nr --cold-size WxH parsed as a DLL path of
+    // "--cold-nr", which then failed in LoadLibrary and reported a missing DLL for a mode that never
+    // loads one. Flags are found wherever they are now, and the DLL path is the one argument that is
+    // not a flag.
+    const auto hasFlag = [argc, argv](const char* flag)
+    {
+        for (int i = 1; i < argc; ++i)
+            if (std::string(argv[i]) == flag)
+                return true;
+        return false;
+    };
+
+    const bool coldNr = hasFlag("--cold-nr");
+    const bool hudAb = hasFlag("--present-hud-ab");
+    const bool compositionAb = hasFlag("--present-composition-ab");
+    const bool presentNr = compositionAb || hudAb || hasFlag("--present-nr");
+
+    const char* dllPath = "OptiScaler.dll";
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string argument = argv[i];
+
+        // --cold-size takes a value, which is not a DLL path either.
+        if (argument == "--cold-size" || argument == "--cold-ui-correction" ||
+            argument == "--cold-core-sdk")
+        {
+            ++i;
+            continue;
+        }
+
+        if (argument.rfind("--", 0) != 0)
+        {
+            dllPath = argv[i];
+            break;
+        }
+    }
+
+    // --cold-size WxH. Defaults stay 640x360, so every earlier cold run means what it meant.
+    unsigned coldWidth = 640, coldHeight = 360;
+    int coldUiCorrection = 0;
+    unsigned coldCoreSdk = 0;
+    for (int i = 1; i + 1 < argc; ++i)
+    {
+        const std::string flag = argv[i];
+
+        if (flag == "--cold-size")
+        {
+            unsigned w = 0, h = 0;
+            if (std::sscanf(argv[i + 1], "%ux%u", &w, &h) == 2 && w > 0 && h > 0)
+            {
+                coldWidth = w;
+                coldHeight = h;
+            }
+        }
+        else if (flag == "--cold-ui-correction")
+        {
+            coldUiCorrection = std::atoi(argv[i + 1]);
+        }
+        else if (flag == "--cold-core-sdk")
+        {
+            coldCoreSdk = static_cast<unsigned>(std::strtoul(argv[i + 1], nullptr, 0));
+        }
+    }
 
     try
     {
@@ -377,7 +432,8 @@ int main(int argc, char** argv)
 
         if (coldNr)
         {
-            RunColdNr(device, queue, alloc, list, fence, fenceEvent);
+            RunColdNr(device, queue, alloc, list, fence, fenceEvent, coldWidth, coldHeight, coldUiCorrection,
+                      coldCoreSdk);
             DestroyWindow(window);
             CloseHandle(fenceEvent);
             return 0;
