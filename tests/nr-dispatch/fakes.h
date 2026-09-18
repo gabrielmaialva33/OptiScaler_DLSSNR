@@ -8,7 +8,24 @@
 #include <vector>
 
 using UINT = unsigned;
+using UINT64 = unsigned long long;
+using UINT16 = unsigned short;
 using HRESULT = int;
+
+// Only the members the views are built from. Distinct values matter more than real ones: the point is
+// that two resources which differ in any of these must not share a descriptor.
+enum DXGI_FORMAT
+{
+    DXGI_FORMAT_UNKNOWN = 0,
+    DXGI_FORMAT_R16G16B16A16_FLOAT = 10,
+    DXGI_FORMAT_R8G8B8A8_TYPELESS = 27,
+    DXGI_FORMAT_R8G8B8A8_UNORM = 28,
+};
+enum D3D12_RESOURCE_DIMENSION
+{
+    D3D12_RESOURCE_DIMENSION_UNKNOWN = 0,
+    D3D12_RESOURCE_DIMENSION_TEXTURE2D = 3,
+};
 constexpr HRESULT S_OK = 0;
 constexpr bool FAILED(HRESULT result) { return result < 0; }
 #define LOG_ERROR(...) ((void) 0)
@@ -33,6 +50,11 @@ struct D3D12_STATIC_SAMPLER_DESC
 struct D3D12_RESOURCE_DESC
 {
     size_t Width;
+    UINT Height {};
+    UINT16 DepthOrArraySize {};
+    UINT16 MipLevels {};
+    D3D12_RESOURCE_DIMENSION Dimension {};
+    DXGI_FORMAT Format {};
 };
 struct CD3DX12_RESOURCE_DESC
 {
@@ -55,6 +77,12 @@ using ConstantBytes = std::array<unsigned char, sizeof(DlssNrConstants)>;
 
 struct ID3D12Resource
 {
+    // What this resource says it is. The default is a plain 2D texture, so a test that does not care
+    // about shape gets one that is valid to build a view from; a test that does care sets it.
+    D3D12_RESOURCE_DESC desc { 1920, 1080, 1, 1, D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+                               DXGI_FORMAT_R16G16B16A16_FLOAT };
+    D3D12_RESOURCE_DESC GetDesc() const { return desc; }
+
     ConstantBytes bytes {};
     bool failMap = false, nullMap = false, mapped = false;
     unsigned maps = 0, unmaps = 0, releases = 0;
@@ -88,6 +116,24 @@ struct ID3D12Resource
     }
 };
 
+// What a descriptor slot holds after a view was written into it.
+//
+// The slot is compared, not counted. A cache that skips a write it should have made leaves the
+// previous incarnation's record sitting here, and only comparing contents can see that; call counts
+// alone would report the skip as the saving it was supposed to be.
+struct ViewRecord
+{
+    ID3D12Resource* res = nullptr;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    unsigned mip = ~0u;
+    bool translateTypeless = false;
+
+    bool operator==(const ViewRecord& o) const
+    {
+        return res == o.res && format == o.format && mip == o.mip && translateTypeless == o.translateTypeless;
+    }
+};
+
 struct ID3D12Device
 {
     int failCreateAt = -1, failMapAt = -1, nullMapAt = -1;
@@ -95,8 +141,8 @@ struct ID3D12Device
     unsigned creates = 0, cbvWrites = 0, srvWrites = 0, uavWrites = 0;
     std::vector<std::unique_ptr<ID3D12Resource>> resources;
     std::array<D3D12_CONSTANT_BUFFER_VIEW_DESC, 48> cbvs {};
-    std::array<std::array<ID3D12Resource*, 5>, 48> srvs {};
-    std::array<std::array<ID3D12Resource*, 2>, 48> uavs {};
+    std::array<std::array<ViewRecord, 5>, 48> srvs {};
+    std::array<std::array<ViewRecord, 2>, 48> uavs {};
     HRESULT CreateCommittedResource(const CD3DX12_HEAP_PROPERTIES*, int, const D3D12_RESOURCE_DESC* desc, int, void*,
                                     ID3D12Resource** output)
     {
@@ -190,15 +236,19 @@ class Shader_Dx12
             heaps[i].heap = { device, i };
         return true;
     }
-    void CreateShaderResourceView(ID3D12Device* device, ID3D12Resource* resource, unsigned handle)
+    // These mirror Shader_Dx12's real signatures, translateTypeless included (97c94b05). The defaults
+    // are the real ones, so a production call that stops passing an argument still compiles here and
+    // is recorded as the default it actually got -- which is what the descriptor would then hold.
+    void CreateShaderResourceView(ID3D12Device* device, ID3D12Resource* resource, unsigned handle,
+                                  DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN, bool translateTypeless = true)
     {
-        device->srvs.at(handle / 8).at(handle % 8) = resource;
+        device->srvs.at(handle / 8).at(handle % 8) = { resource, format, 0, translateTypeless };
         ++device->srvWrites;
     }
-    void CreateUnorderedAccessView(ID3D12Device* device, ID3D12Resource* resource, unsigned handle, unsigned mip)
+    void CreateUnorderedAccessView(ID3D12Device* device, ID3D12Resource* resource, unsigned handle, unsigned mip,
+                                   bool translateTypeless = true)
     {
-        assert(mip == 0);
-        device->uavs.at(handle / 8).at(handle % 8 - 5) = resource;
+        device->uavs.at(handle / 8).at(handle % 8 - 5) = { resource, DXGI_FORMAT_UNKNOWN, mip, translateTypeless };
         ++device->uavWrites;
     }
 

@@ -70,6 +70,65 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     static constexpr uint32_t kSrvCount = 5;
     static constexpr uint32_t kUavCount = 2;
 
+    // The arguments every view in this pass is created with, in one place.
+    //
+    // DispatchPass passes these to Shader_Dx12 and copies them into the key below, so the two cannot
+    // describe different things. They are named rather than written inline because translateTypeless
+    // stopped being fixed in 97c94b05: a cache keyed on the resource alone would hand back a view
+    // built under the other policy. Whatever these become, the key carries them.
+    static constexpr DXGI_FORMAT kViewFormat = DXGI_FORMAT_UNKNOWN; // take the resource's own format
+    static constexpr uint32_t kViewMipLevel = 0;
+    static constexpr bool kViewTranslateTypeless = true;
+
+    // What each slot's descriptors described last, so a binding that did not move is not re-created.
+    //
+    // A view here is a pure function of two things: the resource it names, and the arguments it was
+    // created with. Shader_Dx12::CreateShaderResourceView and CreateUnorderedAccessView read nothing
+    // but GetDesc and their own format, mip and translateTypeless parameters, so a slot whose key has
+    // not moved already holds exactly the bytes the GPU will read, and re-creating the view costs a
+    // driver call for nothing. Steady state is the common case -- the same few resources (the game's
+    // output, the private copies, the guide clones) bound in the same order every frame.
+    //
+    // Which desc fields matter is not a guess. Dimension, DepthOrArraySize and MipLevels choose the
+    // view dimension and its mip count in both functions, and Format is the view format; all four are
+    // in the key. Width and Height shape no view at all -- they are in the key as discriminators, for
+    // the case the pointer alone misses: a released resource whose address the allocator hands back
+    // to a differently shaped one.
+    //
+    // That address case is also why the key carries a generation. Shape equality says the descriptor
+    // bytes would be written the same, not that they still name the same GPU allocation, and an NR
+    // scratch texture freed and re-created at the same size -- a feature rebuild does exactly that --
+    // can land at the same pointer over different memory. Every CreateScratch advances the
+    // generation, which retires every cached key at once. Game-owned resources have no such token and
+    // rest on pointer and shape, as any cache of someone else's resources must.
+    struct BindKey
+    {
+        ID3D12Resource* res = nullptr;
+        uint64_t generation = 0;
+        UINT64 width = 0;
+        UINT height = 0;
+        UINT16 depthOrArraySize = 0;
+        UINT16 mipLevels = 0;
+        D3D12_RESOURCE_DIMENSION dimension = D3D12_RESOURCE_DIMENSION_UNKNOWN;
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;
+        uint32_t mipLevel = 0;
+        bool translateTypeless = false;
+
+        bool operator==(const BindKey& o) const
+        {
+            return res == o.res && generation == o.generation && width == o.width && height == o.height &&
+                   depthOrArraySize == o.depthOrArraySize && mipLevels == o.mipLevels && dimension == o.dimension &&
+                   format == o.format && viewFormat == o.viewFormat && mipLevel == o.mipLevel &&
+                   translateTypeless == o.translateTypeless;
+        }
+    };
+
+    // A default-constructed key names no resource, so a slot that has never been written never
+    // matches and always creates.
+    BindKey _srvKey[DLSSNR_NUM_OF_HEAPS][kSrvCount] = {};
+    BindKey _uavKey[DLSSNR_NUM_OF_HEAPS][kUavCount] = {};
+
     uint32_t _numThreadsX = 8;
     uint32_t _numThreadsY = 8;
 
