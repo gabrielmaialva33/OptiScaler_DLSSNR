@@ -8,6 +8,7 @@
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
 #include <hooks/Streamline_Hooks.h>
+#include <framegen/dlssg/MfgUnlock.h>
 
 #include <sl.h>
 #include <sl_pcl.h>
@@ -96,6 +97,8 @@ class StreamlineProxy
             State::Instance().optiSlCommon = NtdllProxy::LoadLibraryExW_Ldr(slCommonPath.c_str(), NULL, NULL);
             auto dlssgPath = localSlPath / L"nvngx_dlssg.dll"; // TODO: maybe some search?
             State::Instance().optiDLSSG = NtdllProxy::LoadLibraryExW_Ldr(dlssgPath.c_str(), NULL, NULL);
+
+            MfgUnlock::TryApply();
 
             return HookStreamline(_dll);
         }
