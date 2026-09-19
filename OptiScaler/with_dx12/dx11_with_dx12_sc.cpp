@@ -162,6 +162,7 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
     if (Dx11wDx12::WantedForNeuralRendering())
     {
         _nrHost = std::make_unique<DlssNr::PresentHost>();
+        State::Instance().nrPresentHostActive = true;
         LOG_INFO("bridge {} hosts the neural pass: no upscaler in this title", _id);
     }
 

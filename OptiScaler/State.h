@@ -324,6 +324,13 @@ class State
     bool vulkanSkipHooks = false;
     bool vulkanHooksSkipped = false; // Linux: Vulkan hooks disabled via marker file, use D3D overlay path
 
+    // A D3D11-to-D3D12 bridge is carrying the neural pass because this title has no upscaler.
+    //
+    // Set when such a bridge is built and never cleared, because it describes what this process
+    // decided at swapchain creation rather than what is happening this frame. The menu reads it to
+    // stop telling the user to select an upscaler in a game that has none to select.
+    bool nrPresentHostActive = false;
+
     // MenuOverlayVk holds ImGui's renderer backend. Independent of swapchainApi, and the condition
     // MenuOverlayDx::Present stands down on: ImGui has one renderer backend at a time.
     bool menuOverlayIsVulkan = false;

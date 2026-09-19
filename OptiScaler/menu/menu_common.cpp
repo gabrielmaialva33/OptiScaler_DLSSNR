@@ -2452,9 +2452,23 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
 
             std::string joinedUpscalers(joined.begin(), joined.end());
 
-            ImGui::Text("Please select %s as upscaler from game\noptions and load a save game "
-                        "to enable Opti settings.\nUpscalers don't always work in menus.",
-                        joinedUpscalers.c_str());
+            // Do not send someone looking for a setting their game does not have.
+            //
+            // This advice assumes the title ships an upscaler and the user simply has not selected
+            // it. When a D3D11-to-D3D12 bridge is carrying the neural pass, that assumption is false
+            // by construction: the bridge exists precisely because nothing in this game ever calls an
+            // upscaler, so "select DLSS in game options" names a menu entry that is not there.
+            if (state.nrPresentHostActive)
+            {
+                ImGui::Text("Neural Rendering runs at present in this game.\nIt has no upscaler, so there is "
+                            "nothing to select.\nSee the DLSS Neural Rendering panel below.");
+            }
+            else
+            {
+                ImGui::Text("Please select %s as upscaler from game\noptions and load a save game "
+                            "to enable Opti settings.\nUpscalers don't always work in menus.",
+                            joinedUpscalers.c_str());
+            }
 
             if (config->UseHQFont.value_or_default())
                 ImGui::PopFontSize();
