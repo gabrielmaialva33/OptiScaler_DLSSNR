@@ -39,7 +39,7 @@ class PresentHost
     // or something here could not be built. It is not an error for the caller: the frame still has to
     // be shown, and Output() answers null so the caller transfers the source as it always did.
     bool Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
-                D3D12_RESOURCE_STATES sourceState);
+                D3D12_RESOURCE_STATES sourceState, ID3D12CommandQueue* queue);
 
     // What Record produced, in D3D12_RESOURCE_STATE_COPY_SOURCE, or null if this frame has none.
     // Valid only for the recording it came from.
@@ -62,6 +62,20 @@ class PresentHost
   private:
     bool _Ensure(ID3D12Device* device, ID3D12Resource* source);
 
+    // Build the model once, on lists of this host's own, before any frame work exists to sit in
+    // front of it.
+    //
+    // Creating the feature is setup, not frame work, and it was being recorded onto the frame's list
+    // behind two swapchain transitions, two guide clears, four more transitions and a conversion
+    // dispatch. NGX records its own initialization when it creates a feature, and whether it minds
+    // what is already on the list it is handed is not something source inspection answers.
+    //
+    // Two allocators and two lists rather than one reset twice: the first carries the guide clear and
+    // the second carries nothing but the create, so the create's list is empty when NGX gets it.
+    // Resetting one allocator between two submissions would need a CPU wait to be legal; two of them
+    // need nothing, because they are used once and then kept until teardown.
+    bool _EnsureFeature(ID3D12Device* device, ID3D12CommandQueue* queue);
+
     ZeroGuides _guides;
 
     // The colour the model reads and writes. A wide float format rather than the backbuffer's own,
@@ -75,6 +89,10 @@ class PresentHost
 
     D3D12_RESOURCE_STATES _workingState = D3D12_RESOURCE_STATE_COMMON;
     D3D12_RESOURCE_STATES _outputState = D3D12_RESOURCE_STATE_COMMON;
+
+    ID3D12CommandAllocator* _setupAllocators[2] = {};
+    ID3D12GraphicsCommandList* _setupLists[2] = {};
+    bool _featureAttempted = false;
 
     uint64_t _serial = 0;
     uint32_t _width = 0;

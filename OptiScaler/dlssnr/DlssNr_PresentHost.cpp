@@ -34,6 +34,23 @@ void Transition(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource, D3
     from = to;
 }
 
+// Say why a frame went without the pass, once per distinct reason.
+//
+// Every frame that declines declines at sixty hertz, so logging each one buries the log and hides the
+// one line that matters. Comparing the pointer rather than the text is deliberate: these are string
+// literals from a fixed set, so a new pointer is a new reason and nothing here has to allocate or
+// compare characters on the present thread.
+void ReportFrameSkip(const char* reason)
+{
+    static const char* last = nullptr;
+
+    if (reason == nullptr || reason == last)
+        return;
+
+    last = reason;
+    LOG_INFO("DLSS-NR present host: no pass on this frame ({})", reason);
+}
+
 } // namespace
 
 PresentHost::PresentHost() = default;
@@ -44,6 +61,26 @@ void PresentHost::Release()
     _toWorking.reset();
     _fromWorking.reset();
     _guides.Release();
+
+    for (auto*& list : _setupLists)
+    {
+        if (list != nullptr)
+        {
+            list->Release();
+            list = nullptr;
+        }
+    }
+
+    for (auto*& allocator : _setupAllocators)
+    {
+        if (allocator != nullptr)
+        {
+            allocator->Release();
+            allocator = nullptr;
+        }
+    }
+
+    _featureAttempted = false;
 
     _workingState = D3D12_RESOURCE_STATE_COMMON;
     _outputState = D3D12_RESOURCE_STATE_COMMON;
@@ -124,8 +161,80 @@ bool PresentHost::_Ensure(ID3D12Device* device, ID3D12Resource* source)
     return true;
 }
 
+bool PresentHost::_EnsureFeature(ID3D12Device* device, ID3D12CommandQueue* queue)
+{
+    if (_featureAttempted)
+        return true;
+
+    if (queue == nullptr)
+        return false;
+
+    // Attempted, not succeeded. Whatever happens below happens once: a model that refuses is a model
+    // that will refuse again, and retrying it every frame would be sixty allocations a second behind
+    // a picture that is already correct.
+    _featureAttempted = true;
+
+    for (unsigned i = 0; i < 2; ++i)
+    {
+        if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&_setupAllocators[i]))))
+        {
+            LOG_ERROR("DLSS-NR present host: setup allocator {} failed", i);
+            return false;
+        }
+
+        if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _setupAllocators[i], nullptr,
+                                             IID_PPV_ARGS(&_setupLists[i]))))
+        {
+            LOG_ERROR("DLSS-NR present host: setup list {} failed", i);
+            return false;
+        }
+    }
+
+    const auto depthRest = static_cast<D3D12_RESOURCE_STATES>(GuideRestState(false));
+
+    // List one: the guides' zeros, and nothing else.
+    if (!_guides.RecordClear(_setupLists[0], depthRest))
+        return false;
+
+    if (FAILED(_setupLists[0]->Close()))
+    {
+        _guides.AbandonRecording();
+        return false;
+    }
+
+    ID3D12CommandList* first[] = { _setupLists[0] };
+    queue->ExecuteCommandLists(1, first);
+    _guides.ConfirmExecuted();
+
+    // List two: the model, on a list that has nothing on it. Same queue, so the clear above is
+    // ordered before it without a CPU wait.
+    const char* reason = "";
+    const bool created =
+        EvaluateAtPresent(_setupLists[1], _toWorking->Buffer(), _guides.Depth(), _guides.Motion(), true, &reason);
+
+    if (FAILED(_setupLists[1]->Close()))
+    {
+        LOG_ERROR("DLSS-NR present host: setup list 1 close failed");
+        return false;
+    }
+
+    // Executed whatever the answer: NGX can record work on a list and still refuse, and a list that
+    // was written to and never run is work the driver is still holding references for.
+    ID3D12CommandList* second[] = { _setupLists[1] };
+    queue->ExecuteCommandLists(1, second);
+
+    // The reason, not just the answer. A previous run of this same experiment read "the pass declined
+    // this frame" as "the model refused to exist" and would have eliminated the wrong hypothesis.
+    LOG_INFO("DLSS-NR present host: model creation attempted on an empty list, recorded={} ({})", created, reason);
+
+    if (created)
+        _resetOwed = false;
+
+    return true;
+}
+
 bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
-                         D3D12_RESOURCE_STATES sourceState)
+                         D3D12_RESOURCE_STATES sourceState, ID3D12CommandQueue* queue)
 {
     _recorded = false;
     _recordedPass = false;
@@ -142,8 +251,6 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         return false;
     }
 
-    // Zeros before anything reads them. RecordClear binds its own descriptor heap, so it goes first
-    // and the transfer passes bind theirs afterwards.
     const auto depthRest = static_cast<D3D12_RESOURCE_STATES>(GuideRestState(false));
     const auto motionRest = static_cast<D3D12_RESOURCE_STATES>(GuideRestState(true));
 
@@ -158,7 +265,10 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         return false;
     }
 
-    if (!_guides.RecordClear(cmdList, depthRest))
+    // The guides' zeros and the model's creation happen once, on this host's own lists, before the
+    // frame's list carries anything. Their bookkeeping is settled there, so nothing below owes the
+    // caller an answer about them.
+    if (!_EnsureFeature(device, queue))
         return false;
 
     // From here on this list carries work of ours, so whatever happens next the caller's answer
@@ -182,10 +292,14 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
 
     // The pass reads and writes the working colour in place, and is told it arrives in
     // UNORDERED_ACCESS, which is where the conversion just left it.
-    const bool passed = EvaluateAtPresent(cmdList, _toWorking->Buffer(), _guides.Depth(), _guides.Motion(), _resetOwed);
+    const char* frameReason = "";
+    const bool passed =
+        EvaluateAtPresent(cmdList, _toWorking->Buffer(), _guides.Depth(), _guides.Motion(), _resetOwed, &frameReason);
 
     if (!passed)
     {
+        ReportFrameSkip(frameReason);
+
         // The model did not run. The working colour holds an exact conversion of the frame, and
         // converting it back would be two dispatches to arrive where the caller already is. Say so
         // and let the caller transfer its own source.

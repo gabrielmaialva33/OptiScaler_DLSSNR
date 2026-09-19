@@ -1286,8 +1286,9 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     // orders the neural work before the flip without the present thread waiting on it.
     ID3D12Resource* transferSource = _openedDx11BackBuffers[copySlot];
 
-    if (_nrHost != nullptr && _nrHost->Record(_dx12Device, _copyCommandLists[copySlot],
-                                              _openedDx11BackBuffers[copySlot], D3D12_RESOURCE_STATE_COPY_SOURCE))
+    if (_nrHost != nullptr &&
+        _nrHost->Record(_dx12Device, _copyCommandLists[copySlot], _openedDx11BackBuffers[copySlot],
+                        D3D12_RESOURCE_STATE_COPY_SOURCE, _dx12CommandQueue))
     {
         if (auto* composed = _nrHost->Output(); composed != nullptr)
             transferSource = composed;

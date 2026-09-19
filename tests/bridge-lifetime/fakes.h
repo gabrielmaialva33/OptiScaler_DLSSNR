@@ -274,9 +274,12 @@ struct PresentHost
     int lastSourceState = -1;
     bool recordingOutstanding = false;
 
-    bool Record(void* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source, int sourceState)
+    bool Record(void* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source, int sourceState,
+                ID3D12CommandQueue* queue)
     {
         assert(device != nullptr && cmdList != nullptr && source != nullptr);
+        // The host builds the model on lists of its own, so it needs the queue those go on.
+        assert(queue != nullptr && "the host was handed no queue to submit its one-time setup on");
         // Recording again over an outstanding recording would lose whichever answer came first.
         assert(!recordingOutstanding && "a second Record before the last one was resolved");
         ++records;
