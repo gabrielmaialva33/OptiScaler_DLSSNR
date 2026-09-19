@@ -41,8 +41,8 @@ cpu_ticks() { awk '{print $14+$15}' "/proc/$1/stat" 2>/dev/null || echo 0; }
 # pgrep uses ERE: '\(a\|b\)' matches literal parens and never fires. It shipped that way once and
 # the watchdog silently never triggered, because the detector below then failed *open*.
 build_pids() {
-  pgrep -f '[M]SBuild\.exe'
-  pgrep -f '[H]ostX64.x64.(CL|link)\.exe'
+  pgrep -f '[M]SBuild\.exe' || true
+  pgrep -f '[H]ostX64.x64.(CL|link)\.exe' || true
 }
 
 # stalled: true when, over one sample, no process of this build used any CPU and the log did not
@@ -89,7 +89,7 @@ run_msbuild() {
         kill -TERM "$pid" 2>/dev/null
         for p in $(build_pids); do kill -TERM "$p" 2>/dev/null; done
         sleep 2; wineserver -k 2>/dev/null; sleep 2
-        for p in $(pgrep -x winedevice.exe) $(pgrep -x services.exe) $(pgrep -x plugplay.exe); do kill -KILL "$p" 2>/dev/null; done
+        for p in $(pgrep -x winedevice.exe || true) $(pgrep -x services.exe || true) $(pgrep -x plugplay.exe || true); do kill -KILL "$p" 2>/dev/null; done
         break
       fi
     done
