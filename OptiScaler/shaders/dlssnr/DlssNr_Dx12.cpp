@@ -5013,11 +5013,35 @@ void ProbeD3D11(void* d3d11Device)
         // The adapter the game is actually running on. Without it the query answers
         // AdapterUnsupported, which looks like a verdict on the hardware and is really a verdict on
         // the question -- that is what the first attempt got, on a 5080.
+        //
+        // Read it from the game's own device. Adapter 0 is whichever card drives the primary
+        // display, and on a two-GPU machine (a second card for Lossless Scaling, the monitor on
+        // it) that is not the card the game renders on: the question was then asked about a GPU
+        // nothing here would ever use, and its AdapterUnsupported answer disabled the route.
         IDXGIAdapter* adapter = nullptr;
+        IDXGIDevice* dxgiDevice = nullptr;
         IDXGIFactory1* factory = nullptr;
 
-        if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) && factory != nullptr)
-            factory->EnumAdapters(0, &adapter);
+        if (SUCCEEDED(static_cast<IUnknown*>(d3d11Device)->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) &&
+            dxgiDevice != nullptr)
+        {
+            if (FAILED(dxgiDevice->GetAdapter(&adapter)))
+                adapter = nullptr;
+
+            dxgiDevice->Release();
+        }
+
+        if (adapter == nullptr)
+        {
+            LOG_WARN("DLSS-NR D3D11: the game's device did not give up its adapter, asking about adapter 0");
+
+            if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) && factory != nullptr)
+                factory->EnumAdapters(0, &adapter);
+        }
+
+        DXGI_ADAPTER_DESC adapterDesc {};
+        if (adapter != nullptr && FAILED(adapter->GetDesc(&adapterDesc)))
+            adapterDesc = {};
 
         unsigned int supported = 0xFFFFFFFFu;
         unsigned int minArch = 0;
@@ -5033,8 +5057,9 @@ void ProbeD3D11(void* d3d11Device)
                                                  : "unknown";
 
         LOG_WARN("DLSS-NR D3D11: GetFeatureRequirements {} ({}), FeatureSupported 0x{:X} -- {}. "
-                 "minimum architecture 0x{:X}, minimum OS 0x{:X}",
-                 rc, NgxResultName((unsigned int) rc), supported, meaning, minArch, minOs);
+                 "minimum architecture 0x{:X}, minimum OS 0x{:X}, asked about adapter vendor {:04X} device {:04X}",
+                 rc, NgxResultName((unsigned int) rc), supported, meaning, minArch, minOs, adapterDesc.VendorId,
+                 adapterDesc.DeviceId);
 
         if (adapter != nullptr)
             adapter->Release();
