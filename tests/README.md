@@ -28,7 +28,7 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the eleven `nr-*` suites plus `bridge-lifetime` and `vulkan-query-readiness` |
+| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, and `vulkan-query-readiness` |
 | `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
@@ -54,6 +54,9 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   expressions.
 - `nr-localization` — the real portable `.lang` parser and the repository ImGui
   hash. Slowest suite, around 45 seconds.
+- `nr-log-rate` — the log rate limiter against injected time points, a recorded
+  session replay, and the four real report classifications/initializers extracted
+  from the renderer, including manual configuration changes and reversals.
 - `nr-menu` — pass-menu control flow driven by scripted ImGui events.
 - `nr-multipass` — portable multi-pass chain helpers.
 - `nr-pass-config` — the pass-settings codec and the four-point Config round trip
