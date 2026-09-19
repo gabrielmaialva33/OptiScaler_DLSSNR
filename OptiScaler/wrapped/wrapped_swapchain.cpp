@@ -23,6 +23,10 @@
 #include <low_latency/input/input_antilag2.h>
 #endif
 
+#ifdef DLSS_NEURAL_RENDERING
+#include <dlssnr/DlssNr.h>
+#endif
+
 #ifdef DXGI_DEBUG_ENABLED
 #include <magic_enum.hpp>
 #include <dxgidebug.h>
@@ -501,6 +505,11 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         // Tick feature to let it know if it's frozen
         if (auto currentFeature = State::Instance().currentFeature; currentFeature != nullptr)
             currentFeature->TickFrozenCheck();
+
+#ifdef DLSS_NEURAL_RENDERING
+        if (!isD3D11 && cq != nullptr)
+            DlssNr::RunPresentPass((IDXGISwapChain3*) pSwapChain, cq, false);
+#endif
 
         // Draw overlay
         MenuOverlayDx::Present(pSwapChain, SyncInterval, Flags, pPresentParameters, pDevice, hWnd, isUWP);
