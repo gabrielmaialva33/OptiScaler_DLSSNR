@@ -56,16 +56,46 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 //
 // Returns whether the pass recorded anything. False is ordinary -- the model may be off, still
 // building, or already failed for the session -- and the caller still owes its frame a transfer.
-// outReason, when given, is why a false answer was false. It is never null after the call and points
-// at a string literal, so it outlives the caller.
+// The frame description a present-time caller starts from.
 //
-// The distinction matters and this interface used to lose it. "The pass declined this frame" and "the
-// model refused to exist" are different events with different consequences -- the first is ordinary
-// and temporary, the second ends neural rendering for the session -- and a bare bool reported them
-// identically. A run that was meant to test whether the model would be created read a decline as a
-// refusal, and would have eliminated the wrong hypothesis.
+// Every present host describes the same frame in the same way: a backbuffer the game already
+// tonemapped, an extent that only changes on resize, colour read and written in place. Building that
+// description in each caller is how two of them drift -- ExtentIsStable and the settling exemption
+// existed on one side for a while and not the other, on paths that face the identical situation.
+//
+// A caller that captured the game's real depth and motion overwrites what it knows and keeps the
+// rest.
+DlssNrFrameInfo PresentFrameDefaults(bool reset);
+
+// The game's own depth and motion, when an upscaler handed them over this frame cycle.
+//
+// A present-time host is one frame downstream of wherever the guides came from, and the upscaler's
+// evaluate is the only place they exist. CaptureTemporal keeps that pair for the present of the same
+// cycle; this is how a transport asks for it. Returns false when nothing was captured -- which is
+// every frame of a title that ships no upscaler, and the reason DlssNr::ZeroGuides exists.
+//
+// The resources belong to the capture and outlive the call only until the next one. A caller uses
+// them inside the recording it is building and does not store them.
+bool CapturedPresentGuides(ID3D12Resource** depth, ID3D12Resource** motion, DlssNrFrameInfo* frame);
+
+// The pass, over a frame no upscaler was asked for.
+//
+// One entry for every present-time transport: the D3D12 swapchain hook and the D3D11-to-D3D12
+// bridge both arrive here. They differ in how the frame reaches a D3D12 resource, which is their
+// business, and not in what the model is then told about it, which is this function's.
+//
+// colour is read and written in place and must arrive in the state frame.OutputState names. depth
+// and motion are the caller's -- captured from the game's upscaler when there was one, and
+// DlssNr::ZeroGuides when there was not.
+//
+// outReason, when given, is why a false answer was false. It is never null after the call and points
+// at a string literal, so it outlives the caller. The distinction matters: "the pass declined this
+// frame" and "the model refused to exist" are different events with different consequences, and a
+// bare bool reported them identically -- a run meant to test whether the model would be created once
+// read a decline as a refusal and would have eliminated the wrong hypothesis.
 bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
-                       ID3D12Resource* motion, bool reset, const char** outReason = nullptr);
+                       ID3D12Resource* motion, const DlssNrFrameInfo& frame, ID3D12CommandQueue* timingQueue = nullptr,
+                       const char** outReason = nullptr);
 
 // Where a caller that owns its guides must leave them, so the pass transitions them from where they
 // actually are. It reads config keys written for a game's own buffers; a host that guessed the

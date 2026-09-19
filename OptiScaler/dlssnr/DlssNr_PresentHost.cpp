@@ -219,8 +219,8 @@ bool PresentHost::_EnsureFeature(ID3D12Device* device, ID3D12CommandQueue* queue
     DlssNr::Identity::ReportAll(toLog, nullptr, "production", device, queue);
 
     const char* reason = "";
-    const bool created =
-        EvaluateAtPresent(_setupLists[1], _toWorking->Buffer(), _guides.Depth(), _guides.Motion(), true, &reason);
+    const bool created = EvaluateAtPresent(_setupLists[1], _toWorking->Buffer(), _guides.Depth(), _guides.Motion(),
+                                           PresentFrameDefaults(true), queue, &reason);
 
     if (FAILED(_setupLists[1]->Close()))
     {
@@ -308,9 +308,48 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
 
     // The pass reads and writes the working colour in place, and is told it arrives in
     // UNORDERED_ACCESS, which is where the conversion just left it.
+    // The game's own guides when there are any, this host's zeros when there are not.
+    //
+    // A D3D11 title reaches this bridge for two different reasons. One is having no upscaler at all,
+    // which is what it was built for, and there the capture is empty every frame and the zeros are
+    // the only answer. The other is an upscaler running through the Dx11wDx12 interop, whose evaluate
+    // does hand depth and motion over -- and ignoring them to use zeros instead would be throwing
+    // away the real thing while holding it.
+    ID3D12Resource* depth = _guides.Depth();
+    ID3D12Resource* motion = _guides.Motion();
+    DlssNrFrameInfo frame = PresentFrameDefaults(_resetOwed);
+
+    ID3D12Resource* capturedDepth = nullptr;
+    ID3D12Resource* capturedMotion = nullptr;
+    DlssNrFrameInfo captured {};
+
+    if (CapturedPresentGuides(&capturedDepth, &capturedMotion, &captured))
+    {
+        // The capture describes its own guides -- their subrects, their motion encoding, whether depth
+        // is inverted -- and none of that is knowable from here. What stays is this host's account of
+        // the frame the guides are being applied to, which the capture has no opinion about.
+        const DlssNrFrameInfo defaults = frame;
+        frame = captured;
+        frame.PresentSource = defaults.PresentSource;
+        frame.ColourIsLinearHdr = defaults.ColourIsLinearHdr;
+        frame.ExposureTexture = defaults.ExposureTexture;
+        frame.PreExposure = defaults.PreExposure;
+        frame.ExtentIsStable = defaults.ExtentIsStable;
+        frame.OutputState = defaults.OutputState;
+        frame.Reset = defaults.Reset;
+
+        depth = capturedDepth;
+        motion = capturedMotion;
+
+        if (!_reportedCapture)
+        {
+            _reportedCapture = true;
+            LOG_INFO("DLSS-NR present host: using the upscaler's own depth and motion, not the zero guides");
+        }
+    }
+
     const char* frameReason = "";
-    const bool passed =
-        EvaluateAtPresent(cmdList, _toWorking->Buffer(), _guides.Depth(), _guides.Motion(), _resetOwed, &frameReason);
+    const bool passed = EvaluateAtPresent(cmdList, _toWorking->Buffer(), depth, motion, frame, queue, &frameReason);
 
     if (!passed)
     {

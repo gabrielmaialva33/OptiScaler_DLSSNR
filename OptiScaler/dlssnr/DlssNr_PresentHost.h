@@ -93,6 +93,7 @@ class PresentHost
     ID3D12CommandAllocator* _setupAllocators[2] = {};
     ID3D12GraphicsCommandList* _setupLists[2] = {};
     bool _featureAttempted = false;
+    bool _reportedCapture = false;
 
     uint64_t _serial = 0;
     uint32_t _width = 0;

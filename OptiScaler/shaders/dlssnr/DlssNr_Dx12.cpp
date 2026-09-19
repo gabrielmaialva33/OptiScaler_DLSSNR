@@ -3769,8 +3769,7 @@ static void DropPresentList(unsigned int slot)
 
 static bool EnsureBbCopy(ID3D12Device* device, unsigned int width, unsigned int height, DXGI_FORMAT format)
 {
-    if (g_bbCopy != nullptr && g_bbCopyWidth == width && g_bbCopyHeight == height &&
-        g_bbCopyFormat == format)
+    if (g_bbCopy != nullptr && g_bbCopyWidth == width && g_bbCopyHeight == height && g_bbCopyFormat == format)
         return true;
 
     ParkNrResource(g_bbCopy);
@@ -3823,8 +3822,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
 
     ++g_presentFlip;
 
-    const bool wrapStandsDown = !fgHook && g_lastFgFlip != 0 &&
-                                (g_presentFlip - g_lastFgFlip) < kFgHookTimeout;
+    const bool wrapStandsDown = !fgHook && g_lastFgFlip != 0 && (g_presentFlip - g_lastFgFlip) < kFgHookTimeout;
 
     if (wrapStandsDown)
         return;
@@ -3954,17 +3952,27 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     Barrier(list, backbuffer, D3D12_RESOURCE_STATE_COPY_SOURCE, bbState);
 
-    frame.PresentSource = true;
-    frame.ColourIsLinearHdr = false;
-    frame.ExposureTexture = nullptr;
-    frame.PreExposure = 1.0f;
-    frame.ExtentIsStable = true;
-    frame.OutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    // What every present host says about a present frame, in one place. A capture from the game's own
+    // upscaler has already filled the guide description above; this fills the rest and does not
+    // touch it.
+    {
+        const DlssNrFrameInfo defaults = PresentFrameDefaults(frame.Reset);
+        frame.PresentSource = defaults.PresentSource;
+        frame.ColourIsLinearHdr = defaults.ColourIsLinearHdr;
+        frame.ExposureTexture = defaults.ExposureTexture;
+        frame.PreExposure = defaults.PreExposure;
+        frame.ExtentIsStable = defaults.ExtentIsStable;
+        frame.OutputState = defaults.OutputState;
+    }
 
     if (fgHook)
         g_lastFgFlip = g_presentFlip;
 
-    g_compose->Dispatch(list, g_bbCopy, depth, motion, g_bbCopy, frame, queue);
+    // Through the shared entry rather than straight into Dispatch. Two doors to the same pass is how
+    // the two present transports drifted: ExtentIsStable and the reason string each existed on one
+    // side only, on paths facing the identical situation.
+    const char* reason = "";
+    EvaluateAtPresent(list, g_bbCopy, depth, motion, frame, queue, &reason);
 
     if (g_nr.failed)
     {
@@ -4002,12 +4010,11 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         {
             const DWORD wait = WaitForSingleObject(g_presentList.fenceEvent, 1000);
             const double waitedMs =
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart)
-                    .count();
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart).count();
 
             if (wait != WAIT_OBJECT_0)
-                LOG_WARN("DLSS-NR present: completion wait returned {} after {:.1f} ms (slot {})",
-                         (unsigned) wait, waitedMs, slot);
+                LOG_WARN("DLSS-NR present: completion wait returned {} after {:.1f} ms (slot {})", (unsigned) wait,
+                         waitedMs, slot);
         }
     }
 
@@ -4410,8 +4417,58 @@ int GuideRestState(bool motionVectors)
     return value.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 }
 
+bool CapturedPresentGuides(ID3D12Resource** depth, ID3D12Resource** motion, DlssNrFrameInfo* frame)
+{
+    if (depth == nullptr || motion == nullptr || frame == nullptr)
+        return false;
+
+    if (!g_temporal.valid || g_temporal.depth == nullptr || g_temporal.motion == nullptr)
+        return false;
+
+    *depth = g_temporal.depth;
+    *motion = g_temporal.motion;
+    *frame = g_temporal.frame;
+    return true;
+}
+
+DlssNrFrameInfo PresentFrameDefaults(bool reset)
+{
+    DlssNrFrameInfo frame {};
+
+    // The frame is a backbuffer: whatever the game rendered has already been through its tonemapper,
+    // so the encode is the identity. Saying otherwise encodes an encoded frame a second time, which
+    // is the washed-out, banded failure the flag exists to prevent. Nothing here reads an exposure
+    // for the same reason -- a display-referred frame has none to read.
+    frame.PresentSource = true;
+    frame.ColourIsLinearHdr = false;
+    frame.ExposureTexture = nullptr;
+    frame.PreExposure = 1.0f;
+
+    // Colour is read and written in place, as the after-upscale path does, and a present host owns
+    // that resource and rests it in UNORDERED_ACCESS.
+    frame.OutputState = (int) D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    // The swapchain's extent changes on resize and at no other time, and a resize rebuilds everything
+    // a present host owns, so the post-upscale settling gate has nothing to protect here.
+    frame.ExtentIsStable = true;
+
+    // What zero guides describe, and the truthful answer when there is nothing captured: guides the
+    // size of the frame, no subrect, no motion encoding. A caller with real guides overwrites these.
+    frame.MotionVectorsLowResolution = false;
+    frame.DepthInverted = false;
+    frame.MvScaleX = 1.0f;
+    frame.MvScaleY = 1.0f;
+
+    // History has nothing to carry over on the first frame, after a resize, and after any gap the
+    // host could not bridge. The caller knows which of those happened; this side cannot.
+    frame.Reset = reset;
+
+    return frame;
+}
+
 bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
-                       ID3D12Resource* motion, bool reset, const char** outReason)
+                       ID3D12Resource* motion, const DlssNrFrameInfo& frame, ID3D12CommandQueue* timingQueue,
+                       const char** outReason)
 {
     const auto answer = [outReason](bool recorded, const char* reason)
     {
@@ -4446,41 +4503,11 @@ bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colou
 
     const auto desc = colour->GetDesc();
 
-    DlssNrFrameInfo frame {};
-
-    // What this host knows, stated rather than defaulted.
-    //
-    // The frame is a backbuffer: whatever the game rendered, it has already been through its
-    // tonemapper, so the encode is the identity and the model is shown the picture as it is. Saying
-    // otherwise would encode an encoded frame a second time, which is the washed-out, banded failure
-    // the flag exists to prevent.
-    frame.ColourIsLinearHdr = false;
-
-    // Colour is read and written in place, as the after-upscale path does, and this host rests it in
-    // UNORDERED_ACCESS because it owns it and put it there.
-    frame.OutputState = (int) D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-
-    // The guides are zeros at the frame's own size, so there is no render subrect smaller than the
-    // resource and no motion encoding to describe. Saying nothing here is not a default: it is the
-    // truthful answer, and the pass reads the resources' own sizes when a subrect is zero.
-    frame.MotionVectorsLowResolution = false;
-    frame.DepthInverted = false;
-    frame.MvScaleX = 1.0f;
-    frame.MvScaleY = 1.0f;
-
-    // History has nothing to carry over from on the first frame, after a resize, and after any gap
-    // the host could not bridge. The caller knows which of those happened; this side cannot.
-    frame.Reset = reset;
-
-    // The swapchain's extent, which changes on resize and at no other time, and a resize rebuilds
-    // everything this host owns. So the post-upscale settling gate has nothing to protect here.
-    frame.ExtentIsStable = true;
-
     DlssNr::Detail::CoverageSample sample {};
     sample.width = static_cast<uint32_t>(desc.Width);
     sample.height = desc.Height;
 
-    const bool recorded = g_compose->Dispatch(cmdList, colour, depth, motion, colour, frame, nullptr, &sample);
+    const bool recorded = g_compose->Dispatch(cmdList, colour, depth, motion, colour, frame, timingQueue, &sample);
 
     if (recorded)
         return answer(true, "composition recorded at present, with no upscaler in the frame");
