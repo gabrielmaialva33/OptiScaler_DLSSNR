@@ -7201,7 +7201,7 @@ void MenuCommon::RenderInputFixSettings(RenderMenuContext& ctx)
         ImGui::Spacing();
 
         bool enabled = config->KcdInputFixEnabled.value_or_default();
-        if (ImGui::Checkbox(Localization::Label("Enable Input Fix").c_str(), &enabled))
+        if (ImGui::Checkbox(Localization::Label("Enable Input Fix"), &enabled))
         {
             config->KcdInputFixEnabled = enabled;
         }
