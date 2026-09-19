@@ -178,6 +178,7 @@ class MenuCommon
     static void RenderUpscalerInputsSettings(RenderMenuContext& ctx);
     static void RenderApiAndTextureSettings(RenderMenuContext& ctx);
     static void RenderKeybindSettings(RenderMenuContext& ctx);
+    static void RenderInputFixSettings(RenderMenuContext& ctx);
     static void RenderMainMenuGraphs(RenderMenuContext& ctx);
     static void RenderMainMenuBottomBar(RenderMenuContext& ctx);
     static void RenderMipmapBiasWindow(RenderMenuContext& ctx, ImGuiWindowFlags flags);

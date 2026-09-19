@@ -7190,6 +7190,59 @@ void MenuCommon::RenderKeybindSettings(RenderMenuContext& ctx)
     }
 }
 
+void MenuCommon::RenderInputFixSettings(RenderMenuContext& ctx)
+{
+    auto config = ctx.config;
+
+    ImGui::Spacing();
+    if (auto ch = ScopedCollapsingHeader(Localization::Label("Keyboard Input Fix")); ch.IsHeaderOpen())
+    {
+        ScopedIndent indent {};
+        ImGui::Spacing();
+
+        bool enabled = config->KcdInputFixEnabled.value_or_default();
+        if (ImGui::Checkbox(Localization::Label("Enable Input Fix").c_str(), &enabled))
+        {
+            config->KcdInputFixEnabled = enabled;
+        }
+        ShowHelpMarker("High-frequency keyboard capture + missed-press resend for games with frame-dependent input "
+                       "sampling (e.g. Kingdom Come: Deliverance II).");
+
+        if (config->KcdInputFixEnabled.value_or_default())
+        {
+            static const std::vector<MenuOption<int>> modeOptions = {
+                { 0, "Polling (Async Thread)", "High-rate GetAsyncKeyState polling thread" },
+                { 1, "Hook (WH_KEYBOARD_LL)", "Event-driven low-level keyboard hook" }
+            };
+            PopulateCombo("Capture Mode", config->KcdInputFixMode, modeOptions);
+
+            if (config->KcdInputFixMode.value_or_default() == 0)
+            {
+                int pollHz = config->KcdInputFixPollHz.value_or_default();
+                if (ImGui::SliderInt("Poll Rate (Hz)", &pollHz, 100, 1000))
+                    config->KcdInputFixPollHz = pollHz;
+                ShowHelpMarker("Frequency of the background keyboard polling thread.");
+            }
+
+            int debounce = config->KcdInputFixDebounceMs.value_or_default();
+            if (ImGui::SliderInt("Debounce (ms)", &debounce, 0, 100))
+                config->KcdInputFixDebounceMs = debounce;
+            ShowHelpMarker("Ignore re-detections of the same key within this window to avoid duplicate presses.");
+
+            int holdMs = config->KcdInputFixHoldMs.value_or_default();
+            if (ImGui::SliderInt("Hold Duration (ms)", &holdMs, 0, 100))
+                config->KcdInputFixHoldMs = holdMs;
+            ShowHelpMarker(
+                "Keep a held key marked down for this duration after polling to prevent dropped holds (0 = disabled).");
+
+            int maxAge = config->KcdInputFixMaxPendingAgeMs.value_or_default();
+            if (ImGui::SliderInt("Max Pending Age (ms)", &maxAge, 50, 1000))
+                config->KcdInputFixMaxPendingAgeMs = maxAge;
+            ShowHelpMarker("Drop captured presses older than this to avoid stale key replaying.");
+        }
+    }
+}
+
 void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
 {
     if (ImGui::BeginTable("main", 2, ImGuiTableFlags_SizingStretchSame))
@@ -7222,6 +7275,7 @@ void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
         RenderUpscalerInputsSettings(ctx);
         RenderApiAndTextureSettings(ctx);
         RenderKeybindSettings(ctx);
+        RenderInputFixSettings(ctx);
 
         ImGui::EndTable();
     }
