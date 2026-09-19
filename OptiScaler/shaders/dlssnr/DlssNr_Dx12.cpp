@@ -1329,6 +1329,24 @@ float ResolveWhitePoint(int whitePointSource, float whitePointScale, float white
                                         g_nr.gameExposure, g_nr.gamePreExposure, anchored);
 }
 
+// Advanced by every NR scratch allocation, and read into every cached descriptor key.
+//
+// A cached descriptor is kept only while the key that describes it is unchanged, and the pointer and
+// shape in that key cannot tell a re-created texture from the one it replaced when both land at the
+// same address at the same size. Advancing here retires every key at once, which is coarse on purpose:
+// a registry would have to be unwound along every release path, and scratch allocation happens on
+// init, on resize and on feature rebuild -- never per frame -- so the cost of retiring everything is
+// one pass of view creation at a moment that was already re-creating resources.
+//
+// Never reset on NR shutdown: the next session's allocator can hand back the addresses this one used.
+// A wrapped generation is the one value that would make a stale key look fresh, so this saturates
+// instead of wrapping -- and a saturated counter can no longer retire anything, so it turns descriptor
+// reuse off rather than leaving keys that nothing can invalidate.
+uint64_t g_nrScratchGeneration = 1;
+
+// Reuse is only sound while the generation can still advance.
+bool DescriptorReuseAvailable() { return g_nrScratchGeneration != UINT64_MAX; }
+
 ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned int width, unsigned int height)
 {
     D3D12_HEAP_PROPERTIES heap {};
@@ -1349,6 +1367,10 @@ ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned
     ID3D12Resource* res = nullptr;
     device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
                                     IID_PPV_ARGS(&res));
+
+    if (res != nullptr && g_nrScratchGeneration != UINT64_MAX)
+        ++g_nrScratchGeneration;
+
     return res;
 }
 
@@ -1918,8 +1940,26 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
         InPrevEdit != nullptr ? InPrevEdit : InSource,
     };
 
+    // Each view is created only when what it describes moved. BindKey carries both halves of that
+    // question -- the resource's identity and the arguments the view is built from -- so a key that
+    // compares equal means the descriptor already in the slot is byte for byte the one this call
+    // would write.
+    const bool reuse = DescriptorReuseAvailable();
+
     for (uint32_t i = 0; i < kSrvCount; ++i)
-        CreateShaderResourceView(_device, srvs[i], currentHeap.GetSrvCPU(i));
+    {
+        const auto desc = srvs[i]->GetDesc();
+        const BindKey key { srvs[i],        g_nrScratchGeneration, desc.Width,
+                            desc.Height,    desc.DepthOrArraySize, desc.MipLevels,
+                            desc.Dimension, desc.Format,           kViewFormat,
+                            kViewMipLevel,  kViewTranslateTypeless };
+
+        if (reuse && _srvKey[slot][i] == key)
+            continue;
+
+        CreateShaderResourceView(_device, srvs[i], currentHeap.GetSrvCPU(i), kViewFormat, kViewTranslateTypeless);
+        _srvKey[slot][i] = key;
+    }
 
     ID3D12Resource* const uavs[kUavCount] = {
         OutTarget,
@@ -1927,7 +1967,19 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
     };
 
     for (uint32_t i = 0; i < kUavCount; ++i)
-        CreateUnorderedAccessView(_device, uavs[i], currentHeap.GetUavCPU(i), 0);
+    {
+        const auto desc = uavs[i]->GetDesc();
+        const BindKey key { uavs[i],        g_nrScratchGeneration, desc.Width,
+                            desc.Height,    desc.DepthOrArraySize, desc.MipLevels,
+                            desc.Dimension, desc.Format,           kViewFormat,
+                            kViewMipLevel,  kViewTranslateTypeless };
+
+        if (reuse && _uavKey[slot][i] == key)
+            continue;
+
+        CreateUnorderedAccessView(_device, uavs[i], currentHeap.GetUavCPU(i), kViewMipLevel, kViewTranslateTypeless);
+        _uavKey[slot][i] = key;
+    }
 
     std::memcpy(_mappedConstants[slot], &InConstants, sizeof(InConstants));
 
