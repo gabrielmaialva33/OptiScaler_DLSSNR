@@ -234,6 +234,33 @@ Crimson Desert (Steam 3321460), `~/.local/share/Steam/steamapps/common/Crimson D
 - Full history, backups and rollback notes:
   `~/.local/state/dlss5/backups/20260902-201621-optiscaler/README.md`.
 
+### Titles with no upscaler at all (the `Dx11BridgeHost` path)
+
+Crimson Desert exercises the ordinary after-upscale route. These two exercise the other one: a D3D11
+game that never calls an upscaler, where the pass is hosted on the D3D11-to-D3D12 bridge and there is
+no `EvaluateAfterUpscale` to hook. Both measured working on 2026-09-18.
+
+- **Divinity: Original Sin 2** (435150), `DefEd/bin/`, installed as `winmm.dll`. Isometric, slow
+  camera. **Its prefix has no `nvapi64.dll`**, so OptiScaler substitutes fakenvapi, and NGX then
+  fails to build the model's kernels -- `NGXCubinD3D12::CreateKernel failed - nvapi status -3` --
+  and refuses feature 18 with `FAIL_PlatformError`. The fix is `[Libraries] NvapiPath` pointing at
+  Proton's own `files/lib/wine/nvapi/x86_64-windows/nvapi64.dll`; putting a copy in the prefix's
+  system32 does not survive, because Proton manages that directory and reverts it on launch.
+- **The Witcher 3** (292030), `bin/x64/`, installed as `dxgi.dll`. The DirectX 11 renderer ships no
+  upscaler -- DLSS went only to `bin/x64_dx12` in the next-gen update -- so the same game provides
+  both routes side by side with identical content. Third-person, fast orbital camera. Its prefix
+  already has `nvapi64.dll`, so no `NvapiPath` is needed. Pick **DirectX 11** in Steam's launch
+  selector; the DX12 entry runs a different executable in a different directory.
+
+Two traps, both paid for:
+
+- **Replace the keys in the shipped ini, never insert new ones.** Copying `OptiScaler.ini` and adding
+  `Enabled=true` at the top of `[DlssNr]` leaves the section's own `Enabled=auto` further down, and
+  the parser keeps the last one. The result is a game where OptiScaler loads, captures the device and
+  builds no bridge, with nothing in the log to say why.
+- **NGX writes its own diagnosis through `LOG_DEBUG`.** At the default `LogLevel=2` it is discarded.
+  Set `LogLevel=1` before investigating anything NGX refuses; the answer is usually already there.
+
 ## Precompiled shaders
 
 Every compute pass under `OptiScaler/shaders/<pass>/` ships its bytecode as a header in

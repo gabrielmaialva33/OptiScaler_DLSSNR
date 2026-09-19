@@ -456,11 +456,19 @@ converted back and copied to the presenter, two history resets in the whole sess
 temporal history was accumulating throughout. Reported by the person playing it: the image visibly
 gains detail, and **it does not smear in motion**.
 
+Repeated the same day in The Witcher 3, `bin/x64`, the DirectX 11 renderer -- which ships no
+upscaler at all, DLSS having gone only to the DX12 path in the next-gen update. 7076 of 7251 frames
+carried the model's output to the presenter, again with two history resets in the session, and again
+no smearing reported. Two titles of opposite profile now: an isometric CRPG with a slow panning
+camera, and a third-person action RPG with fast orbital rotation over moving vegetation.
+
 What that settles and what it does not. It settles that zero guides are not disqualifying on their
-own, which is what the sequencing was built on. It does not settle the axis: Divinity is isometric
-with a slow panning camera, which is the friendly case. A first-person title with fast rotation is
-the adverse one and has not been tried, and "did not smear here" is an observation by eye, not a
-measurement of temporal stability.
+own, which is what the sequencing was built on, and two profiles rather than one make that harder to
+dismiss as a property of slow cameras. It does not settle the axis. Both observations are by eye, not
+measurements of temporal stability, and neither title is the extreme case: a first-person renderer
+with fast mouse rotation keeps almost nothing between consecutive frames, and that is where a
+permanently still motion field has the most to get wrong. No D3D11 title without an upscaler on this
+workstation is first-person, so that case may not be reachable here at all.
 
 So synthesised motion moves back to where it started -- an optimisation to reach for when a case
 shows it is needed -- and the case that would show it is a fast-camera title, not this one.
