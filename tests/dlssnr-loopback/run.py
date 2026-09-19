@@ -296,6 +296,20 @@ def main():
     if not standalone or args.cold_load_optiscaler:
         shutil.copy2(dll, RUN / 'OptiScaler.dll')
 
+    if args.cold_load_optiscaler:
+        # Written here rather than documented, because the first run without it looked like the
+        # failure under investigation: the process died right after the DLL loaded, before it could
+        # create a device, and the runner reported ZERO COVERAGE. That was the startup update check
+        # going to the network in a headless Proton prefix, not a refusal by anything.
+        #
+        # Only things that make a small diagnostic process behave like one. None of it touches how
+        # D3D12 or DXGI objects are created, which is the axis this flag exists to test.
+        (RUN / 'OptiScaler.ini').write_text(
+            '; Written by run.py for --cold-load-optiscaler. Not a user config.\n'
+            '[Log]\nLogToFile=true\nLogLevel=2\n\n'
+            '[Menu]\nOverlayMenu=false\n\n'
+            '[Hotfix]\nCheckForUpdate=false\n')
+
     env = dict(os.environ, WINEPREFIX=str(PREFIX), WINEDEBUG='-all')
     if not args.skip_build:
       # Compiling goes through the same msvc-wine prefix that build-local.sh uses. Two clients on
