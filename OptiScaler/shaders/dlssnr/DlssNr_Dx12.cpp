@@ -2428,6 +2428,25 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);
     const bool reduced = workWidth != width || workHeight != height;
 
+    // Say what the model is being asked for, when it changes.
+    //
+    // The working scale changes what the model receives more than any other control and left no trace
+    // at all, so a session where someone moved the slider could not be read back. That cost a real
+    // investigation: a run full of FAIL_InvalidParameter looked like a defect in the pass until the
+    // person playing said they had raised the model to 200%, which is the one fact the log could not
+    // supply. On change only -- it moves by hand.
+    {
+        static unsigned int lastW = 0, lastH = 0;
+
+        if (workWidth != lastW || workHeight != lastH)
+        {
+            LOG_INFO("DLSS-NR working size: {}x{} at scale {:.2f} ({:.2f} Mpx), frame {}x{}", workWidth, workHeight,
+                     workScale, (workWidth * (double) workHeight) / 1.0e6, width, height);
+            lastW = workWidth;
+            lastH = workHeight;
+        }
+    }
+
     if (chainEnabled && !g_chainExtent.Observe(workWidth, workHeight, now, static_cast<uint32_t>(desc.Format)))
     {
         reportSkip("chain working resolution is settling (500 ms); no model reconstruction");
