@@ -319,6 +319,22 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     ID3D12Resource* motion = _guides.Motion();
     DlssNrFrameInfo frame = PresentFrameDefaults(_resetOwed);
 
+    // A motion contract that describes valid units, over data that is all zeros.
+    //
+    // The model accepts supersampling (working size > target) when it is given real motion -- proven
+    // in Crimson at 2x -- and refuses it with the degenerate 1x1, non-inverted contract the zero
+    // guides carried, but only above 1.0; at 1.0 the same zeros are fine. That is the model applying
+    // stricter guide validation when it has to synthesise pixels above native.
+    //
+    // Zero motion times any scale is still zero, so this changes how the model reads the units, not
+    // the data. If the refusal is parameter validation, this passes it; if the model inspects the
+    // texture, it still refuses -- and that difference is exactly what needs to be known. On a
+    // slow-camera title the zero motion is invisible anyway (measured: no smearing at 1.0), so if it
+    // passes, this title gets usable supersampling.
+    frame.MvScaleX = (float) _width;
+    frame.MvScaleY = -(float) _height;
+    frame.DepthInverted = true;
+
     ID3D12Resource* capturedDepth = nullptr;
     ID3D12Resource* capturedMotion = nullptr;
     DlssNrFrameInfo captured {};
