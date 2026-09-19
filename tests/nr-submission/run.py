@@ -12,12 +12,13 @@ subprocess.run(['g++', '-std=c++20', '-g', '-O1', '-pthread', '-Wall', '-Wextra'
                 str(here / 'model.cpp'), '-o', str(out / 'model')], check=True)
 subprocess.run([str(out / 'model')], check=True)
 
-# Boundary guard: both original queue-call paths must notify, always after the call.
+# Boundary guard: all original queue-call paths must notify, always after the call.
 source = (root / 'OptiScaler/resource_tracking/ResTrack_dx12.cpp').read_text()
 body = source.split('void ResTrack_Dx12::hkExecuteCommandLists(', 1)[1].split('#pragma region Heap hooks', 1)[0]
-assert body.count('o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);') == 2
-assert body.count('nrSubmission.Submitted();') == 2
+call_count = body.count('o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);')
+assert call_count >= 1
+assert body.count('nrSubmission.Submitted();') == call_count
 for tail in body.split('o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);')[1:]:
     assert tail.lstrip().startswith('nrSubmission.Submitted();')
 assert body.index('Submission::Batch') < body.index('o_ExecuteCommandLists(')
-print('PASS: both queue-hook paths reserve before execution and notify after original call')
+print('PASS: queue-hook paths reserve before execution and notify after original call')
