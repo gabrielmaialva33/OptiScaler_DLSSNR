@@ -84,6 +84,8 @@ typedef void(STDMETHODCALLTYPE* PFN_DrawInstanced)(ID3D12GraphicsCommandList* Th
                                                    UINT StartInstanceLocation);
 typedef void(STDMETHODCALLTYPE* PFN_Dispatch)(ID3D12GraphicsCommandList* This, UINT ThreadGroupCountX,
                                               UINT ThreadGroupCountY, UINT ThreadGroupCountZ);
+typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandLists)(ID3D12CommandQueue* This, UINT NumCommandLists,
+                                                         ID3D12CommandList* const* ppCommandLists);
 typedef ULONG(STDMETHODCALLTYPE* PFN_Release)(ID3D12Resource* This);
 
 // Original method calls for device
@@ -103,19 +105,8 @@ static PFN_CopyDescriptorsSimple o_CopyDescriptorsSimple = nullptr;
 static PFN_Dispatch o_Dispatch = nullptr;
 static PFN_DrawInstanced o_DrawInstanced = nullptr;
 static PFN_DrawIndexedInstanced o_DrawIndexedInstanced = nullptr;
-<<<<<<< HEAD
-static PFN_ExecuteBundle o_ExecuteBundle = nullptr;
-static PFN_Close o_Close = nullptr;
-
 static PFN_ExecuteCommandLists o_ExecuteCommandLists = nullptr;
 static std::atomic<void*> nrQueueImplementation { nullptr };
-||||||| parent of e8c9834d (Removed JustTrackCmdList and hooks needed for it)
-static PFN_ExecuteBundle o_ExecuteBundle = nullptr;
-static PFN_Close o_Close = nullptr;
-
-static PFN_ExecuteCommandLists o_ExecuteCommandLists = nullptr;
-=======
->>>>>>> e8c9834d (Removed JustTrackCmdList and hooks needed for it)
 static PFN_Release o_Release = nullptr;
 
 static PFN_OMSetRenderTargets o_OMSetRenderTargets = nullptr;

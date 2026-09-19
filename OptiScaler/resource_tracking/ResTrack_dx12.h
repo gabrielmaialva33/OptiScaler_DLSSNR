@@ -554,12 +554,16 @@ class ResTrack_Dx12
                                             ID3D12Resource* pCounterResource, D3D12_UNORDERED_ACCESS_VIEW_DESC* pDesc,
                                             D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor);
 
+    static void hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumCommandLists,
+                                      ID3D12CommandList* const* ppCommandLists);
+
     static HRESULT hkCreateDescriptorHeap(ID3D12Device* This, D3D12_DESCRIPTOR_HEAP_DESC* pDescriptorHeapDesc,
                                           REFIID riid, void** ppvHeap);
 
     static ULONG hkRelease(ID3D12Resource* This);
 
     static void HookCommandList(ID3D12Device* InDevice);
+    static void HookToQueue(ID3D12Device* InDevice);
     static void HookResource(ID3D12Device* InDevice);
 
     static bool CheckResource(ID3D12Resource* resource, ResourceInfo* outInfo = nullptr);
