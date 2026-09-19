@@ -40,9 +40,12 @@ int checkboxCalls=0, sliderCalls=0;
 void SeparatorText(const char*) {}
 // The format string is the caller's own literal, forwarded through a parameter pack.
 //
-// GCC 13 and 14 raise -Wformat-nonliteral here and this suite builds with -Werror, so CI failed on a
+// GCC 13 and 14 raise -Wformat-security here and this suite builds with -Werror, so CI failed on a
 // line GCC 16 accepts in silence -- a compiler-version divergence, not a defect in what is being
-// tested. The attribute that would normally answer this, __attribute__((format(printf, ...))), does
+// tested. The flag is -Wformat-security, not the -Wformat-nonliteral it reads like: the message is
+// "format not a string literal and no format arguments", and the second half is why. Both are
+// suppressed below, because the first attempt suppressed only the plausible-sounding one and CI
+// failed again identically. The attribute that would normally answer this, __attribute__((format(printf, ...))), does
 // not apply: a parameter pack is not a varargs list and GCC rejects the argument index. So the
 // warning is suppressed exactly here, over one statement, rather than the suite dropping -Werror and
 // losing every other warning with it.
@@ -52,6 +55,7 @@ template <class... T> void Add(const char* format, T... values)
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#pragma GCC diagnostic ignored "-Wformat-security"
 #endif
     std::snprintf(text, sizeof(text), format, values...);
 #if defined(__GNUC__)
