@@ -423,6 +423,15 @@ struct NrState
     // failure into a crash. It stays off and says why.
     bool failed = false;
     const char* reason = "";
+
+    // A size the model said no to, which is a different thing from a failure.
+    //
+    // FAIL_InvalidParameter answers the request, not the session: the model will take a smaller one.
+    // Keeping the size rather than a flag means the refusal expires on its own -- the next frame at
+    // any other extent is not the refused one and simply runs.
+    bool rejectedWork = false;
+    unsigned int rejectedWorkWidth = 0;
+    unsigned int rejectedWorkHeight = 0;
 };
 
 NrState g_nr;
@@ -3521,6 +3530,31 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             if (g_capture.readyToWrite() && g_captureWriteAtFrame == 0)
                 g_captureWriteAtFrame = g_frames + 8;
         }
+    }
+    else if (result == 0xBAD00005)
+    {
+        // FAIL_InvalidParameter is the model rejecting what it was asked for, not the model breaking.
+        //
+        // Measured in Divinity: Original Sin 2 at 3440x1440 by raising the working scale to 200%,
+        // which asks for 6880x2880 -- 19.8 Mpx, four times anything this project has ever measured
+        // (model-cost-vs-working-scale.md stops at 1.0). The model refuses it. Every refusal in that
+        // session arrived within ten lines of a rebuild and never during steady operation, which is
+        // what a size the model will not take looks like.
+        //
+        // Treating that as session-fatal punished the user for moving a slider: the pass went dead
+        // and stayed dead, and putting the slider back did nothing until the next rebuild happened to
+        // clear it. The parameter is theirs to change, so the refusal is theirs to undo. Remember the
+        // size that was refused, keep the pass alive, and decline only that size.
+        if (!g_nr.rejectedWork || g_nr.rejectedWorkWidth != workWidth || g_nr.rejectedWorkHeight != workHeight)
+        {
+            LOG_WARN("DLSS-NR: the model refused {}x{} (0x{:X} {}). The pass stays available; change the working "
+                     "scale or the resolution and it runs again.",
+                     workWidth, workHeight, (uint32_t) result, NgxResultName((unsigned int) result));
+        }
+
+        g_nr.rejectedWork = true;
+        g_nr.rejectedWorkWidth = workWidth;
+        g_nr.rejectedWorkHeight = workHeight;
     }
     else
     {
