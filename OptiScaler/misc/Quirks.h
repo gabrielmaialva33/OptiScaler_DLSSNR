@@ -550,11 +550,17 @@ static const QuirkEntry quirkTable[] = {
 
     // Rise of the Tomb Raider
     // Hudfix incompatible
-    QUIRK_ENTRY("rottr.exe", GameQuirk::DisableHudfix),
+    QUIRK_ENTRY("rottr.exe", GameQuirk::DisableHudfix, GameQuirk::SkipD3D11FeatureLevelElevation),
 
     // Shadow of the Tomb Raider
     // Hudfix incompatible
     QUIRK_ENTRY("sottr.exe", GameQuirk::DisableHudfix),
+
+    // Trails in the Sky the 2nd Chapter
+    QUIRK_ENTRY("ed6_win2.exe", GameQuirk::DisableDxgiSpoofing, GameQuirk::UseFsr2Dx11Inputs),
+
+    // Sword and Fairy 7
+    QUIRK_ENTRY("pal7-win64-shipping.exe", GameQuirk::DontUseUnrealColorBarriers, GameQuirk::DontUseUnrealMVBarriers),
 
     // Stellar Blade
     // Hudfix incompatible
@@ -581,7 +587,7 @@ static const QuirkEntry quirkTable[] = {
 
     // No Man's Sky
     QUIRK_ENTRY("nms.exe", GameQuirk::KernelBaseHooks, GameQuirk::VulkanDLSSBarrierFixup,
-                GameQuirk::EnableVulkanSpoofing),
+                GameQuirk::EnableVulkanSpoofing, GameQuirk::FSRFGHudlessMismatchFixup),
 
     // RTX Remix
     QUIRK_ENTRY("nvremixbridge.exe", GameQuirk::DisableDxgiSpoofing, GameQuirk::LoadVulkanManually,
