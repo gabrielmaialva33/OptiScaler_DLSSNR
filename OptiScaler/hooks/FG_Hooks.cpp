@@ -21,6 +21,10 @@
 #include <d3d12.h>
 #include <detours/detours.h>
 
+#ifdef DLSS_NEURAL_RENDERING
+#include <dlssnr/DlssNr.h>
+#endif
+
 #define XEFG_RESOURCE_REF_LIMIT 1
 
 static ID3D12Fence* resizeFence = nullptr;
@@ -1244,6 +1248,28 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     // Used at wrapped_swapchain LocalPresent to determine is frame is interpolated or not
     if (willPresent)
         state.fgPresentIsCalled = true;
+
+#ifdef DLSS_NEURAL_RENDERING
+    // The DLSS-NR present hook: the frame is finished at this point, and it still is the frame
+    // frame generation will interpolate FROM, so enhancing it here enhances the generated frames
+    // with it. It runs before the original present, which is where the SL interposer captures the
+    // FG input, and before the wrapped swapchain's own hook on this same flip, which then stands
+    // down for the base frame and keeps enhancing the cycle's generated frames.
+    if (willPresent && state.swapchainInteropApi == SwapchainInteropApi::None && state.currentCommandQueue != nullptr)
+    {
+        DlssNr::RunPresentPass((IDXGISwapChain3*) This, state.currentCommandQueue, true);
+
+#ifdef DLSSNR_DEBUG
+        static bool nrOrderingLogged = false;
+        if (!nrOrderingLogged)
+        {
+            nrOrderingLogged = true;
+            LOG_INFO("DLSS-NR [DBG] ordering OK: present hook enhanced the BASE frame pre-FG; "
+                     "o_FGSCPresent (next, runs DLSS-G) inherits it. Model runs once per base frame.");
+        }
+#endif
+    }
+#endif
 
     HRESULT result;
     if (pPresentParameters == nullptr)
