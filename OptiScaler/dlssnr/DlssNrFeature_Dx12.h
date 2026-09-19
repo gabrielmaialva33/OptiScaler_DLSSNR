@@ -227,5 +227,18 @@ const char* MultipassStatus();
 void RequestCapture(unsigned int frames);
 bool CaptureInProgress();
 
+struct IDXGISwapChain3;
+
+// The present hook. Runs the pass on the swapchain backbuffer at present time: the frame the game
+// finished, tone-mapped and display-referred. The temporal inputs are the depth and motion the game's
+// upscaler evaluate handed over earlier in the same frame, pinned by EvaluateAfterUpscale; without
+// them the pass either waits (Require DLSS on) or runs on dummy temporals that treat the scene as static
+// (Require DLSS off).
+void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool fgHook);
+
+// The source the pass is running from, for the overlay: the upscaler's output or the swapchain, and
+// whether the temporal inputs are in hand. Empty while nothing has run yet.
+const char* HookStatus();
+
 void Shutdown();
 } // namespace DlssNr

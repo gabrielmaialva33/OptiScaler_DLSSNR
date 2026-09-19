@@ -150,6 +150,9 @@ struct DlssNrFrameInfo
     // its output -- a private copy of the game's colour -- and rests it in UNORDERED_ACCESS; reading
     // the config for that copy would transition it out of a state it was never in.
     int OutputState = -1;
+
+    // True when running on the swapchain backbuffer at present time.
+    bool PresentSource = false;
 };
 
 struct alignas(256) DlssNrConstants

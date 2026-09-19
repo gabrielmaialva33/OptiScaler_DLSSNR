@@ -21,12 +21,14 @@
 #include <hooks/D3D12_Hooks.h>
 #include <dlssnr/DlssNr_GpuTiming.h>
 #include <dlssnr/DlssNr_LogRate.h>
+#include <dlssnr/DlssNr_ZeroGuides.h>
 
 #include <mutex>
 #include <optional>
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#include <chrono>
 #include "precompile/DlssNr_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
 
@@ -3108,7 +3110,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS };
 
     // Read the exposure scan's candidates on the pass's own command list, once a frame.
-    if (!holdingColor)
+    if (!holdingColor && !frame.PresentSource)
         DlssNr::ExposureScan::Tick(device, cmdList);
 
     ReadResourceScope depthRead(cmdList, depth, depthBarrierState);
@@ -3161,7 +3163,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const int guideDepthInverted = g_nr.guideDepthInverted ? 1 : 0;
     const bool isLogFrame = g_frames % 120 == 0;
 
-    SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+    SetExtras(cfg, nullptr, frame.PresentSource ? target : nullptr, 0, 0, frame.PresentSource ? width : 0,
+              frame.PresentSource ? height : 0);
 
     // The proxy path, when asked for. Same inputs, same model -- the difference is who calls it.
     //
@@ -3546,6 +3549,472 @@ void RetryAfterFailure()
     g_nr.reset = true;
 }
 
+struct PresentTemporal
+{
+    ID3D12Resource* depth = nullptr;
+    ID3D12Resource* motion = nullptr;
+    DlssNrFrameInfo frame {};
+    unsigned long long capturedAt = 0;
+    unsigned long long renderSeq = 0;
+    bool valid = false;
+};
+
+static PresentTemporal g_temporal;
+static unsigned long long g_renderSeq = 0;
+static unsigned long long g_nrLastEnhancedSeq = 0;
+static unsigned long long g_presentRuns = 0;
+static unsigned long long g_presentSkips = 0;
+static ID3D12Resource* g_lastEnhancedBb = nullptr;
+static unsigned int g_lastEnhancedBbIdx = 0xFFFFFFFF;
+static unsigned int g_sameBbStreak = 0, g_maxSameBbStreak = 0;
+
+static void ReleasePresentTemporal()
+{
+    if (g_temporal.depth != nullptr)
+    {
+        g_temporal.depth->Release();
+        g_temporal.depth = nullptr;
+    }
+    if (g_temporal.motion != nullptr)
+    {
+        g_temporal.motion->Release();
+        g_temporal.motion = nullptr;
+    }
+    g_temporal.valid = false;
+}
+
+static void CaptureTemporal(NVSDK_NGX_Parameter* params, const DlssNrFrameInfo& frame)
+{
+    ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
+    ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
+
+    if (depth == nullptr || motion == nullptr)
+        return;
+
+    ParkNrResource(g_temporal.depth);
+    ParkNrResource(g_temporal.motion);
+
+    depth->AddRef();
+    motion->AddRef();
+    g_temporal.depth = depth;
+    g_temporal.motion = motion;
+    g_temporal.frame = frame;
+    g_temporal.capturedAt = g_frames;
+    g_temporal.renderSeq = ++g_renderSeq;
+    g_temporal.valid = true;
+}
+
+struct PresentList
+{
+    static constexpr unsigned int kSlots = 4;
+    ID3D12CommandAllocator* allocator[kSlots] = {};
+    ID3D12GraphicsCommandList* list[kSlots] = {};
+    UINT64 fenceValue[kSlots] = {};
+    bool dirty[kSlots] = {};
+    ID3D12Fence* fence = nullptr;
+    HANDLE fenceEvent = nullptr;
+};
+
+static PresentList g_presentList;
+static UINT64 g_presentFenceValue = 0;
+static unsigned long long g_presentFlip = 0;
+static unsigned long long g_lastFgFlip = 0;
+static constexpr unsigned long long kFgHookTimeout = 16;
+static bool g_sourceIsPresent = false;
+static ID3D12Resource* g_bbCopy = nullptr;
+static unsigned int g_bbCopyWidth = 0;
+static unsigned int g_bbCopyHeight = 0;
+static DXGI_FORMAT g_bbCopyFormat = DXGI_FORMAT_UNKNOWN;
+
+static void ResetPresentList()
+{
+    for (unsigned int i = 0; i < PresentList::kSlots; ++i)
+    {
+        if (g_presentList.list[i] != nullptr)
+        {
+            g_presentList.list[i]->Release();
+            g_presentList.list[i] = nullptr;
+        }
+
+        if (g_presentList.allocator[i] != nullptr)
+        {
+            g_presentList.allocator[i]->Release();
+            g_presentList.allocator[i] = nullptr;
+        }
+
+        g_presentList.fenceValue[i] = 0;
+        g_presentList.dirty[i] = false;
+    }
+
+    if (g_presentList.fence != nullptr)
+    {
+        g_presentList.fence->Release();
+        g_presentList.fence = nullptr;
+    }
+
+    if (g_presentList.fenceEvent != nullptr)
+    {
+        CloseHandle(g_presentList.fenceEvent);
+        g_presentList.fenceEvent = nullptr;
+    }
+
+    g_presentFenceValue = 0;
+}
+
+static bool EnsurePresentList(ID3D12Device* device)
+{
+    if (g_presentList.list[0] != nullptr)
+        return true;
+
+    for (unsigned int i = 0; i < PresentList::kSlots; ++i)
+    {
+        if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                  IID_PPV_ARGS(&g_presentList.allocator[i]))))
+        {
+            ResetPresentList();
+            return false;
+        }
+
+        if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_presentList.allocator[i], nullptr,
+                                             IID_PPV_ARGS(&g_presentList.list[i]))))
+        {
+            ResetPresentList();
+            return false;
+        }
+
+        g_presentList.list[i]->Close();
+    }
+
+    if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_presentList.fence))))
+    {
+        ResetPresentList();
+        return false;
+    }
+
+    g_presentList.fenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+
+    if (g_presentList.fenceEvent == nullptr)
+    {
+        ResetPresentList();
+        return false;
+    }
+
+    return true;
+}
+
+static ID3D12GraphicsCommandList* GetPresentCommandList(ID3D12Device* device, unsigned int slot)
+{
+    if (g_presentList.list[0] == nullptr && !EnsurePresentList(device))
+        return nullptr;
+
+    if (!g_presentList.dirty[slot])
+    {
+        if (g_presentList.fenceValue[slot] != 0 &&
+            g_presentList.fence->GetCompletedValue() < g_presentList.fenceValue[slot])
+        {
+            if (SUCCEEDED(g_presentList.fence->SetEventOnCompletion(g_presentList.fenceValue[slot],
+                                                                    g_presentList.fenceEvent)))
+            {
+                const DWORD wait = WaitForSingleObject(g_presentList.fenceEvent, 5000);
+                if (wait != WAIT_OBJECT_0)
+                    LOG_WARN("DLSS-NR present: allocator wait returned {} (slot {})", (unsigned) wait, slot);
+            }
+        }
+
+        HRESULT hr = g_presentList.allocator[slot]->Reset();
+        if (FAILED(hr))
+        {
+            LOG_WARN("DLSS-NR present: allocator reset failed on slot {} (HRESULT {:08X})", slot, (unsigned) hr);
+            return nullptr;
+        }
+
+        hr = g_presentList.list[slot]->Reset(g_presentList.allocator[slot], nullptr);
+        if (FAILED(hr))
+        {
+            LOG_WARN("DLSS-NR present: list reset failed on slot {} (HRESULT {:08X})", slot, (unsigned) hr);
+            return nullptr;
+        }
+
+        g_presentList.dirty[slot] = true;
+    }
+
+    return g_presentList.list[slot];
+}
+
+static void SubmitPresentList(ID3D12CommandQueue* queue, unsigned int slot)
+{
+    if (!g_presentList.dirty[slot])
+        return;
+
+    if (SUCCEEDED(g_presentList.list[slot]->Close()))
+    {
+        queue->ExecuteCommandLists(1, (ID3D12CommandList**) &g_presentList.list[slot]);
+        g_presentList.fenceValue[slot] = ++g_presentFenceValue;
+        queue->Signal(g_presentList.fence, g_presentList.fenceValue[slot]);
+    }
+
+    g_presentList.dirty[slot] = false;
+}
+
+static void DropPresentList(unsigned int slot)
+{
+    if (!g_presentList.dirty[slot])
+        return;
+
+    if (FAILED(g_presentList.list[slot]->Close()))
+        LOG_WARN("DLSS-NR present: dropped list slot {} would not close", slot);
+
+    g_presentList.dirty[slot] = false;
+}
+
+static bool EnsureBbCopy(ID3D12Device* device, unsigned int width, unsigned int height, DXGI_FORMAT format)
+{
+    if (g_bbCopy != nullptr && g_bbCopyWidth == width && g_bbCopyHeight == height &&
+        g_bbCopyFormat == format)
+        return true;
+
+    ParkNrResource(g_bbCopy);
+
+    g_bbCopy = CreateScratch(device, format, width, height);
+    g_bbCopyWidth = width;
+    g_bbCopyHeight = height;
+    g_bbCopyFormat = format;
+
+    return g_bbCopy != nullptr;
+}
+
+const char* HookStatus()
+{
+    if (!Config::Instance()->DlssNrEnabled.value_or_default())
+        return "off";
+
+    const uint32_t method = Config::Instance()->DlssNrHookMethod.value_or_default();
+
+    if (method == 2)
+    {
+        if (g_temporal.valid)
+            return "present: active, swapchain source with DLSS temporal inputs";
+        if (Config::Instance()->DlssNrRequireDlss.value_or_default())
+            return "present: waiting for DLSS temporal inputs from the upscaler";
+        return "present: active, presentation backbuffer with dummy temporal inputs";
+    }
+
+    if (method == 0)
+    {
+        if (g_temporal.valid)
+            return "auto: present, swapchain source with DLSS temporal inputs";
+        return "auto: upscaled, the upscaler has handed over no temporal inputs yet";
+    }
+
+    return "upscaled: active on the upscaler's output";
+}
+
+void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool fgHook)
+{
+    const Config& cfg = *Config::Instance();
+
+    if (!cfg.DlssNrEnabled.value_or_default() || g_nr.failed || swapchain == nullptr || queue == nullptr)
+        return;
+
+    const uint32_t method = cfg.DlssNrHookMethod.value_or_default();
+
+    if (method != 2 && !(method == 0 && g_temporal.valid))
+        return;
+
+    ++g_presentFlip;
+
+    const bool wrapStandsDown = !fgHook && g_lastFgFlip != 0 &&
+                                (g_presentFlip - g_lastFgFlip) < kFgHookTimeout;
+
+    if (wrapStandsDown)
+        return;
+
+    ID3D12Resource* backbuffer = nullptr;
+    const UINT index = swapchain->GetCurrentBackBufferIndex();
+
+    if (FAILED(swapchain->GetBuffer(index, IID_PPV_ARGS(&backbuffer))) || backbuffer == nullptr)
+    {
+        ReportSkipOnce("the present hook could not reach the swapchain's backbuffer");
+        return;
+    }
+
+    ID3D12Device* device = nullptr;
+
+    if (FAILED(backbuffer->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
+    {
+        backbuffer->Release();
+        ReportSkipOnce("the backbuffer belongs to no D3D12 device");
+        return;
+    }
+
+    if (g_compose == nullptr)
+        g_compose = std::make_unique<DlssNr_Dx12>("Neural Rendering", device);
+
+    if (g_compose == nullptr)
+    {
+        backbuffer->Release();
+        device->Release();
+        ReportSkipOnce("the pass could not be created");
+        return;
+    }
+
+    const unsigned int slot = index % PresentList::kSlots;
+    ID3D12GraphicsCommandList* list = GetPresentCommandList(device, slot);
+
+    if (list == nullptr)
+    {
+        backbuffer->Release();
+        device->Release();
+        ReportSkipOnce("the present hook's command list could not be prepared");
+        return;
+    }
+
+    const D3D12_RESOURCE_DESC bbDesc = backbuffer->GetDesc();
+    const unsigned int width = (unsigned int) bbDesc.Width;
+    const unsigned int height = bbDesc.Height;
+
+    if (!EnsureBbCopy(device, width, height, bbDesc.Format))
+    {
+        DropPresentList(slot);
+        backbuffer->Release();
+        device->Release();
+        g_nr.failed = true;
+        g_nr.reason = "the present hook's backbuffer copy could not be created";
+        LOG_ERROR("DLSS-NR present: {}", g_nr.reason);
+        return;
+    }
+
+    ID3D12Resource* depth = nullptr;
+    ID3D12Resource* motion = nullptr;
+    DlssNrFrameInfo frame {};
+
+    static ZeroGuides s_dummyGuides;
+
+    if (g_temporal.valid)
+    {
+        depth = g_temporal.depth;
+        motion = g_temporal.motion;
+        frame = g_temporal.frame;
+    }
+    else if (cfg.DlssNrRequireDlss.value_or_default())
+    {
+        DropPresentList(slot);
+        backbuffer->Release();
+        device->Release();
+        ReportSkipOnce("the present hook is waiting for the upscaler's temporal inputs");
+        return;
+    }
+    else
+    {
+        if (!s_dummyGuides.Ensure(device, width, height))
+        {
+            DropPresentList(slot);
+            backbuffer->Release();
+            device->Release();
+            g_nr.failed = true;
+            g_nr.reason = "the present hook's dummy temporals could not be created";
+            LOG_ERROR("DLSS-NR present: {}", g_nr.reason);
+            return;
+        }
+        s_dummyGuides.RecordClear(list);
+        depth = s_dummyGuides.Depth();
+        motion = s_dummyGuides.Motion();
+        frame = DlssNrFrameInfo {};
+    }
+
+    if (g_temporal.valid && g_temporal.renderSeq == g_nrLastEnhancedSeq)
+    {
+        ++g_presentSkips;
+        DropPresentList(slot);
+        backbuffer->Release();
+        device->Release();
+        return;
+    }
+
+    if (g_temporal.valid)
+        g_nrLastEnhancedSeq = g_temporal.renderSeq;
+
+    ++g_presentRuns;
+    g_sameBbStreak = (backbuffer == g_lastEnhancedBb) ? g_sameBbStreak + 1 : 0;
+    g_maxSameBbStreak = g_sameBbStreak > g_maxSameBbStreak ? g_sameBbStreak : g_maxSameBbStreak;
+    g_lastEnhancedBb = backbuffer;
+    g_lastEnhancedBbIdx = index;
+
+    if (!g_sourceIsPresent)
+    {
+        g_sourceIsPresent = true;
+        g_nr.reset = true;
+    }
+
+    const D3D12_RESOURCE_STATES bbState = D3D12_RESOURCE_STATE_PRESENT;
+
+    Barrier(list, backbuffer, bbState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+    list->CopyResource(g_bbCopy, backbuffer);
+    Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Barrier(list, backbuffer, D3D12_RESOURCE_STATE_COPY_SOURCE, bbState);
+
+    frame.PresentSource = true;
+    frame.ColourIsLinearHdr = false;
+    frame.ExposureTexture = nullptr;
+    frame.PreExposure = 1.0f;
+    frame.ExtentIsStable = true;
+    frame.OutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    if (fgHook)
+        g_lastFgFlip = g_presentFlip;
+
+    g_compose->Dispatch(list, g_bbCopy, depth, motion, g_bbCopy, frame, queue);
+
+    if (g_nr.failed)
+    {
+        DropPresentList(slot);
+        backbuffer->Release();
+        device->Release();
+        return;
+    }
+
+    {
+        static bool firstLogged = false;
+        if (!firstLogged)
+        {
+            firstLogged = true;
+            LOG_INFO("DLSS-NR present: first pass on the backbuffer ({}x{}, {} hook)", width, height,
+                     fgHook ? "frame-generation" : "swapchain");
+        }
+    }
+
+    Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Barrier(list, backbuffer, bbState, D3D12_RESOURCE_STATE_COPY_DEST);
+    list->CopyResource(backbuffer, g_bbCopy);
+    Barrier(list, backbuffer, D3D12_RESOURCE_STATE_COPY_DEST, bbState);
+    Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    SubmitPresentList(queue, slot);
+
+    if (cfg.DlssNrPresentSync.value_or_default() && g_presentList.fenceValue[slot] != 0 &&
+        g_presentList.fence->GetCompletedValue() < g_presentList.fenceValue[slot])
+    {
+        const auto waitStart = std::chrono::steady_clock::now();
+        const UINT64 done = g_presentList.fenceValue[slot];
+
+        if (SUCCEEDED(g_presentList.fence->SetEventOnCompletion(done, g_presentList.fenceEvent)))
+        {
+            const DWORD wait = WaitForSingleObject(g_presentList.fenceEvent, 1000);
+            const double waitedMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart)
+                    .count();
+
+            if (wait != WAIT_OBJECT_0)
+                LOG_WARN("DLSS-NR present: completion wait returned {} after {:.1f} ms (slot {})",
+                         (unsigned) wait, waitedMs, slot);
+        }
+    }
+
+    backbuffer->Release();
+    device->Release();
+}
+
 // What the parameter block says about this frame, read the same way whichever side of the upscaler
 // the model runs on. Everything here is a property of how the game encodes its buffers, and both
 // paths read the block the game filled for the upscaler.
@@ -3879,6 +4348,22 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     const auto contractOutput = target->GetDesc();
     ReportSpatialContract(params, GetResource(params, NVSDK_NGX_Parameter_Color, "DLSSD.Color"), target, false,
                           static_cast<unsigned>(contractOutput.Width), contractOutput.Height);
+
+    const uint32_t hookMethod = cfg.DlssNrHookMethod.value_or_default();
+    if (hookMethod != 1)
+        CaptureTemporal(params, frame);
+
+    if (hookMethod == 2 || (hookMethod == 0 && g_temporal.valid))
+    {
+        coverage.sample.reason = "deferred to present-time hook";
+        return;
+    }
+
+    if (g_sourceIsPresent)
+    {
+        g_sourceIsPresent = false;
+        g_nr.reset = true;
+    }
 
     // The upscaler's inputs are at render resolution while colour and output are at display
     // resolution; the model takes that as a subrect per resource, which the pass reads from the
@@ -4701,5 +5186,13 @@ void Shutdown()
     GpuTiming::SetEnabled(false);
 
     g_compose.reset();
+
+    ResetPresentList();
+    ReleasePresentTemporal();
+    if (g_bbCopy != nullptr)
+    {
+        g_bbCopy->Release();
+        g_bbCopy = nullptr;
+    }
 }
 } // namespace DlssNr
