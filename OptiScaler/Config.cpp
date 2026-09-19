@@ -408,6 +408,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrRRPasses.set_from_config(readUInt("DlssNr", "RRPasses"));
             DlssNrRRWorkingScale.set_from_config(readFloat("DlssNr", "RRWorkingScale"));
             DlssNrToggleKey.set_from_config(readInt("DlssNr", "ToggleKey"));
+            DlssNrHookMethod.set_from_config(readUInt("DlssNr", "HookMethod"));
+            DlssNrRequireDlss.set_from_config(readBool("DlssNr", "RequireDlss"));
+            DlssNrPresentSync.set_from_config(readBool("DlssNr", "PresentSync"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
             DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
@@ -1322,6 +1325,11 @@ bool Config::SaveIni()
             auto toggle = Instance()->DlssNrToggleKey.value_for_config();
             ini.SetValue("DlssNr", "ToggleKey", GetIntValue(toggle, toggle > 0).c_str());
         }
+        ini.SetValue("DlssNr", "HookMethod", GetIntValue(Instance()->DlssNrHookMethod.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "RequireDlss",
+                     GetBoolValue(Instance()->DlssNrRequireDlss.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "PresentSync",
+                     GetBoolValue(Instance()->DlssNrPresentSync.value_for_config()).c_str());
         ini.SetValue("DlssNr", "TransferStrength",
                      GetFloatValue(Instance()->DlssNrTransferStrength.value_for_config()).c_str());
         ini.SetValue("DlssNr", "ColourStrength",
