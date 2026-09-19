@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -346,6 +346,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="low_latency\input\input_antilag2.h" />
     <ClInclude Include="shaders\magnifier\Magnifier_Dx11.h" />
     <ClInclude Include="menu\input\input_system.h" />
+    <ClInclude Include="menu\input\kcd_input_fix.h" />
     <ClInclude Include="menu\input\input_system_internal.h" />
     <ClInclude Include="framegen\nvngx\Nvngx_FFX.h" />
     <ClInclude Include="framegen\nvngx\Nvngx_Nukems.h" />
@@ -640,6 +641,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="menu\input\input_system_cursor.cpp" />
     <ClCompile Include="menu\input\input_system_detours.cpp" />
     <ClCompile Include="menu\input\input_system_directinput.cpp" />
+    <ClCompile Include="menu\input\kcd_input_fix.cpp" />
     <ClCompile Include="menu\input\input_system_gameinput.cpp" />
     <ClCompile Include="menu\input\input_system_hid.cpp" />
     <ClCompile Include="menu\input\input_system_messages.cpp" />

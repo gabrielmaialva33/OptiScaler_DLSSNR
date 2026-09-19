@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Header Files">
@@ -872,6 +872,9 @@
     <ClInclude Include="menu\input\input_system.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="menu\input\kcd_input_fix.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="menu\input\input_system_internal.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1458,6 +1461,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="menu\input\input_system_directinput.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="menu\input\kcd_input_fix.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="menu\input\input_system_xinput.cpp">
