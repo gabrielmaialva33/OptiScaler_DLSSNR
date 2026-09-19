@@ -439,6 +439,32 @@ synthesized motion field should move from "step 3, if step 2 earns it" to "part 
 player would be asked to look at". Whether that field is computed on the GPU here rather than on the
 CPU with OpenCV is an implementation question; that it is needed at all is now the expectation.
 
+### Measured (2026-09-18): the smearing this section predicted did not happen
+
+The finding above says permanently zeroed motion makes the model read all movement as static noise
+and smear during any camera or object motion, and calls that a property of the model rather than a
+tuning problem. This note then reordered its own plan around it, moving synthesised motion from a
+later step into "part of the first thing a player would be asked to look at".
+
+That claim was never measured. It arrived as a quotation in an independent review, and everything
+downstream of it -- including every estimate of how much work stood between the transport and a
+usable result -- treated it as established.
+
+The first real run contradicts it. Divinity: Original Sin 2, the present host on the D3D11 bridge,
+zero-filled `R32_FLOAT` depth and `R16G16_FLOAT` motion, 18549 frames with the model's output
+converted back and copied to the presenter, two history resets in the whole session so the model's
+temporal history was accumulating throughout. Reported by the person playing it: the image visibly
+gains detail, and **it does not smear in motion**.
+
+What that settles and what it does not. It settles that zero guides are not disqualifying on their
+own, which is what the sequencing was built on. It does not settle the axis: Divinity is isometric
+with a slow panning camera, which is the friendly case. A first-person title with fast rotation is
+the adverse one and has not been tried, and "did not smear here" is an observation by eye, not a
+measurement of temporal stability.
+
+So synthesised motion moves back to where it started -- an optimisation to reach for when a case
+shows it is needed -- and the case that would show it is a fast-camera title, not this one.
+
 ### Prerequisites the review states plainly
 
 1. Fail-closed fence synchronisation in `ResizeBuffers` and `_ReleaseInteropObjects`.

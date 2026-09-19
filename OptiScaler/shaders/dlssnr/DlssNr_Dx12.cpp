@@ -2072,6 +2072,30 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const float scanTrim = cfg.DlssNrScanTrim.value_or_default();
     const bool holdFrame = cfg.DlssNrHoldFrame.value_or_default();
     const bool reversibleMode = cfg.DlssNrReversibleMode.value_or_default();
+
+    // The two comparison controls, said out loud when they move.
+    //
+    // HoldFrame and ApplyModel exist to be toggled against each other on one frame: freeze the input,
+    // turn the model's edit on and off, and the difference is the model's contribution. That makes
+    // them the two settings most likely to be changing while someone is forming an opinion -- and
+    // they were the only ones that left no trace, so a session spent comparing could not be
+    // reconstructed afterwards from its own log. Every other input to the pass is already in the
+    // composition contract; these two were not, because neither changes what is composed.
+    //
+    // On change only. A per-frame line would be sixty a second of something that moves by hand.
+    {
+        static int lastHold = -1, lastApply = -1;
+        const int hold = holdFrame ? 1 : 0;
+        const int apply = cfg.DlssNrApplyModel.value_or_default() ? 1 : 0;
+
+        if (hold != lastHold || apply != lastApply)
+        {
+            LOG_INFO("DLSS-NR comparison controls: HoldFrame={}, ApplyModel={}", hold ? "on" : "off",
+                     apply ? "on" : "off");
+            lastHold = hold;
+            lastApply = apply;
+        }
+    }
     const auto cfgPreset = cfg.DlssNrPreset.value_or_default();
     const float cfgIntensity = cfg.DlssNrIntensity.value_or_default();
     const float cfgLocalStructure = cfg.DlssNrLocalStructure.value_or_default();
