@@ -732,6 +732,29 @@ HMODULE LibraryLoadHooks::LoadNvApi()
             LOG_WARN("nvapi64.dll is loaded when Nvidia is not the primary GPU");
     }
 
+    // An explicit path, when the user gave one. Same shape as NvngxDlssPath at :757.
+    //
+    // [Libraries] NvapiPath has been in the shipped ini and read into Config for as long as its
+    // siblings have, and nothing ever read it back -- the key was documented and dead. It matters
+    // more than it looks: the search below is deliberately system32-only, and under Proton that
+    // directory belongs to Proton. A prefix where Proton did not install nvapi64.dll cannot be fixed
+    // by putting one there, because the next launch removes it. Measured in Divinity: Original Sin 2,
+    // where the absence sends this function to fakenvapi, and NGX then fails to build its model's
+    // kernels -- "NGXCubinD3D12::CreateKernel failed - nvapi status -3" -- and refuses feature 18
+    // with FAIL_PlatformError. A path the user controls is the way out that does not fight the
+    // runtime.
+    if (nvapi == nullptr && Config::Instance()->NvapiDllPath.has_value())
+    {
+        nvapi = NtdllProxy::LoadLibraryExW_Ldr(Config::Instance()->NvapiDllPath.value().c_str(), NULL, 0);
+
+        if (nvapi != nullptr)
+            LOG_INFO("nvapi64.dll loaded from NvapiPath: {}",
+                     wstring_to_string(Config::Instance()->NvapiDllPath.value()));
+        else
+            LOG_WARN("NvapiPath is set but did not load: {}",
+                     wstring_to_string(Config::Instance()->NvapiDllPath.value()));
+    }
+
     // Try to load nvapi only from system32, like the original call would
     if (nvapi == nullptr)
         nvapi = NtdllProxy::LoadLibraryExW_Ldr(L"nvapi64.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
