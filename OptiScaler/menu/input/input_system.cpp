@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "input_system_internal.h"
+#include "kcd_input_fix.h"
 
 #include <include/imgui/imgui.h>
 
@@ -761,6 +762,10 @@ void ApplyMenuVisibilityChangeLocked(bool visible)
     _state.BlockKeyboard = visible;
     _state.BlockCursor = visible;
 
+    // Do not capture keystrokes while the overlay menu is open, so typing in the
+    // menu is never replayed into the game's DirectInput keyboard.
+    KcdInputFix::SetCaptureAllowed(!visible);
+
     if (wasMenuVisible != visible)
     {
         LOG_INFO("menu visibility changed {} -> {} blockMouse:{} blockKeyboard:{} blockCursor:{} input:{} target:{}",
@@ -1177,6 +1182,11 @@ static void BeginFrameLocked(HWND targetHwnd, HWND inputHwnd, bool hasInputHwnd,
     UpdateExternalMouseHookLocked();
     PumpExternalRawInputSinkLocked();
     PollInputFallbackLocked();
+
+    // Reconcile the keyboard input fix with the config: starting/stopping the
+    // poll thread or installing/uninstalling the low-level hook when the user
+    // toggles it or switches the capture method from the in-game menu.
+    KcdInputFix::Update();
 }
 
 void BeginFrame(HWND targetHwnd, bool isUwp)

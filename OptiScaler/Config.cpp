@@ -552,6 +552,17 @@ bool Config::Reload(std::filesystem::path iniPath)
                 DLSSDRenderPresetUltraPerformance.set_from_config(setting);
         }
 
+        // Keyboard input fix (frame-dependent input sampling, e.g. Kingdom Come)
+        {
+            KcdInputFixEnabled.set_from_config(readBool("KcdInputFix", "Enabled"));
+            KcdInputFixMode.set_from_config(readInt("KcdInputFix", "Mode"));
+            KcdInputFixPollHz.set_from_config(readInt("KcdInputFix", "PollHz"));
+            KcdInputFixDebounceMs.set_from_config(readInt("KcdInputFix", "DebounceMs"));
+            KcdInputFixHoldMs.set_from_config(readInt("KcdInputFix", "HoldMs"));
+            KcdInputFixMaxPendingAgeMs.set_from_config(readInt("KcdInputFix", "MaxPendingAgeMs"));
+            KcdInputFixMaxPending.set_from_config(readInt("KcdInputFix", "MaxPending"));
+        }
+
         // NvngxFG
         {
             if (auto setting = readBool("Nukems", "MakeDepthCopy"); setting.has_value() && setting.value())
@@ -1557,6 +1568,18 @@ bool Config::SaveIni()
         ini.SetValue("Menu", "BGColorG", GetFloatValue(Instance()->MenuBGColorG.value_for_config()).c_str());
         ini.SetValue("Menu", "BGColorB", GetFloatValue(Instance()->MenuBGColorB.value_for_config()).c_str());
         ini.SetValue("Menu", "BGColorA", GetFloatValue(Instance()->MenuBGColorA.value_for_config()).c_str());
+    }
+
+    // Keyboard input fix (frame-dependent input sampling, e.g. Kingdom Come)
+    {
+        ini.SetValue("KcdInputFix", "Enabled", GetBoolValue(Instance()->KcdInputFixEnabled.value_for_config()).c_str());
+        ini.SetValue("KcdInputFix", "Mode", GetIntValue(Instance()->KcdInputFixMode.value_for_config()).c_str());
+        ini.SetValue("KcdInputFix", "PollHz", GetIntValue(Instance()->KcdInputFixPollHz.value_for_config()).c_str());
+        ini.SetValue("KcdInputFix", "DebounceMs", GetIntValue(Instance()->KcdInputFixDebounceMs.value_for_config()).c_str());
+        ini.SetValue("KcdInputFix", "HoldMs", GetIntValue(Instance()->KcdInputFixHoldMs.value_for_config()).c_str());
+        ini.SetValue("KcdInputFix", "MaxPendingAgeMs",
+                     GetIntValue(Instance()->KcdInputFixMaxPendingAgeMs.value_for_config()).c_str());
+        ini.SetValue("KcdInputFix", "MaxPending", GetIntValue(Instance()->KcdInputFixMaxPending.value_for_config()).c_str());
     }
 
     // Hooks

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "input_system_internal.h"
+#include "kcd_input_fix.h"
 
 #include <hooks/Kernel_Hooks.h>
 
@@ -391,6 +392,8 @@ bool HookDirectInputDeviceLocked(void* device, DirectInputDeviceKind kind)
     if (!attachRelease && !attachGetDeviceState && !attachGetDeviceData)
     {
         TrackDirectInputDeviceLocked(device, kind);
+        if (kind == DirectInputDeviceKind::Keyboard)
+            KcdInputFix::Update();
         return completeCoverage;
     }
 
@@ -445,6 +448,8 @@ bool HookDirectInputDeviceLocked(void* device, DirectInputDeviceKind kind)
                  reinterpret_cast<void*>(getDeviceData), device);
 
     TrackDirectInputDeviceLocked(device, kind);
+    if (kind == DirectInputDeviceKind::Keyboard)
+        KcdInputFix::Update();
     return completeCoverage;
 }
 
@@ -660,6 +665,10 @@ void UpdateDirectInputIntegration()
 
 bool RemoveDirectInputHooksLocked()
 {
+    // Tear down the keyboard input-fix capture thread whenever the DirectInput hooks
+    // go away (this only happens on shutdown). Idempotent; returns fast if not running.
+    KcdInputFix::Stop();
+
     if (!_state.DirectInput8CreateHookInstalled && !_state.DirectInputCreateAHookInstalled &&
         !_state.DirectInputCreateWHookInstalled && !_state.DirectInputCreateExHookInstalled &&
         !_state.DirectInputCreateDeviceAHookInstalled && !_state.DirectInputCreateDeviceWHookInstalled &&
