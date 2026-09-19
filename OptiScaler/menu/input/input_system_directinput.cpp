@@ -941,10 +941,11 @@ HRESULT WINAPI hkDirectInputCreateDeviceW(void* directInput, REFGUID guid, void*
 HRESULT WINAPI hkDirectInputGetDeviceState(void* device, DWORD dataSize, LPVOID data)
 {
     DirectInputGetDeviceState_t original = nullptr;
+    DirectInputDeviceKind kind = DirectInputDeviceKind::Other;
 
     {
         std::unique_lock lock(_state.Mutex);
-        const DirectInputDeviceKind kind = GetDirectInputDeviceKindLocked(device);
+        kind = GetDirectInputDeviceKindLocked(device);
         _state.DirectInputGetDeviceStateCallCount++;
 
         if (ShouldBlockDirectInputDeviceLocked(kind))
@@ -972,7 +973,12 @@ HRESULT WINAPI hkDirectInputGetDeviceState(void* device, DWORD dataSize, LPVOID 
         return DIERR_GENERIC;
 
     ScopedHookBypass bypass;
-    return original(device, dataSize, data);
+    const HRESULT result = original(device, dataSize, data);
+    if (SUCCEEDED(result) && kind == DirectInputDeviceKind::Keyboard && data != nullptr && dataSize >= 256)
+    {
+        KcdInputFix::ApplyPendingToLevelState(reinterpret_cast<BYTE*>(data));
+    }
+    return result;
 }
 
 HRESULT WINAPI hkDirectInputGetDeviceData(void* device, DWORD objectDataSize, LPDIDEVICEOBJECTDATA data, LPDWORD inOut,
@@ -1010,8 +1016,18 @@ HRESULT WINAPI hkDirectInputGetDeviceData(void* device, DWORD objectDataSize, LP
         if (original == nullptr)
             return DIERR_GENERIC;
 
+        const DWORD capacity = (inOut != nullptr) ? *inOut : 0;
+
         ScopedHookBypass bypass;
-        return original(device, objectDataSize, data, inOut, flags);
+        const HRESULT result = original(device, objectDataSize, data, inOut, flags);
+        if (SUCCEEDED(result) && kind == DirectInputDeviceKind::Keyboard && data != nullptr && inOut != nullptr &&
+            objectDataSize == sizeof(DIDEVICEOBJECTDATA))
+        {
+            const int added =
+                KcdInputFix::ApplyPendingToEventBuffer(data, static_cast<int>(capacity), static_cast<int>(*inOut));
+            *inOut += static_cast<DWORD>(added);
+        }
+        return result;
     }
 
     // GetDeviceData is backed by a buffered event queue. Returning zero without
