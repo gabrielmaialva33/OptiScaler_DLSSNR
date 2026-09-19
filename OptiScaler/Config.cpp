@@ -1336,10 +1336,8 @@ bool Config::SaveIni()
             ini.SetValue("DlssNr", "ToggleKey", GetIntValue(toggle, toggle > 0).c_str());
         }
         ini.SetValue("DlssNr", "HookMethod", GetIntValue(Instance()->DlssNrHookMethod.value_for_config()).c_str());
-        ini.SetValue("DlssNr", "RequireDlss",
-                     GetBoolValue(Instance()->DlssNrRequireDlss.value_for_config()).c_str());
-        ini.SetValue("DlssNr", "PresentSync",
-                     GetBoolValue(Instance()->DlssNrPresentSync.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "RequireDlss", GetBoolValue(Instance()->DlssNrRequireDlss.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "PresentSync", GetBoolValue(Instance()->DlssNrPresentSync.value_for_config()).c_str());
         ini.SetValue("DlssNr", "TransferStrength",
                      GetFloatValue(Instance()->DlssNrTransferStrength.value_for_config()).c_str());
         ini.SetValue("DlssNr", "ColourStrength",
@@ -1572,11 +1570,13 @@ bool Config::SaveIni()
         ini.SetValue("KcdInputFix", "Enabled", GetBoolValue(Instance()->KcdInputFixEnabled.value_for_config()).c_str());
         ini.SetValue("KcdInputFix", "Mode", GetIntValue(Instance()->KcdInputFixMode.value_for_config()).c_str());
         ini.SetValue("KcdInputFix", "PollHz", GetIntValue(Instance()->KcdInputFixPollHz.value_for_config()).c_str());
-        ini.SetValue("KcdInputFix", "DebounceMs", GetIntValue(Instance()->KcdInputFixDebounceMs.value_for_config()).c_str());
+        ini.SetValue("KcdInputFix", "DebounceMs",
+                     GetIntValue(Instance()->KcdInputFixDebounceMs.value_for_config()).c_str());
         ini.SetValue("KcdInputFix", "HoldMs", GetIntValue(Instance()->KcdInputFixHoldMs.value_for_config()).c_str());
         ini.SetValue("KcdInputFix", "MaxPendingAgeMs",
                      GetIntValue(Instance()->KcdInputFixMaxPendingAgeMs.value_for_config()).c_str());
-        ini.SetValue("KcdInputFix", "MaxPending", GetIntValue(Instance()->KcdInputFixMaxPending.value_for_config()).c_str());
+        ini.SetValue("KcdInputFix", "MaxPending",
+                     GetIntValue(Instance()->KcdInputFixMaxPending.value_for_config()).c_str());
     }
 
     // Hooks
