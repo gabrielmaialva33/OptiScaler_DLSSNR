@@ -395,9 +395,12 @@ static void hkSetDescriptorHeaps(ID3D12GraphicsCommandList* commandList, UINT Nu
 {
     if (!lateInProgressSetDescriptorHeaps && !isUpscalerActive && commandList != nullptr)
     {
-        ResTrack_Dx12::OnSetDescriptorHeaps(commandList, NumDescriptorHeaps, ppDescriptorHeaps);
+        auto config = Config::Instance();
 
-        if (Config::Instance()->ExtendedStateRestore.value_or_default() && ppDescriptorHeaps != nullptr)
+        if (config->FGHudfixPersistentBindings.value_or_default())
+            ResTrack_Dx12::OnSetDescriptorHeaps(commandList, NumDescriptorHeaps, ppDescriptorHeaps);
+
+        if (config->ExtendedStateRestore.value_or_default() && ppDescriptorHeaps != nullptr)
         {
             std::unique_lock<std::shared_mutex> lock(descriptorHeapsMutex);
 
@@ -427,9 +430,12 @@ static void hkSetComputeRootSignature(ID3D12GraphicsCommandList* commandList, ID
 {
     if (!lateInProgressSetComputeRootSignature && !isUpscalerActive && commandList != nullptr)
     {
-        ResTrack_Dx12::OnSetComputeRootSignature(commandList, pRootSignature);
+        auto config = Config::Instance();
 
-        if (Config::Instance()->RestoreComputeSignature.value_or_default() && pRootSignature != nullptr)
+        if (config->FGHudfixPersistentBindings.value_or_default())
+            ResTrack_Dx12::OnSetComputeRootSignature(commandList, pRootSignature);
+
+        if (config->RestoreComputeSignature.value_or_default() && pRootSignature != nullptr)
         {
             {
                 auto paramCount = GetRootParameterCount(pRootSignature);
@@ -574,9 +580,12 @@ static void hkSetGraphicsRootSignature(ID3D12GraphicsCommandList* commandList, I
 {
     if (!lateInProgressSetGraphicsRootSignature && !isUpscalerActive && commandList != nullptr)
     {
-        ResTrack_Dx12::OnSetGraphicsRootSignature(commandList, pRootSignature);
+        auto config = Config::Instance();
 
-        if (Config::Instance()->RestoreGraphicSignature.value_or_default() && pRootSignature != nullptr)
+        if (config->FGHudfixPersistentBindings.value_or_default())
+            ResTrack_Dx12::OnSetGraphicsRootSignature(commandList, pRootSignature);
+
+        if (config->RestoreGraphicSignature.value_or_default() && pRootSignature != nullptr)
         {
             std::unique_lock<std::shared_mutex> lock(rootSignatureMutex);
 
@@ -735,9 +744,12 @@ static void hkSetDescriptorHeapsLate(ID3D12GraphicsCommandList* commandList, UIN
 
     if (!isUpscalerActive && commandList != nullptr)
     {
-        ResTrack_Dx12::OnSetDescriptorHeaps(commandList, NumDescriptorHeaps, ppDescriptorHeaps);
+        auto config = Config::Instance();
 
-        if (Config::Instance()->ExtendedStateRestore.value_or_default() && ppDescriptorHeaps != nullptr)
+        if (config->FGHudfixPersistentBindings.value_or_default())
+            ResTrack_Dx12::OnSetDescriptorHeaps(commandList, NumDescriptorHeaps, ppDescriptorHeaps);
+
+        if (config->ExtendedStateRestore.value_or_default() && ppDescriptorHeaps != nullptr)
         {
             std::unique_lock<std::shared_mutex> lock(descriptorHeapsMutex);
 
@@ -763,9 +775,12 @@ static void hkSetComputeRootSignatureLate(ID3D12GraphicsCommandList* commandList
 
     if (!isUpscalerActive && commandList != nullptr)
     {
-        ResTrack_Dx12::OnSetComputeRootSignature(commandList, pRootSignature);
+        auto config = Config::Instance();
 
-        if (Config::Instance()->RestoreComputeSignature.value_or_default() && pRootSignature != nullptr)
+        if (config->FGHudfixPersistentBindings.value_or_default())
+            ResTrack_Dx12::OnSetComputeRootSignature(commandList, pRootSignature);
+
+        if (config->RestoreComputeSignature.value_or_default() && pRootSignature != nullptr)
         {
             {
                 auto paramCount = GetRootParameterCount(pRootSignature);
@@ -936,9 +951,12 @@ static void hkSetGraphicsRootSignatureLate(ID3D12GraphicsCommandList* commandLis
 
     if (!isUpscalerActive && commandList != nullptr)
     {
-        ResTrack_Dx12::OnSetGraphicsRootSignature(commandList, pRootSignature);
+        auto config = Config::Instance();
 
-        if (Config::Instance()->RestoreGraphicSignature.value_or_default() && pRootSignature != nullptr)
+        if (config->FGHudfixPersistentBindings.value_or_default())
+            ResTrack_Dx12::OnSetGraphicsRootSignature(commandList, pRootSignature);
+
+        if (config->RestoreGraphicSignature.value_or_default() && pRootSignature != nullptr)
         {
             std::unique_lock<std::shared_mutex> lock(rootSignatureMutex);
             signatures.insert_or_assign(commandList, SignatureEntry { SignatureEntryType::Graphics, pRootSignature });
@@ -1104,6 +1122,7 @@ void D3D12Hooks::HookToCommandListLate(ID3D12GraphicsCommandList* commandList)
     const bool restoreComputeSignature = config->RestoreComputeSignature.value_or_default();
     const bool restoreGraphicSignature = config->RestoreGraphicSignature.value_or_default();
     const bool extendedRestoreSignature = config->ExtendedStateRestore.value_or_default();
+    const bool persistentBindings = config->FGHudfixPersistentBindings.value_or_default();
 
     s_SetPipelineState.o_lateHook = (PFN_SetPipelineState) pVTable[25];
     s_SetDescriptorHeaps.o_lateHook = (PFN_SetDescriptorHeaps) pVTable[28];
@@ -1130,7 +1149,7 @@ void D3D12Hooks::HookToCommandListLate(ID3D12GraphicsCommandList* commandList)
             DetourAttach(&(PVOID&) s_SetPipelineState.o_lateHook, hkSetPipelineStateLate);
 
         if (s_SetDescriptorHeaps.o_lateHook != nullptr &&
-            (extendedRestoreSignature || State::Instance().activeFgInput == FGInput::Upscaler))
+            (extendedRestoreSignature || (persistentBindings && State::Instance().activeFgInput == FGInput::Upscaler)))
         {
             DetourAttach(&(PVOID&) s_SetDescriptorHeaps.o_lateHook, hkSetDescriptorHeapsLate);
         }
@@ -1268,7 +1287,9 @@ static void HookToCommandList(ID3D12Device* InDevice)
             // Get the vtable pointer
             PVOID* pVTable = *(PVOID**) commandList;
 
-            const bool extendedRestoreSignature = Config::Instance()->ExtendedStateRestore.value_or_default();
+            auto config = Config::Instance();
+            const bool extendedRestoreSignature = config->ExtendedStateRestore.value_or_default();
+            const bool persistentBindings = config->FGHudfixPersistentBindings.value_or_default();
 
             s_SetPipelineState.o_earlyHook = (PFN_SetPipelineState) pVTable[25];
             s_SetDescriptorHeaps.o_earlyHook = (PFN_SetDescriptorHeaps) pVTable[28];
@@ -1294,7 +1315,8 @@ static void HookToCommandList(ID3D12Device* InDevice)
                     DetourAttach(&(PVOID&) s_SetPipelineState.o_earlyHook, hkSetPipelineState);
 
                 if (s_SetDescriptorHeaps.o_earlyHook != nullptr &&
-                    (extendedRestoreSignature || State::Instance().activeFgInput == FGInput::Upscaler))
+                    (extendedRestoreSignature ||
+                     (persistentBindings && State::Instance().activeFgInput == FGInput::Upscaler)))
                 {
                     DetourAttach(&(PVOID&) s_SetDescriptorHeaps.o_earlyHook, hkSetDescriptorHeaps);
                 }
