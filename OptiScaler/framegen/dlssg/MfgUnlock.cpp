@@ -324,6 +324,79 @@ bool PatchWrapperClamp(HMODULE module)
 
     return WriteBytes(countAt, count, sizeof(count));
 }
+
+bool PatchSlDrsClamp(HMODULE mod)
+{
+    auto base = reinterpret_cast<uint8_t*>(mod);
+    if (!base)
+        return false;
+    auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+        return false;
+    auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE)
+        return false;
+
+    const uint8_t sig[15] = { 0x41, 0x8B, 0x17, 0x39, 0x10,
+                              0x4C, 0x0F, 0x42, 0xC0, 0x41,
+                              0x8B, 0x00, 0x41, 0x89, 0x07 };
+    const size_t sig_len = sizeof(sig);
+    const size_t je_offset = 21; // distance from the guarded je to the anchor
+
+    uint8_t* found = nullptr;
+    size_t hits = 0;
+    const auto* section = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section)
+    {
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0)
+            continue;
+        uint8_t* start = base + section->VirtualAddress;
+        const size_t size = section->Misc.VirtualSize;
+        if (size < je_offset + sig_len)
+            continue;
+        for (size_t off = je_offset; off + sig_len <= size; ++off)
+        {
+            if (std::memcmp(start + off, sig, sig_len) != 0)
+                continue;
+            if (found == nullptr)
+                found = start + off;
+            ++hits;
+        }
+    }
+
+    if (hits != 1 || found == nullptr)
+    {
+        LOG_WARN("MFG unlock: found {} DRS max-clamp anchors in sl.dlss_g.dll (expected 1); leaving DRS clamp alone", hits);
+        return false;
+    }
+
+    uint8_t* je = found - je_offset;
+    // The guard must be a near `je rel32` (0F 84 <disp32>), 6 bytes long.
+    if (je[0] != 0x0F || je[1] != 0x84)
+    {
+        LOG_WARN("MFG unlock: the DRS clamp guard is not the expected `je rel32`; leaving it alone");
+        return false;
+    }
+    int32_t je_disp = 0;
+    std::memcpy(&je_disp, je + 2, sizeof(je_disp));
+    const int32_t target = static_cast<int32_t>(je - base) + 6 + je_disp;
+
+    // Rewrite the 6-byte `je` as an unconditional near `jmp rel32` (5 bytes) + NOP.
+    const int32_t jmp_disp = target - (static_cast<int32_t>(je - base) + 5);
+    uint8_t replacement[6];
+    replacement[0] = 0xE9;
+    std::memcpy(replacement + 1, &jmp_disp, 4);
+    replacement[5] = 0x90;
+
+    if (WriteBytes(reinterpret_cast<uintptr_t>(je), replacement, sizeof(replacement)))
+    {
+        LOG_INFO("MFG unlock: removed the DRS 'max generated frames' clamp in sl.dlss_g.dll (je->jmp); "
+                 "the driver profile can no longer cap MFG to 2x");
+        return true;
+    }
+    LOG_WARN("MFG unlock: could not patch the DRS max-clamp guard");
+    return false;
+}
 } // namespace
 
 void MfgUnlock::TryApply()
@@ -371,6 +444,9 @@ void MfgUnlock::TryApply()
 
             if (PatchWrapperClamp(module))
                 LOG_INFO("MFG unlock: sl.dlss_g.dll ceiling raised to {}", kMaxGeneratedFrames);
+
+            if (PatchSlDrsClamp(module))
+                LOG_INFO("MFG unlock: removed the DRS 'max generated frames' clamp in sl.dlss_g.dll");
         }
     }
 }
