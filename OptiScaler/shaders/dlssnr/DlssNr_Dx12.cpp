@@ -3839,6 +3839,44 @@ static bool EnsureBbCopy(ID3D12Device* device, unsigned int width, unsigned int 
     return g_bbCopy != nullptr;
 }
 
+// One line, on a cadence, that answers the questions a session actually asks: is the pass running,
+// how many frames reach the screen for each one rendered, and why not when it is not.
+//
+// Written because those answers were in the log all along -- as a frametime here, a present counter
+// there, an NGX code three hundred lines up -- and reconstructing them by hand cost real time. The
+// present:render ratio is the multiplier that actually left the GPU, which is a different thing from
+// the multiplier that was requested; a request of 4x that pace-fails to 1x looks identical in config
+// and opposite on screen. render frames are counted at CaptureTemporal (g_renderSeq); present frames
+// at the present hook (g_presentFlip).
+void ReportRuntimeStatus(bool passRecorded, const char* skipReason)
+{
+    static unsigned long long lastPresent = 0;
+    static unsigned long long lastRender = 0;
+    static std::chrono::steady_clock::time_point lastAt {};
+
+    const auto now = std::chrono::steady_clock::now();
+    if (lastAt.time_since_epoch().count() != 0 && now - lastAt < std::chrono::seconds(2))
+        return;
+
+    const auto presents = g_presentFlip - lastPresent;
+    const auto renders = g_renderSeq - lastRender;
+    lastPresent = g_presentFlip;
+    lastRender = g_renderSeq;
+    lastAt = now;
+
+    if (renders == 0 && presents == 0)
+        return;
+
+    const double ratio = renders != 0 ? (double) presents / (double) renders : 0.0;
+
+    if (passRecorded)
+        LOG_INFO("DLSS-NR status: {} | {} presents : {} renders = {:.2f}x on screen", HookStatus(), presents, renders,
+                 ratio);
+    else
+        LOG_INFO("DLSS-NR status: no pass this window ({}) | {} presents : {} renders", skipReason ? skipReason : "",
+                 presents, renders);
+}
+
 const char* HookStatus()
 {
     if (!Config::Instance()->DlssNrEnabled.value_or_default())
@@ -4029,7 +4067,11 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     // the two present transports drifted: ExtentIsStable and the reason string each existed on one
     // side only, on paths facing the identical situation.
     const char* reason = "";
-    EvaluateAtPresent(list, g_bbCopy, depth, motion, frame, queue, &reason);
+    const bool recorded = EvaluateAtPresent(list, g_bbCopy, depth, motion, frame, queue, &reason);
+
+    // The one status line, on its own cadence. present:render is the multiplier that actually reached
+    // the screen -- the number a session spends the most effort reconstructing by hand otherwise.
+    ReportRuntimeStatus(recorded, reason);
 
     if (g_nr.failed)
     {
