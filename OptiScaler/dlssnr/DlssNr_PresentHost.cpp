@@ -211,8 +211,12 @@ bool PresentHost::_EnsureFeature(ID3D12Device* device, ID3D12CommandQueue* queue
     // ordered before it without a CPU wait.
     // Said once, immediately before the create that has been refusing, and said by the same code the
     // harness uses so the two reports can be diffed rather than read.
-    DlssNr::Identity::ReportAll([](void*, const char* line) { LOG_INFO("{}", line); }, nullptr, "production",
-                                device, queue);
+    // The sink is named rather than written inline. An inline lambda inside the argument list puts the
+    // call over the column limit, and two builds of clang-format 20 -- the Arch package here and the
+    // one the CI action carries -- wrap what is left differently, so the check failed on formatting
+    // this machine reported as clean. A short name removes the line that has to be wrapped at all.
+    const auto toLog = [](void*, const char* line) { LOG_INFO("{}", line); };
+    DlssNr::Identity::ReportAll(toLog, nullptr, "production", device, queue);
 
     const char* reason = "";
     const bool created =
@@ -237,7 +241,7 @@ bool PresentHost::_EnsureFeature(ID3D12Device* device, ID3D12CommandQueue* queue
     // are loaded -- EnsureForwarder happens inside the create -- so its module list is short by
     // exactly the modules the question is about. The harness reports once, after its forwarder is
     // loaded, so this is the report that lines up with it.
-    DlssNr::Identity::ReportNgxModules([](void*, const char* line) { LOG_INFO("{}", line); }, nullptr);
+    DlssNr::Identity::ReportNgxModules(toLog, nullptr);
 
     if (created)
         _resetOwed = false;

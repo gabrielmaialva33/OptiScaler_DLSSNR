@@ -38,9 +38,25 @@ std::vector<std::string> output;
 int toggle=-1, interval=-1;
 int checkboxCalls=0, sliderCalls=0;
 void SeparatorText(const char*) {}
-template<class... T> void Add(const char* format, T... values) {
+// The format string is the caller's own literal, forwarded through a parameter pack.
+//
+// GCC 13 and 14 raise -Wformat-nonliteral here and this suite builds with -Werror, so CI failed on a
+// line GCC 16 accepts in silence -- a compiler-version divergence, not a defect in what is being
+// tested. The attribute that would normally answer this, __attribute__((format(printf, ...))), does
+// not apply: a parameter pack is not a varargs list and GCC rejects the argument index. So the
+// warning is suppressed exactly here, over one statement, rather than the suite dropping -Werror and
+// losing every other warning with it.
+template <class... T> void Add(const char* format, T... values)
+{
     char text[2048];
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#endif
     std::snprintf(text, sizeof(text), format, values...);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
     output.emplace_back(text);
 }
 template<class... T> void TextWrapped(const char* text, T... values) { Add(text,values...); }
