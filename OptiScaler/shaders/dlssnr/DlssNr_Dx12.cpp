@@ -2432,7 +2432,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Capped at 2x: cost grows with the area and NGX acceptance above native is what this probe tests.
     const float configuredWorkScale = frame.AfterRayReconstruction ? cfg.DlssNrRRWorkingScale.value_or_default()
                                                                    : cfg.DlssNrWorkingScale.value_or_default();
-    const float workScale = std::clamp(configuredWorkScale, 0.25f, 2.0f);
+    // The upper bound is 1.0 for a caller with no real motion: above native the model refuses zero
+    // guides (see DlssNrFrameInfo::AllowSupersampling), so clamping here turns a would-be refusal of
+    // the user's chosen scale into the nearest size that runs, silently and every frame.
+    const float maxWorkScale = frame.AllowSupersampling ? 2.0f : 1.0f;
+    const float workScale = std::clamp(configuredWorkScale, 0.25f, maxWorkScale);
     const auto workWidth = (unsigned int) (width * workScale + 0.5f);
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);
     const bool reduced = workWidth != width || workHeight != height;

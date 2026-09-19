@@ -153,6 +153,14 @@ struct DlssNrFrameInfo
 
     // True when running on the swapchain backbuffer at present time.
     bool PresentSource = false;
+
+    // Whether the model may work above native (working scale > 1). Supersampling makes it synthesise
+    // pixels the source does not have, and to place them it needs real motion: measured, it accepts
+    // 2x with a game's own depth+motion (Crimson) and refuses zero guides with FAIL_InvalidParameter
+    // (the no-upscaler present host), while accepting zeros fine at exactly 1.0. A caller with no real
+    // motion sets this false and the pass clamps the working scale to 1.0, rather than letting the
+    // model refuse a size the user picked. A caller with real guides leaves it true.
+    bool AllowSupersampling = true;
 };
 
 struct alignas(256) DlssNrConstants
