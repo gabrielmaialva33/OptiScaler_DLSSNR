@@ -2375,9 +2375,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // scope declines -- ray reconstruction is the common one -- the after-upscale path serves that
     // evaluate and needs the gate just as much. The driver proxy is a post-upscale path too and is
     // deliberately included; it faces the same rebuild churn.
+    // frame.ExtentIsStable last, so Observe is still called in exactly the cases it used to be and
+    // the tracker's state stays coherent for callers that do alternate. Only the standing down is
+    // skipped, and only for a caller that has said its extent cannot alternate.
     if (sourceIsTarget && !chainEnabled &&
         !g_postExtent.Observe(workWidth, workHeight, now,
-                              PostContract(width, (unsigned int) height, static_cast<uint32_t>(desc.Format))))
+                              PostContract(width, (unsigned int) height, static_cast<uint32_t>(desc.Format))) &&
+        !frame.ExtentIsStable)
     {
         reportSkip("working resolution is settling (500 ms); no model reconstruction");
         device->Release();
@@ -3775,19 +3779,26 @@ int GuideRestState(bool motionVectors)
 }
 
 bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
-                       ID3D12Resource* motion, bool reset)
+                       ID3D12Resource* motion, bool reset, const char** outReason)
 {
+    const auto answer = [outReason](bool recorded, const char* reason)
+    {
+        if (outReason != nullptr)
+            *outReason = reason;
+        return recorded;
+    };
+
     if (!Config::Instance()->DlssNrEnabled.value_or_default())
-        return false;
+        return answer(false, "the pass is disabled");
 
     if (cmdList == nullptr || colour == nullptr || depth == nullptr || motion == nullptr)
-        return false;
+        return answer(false, "the host passed a null resource");
 
     ID3D12Device* device = nullptr;
     if (FAILED(colour->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
     {
         ReportSkipOnce("the present host's colour belongs to no D3D12 device");
-        return false;
+        return answer(false, "the colour belongs to no D3D12 device");
     }
 
     if (g_compose == nullptr)
@@ -3798,7 +3809,7 @@ bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colou
     if (g_compose == nullptr)
     {
         ReportSkipOnce("the pass could not be created for the present host");
-        return false;
+        return answer(false, "the composition pass could not be built");
     }
 
     const auto desc = colour->GetDesc();
@@ -3829,6 +3840,10 @@ bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colou
     // the host could not bridge. The caller knows which of those happened; this side cannot.
     frame.Reset = reset;
 
+    // The swapchain's extent, which changes on resize and at no other time, and a resize rebuilds
+    // everything this host owns. So the post-upscale settling gate has nothing to protect here.
+    frame.ExtentIsStable = true;
+
     DlssNr::Detail::CoverageSample sample {};
     sample.width = static_cast<uint32_t>(desc.Width);
     sample.height = desc.Height;
@@ -3836,9 +3851,12 @@ bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colou
     const bool recorded = g_compose->Dispatch(cmdList, colour, depth, motion, colour, frame, nullptr, &sample);
 
     if (recorded)
-        sample.reason = "composition recorded at present, with no upscaler in the frame";
+        return answer(true, "composition recorded at present, with no upscaler in the frame");
 
-    return recorded;
+    // Dispatch's own account of why not. It distinguishes a model that was called and refused from a
+    // frame the pass chose not to serve, which is the distinction the caller needs and the one a bare
+    // bool destroys.
+    return answer(false, sample.reason);
 }
 
 // ---------------------------------------------------------------------------------------------

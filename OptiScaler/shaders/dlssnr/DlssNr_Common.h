@@ -123,6 +123,25 @@ struct DlssNrFrameInfo
     // feature-create flags and decides which valid-region dimensions apply to the motion texture.
     bool MotionVectorsLowResolution = false;
 
+    // Whether this caller's frame extent can change between frames.
+    //
+    // After an extent change the post-upscale path stands the model down for 500 ms rather than
+    // rebuild it, because a title that alternates extents -- an offscreen portrait rendered between
+    // main-scene frames is the reported case -- would otherwise rebuild and retire the model on every
+    // alternation. That is preventive hardening against a game's behaviour, and the note where it
+    // lives says so: no failure was ever observed, and the cost is real.
+    //
+    // A caller that owns its own frame does not have that behaviour. A present-time host works on the
+    // swapchain's extent, which changes on resize and at no other time, and a resize already rebuilds
+    // everything it owns. For such a caller the gate buys nothing and costs the first half second,
+    // which on a cold start is the half second in which the model would otherwise be built.
+    //
+    // The reference implementation this was checked against (jlrouzies-fr/DLSS5-Feeder,
+    // host/dlss5-feed-host64.cpp:2285-2317) opens a command list immediately before its create, closes
+    // it immediately after and waits on a fence, with no settling rule anywhere. So the wait is our
+    // policy, not something NGX asks for.
+    bool ExtentIsStable = false;
+
     // The resource state the output arrives in and is handed back in, as a D3D12_RESOURCE_STATES
     // value, when the caller owns the output and knows. Negative means the output is the upscaler's
     // and arrives in whatever state the config says the upscaler left it in.

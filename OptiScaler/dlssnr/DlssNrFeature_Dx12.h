@@ -55,8 +55,16 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 //
 // Returns whether the pass recorded anything. False is ordinary -- the model may be off, still
 // building, or already failed for the session -- and the caller still owes its frame a transfer.
+// outReason, when given, is why a false answer was false. It is never null after the call and points
+// at a string literal, so it outlives the caller.
+//
+// The distinction matters and this interface used to lose it. "The pass declined this frame" and "the
+// model refused to exist" are different events with different consequences -- the first is ordinary
+// and temporary, the second ends neural rendering for the session -- and a bare bool reported them
+// identically. A run that was meant to test whether the model would be created read a decline as a
+// refusal, and would have eliminated the wrong hypothesis.
 bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
-                       ID3D12Resource* motion, bool reset);
+                       ID3D12Resource* motion, bool reset, const char** outReason = nullptr);
 
 // Where a caller that owns its guides must leave them, so the pass transitions them from where they
 // actually are. It reads config keys written for a game's own buffers; a host that guessed the
