@@ -136,7 +136,7 @@ def check_present_coverage(harness):
 
 
 def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_ab=False, cold_size=None,
-                     cold_ui=None, cold_sdk=None):
+                     cold_ui=None, cold_sdk=None, cold_load_opti=False):
     """Run the harness the way a Steam game runs: through Proton, in a compatdata prefix of its own.
 
     Hand-mirroring what Proton provides (vkd3d-proton, dxvk-nvapi, the driver's nvngx pair and the
@@ -178,7 +178,8 @@ def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_
                        (['--present-composition-ab'] if composition_ab else ['--present-hud-ab'] if hud_ab else ['--present-nr'] if present_nr else ['--cold-nr'] if cold_nr else [])
                        + (['--cold-size', cold_size] if cold_nr and cold_size else [])
                        + (['--cold-ui-correction', cold_ui] if cold_nr and cold_ui else [])
-                       + (['--cold-core-sdk', cold_sdk] if cold_nr and cold_sdk else []),
+                       + (['--cold-core-sdk', cold_sdk] if cold_nr and cold_sdk else [])
+                       + (['--cold-load-optiscaler'] if cold_nr and cold_load_opti else []),
                        cwd=RUN, env=env, timeout=600)
     hlog = RUN / 'dlssnr-loopback.log'
     harness = hlog.read_text(errors='replace') if hlog.exists() else ''
@@ -249,6 +250,11 @@ def main():
                     help='with --cold-nr: the SDK version to initialise the CORE with (default 0). '
                          'Production passes NVSDK_NGX_Version_API (0x15) whenever no game NGX init '
                          'populated State, which is exactly the no-upscaler case.')
+    ap.add_argument('--cold-load-optiscaler', action='store_true',
+                    help="with --cold-nr: LoadLibrary the production OptiScaler.dll before the cold "
+                         "sequence and then leave it alone. Puts this process's one remaining "
+                         "difference from production -- OptiScaler's hooks, installed from DllMain -- "
+                         "into the control that passes. Nothing is called on it.")
     ap.add_argument('--skip-build', action='store_true',
                     help='reuse the selected mode\'s artifacts/{run,cold-run,present-run}/dlssnr-loopback.exe')
     modes = ap.add_mutually_exclusive_group()
@@ -285,7 +291,9 @@ def main():
 
     OUT.mkdir(exist_ok=True)
     RUN.mkdir(exist_ok=True)
-    if not standalone:
+    # Cold NR does not load OptiScaler, which is the point of it -- unless it is being asked to, in
+    # which case the DLL has to be next to the harness like it is next to a game.
+    if not standalone or args.cold_load_optiscaler:
         shutil.copy2(dll, RUN / 'OptiScaler.dll')
 
     env = dict(os.environ, WINEPREFIX=str(PREFIX), WINEDEBUG='-all')
@@ -350,7 +358,7 @@ def main():
 
     if args.runtime == 'proton':
         return run_under_proton(args.cold_nr, args.present_nr, args.hud_ab, args.composition_ab, args.cold_size,
-                                args.cold_ui_correction, args.cold_core_sdk)
+                                args.cold_ui_correction, args.cold_core_sdk, args.cold_load_optiscaler)
 
     # A separate runtime prefix: the compiler prefix is configured for MSVC, not for graphics, and
     # running the app there conflates "the harness is wrong" with "this prefix has no D3D12".

@@ -353,6 +353,7 @@ int main(int argc, char** argv)
     unsigned coldWidth = 640, coldHeight = 360;
     int coldUiCorrection = 0;
     unsigned coldCoreSdk = 0;
+    const bool coldLoadOptiScaler = hasFlag("--cold-load-optiscaler");
     for (int i = 1; i + 1 < argc; ++i)
     {
         const std::string flag = argv[i];
@@ -432,6 +433,27 @@ int main(int argc, char** argv)
 
         if (coldNr)
         {
+            // The one axis this mode was built to exclude, offered as a switch.
+            //
+            // Cold NR passes and production fails on the same files, the same core, the same
+            // forwarder and the same model, with every parameter either matched or proved
+            // irrelevant. What production has that this process does not is OptiScaler in it:
+            // its D3D12, DXGI, loader and NVAPI hooks, installed from DllMain. Loading the
+            // production DLL here and then running the unchanged sequence puts that one property
+            // into the control that passes.
+            //
+            // Nothing is called on it. It is loaded for its DllMain and left alone, because the
+            // question is whether being present is enough.
+            if (coldLoadOptiScaler)
+            {
+                Say("  --cold-load-optiscaler: loading %s before the cold sequence\n", dllPath);
+                const HMODULE opti = LoadLibraryA(dllPath);
+                if (opti == nullptr)
+                    Say("  OptiScaler load FAILED, Win32=%lu; the axis was not applied\n", GetLastError());
+                else
+                    Say("  OptiScaler loaded at %p; its hooks are installed in this process\n", (void*) opti);
+            }
+
             RunColdNr(device, queue, alloc, list, fence, fenceEvent, coldWidth, coldHeight, coldUiCorrection,
                       coldCoreSdk);
             DestroyWindow(window);
