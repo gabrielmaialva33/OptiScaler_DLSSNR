@@ -337,9 +337,9 @@ bool PatchSlDrsClamp(HMODULE mod)
     if (nt->Signature != IMAGE_NT_SIGNATURE)
         return false;
 
-    const uint8_t sig[15] = { 0x41, 0x8B, 0x17, 0x39, 0x10,
-                              0x4C, 0x0F, 0x42, 0xC0, 0x41,
-                              0x8B, 0x00, 0x41, 0x89, 0x07 };
+    const uint8_t sig[15] = {
+        0x41, 0x8B, 0x17, 0x39, 0x10, 0x4C, 0x0F, 0x42, 0xC0, 0x41, 0x8B, 0x00, 0x41, 0x89, 0x07
+    };
     const size_t sig_len = sizeof(sig);
     const size_t je_offset = 21; // distance from the guarded je to the anchor
 
@@ -366,7 +366,8 @@ bool PatchSlDrsClamp(HMODULE mod)
 
     if (hits != 1 || found == nullptr)
     {
-        LOG_WARN("MFG unlock: found {} DRS max-clamp anchors in sl.dlss_g.dll (expected 1); leaving DRS clamp alone", hits);
+        LOG_WARN("MFG unlock: found {} DRS max-clamp anchors in sl.dlss_g.dll (expected 1); leaving DRS clamp alone",
+                 hits);
         return false;
     }
 
@@ -397,6 +398,33 @@ bool PatchSlDrsClamp(HMODULE mod)
     LOG_WARN("MFG unlock: could not patch the DRS max-clamp guard");
     return false;
 }
+
+// Per-patch outcome for the one-line summary TryApply prints once per module. A miss is a signature
+// that did not match, a fixed-count guard that refused, or a write that failed - every fail-closed
+// path a Patch* function can take lands here, so a partially applied patcher cannot pass for a whole
+// one. A skip is a patch that was not attempted on this build or was turned off in config, which is
+// not a failure and must not read like one.
+enum class PatchStatus
+{
+    Ok,
+    Miss,
+    Skip
+};
+
+const char* Status(PatchStatus status)
+{
+    switch (status)
+    {
+    case PatchStatus::Ok:
+        return "ok";
+    case PatchStatus::Miss:
+        return "MISS";
+    case PatchStatus::Skip:
+        return "skip";
+    }
+
+    return "?";
+}
 } // namespace
 
 void MfgUnlock::TryApply()
@@ -415,8 +443,8 @@ void MfgUnlock::TryApply()
         {
             snippetDone = true;
 
-            const bool advertise = PatchAdvertise(module);
-            const bool validate = PatchValidate(module);
+            const PatchStatus advertise = PatchAdvertise(module) ? PatchStatus::Ok : PatchStatus::Miss;
+            const PatchStatus validate = PatchValidate(module) ? PatchStatus::Ok : PatchStatus::Miss;
 
             // Default on where it applies: below Blackwell the unlock alone produces frames that do
             // not advance the picture, so the two belong together. dlssCapable is set from the same
@@ -426,13 +454,21 @@ void MfgUnlock::TryApply()
                                       gpu.nvidiaArchInfo.architecture_id >= NV_GPU_ARCHITECTURE_TU100 &&
                                       gpu.nvidiaArchInfo.architecture_id <= NV_GPU_ARCHITECTURE_AD100;
 
+            // Skip is not a miss: a build or a card that does not want the kernel swap says so here,
+            // and the summary must not read it as a half-applied patch.
+            PatchStatus blackwellKernels = PatchStatus::Skip;
             if (Config::Instance()->FGDLSSGAdaBlackwellKernels.value_or(preBlackwell))
-                PatchBlackwellKernels(module);
+                blackwellKernels = PatchBlackwellKernels(module) ? PatchStatus::Ok : PatchStatus::Miss;
 
-            if (advertise && validate)
-                LOG_INFO("MFG unlock: nvngx_dlssg.dll patched for {} generated frames", kMaxGeneratedFrames);
+            // One line so a half-applied module cannot hide behind a single buried warning in a
+            // 180k-line log: WARN the moment any patch missed, INFO only when the module is whole.
+            if (advertise == PatchStatus::Miss || validate == PatchStatus::Miss ||
+                blackwellKernels == PatchStatus::Miss)
+                LOG_WARN("MFG unlock summary (nvngx_dlssg.dll): advertise={} validate={} blackwellKernels={}",
+                         Status(advertise), Status(validate), Status(blackwellKernels));
             else
-                LOG_WARN("MFG unlock: nvngx_dlssg.dll incomplete, advertise {}, validate {}", advertise, validate);
+                LOG_INFO("MFG unlock summary (nvngx_dlssg.dll): advertise={} validate={} blackwellKernels={}",
+                         Status(advertise), Status(validate), Status(blackwellKernels));
         }
     }
 
@@ -442,11 +478,18 @@ void MfgUnlock::TryApply()
         {
             wrapperDone = true;
 
-            if (PatchWrapperClamp(module))
-                LOG_INFO("MFG unlock: sl.dlss_g.dll ceiling raised to {}", kMaxGeneratedFrames);
+            const PatchStatus wrapperClamp = PatchWrapperClamp(module) ? PatchStatus::Ok : PatchStatus::Miss;
+            const PatchStatus drsClamp = PatchSlDrsClamp(module) ? PatchStatus::Ok : PatchStatus::Miss;
 
-            if (PatchSlDrsClamp(module))
-                LOG_INFO("MFG unlock: removed the DRS 'max generated frames' clamp in sl.dlss_g.dll");
+            // Same one-line summary for the wrapper. This is the patch that half-applied in the
+            // Crimson Desert run - wrapperClamp missed while everything else took - and the miss was
+            // one line lost in the log; here it is the level of the whole summary.
+            if (wrapperClamp == PatchStatus::Miss || drsClamp == PatchStatus::Miss)
+                LOG_WARN("MFG unlock summary (sl.dlss_g.dll): wrapperClamp={} drsClamp={}", Status(wrapperClamp),
+                         Status(drsClamp));
+            else
+                LOG_INFO("MFG unlock summary (sl.dlss_g.dll): wrapperClamp={} drsClamp={}", Status(wrapperClamp),
+                         Status(drsClamp));
         }
     }
 }

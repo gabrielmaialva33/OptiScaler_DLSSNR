@@ -28,6 +28,9 @@
 namespace MfgUnlock
 {
 // Applies both patches once per process. Silent and harmless when the config option is off, when
-// nvngx_dlssg.dll is not loaded, or when either signature does not match exactly once.
+// nvngx_dlssg.dll is not loaded, or when either signature does not match exactly once. Once a module
+// has been handled it logs a single "MFG unlock summary (<module>): ..." line naming every patch and
+// whether it applied (ok), missed (MISS) or was not attempted (skip), so a half-applied module is
+// one WARN rather than a lone warning buried in the log.
 void TryApply();
 } // namespace MfgUnlock
