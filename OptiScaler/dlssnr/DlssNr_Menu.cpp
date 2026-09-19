@@ -375,12 +375,84 @@ void RenderMenu(Config* config, float menuResScale)
         }
 
         ImGui::Spacing();
+        ImGui::SeparatorText(Localization::Tr("Source"));
+
+        {
+            const bool vkOnly = DlssNr::IsRunningVk();
+
+            if (vkOnly)
+                ImGui::BeginDisabled();
+
+            static const char* hookMethodNames[] = { Localization::Label("Auto"), Localization::Label("Upscaled"),
+                                                     Localization::Label("Present") };
+            int hookMethod = (int) config->DlssNrHookMethod.value_or_default();
+            if (hookMethod < 0 || hookMethod > 2)
+                hookMethod = 1;
+
+            if (ImGui::Combo(Localization::Label("Hook method"), &hookMethod, hookMethodNames,
+                             IM_ARRAYSIZE(hookMethodNames)))
+                config->DlssNrHookMethod = (uint32_t) hookMethod;
+
+            if (vkOnly)
+                ImGui::EndDisabled();
+
+            HelpMarker("Where the pass runs, and what it runs on.\n\nAuto: the swapchain backbuffer, as soon "
+                       "as the game's upscaler has handed over its depth and motion; the upscaler's "
+                       "output until then.\n\nUpscaled: in place, immediately after the game's upscaler "
+                       "has written its output. That output is linear and un-tonemapped, so the Colour "
+                       "section below must map it into something the model recognises -- the paper "
+                       "white is where a game that moves its exposure makes itself felt.\n\nPresent: at "
+                       "the moment of present, on the swapchain's backbuffer -- the frame the game has "
+                       "finished and tone-mapped, which is exactly the kind of picture the model was "
+                       "trained on. There is nothing to divide and no white point to find, and with "
+                       "frame generation the base frame is enhanced before the generated frames are "
+                       "made from it. This is how the ReShade implementations run it, and the one a "
+                       "title like KCD2 wants.\n\nDirect3D only; on a Vulkan game the pass keeps "
+                       "running where it always has.");
+
+            if (hookMethod == 2)
+            {
+                bool requireDlss = config->DlssNrRequireDlss.value_or_default();
+                if (ImGui::Checkbox(Localization::Label("Require DLSS temporal inputs"), &requireDlss))
+                    config->DlssNrRequireDlss = requireDlss;
+
+                HelpMarker("Present needs the game's depth and motion to reproject its history. With this "
+                           "on, a frame that has no temporal inputs yet is shown as the game rendered "
+                           "it. With it off, the pass runs on dummy temporals -- constant depth, no "
+                           "motion -- and treats the scene as standing still, which is right for a "
+                           "title whose upscaler is not DLSS.");
+            }
+
+            if (hookMethod != 1)
+            {
+                bool presentSync = config->DlssNrPresentSync.value_or_default();
+                if (ImGui::Checkbox(Localization::Label("Present sync"), &presentSync))
+                    config->DlssNrPresentSync = presentSync;
+
+                HelpMarker("Waits on a fence after the backbuffer write-back completes before returning "
+                           "to the swapchain flip. Prevents frame generation pacing stalls and race "
+                           "conditions on presentation.");
+            }
+
+            if (!vkOnly)
+            {
+                const char* status = DlssNr::HookStatus();
+                if (status != nullptr && status[0] != '\0')
+                    ImGui::TextUnformatted(status);
+            }
+        }
+
+        ImGui::Spacing();
         ImGui::PushItemWidth(220.0f * menuResScale);
 
         // Native Vulkan has no pre-upscale implementation; show its effective stage as status.
         if (vulkan)
         {
             ImGui::TextDisabled(Localization::Tr("Stage: after the upscaler (native Vulkan)"));
+        }
+        else if (config->DlssNrHookMethod.value_or_default() == 2)
+        {
+            ImGui::TextDisabled(Localization::Tr("Stage: swapchain present (bypasses upscaler stages)"));
         }
         else
         {
@@ -724,10 +796,18 @@ void RenderMenu(Config* config, float menuResScale)
 
         ImGui::SeparatorText(Localization::Tr("Colour"));
 
-        ImGui::TextDisabled(Localization::Tr("The model was trained on finished, sRGB-encoded frames. The upscaler's\n"
-                                             "output is not one: it is linear and open-ended. These decide how it is\n"
-                                             "mapped into something the model recognises. A frame the game reports as\n"
-                                             "already tone-mapped is passed over untouched and none of this applies."));
+        if (config->DlssNrHookMethod.value_or_default() == 2)
+        {
+            ImGui::TextDisabled(Localization::Tr("Hook method is set to Present: the swapchain backbuffer is already\n"
+                                                 "tone-mapped and display-referred sRGB. White point and exposure mapping\n"
+                                                 "controls are bypassed."));
+        }
+        else
+        {
+            ImGui::TextDisabled(Localization::Tr("The model was trained on finished, sRGB-encoded frames. The upscaler's\n"
+                                                 "output is not one: it is linear and open-ended. These decide how it is\n"
+                                                 "mapped into something the model recognises. A frame the game reports as\n"
+                                                 "already tone-mapped is passed over untouched and none of this applies."));
 
         {
             // Logarithmic, because the useful range is not linear. A quarter to 240: the low end because
@@ -1286,6 +1366,7 @@ void RenderMenu(Config* config, float menuResScale)
                     }
                 }
             }
+        }
         }
 
         ImGui::SeparatorText(Localization::Tr("Compare"));
