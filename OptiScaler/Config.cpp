@@ -433,7 +433,6 @@ bool Config::Reload(std::filesystem::path iniPath)
                 DlssNrScalingDownscaler.reset();
 
             DlssNrStage.set_from_config(readUInt("DlssNr", "Stage"));
-            DlssNrDx11BridgeHost.set_from_config(readBool("DlssNr", "Dx11BridgeHost"));
             DlssNrProxyProbe.set_from_config(readBool("DlssNr", "ProxyProbe"));
             DlssNrUseProxy.set_from_config(readBool("DlssNr", "UseProxy"));
             DlssNrScanExposure.set_from_config(readBool("DlssNr", "ScanExposure"));
@@ -1364,8 +1363,6 @@ bool Config::SaveIni()
         ini.SetValue("DlssNr", "ScalingDownscaler", GetIntValue(Instance()->DlssNrScalingDownscaler).c_str());
 
         ini.SetValue("DlssNr", "Stage", GetIntValue(Instance()->DlssNrStage.value_for_config()).c_str());
-        ini.SetValue("DlssNr", "Dx11BridgeHost",
-                     GetBoolValue(Instance()->DlssNrDx11BridgeHost.value_for_config()).c_str());
         ini.SetValue("DlssNr", "AutoCapture", GetBoolValue(Instance()->DlssNrAutoCapture.value_for_config()).c_str());
 
         // These were read every launch but never written, so nothing set through the menu survived a

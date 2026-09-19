@@ -29,7 +29,20 @@ bool WantedForNeuralRendering()
 {
     const auto& cfg = *Config::Instance();
 
-    if (!cfg.DlssNrEnabled.value_or_default() || !cfg.DlssNrDx11BridgeHost.value_or_default())
+    // One control for where the model runs, not two.
+    //
+    // This used to have a key of its own, DlssNrDx11BridgeHost, alongside HookMethod. They named the
+    // same quantity -- where the pass runs -- and asked the user to know which D3D version the game
+    // uses in order to pick the right one, which is not something anyone knows. DEVELOPMENT.md's
+    // "one quantity, one control" says that is the wrong shape, and it showed: a title configured
+    // with the wrong one of the two loads OptiScaler, captures the device and builds nothing, with
+    // no line in the log to say why.
+    //
+    // HookMethod 2 is "present". Which transport carries it is this module's business: a D3D12
+    // swapchain goes through RunPresentPass, a D3D11 one through this bridge. Auto (0) is not enough
+    // to build on, because it resolves on whether an upscaler ever hands over temporal inputs, and
+    // this decision is made at swapchain creation, before any upscaler has been called.
+    if (!cfg.DlssNrEnabled.value_or_default() || cfg.DlssNrHookMethod.value_or_default() != 2)
         return false;
 
     // Never alongside frame generation in this slice. FG owns the presenter, the submission order and
