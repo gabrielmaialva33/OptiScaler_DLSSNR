@@ -102,3 +102,8 @@ summary = "Production D3D11/D3D12 swapchain and upscaler fence waits, initializa
 tier = "host"
 timeout = 300
 summary = "Production Vulkan upscaler timing: nonblocking NOT_READY retry, error rejection and single consumption under scripted API fakes. No frame-identity or GPU synchronization coverage."
+
+[mfg-pattern]
+tier = "host"
+timeout = 300
+summary = "The real MFG byte signatures and the real scanner matcher against synthetic cmp/mov buffers: each architecture signature matches its cmp-against-0x1b0 site and rejects a mov of the same immediate. Runs no patcher and touches no DLL."
