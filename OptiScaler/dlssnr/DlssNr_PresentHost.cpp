@@ -2,6 +2,7 @@
 
 #include "DlssNr_PresentHost.h"
 #include "DlssNrFeature_Dx12.h"
+#include "DlssNr_Identity.h"
 
 #include <shaders/format_transfer/FT_Dx12.h>
 
@@ -208,6 +209,11 @@ bool PresentHost::_EnsureFeature(ID3D12Device* device, ID3D12CommandQueue* queue
 
     // List two: the model, on a list that has nothing on it. Same queue, so the clear above is
     // ordered before it without a CPU wait.
+    // Said once, immediately before the create that has been refusing, and said by the same code the
+    // harness uses so the two reports can be diffed rather than read.
+    DlssNr::Identity::ReportAll([](void*, const char* line) { LOG_INFO("{}", line); }, nullptr, "production",
+                                device, queue);
+
     const char* reason = "";
     const bool created =
         EvaluateAtPresent(_setupLists[1], _toWorking->Buffer(), _guides.Depth(), _guides.Motion(), true, &reason);
@@ -226,6 +232,12 @@ bool PresentHost::_EnsureFeature(ID3D12Device* device, ID3D12CommandQueue* queue
     // The reason, not just the answer. A previous run of this same experiment read "the pass declined
     // this frame" as "the model refused to exist" and would have eliminated the wrong hypothesis.
     LOG_INFO("DLSS-NR present host: model creation attempted on an empty list, recorded={} ({})", created, reason);
+
+    // Again, now that the attempt is over. The first report runs before the forwarder and the model
+    // are loaded -- EnsureForwarder happens inside the create -- so its module list is short by
+    // exactly the modules the question is about. The harness reports once, after its forwarder is
+    // loaded, so this is the report that lines up with it.
+    DlssNr::Identity::ReportNgxModules([](void*, const char* line) { LOG_INFO("{}", line); }, nullptr);
 
     if (created)
         _resetOwed = false;

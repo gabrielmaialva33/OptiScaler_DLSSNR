@@ -231,6 +231,10 @@ static void Run(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12CommandAl
         wchar_t snippetPath[MAX_PATH] {};
         const auto pathLength = GetModuleFileNameW(snippet, snippetPath, MAX_PATH);
         Require(pathLength != 0 && pathLength < MAX_PATH, "snippet module path cannot be resolved");
+        // Same reporter, same order, same prefix as production writes. The point is a diff.
+        DlssNr::Identity::ReportAll([](void*, const char* line) { Say("%s\n", line); }, nullptr, "harness", device,
+                                    queue);
+
         stage = "snippet Init_Ext / CreateFeature(18)";
         begin();
         // The last argument is UI correction. This mode has always passed 0; production passes 1, and
