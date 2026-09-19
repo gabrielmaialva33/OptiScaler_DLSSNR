@@ -28,7 +28,7 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the eleven `nr-*` suites plus `bridge-lifetime` |
+| `host` | Python, `g++`, `clang++` | the eleven `nr-*` suites plus `bridge-lifetime` and `vulkan-query-readiness` |
 | `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
@@ -38,11 +38,14 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** All twelve build real production code with local fakes under
+**Host tier.** All thirteen build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
   ownership and deferred release against scripted COM/Win32 fakes. No GPU coverage.
+- `vulkan-query-readiness` — production Vulkan upscaler timing, nonblocking
+  readiness retry, error rejection and single consumption. No frame-identity
+  or GPU synchronization coverage.
 - `nr-before-upscale` — pre-upscale boundary functions against strict host fakes.
 - `nr-dispatch` — composition constants, descriptor slots and partial initialization cleanup.
 - `nr-gpu-timing` — portable timing validation, plus the duplicate-execution

@@ -92,3 +92,8 @@ summary = "Drives the production NGX exports on a real D3D12 device and exercise
 tier = "host"
 timeout = 300
 summary = "Production D3D11/D3D12 swapchain and upscaler fence waits, initialization, failed submissions, resize preflight, ownership and retirement under scripted COM/Win32 fakes."
+
+[vulkan-query-readiness]
+tier = "host"
+timeout = 300
+summary = "Production Vulkan upscaler timing: nonblocking NOT_READY retry, error rejection and single consumption under scripted API fakes. No frame-identity or GPU synchronization coverage."
