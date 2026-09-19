@@ -136,7 +136,8 @@ def check_present_coverage(harness):
 
 
 def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_ab=False, cold_size=None,
-                     cold_ui=None, cold_sdk=None, cold_load_opti=False):
+                     cold_ui=None, cold_sdk=None, cold_load_opti=False, cold_from_d3d11=False,
+                     cold_siblings=False):
     """Run the harness the way a Steam game runs: through Proton, in a compatdata prefix of its own.
 
     Hand-mirroring what Proton provides (vkd3d-proton, dxvk-nvapi, the driver's nvngx pair and the
@@ -179,7 +180,9 @@ def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_
                        + (['--cold-size', cold_size] if cold_nr and cold_size else [])
                        + (['--cold-ui-correction', cold_ui] if cold_nr and cold_ui else [])
                        + (['--cold-core-sdk', cold_sdk] if cold_nr and cold_sdk else [])
-                       + (['--cold-load-optiscaler'] if cold_nr and cold_load_opti else []),
+                       + (['--cold-load-optiscaler'] if cold_nr and cold_load_opti else [])
+                       + (['--cold-device-from-d3d11'] if cold_nr and cold_from_d3d11 else [])
+                       + (['--cold-sibling-snippets'] if cold_nr and cold_siblings else []),
                        cwd=RUN, env=env, timeout=600)
     hlog = RUN / 'dlssnr-loopback.log'
     harness = hlog.read_text(errors='replace') if hlog.exists() else ''
@@ -255,6 +258,14 @@ def main():
                          "sequence and then leave it alone. Puts this process's one remaining "
                          "difference from production -- OptiScaler's hooks, installed from DllMain -- "
                          "into the control that passes. Nothing is called on it.")
+    ap.add_argument('--cold-device-from-d3d11', action='store_true',
+                    help="with --cold-nr: build the D3D12 device the way production does -- a D3D11 "
+                         "device, its adapter through IDXGIDevice, D3D12CreateDevice on that at "
+                         "feature level 11_0 -- instead of enumerating an adapter and asking for 12_0.")
+    ap.add_argument('--cold-sibling-snippets', action='store_true',
+                    help="with --cold-nr: load nvngx_dlss/dlssd/dlssg beside the NR snippet, as a game "
+                         "folder has them and OptiScaler loads them. The identity diff found this to be "
+                         "the only named difference left between this process and production.")
     ap.add_argument('--skip-build', action='store_true',
                     help='reuse the selected mode\'s artifacts/{run,cold-run,present-run}/dlssnr-loopback.exe')
     modes = ap.add_mutually_exclusive_group()
@@ -322,7 +333,7 @@ def main():
          '/I' + str(ROOT / 'external/nvngx_dlss_sdk'), HERE / 'harness.cpp',
          '/Fo' + str(OUT / 'harness.obj'),
          '/Fe' + str(RUN / 'dlssnr-loopback.exe'),
-         '/link', 'd3d12.lib', 'dxgi.lib', 'user32.lib'],
+         '/link', 'd3d12.lib', 'd3d11.lib', 'dxgi.lib', 'user32.lib'],
         env=dict(env, WINE_MSVC_RAW_STDOUT='1'), log=OUT / 'build.log')
     if not (RUN / 'dlssnr-loopback.exe').exists():
         raise SystemExit('no harness binary; run without --skip-build first')
@@ -342,7 +353,13 @@ def main():
                 link = RUN / src.name
                 link.unlink(missing_ok=True)
                 link.symlink_to(src)
-    for name in ('nvngx.dll_dlssnr.dll', 'nvngx_dlssnr.dll', '_nvngx.dll'):
+    names = ['nvngx.dll_dlssnr.dll', 'nvngx_dlssnr.dll', '_nvngx.dll']
+    if args.cold_sibling_snippets:
+        # The other feature snippets a game folder carries. They are only staged so that
+        # LoadLibrary can find them; nothing calls into them, which is also true in production.
+        names += ['nvngx_dlss.dll', 'nvngx_dlssd.dll', 'nvngx_dlssg.dll']
+
+    for name in names:
         src = kit / name
         # Cold bring-up should test the installed driver, not a possibly stale kit copy.
         # Leave the legacy sweep's dependency selection unchanged.
@@ -353,9 +370,19 @@ def main():
         # for external builds that do not ship their matching forwarder.
         if name == 'nvngx.dll_dlssnr.dll' and (dll.parent / name).exists():
             src = (dll.parent / name).resolve()
+        siblings = ('nvngx_dlss.dll', 'nvngx_dlssd.dll', 'nvngx_dlssg.dll')
+        if not src.exists() and name in siblings:
+            # The kit may not carry them; a game folder does. Fall back to the one we know has them.
+            game = Path.home() / ('.local/share/Steam/steamapps/common/Divinity Original Sin 2/DefEd/bin') / name
+            if game.exists():
+                src = game
+
         if not src.exists():
-            if standalone:
+            if standalone and name not in siblings:
                 raise SystemExit(f'SETUP FAILURE: missing cold NR dependency {src}; no NGX result')
+            if name in siblings:
+                print(f'  warning: {name} not found; the sibling-snippet axis is incomplete')
+                continue
             print(f'  warning: {name} not in {kit} — NR will report itself unavailable')
             continue
         link = RUN / name
@@ -372,7 +399,8 @@ def main():
 
     if args.runtime == 'proton':
         return run_under_proton(args.cold_nr, args.present_nr, args.hud_ab, args.composition_ab, args.cold_size,
-                                args.cold_ui_correction, args.cold_core_sdk, args.cold_load_optiscaler)
+                                args.cold_ui_correction, args.cold_core_sdk, args.cold_load_optiscaler,
+                                args.cold_device_from_d3d11, args.cold_sibling_snippets)
 
     # A separate runtime prefix: the compiler prefix is configured for MSVC, not for graphics, and
     # running the app there conflates "the harness is wrong" with "this prefix has no D3D12".

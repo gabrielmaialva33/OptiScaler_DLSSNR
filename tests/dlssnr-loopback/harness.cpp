@@ -6,6 +6,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <d3d12.h>
+#include <d3d11.h>
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
 #include <DirectXMath.h>
@@ -355,6 +356,8 @@ int main(int argc, char** argv)
     int coldUiCorrection = 0;
     unsigned coldCoreSdk = 0;
     const bool coldLoadOptiScaler = hasFlag("--cold-load-optiscaler");
+    const bool coldDeviceFromD3D11 = hasFlag("--cold-device-from-d3d11");
+    const bool coldSiblingSnippets = hasFlag("--cold-sibling-snippets");
     for (int i = 1; i + 1 < argc; ++i)
     {
         const std::string flag = argv[i];
@@ -412,10 +415,45 @@ int main(int argc, char** argv)
         Com<IDXGIFactory4> factory;
         Check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
 
+        Com<ID3D12Device> device;
+        Com<ID3D11Device> dx11Device;
+
+        // Production's device does not come from an adapter this process enumerated. It comes from a
+        // D3D11 device: WithDx12::GetD3D12DeviceFromD3D11 queries IDXGIDevice off the game's D3D11
+        // device, takes its adapter, and creates the D3D12 device on that at feature level 11_0
+        // (with_dx12.cpp:284-325, and the bridge asks for 11_0 at dx11_with_dx12_sc.cpp:146).
+        //
+        // Three things differ from the loop below and this reproduces all three: where the adapter
+        // object came from, the feature level, and the presence of a live D3D11 device in the
+        // process. The feeder's own matrix found the adapter argument to be one of the two
+        // structural axes that mattered for its refusals, so provenance is not assumed harmless.
+        if (coldDeviceFromD3D11)
+        {
+            Say("  --cold-device-from-d3d11: mirroring WithDx12::GetD3D12DeviceFromD3D11\n");
+
+            D3D_FEATURE_LEVEL got {};
+            const HRESULT hr11 = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
+                                                   D3D11_SDK_VERSION, &dx11Device, &got, nullptr);
+            Require(SUCCEEDED(hr11) && dx11Device.p != nullptr, "D3D11CreateDevice failed for the interop axis");
+
+            Com<IDXGIDevice> dxgiDevice;
+            Check(dx11Device->QueryInterface(IID_PPV_ARGS(&dxgiDevice)), "QueryInterface IDXGIDevice");
+
+            IDXGIAdapter* adapter = nullptr;
+            Check(dxgiDevice->GetAdapter(&adapter), "IDXGIDevice::GetAdapter");
+
+            DXGI_ADAPTER_DESC ad {};
+            adapter->GetDesc(&ad);
+            const HRESULT hr = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device));
+            Say("  D3D11 adapter vendor=%04X device=%04X -> D3D12CreateDevice(11_0) 0x%08lX\n", ad.VendorId,
+                ad.DeviceId, (unsigned long) hr);
+            adapter->Release();
+            Require(SUCCEEDED(hr) && device.p != nullptr, "no D3D12 device from the D3D11 adapter");
+        }
+
         // A null adapter asks the runtime to choose, and under Wine that returns E_INVALIDARG,
         // which reads like a bad argument when it means "no default was resolved".
-        Com<ID3D12Device> device;
-        for (UINT i = 0;; ++i)
+        for (UINT i = 0; device.p == nullptr; ++i)
         {
             IDXGIAdapter1* adapter = nullptr;
             if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND)
@@ -459,6 +497,25 @@ int main(int argc, char** argv)
 
         if (coldNr)
         {
+            // The one named difference the identity diff turned up.
+            //
+            // A game folder holds the other NGX feature snippets -- DLSS, DLSS-D, DLSS-G -- and
+            // OptiScaler loads them at startup, so by the time the neural pass asks for feature 18
+            // there are four snippets in the process. This harness has only ever had one. Every other
+            // measured property of the device, the adapter and the queue is identical between the
+            // two, so this is what is left.
+            //
+            // Loaded and left alone, exactly as production has them: present, not called.
+            if (coldSiblingSnippets)
+            {
+                for (const char* sibling : { "nvngx_dlss.dll", "nvngx_dlssd.dll", "nvngx_dlssg.dll" })
+                {
+                    const HMODULE m = LoadLibraryA(sibling);
+                    Say("  --cold-sibling-snippets: %s -> %p%s\n", sibling, (void*) m,
+                        m == nullptr ? " (absent, axis incomplete)" : "");
+                }
+            }
+
             RunColdNr(device, queue, alloc, list, fence, fenceEvent, coldWidth, coldHeight, coldUiCorrection,
                       coldCoreSdk);
             DestroyWindow(window);
