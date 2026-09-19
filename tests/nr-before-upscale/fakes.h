@@ -165,6 +165,7 @@ struct Config
     Option<float> DlssNrWorkingScale, DlssNrRRWorkingScale;
     Option<bool> DlssNrEnabled, DlssNrHoldFrame, DlssNrUseProxy, DlssNrApplyAfterRR;
     Option<unsigned> DlssNrStage, DlssNrRRPasses;
+    Option<uint32_t> DlssNrHookMethod;
     Option<int> ColorResourceBarrier, DepthResourceBarrier, MVResourceBarrier, ExposureResourceBarrier;
     DlssNrPassSnapshot GetDlssNrPassSnapshot() const { return {}; }
     static Config* Instance() { static Config cfg; return &cfg; }
@@ -233,6 +234,13 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* p)
     p->Get("Exposure", &f.ExposureTexture);
     return f;
 }
+
+struct TemporalFakeState { bool valid = false; };
+inline TemporalFakeState g_temporal;
+inline void CaptureTemporal(NVSDK_NGX_Parameter*, const DlssNrFrameInfo&) {}
+inline bool g_sourceIsPresent = false;
+struct NrFakeState { bool reset = false; };
+inline NrFakeState g_nr;
 }
 
 namespace DlssNr::GpuTiming { inline void SetEnabled(bool) {} }
