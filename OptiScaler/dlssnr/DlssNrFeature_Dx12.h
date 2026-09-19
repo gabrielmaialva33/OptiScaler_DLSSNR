@@ -20,6 +20,7 @@
 // vectors, so anything guessing from the parameter block alone attaches to both and runs the model twice
 // per rendered frame. Here it is a lookup on the feature handle.
 class Config;
+struct IDXGISwapChain3;
 
 namespace DlssNr
 {
@@ -226,8 +227,6 @@ const char* MultipassStatus();
 // The pair is a control: same frames, same run, one variable.
 void RequestCapture(unsigned int frames);
 bool CaptureInProgress();
-
-struct IDXGISwapChain3;
 
 // The present hook. Runs the pass on the swapchain backbuffer at present time: the frame the game
 // finished, tone-mapped and display-referred. The temporal inputs are the depth and motion the game's
