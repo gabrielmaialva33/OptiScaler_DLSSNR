@@ -3677,6 +3677,12 @@ static UINT64 g_presentFenceValue = 0;
 static unsigned long long g_presentFlip = 0;
 static unsigned long long g_lastFgFlip = 0;
 static constexpr unsigned long long kFgHookTimeout = 16;
+// The upscaled route (HookMethod 1, and 0 until the upscaler hands over temporal inputs) never
+// enters the present-time body, so it keeps its own render count and last outcome here.
+// ReportRuntimeStatus reads both; that is what makes the status line route-agnostic.
+static unsigned long long g_upscaleRenders = 0;
+static bool g_upscaleApplied = false;
+static const char* g_upscaleReason = nullptr;
 static bool g_sourceIsPresent = false;
 static ID3D12Resource* g_bbCopy = nullptr;
 static unsigned int g_bbCopyWidth = 0;
@@ -3858,10 +3864,11 @@ void ReportRuntimeStatus(bool passRecorded, const char* skipReason)
     if (lastAt.time_since_epoch().count() != 0 && now - lastAt < std::chrono::seconds(2))
         return;
 
+    const auto renderCount = g_renderSeq + g_upscaleRenders;
     const auto presents = g_presentFlip - lastPresent;
-    const auto renders = g_renderSeq - lastRender;
+    const auto renders = renderCount - lastRender;
     lastPresent = g_presentFlip;
-    lastRender = g_renderSeq;
+    lastRender = renderCount;
     lastAt = now;
 
     if (renders == 0 && presents == 0)
@@ -3910,12 +3917,19 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     if (!cfg.DlssNrEnabled.value_or_default() || g_nr.failed || swapchain == nullptr || queue == nullptr)
         return;
 
+    // Every present the hook sees is counted, whichever route owns the pass; it is the numerator
+    // of the on-screen ratio the status line reports.
+    ++g_presentFlip;
+
     const uint32_t method = cfg.DlssNrHookMethod.value_or_default();
 
     if (method != 2 && !(method == 0 && g_temporal.valid))
+    {
+        // The upscaled route recorded (or declined) its pass on the upscaler's command list; this
+        // is still the one place per present to say so.
+        ReportRuntimeStatus(g_upscaleApplied, g_upscaleReason ? g_upscaleReason : "no upscaler evaluate yet");
         return;
-
-    ++g_presentFlip;
+    }
 
     const bool wrapStandsDown = !fgHook && g_lastFgFlip != 0 && (g_presentFlip - g_lastFgFlip) < kFgHookTimeout;
 
@@ -4465,6 +4479,11 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
         return;
     }
 
+    // From here the frame is this route's: count it as a render and publish how it ends.
+    ++g_upscaleRenders;
+    g_upscaleApplied = false;
+    g_upscaleReason = coverage.sample.reason;
+
     if (g_sourceIsPresent)
     {
         g_sourceIsPresent = false;
@@ -4479,6 +4498,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     if (FAILED(target->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
     {
         coverage.sample.reason = "output has no D3D12 device";
+        g_upscaleReason = coverage.sample.reason;
         ReportSkipOnce("the output texture belongs to no D3D12 device");
         return;
     }
@@ -4492,6 +4512,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     if (g_compose == nullptr)
     {
         coverage.sample.reason = "composition pass unavailable";
+        g_upscaleReason = coverage.sample.reason;
         ReportSkipOnce("the pass could not be created");
         return;
     }
@@ -4503,6 +4524,8 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
         g_compose->Dispatch(cmdList, target, depth, motion, target, frame, timingQueue, &coverage.sample);
     if (coverage.sample.applied)
         coverage.sample.reason = "composition recorded into upscaler output";
+    g_upscaleApplied = coverage.sample.applied;
+    g_upscaleReason = coverage.sample.reason;
 }
 
 // ---------------------------------------------------------------------------------------------

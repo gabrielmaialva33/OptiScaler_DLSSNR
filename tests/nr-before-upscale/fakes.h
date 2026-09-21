@@ -239,6 +239,11 @@ struct TemporalFakeState { bool valid = false; };
 inline TemporalFakeState g_temporal;
 inline void CaptureTemporal(NVSDK_NGX_Parameter*, const DlssNrFrameInfo&) {}
 inline bool g_sourceIsPresent = false;
+// The upscaled route's own render count and last outcome (DlssNr_Dx12.cpp keeps them beside
+// g_presentFlip); the status line reads them, this harness only needs them to exist.
+inline unsigned long long g_upscaleRenders = 0;
+inline bool g_upscaleApplied = false;
+inline const char* g_upscaleReason = nullptr;
 struct NrFakeState { bool reset = false; };
 inline NrFakeState g_nr;
 }
