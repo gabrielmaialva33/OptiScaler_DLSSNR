@@ -211,6 +211,13 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
                 StreamlineHooks::hookDlssg(dlssgModule);
             else
                 StreamlineHooks::hookLocalDlssg(dlssgModule);
+
+            // The wrapper's clamp has to be lifted before the game's first slDLSSGGetState, which is
+            // where the original max gets captured. S.T.A.L.K.E.R. 2 loads nvngx_dlssg.dll a second
+            // before this plugin, so the TryApply on that load found no wrapper, and the game asked
+            // GetState before SetOptions, so the later TryApply never ran: mfgMax stayed 3 and the
+            // "4x" ran at 2x. Idempotent; the snippet half already reports done.
+            MfgUnlock::TryApply();
         }
         else
         {

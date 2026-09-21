@@ -1360,6 +1360,9 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
     {
         if (!optiState.dlssgMfgMax.has_value())
         {
+            // Before the read, so the count this captures is the patched one (same as SetOptions).
+            MfgUnlock::TryApply();
+
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};
             if (o_slDLSSGGetState(viewport, localState, &localOptions) == sl::Result::eOk &&
