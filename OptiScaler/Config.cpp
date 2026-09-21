@@ -621,7 +621,8 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         // Sharpness
         {
-            SharpnessShader.set_from_config(readString("Sharpness", "Shader", true).transform(CodeToSharpnessShader));
+            SharpnessShader.set_from_config(
+                readString("Sharpness", "Shader", true).transform(CodeToEnum<SharpenShader>));
             OverrideSharpness.set_from_config(readBool("Sharpness", "OverrideSharpness"));
 
             if (auto setting = readFloat("Sharpness", "Sharpness"); setting.has_value())
@@ -1469,7 +1470,7 @@ bool Config::SaveIni()
     // Sharpness
     {
         std::string shader = SharpnessShader.value_for_config()
-                                 .transform(SharpnessShaderToCode) // Turn enum into string
+                                 .transform(EnumToCode<SharpenShader>) // Turn enum into string
                                  .value_or("auto");
 
         ini.SetValue("Sharpness", "Shader", shader.c_str());
