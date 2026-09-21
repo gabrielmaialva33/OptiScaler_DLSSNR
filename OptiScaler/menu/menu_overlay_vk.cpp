@@ -67,6 +67,136 @@ static uint32_t _overlayQueueFamily = UINT32_MAX;
 // single failed submit leave its fence unsignalled, and every later frame then paid the full timeout.
 static bool _frameFencePending[8] = {};
 
+// Cross-family drawing, for a game that presents from a queue family without graphics -- id Tech 7
+// presents DOOM Eternal from its compute queue. The menu's render pass then runs on the graphics
+// queue chosen at swapchain creation, and the swapchain image is walked across the family boundary
+// and back: a release on the presenting queue, an acquire + the menu + a release on the graphics
+// queue, and an acquire back on the presenting queue, the three submits chained by semaphores so the
+// present waits for the last. Per swapchain image, like the frame data above; the fence of the image
+// is armed on the last submit, which the chain orders after the other two, so waiting on it covers
+// all three before any of them is reused. The presenting-family pool is built on first use, because
+// only the present hook learns which family that is.
+constexpr uint32_t kOverlayMaxImages = 8;
+static VkCommandPool _xferPool = VK_NULL_HANDLE;
+static uint32_t _xferFamily = UINT32_MAX;
+static VkCommandBuffer _xferRelease[kOverlayMaxImages] = {};
+static VkCommandBuffer _xferAcquire[kOverlayMaxImages] = {};
+static VkSemaphore _xferToGraphics[kOverlayMaxImages] = {};
+static VkSemaphore _xferToPresent[kOverlayMaxImages] = {};
+
+// Caller holds both overlay locks and has drained the device, or knows it is lost.
+static void DestroyCrossFamilyObjects(bool deviceLost)
+{
+    VkDevice device = _ImVulkan_Info.Device;
+
+    for (uint32_t i = 0; i < kOverlayMaxImages; i++)
+    {
+        if (!deviceLost && device != VK_NULL_HANDLE)
+        {
+            if (_xferToGraphics[i] != VK_NULL_HANDLE)
+                vkDestroySemaphore(device, _xferToGraphics[i], VK_NULL_HANDLE);
+
+            if (_xferToPresent[i] != VK_NULL_HANDLE)
+                vkDestroySemaphore(device, _xferToPresent[i], VK_NULL_HANDLE);
+        }
+
+        _xferToGraphics[i] = VK_NULL_HANDLE;
+        _xferToPresent[i] = VK_NULL_HANDLE;
+        _xferRelease[i] = VK_NULL_HANDLE;
+        _xferAcquire[i] = VK_NULL_HANDLE;
+    }
+
+    if (!deviceLost && device != VK_NULL_HANDLE && _xferPool != VK_NULL_HANDLE)
+        vkDestroyCommandPool(device, _xferPool, VK_NULL_HANDLE);
+
+    _xferPool = VK_NULL_HANDLE;
+    _xferFamily = UINT32_MAX;
+}
+
+static bool EnsureCrossFamilyObjects(uint32_t presentFamily)
+{
+    VkDevice device = _ImVulkan_Info.Device;
+
+    if (device == VK_NULL_HANDLE || _scImageCount == 0 || _scImageCount > kOverlayMaxImages)
+        return false;
+
+    if (_xferPool != VK_NULL_HANDLE && _xferFamily == presentFamily)
+        return true;
+
+    // A different presenting family than last time: nothing of ours may be in flight on the old pool.
+    if (_xferPool != VK_NULL_HANDLE)
+    {
+        vkDeviceWaitIdle(device);
+        DestroyCrossFamilyObjects(false);
+    }
+
+    VkCommandPoolCreateInfo poolInfo = {};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = presentFamily;
+
+    auto result = vkCreateCommandPool(device, &poolInfo, NULL, &_xferPool);
+
+    if (result != VK_SUCCESS)
+    {
+        LOG_ERROR("vkCreateCommandPool error: {0:X}", (UINT) result);
+        DestroyCrossFamilyObjects(false);
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo bufferInfo = {};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    bufferInfo.commandPool = _xferPool;
+    bufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    bufferInfo.commandBufferCount = _scImageCount;
+
+    if ((result = vkAllocateCommandBuffers(device, &bufferInfo, _xferRelease)) != VK_SUCCESS ||
+        (result = vkAllocateCommandBuffers(device, &bufferInfo, _xferAcquire)) != VK_SUCCESS)
+    {
+        LOG_ERROR("vkAllocateCommandBuffers error: {0:X}", (UINT) result);
+        DestroyCrossFamilyObjects(false);
+        return false;
+    }
+
+    VkSemaphoreCreateInfo semInfo = {};
+    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+    for (uint32_t i = 0; i < _scImageCount; i++)
+    {
+        if ((result = vkCreateSemaphore(device, &semInfo, NULL, &_xferToGraphics[i])) != VK_SUCCESS ||
+            (result = vkCreateSemaphore(device, &semInfo, NULL, &_xferToPresent[i])) != VK_SUCCESS)
+        {
+            LOG_ERROR("vkCreateSemaphore error: {0:X}", (UINT) result);
+            DestroyCrossFamilyObjects(false);
+            return false;
+        }
+    }
+
+    _xferFamily = presentFamily;
+    return true;
+}
+
+// A queue-family ownership transfer of one swapchain image, in PRESENT_SRC layout on both sides. The
+// same barrier is recorded twice, as the release on the source family's queue and the acquire on the
+// destination's; the stage and access masks say what each side did or will do with the image.
+static void RecordFamilyTransfer(VkCommandBuffer cb, VkImage image, uint32_t srcFamily, uint32_t dstFamily,
+                                 VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage,
+                                 VkAccessFlags dstAccess)
+{
+    VkImageMemoryBarrier barrier = {};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.srcAccessMask = srcAccess;
+    barrier.dstAccessMask = dstAccess;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.srcQueueFamilyIndex = srcFamily;
+    barrier.dstQueueFamilyIndex = dstFamily;
+    barrier.image = image;
+    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    vkCmdPipelineBarrier(cb, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+}
+
 static uint32_t CreatedQueueCount(VkDevice device, uint32_t family)
 {
     std::scoped_lock lock(_deviceQueueCountsMutex);
@@ -812,6 +942,8 @@ static bool DestroyVulkanObjectsLocked(bool shutdown)
         }
     }
 
+    DestroyCrossFamilyObjects(_vulkanDeviceLost);
+
     if (!_vulkanDeviceLost)
     {
         if (_vkRenderPass)
@@ -927,6 +1059,11 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
         return true;
     }
 
+    // The presenting family may have no graphics capability at all (id Tech 7 presents from its
+    // compute queue): then the menu is drawn on the overlay's graphics queue instead, with the image
+    // handed across the family boundary and back around it. See the cross-family objects above.
+    bool crossFamily = false;
+
     if (presentFamily != _overlayQueueFamily)
     {
         const bool graphics = presentFamily < _familyProps.size() &&
@@ -934,48 +1071,43 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
 
         if (!graphics)
         {
-            static bool warnedNonGraphics = false;
+            static bool saidCrossFamily = false;
 
-            if (!warnedNonGraphics)
+            if (!saidCrossFamily)
             {
-                warnedNonGraphics = true;
-                const bool concurrent = _scSharingMode == VK_SHARING_MODE_CONCURRENT;
-                const bool sharedWithOverlay =
-                    concurrent && std::find(_scSharedFamilies.begin(), _scSharedFamilies.end(), _overlayQueueFamily) !=
-                                      _scSharedFamilies.end();
-
-                LOG_WARN("present happens on queue family {0} (flags {1:X}), which cannot run a render pass; "
-                         "the Vulkan overlay is not possible on this swapchain. Drawing it on the overlay's own "
-                         "graphics family ({2}) instead would need: a semaphore so the present waits for the "
-                         "overlay's submit, and {3}",
+                saidCrossFamily = true;
+                LOG_INFO("present happens on queue family {0} (flags {1:X}), which cannot run a render pass; drawing "
+                         "the menu on graphics family {2} with a queue-family transfer around it ({3} swapchain)",
                          presentFamily,
                          presentFamily < _familyProps.size() ? (UINT) _familyProps[presentFamily].queueFlags : 0u,
                          _overlayQueueFamily,
-                         sharedWithOverlay
-                             ? "nothing more -- the swapchain is CONCURRENT and already lists that family, so it may "
-                               "write the image directly"
-                         : concurrent ? "an ownership transfer -- the swapchain is CONCURRENT but does not list "
-                                        "that family"
-                                      : "an ownership transfer -- the swapchain is EXCLUSIVE, so a release "
-                                        "barrier on this queue and an acquire on the graphics one");
+                         _scSharingMode == VK_SHARING_MODE_CONCURRENT ? "CONCURRENT" : "EXCLUSIVE");
             }
 
-            ImGui::Render();
-            return true;
+            if (!EnsureCrossFamilyObjects(presentFamily))
+            {
+                LOG_ERROR("could not build the cross-family objects for family {0}, menu disabled", presentFamily);
+                ImGui::Render();
+                return true;
+            }
+
+            crossFamily = true;
         }
-
-        LOG_WARN("present happens on queue family {0}, not {1}; moving the overlay's command pools to it",
-                 presentFamily, _overlayQueueFamily);
-
-        if (!RebuildCommandPoolsForFamily(presentFamily))
+        else
         {
-            LOG_ERROR("could not move the overlay's command pools to family {0}, menu disabled", presentFamily);
-            ImGui::Render();
-            return true;
-        }
+            LOG_WARN("present happens on queue family {0}, not {1}; moving the overlay's command pools to it",
+                     presentFamily, _overlayQueueFamily);
 
-        _ImVulkan_Info.Queue = queue;
-        LOG_WARN("overlay now records on queue family {0}", presentFamily);
+            if (!RebuildCommandPoolsForFamily(presentFamily))
+            {
+                LOG_ERROR("could not move the overlay's command pools to family {0}, menu disabled", presentFamily);
+                ImGui::Render();
+                return true;
+            }
+
+            _ImVulkan_Info.Queue = queue;
+            LOG_WARN("overlay now records on queue family {0}", presentFamily);
+        }
     }
 
     // The overlay takes over whatever the present was going to wait on, and the present waits on the
@@ -1023,6 +1155,12 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
         vkBeginCommandBuffer(fd->CommandBuffer, &info);
     }
 
+    // Acquire the image from the presenting family before the render pass touches it.
+    if (crossFamily)
+        RecordFamilyTransfer(fd->CommandBuffer, fd->Backbuffer, presentFamily, _overlayQueueFamily,
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+
     {
         VkRenderPassBeginInfo info = {};
         info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -1037,6 +1175,13 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), fd->CommandBuffer);
 
     vkCmdEndRenderPass(fd->CommandBuffer);
+
+    // And release it back once the menu is drawn.
+    if (crossFamily)
+        RecordFamilyTransfer(fd->CommandBuffer, fd->Backbuffer, _overlayQueueFamily, presentFamily,
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0);
+
     auto ecbResult = vkEndCommandBuffer(fd->CommandBuffer);
 
     if (ecbResult != VK_SUCCESS)
@@ -1051,40 +1196,143 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
 
     VkPipelineStageFlags waitStages[kMaxWaitSemaphores];
 
+    // The presenting family may be compute-only, where a colour-attachment stage is not a valid wait
+    // stage; ALL_COMMANDS is valid on every queue and is what the cross-family path uses throughout.
     for (uint32_t i = 0; i < pPresentInfo->waitSemaphoreCount; i++)
-        waitStages[i] = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        waitStages[i] =
+            crossFamily ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
     // Indexed by swapchain image, the same index as the fence and the command buffer above. Cycling
     // this on a frame counter instead let the index come round again while an earlier present was
     // still waiting on that semaphore, which is a hang with no diagnostic.
     VkSemaphore signalSemaphore = _ImVulkan_Semaphores[idx];
 
-    VkSubmitInfo submit_info = {};
-    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &fd->CommandBuffer;
-    submit_info.pWaitDstStageMask = waitStages;
-    submit_info.waitSemaphoreCount = pPresentInfo->waitSemaphoreCount;
-    submit_info.pWaitSemaphores = pPresentInfo->pWaitSemaphores;
-    submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores = &signalSemaphore;
-
-    // On the queue that is presenting, not on the one captured at swapchain creation.
-    auto qResult = vkQueueSubmit(queue, 1, &submit_info, fd->Fence);
-
-    if (qResult != VK_SUCCESS)
-    {
-        LOG_ERROR("vkQueueSubmit error: {0:X}", (UINT) qResult);
-        return true;
-    }
-
-    _frameFencePending[idx] = true;
-
     // The hook calls the real present after this function releases its locks. Do not lend it storage
     // in the swapchain arrays, which a concurrent teardown can now free. Each presenting thread keeps
     // its own copy until its next call; GPU semaphore/pacer synchronization is otherwise unchanged.
     static thread_local VkSemaphore presentWaitSemaphore = VK_NULL_HANDLE;
-    presentWaitSemaphore = signalSemaphore;
+
+    if (!crossFamily)
+    {
+        VkSubmitInfo submit_info = {};
+        submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &fd->CommandBuffer;
+        submit_info.pWaitDstStageMask = waitStages;
+        submit_info.waitSemaphoreCount = pPresentInfo->waitSemaphoreCount;
+        submit_info.pWaitSemaphores = pPresentInfo->pWaitSemaphores;
+        submit_info.signalSemaphoreCount = 1;
+        submit_info.pSignalSemaphores = &signalSemaphore;
+
+        // On the queue that is presenting, not on the one captured at swapchain creation.
+        auto qResult = vkQueueSubmit(queue, 1, &submit_info, fd->Fence);
+
+        if (qResult != VK_SUCCESS)
+        {
+            LOG_ERROR("vkQueueSubmit error: {0:X}", (UINT) qResult);
+            return true;
+        }
+
+        _frameFencePending[idx] = true;
+        presentWaitSemaphore = signalSemaphore;
+        pPresentInfo->waitSemaphoreCount = 1;
+        pPresentInfo->pWaitSemaphores = &presentWaitSemaphore;
+
+        return true;
+    }
+
+    // Three submits. 1: on the presenting queue, waiting on what the present was going to wait on,
+    // release the image to the graphics family. 2: on the graphics queue, the acquire, the menu and
+    // the release recorded above. 3: back on the presenting queue, acquire the image and signal the
+    // semaphore the present waits on; this one carries the fence. Every submit on the graphics queue
+    // goes through the vkQueueSubmit hook, which holds that queue's lock against the game's own
+    // submits from its render thread; the presenting queue is the game's to synchronise, and it is
+    // inside its present call.
+    VkCommandBufferBeginInfo oneTime = {};
+    oneTime.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    oneTime.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    vkResetCommandBuffer(_xferRelease[idx], 0);
+    vkBeginCommandBuffer(_xferRelease[idx], &oneTime);
+    RecordFamilyTransfer(_xferRelease[idx], fd->Backbuffer, presentFamily, _overlayQueueFamily,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0);
+
+    vkResetCommandBuffer(_xferAcquire[idx], 0);
+    vkBeginCommandBuffer(_xferAcquire[idx], &oneTime);
+    RecordFamilyTransfer(_xferAcquire[idx], fd->Backbuffer, _overlayQueueFamily, presentFamily,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0);
+
+    if (vkEndCommandBuffer(_xferRelease[idx]) != VK_SUCCESS || vkEndCommandBuffer(_xferAcquire[idx]) != VK_SUCCESS)
+    {
+        LOG_ERROR("could not record the queue-family transfer, menu skipped this frame");
+        return true;
+    }
+
+    VkSubmitInfo release = {};
+    release.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    release.waitSemaphoreCount = pPresentInfo->waitSemaphoreCount;
+    release.pWaitSemaphores = pPresentInfo->pWaitSemaphores;
+    release.pWaitDstStageMask = waitStages;
+    release.commandBufferCount = 1;
+    release.pCommandBuffers = &_xferRelease[idx];
+    release.signalSemaphoreCount = 1;
+    release.pSignalSemaphores = &_xferToGraphics[idx];
+
+    auto r1 = vkQueueSubmit(queue, 1, &release, VK_NULL_HANDLE);
+
+    if (r1 != VK_SUCCESS)
+    {
+        // Nothing has been taken from the present yet; let it through without the menu.
+        LOG_ERROR("vkQueueSubmit (release) error: {0:X}", (UINT) r1);
+        return true;
+    }
+
+    // From here the game's semaphores have been waited on by submit 1, so the present must be routed
+    // through ours whatever happens below.
+    VkPipelineStageFlags allCommands = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkSemaphore chain = _xferToGraphics[idx];
+
+    VkSubmitInfo draw = {};
+    draw.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    draw.waitSemaphoreCount = 1;
+    draw.pWaitSemaphores = &chain;
+    draw.pWaitDstStageMask = &allCommands;
+    draw.commandBufferCount = 1;
+    draw.pCommandBuffers = &fd->CommandBuffer;
+    draw.signalSemaphoreCount = 1;
+    draw.pSignalSemaphores = &_xferToPresent[idx];
+
+    auto r2 = vkQueueSubmit(_ImVulkan_Info.Queue, 1, &draw, VK_NULL_HANDLE);
+
+    if (r2 == VK_SUCCESS)
+        chain = _xferToPresent[idx];
+    else
+        LOG_ERROR("vkQueueSubmit (menu, graphics queue) error: {0:X}", (UINT) r2);
+
+    VkSubmitInfo acquire = {};
+    acquire.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    acquire.waitSemaphoreCount = 1;
+    acquire.pWaitSemaphores = &chain;
+    acquire.pWaitDstStageMask = &allCommands;
+    acquire.commandBufferCount = 1;
+    acquire.pCommandBuffers = &_xferAcquire[idx];
+    acquire.signalSemaphoreCount = 1;
+    acquire.pSignalSemaphores = &signalSemaphore;
+
+    auto r3 = vkQueueSubmit(queue, 1, &acquire, fd->Fence);
+
+    if (r3 == VK_SUCCESS)
+    {
+        _frameFencePending[idx] = true;
+        presentWaitSemaphore = signalSemaphore;
+    }
+    else
+    {
+        // The chain's last signalled semaphore still has its one wait to spend: hand it to the present.
+        LOG_ERROR("vkQueueSubmit (acquire) error: {0:X}", (UINT) r3);
+        presentWaitSemaphore = chain;
+    }
+
     pPresentInfo->waitSemaphoreCount = 1;
     pPresentInfo->pWaitSemaphores = &presentWaitSemaphore;
 
