@@ -4662,6 +4662,23 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
         return;
 
     CoverageScope coverage(1);
+
+    // This route owns the frame from here: one render for the status line, and the outcome it will
+    // report. The scope's sample is the truth on every path out of this constructor, so it is
+    // published when the scope closes rather than at each return. (Stage 1 read "0 renders" and
+    // "no upscaler evaluate yet" before this, because the after-upscale pass stands down at
+    // stage 1 and the counting lived only there.)
+    ++g_upscaleRenders;
+    struct PublishOutcome
+    {
+        const CoverageScope& scope;
+        ~PublishOutcome()
+        {
+            g_upscaleApplied = scope.sample.applied;
+            g_upscaleReason = scope.sample.reason;
+        }
+    } publishOutcome { coverage };
+
     if (cmdList == nullptr || params == nullptr)
     {
         coverage.sample.reason = "no command list or parameter block";
