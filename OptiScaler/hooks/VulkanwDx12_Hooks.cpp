@@ -15,6 +15,27 @@
 static PFN_vkQueueSubmit o_vkQueueSubmit = nullptr;
 static PFN_vkQueueSubmit2 o_vkQueueSubmit2 = nullptr;
 static PFN_vkQueueSubmit2KHR o_vkQueueSubmit2KHR = nullptr;
+
+// One lock per VkQueue. A queue is an externally synchronised object, and the Vulkan menu overlay
+// now submits on the game's graphics queue from the present thread while the game may be submitting
+// on it from its render thread (id Tech 7 presents from a compute queue, so the menu cannot ride the
+// presenting one). Every submit the game makes reaches these hooks -- Detours on vulkan-1's exports
+// plus the GetDeviceProcAddr routing -- and so does the overlay's own vkQueueSubmit, so holding the
+// queue's lock across the body serialises the two. Recursive, because the interop path below may
+// re-enter an exported entry point on the same thread.
+static std::mutex _queueLocksMutex;
+static std::unordered_map<VkQueue, std::unique_ptr<std::recursive_mutex>> _queueLocks;
+
+static std::recursive_mutex& QueueLock(VkQueue queue)
+{
+    std::scoped_lock guard(_queueLocksMutex);
+    auto& slot = _queueLocks[queue];
+
+    if (!slot)
+        slot = std::make_unique<std::recursive_mutex>();
+
+    return *slot;
+}
 static PFN_vkBeginCommandBuffer o_vkBeginCommandBuffer = nullptr;
 static PFN_vkEndCommandBuffer o_vkEndCommandBuffer = nullptr;
 static PFN_vkResetCommandBuffer o_vkResetCommandBuffer = nullptr;
@@ -6191,6 +6212,8 @@ static const VkTimelineSemaphoreSubmitInfo* FindTimelineSubmitInfo(const void* p
 VkResult Vulkan_wDx12::hk_vkQueueSubmit(VkQueue queue, uint32_t submitCount, const VkSubmitInfo* pSubmits,
                                         VkFence fence)
 {
+    std::scoped_lock queueLock(QueueLock(queue));
+
     if (pSubmits == nullptr || o_vkQueueSubmit == nullptr)
     {
         LOG_ERROR("Invalid parameters to hk_vkQueueSubmit");
@@ -6465,6 +6488,8 @@ static VkResult Submit2WithDx12Interop(SubmitFn originalSubmit, VkQueue queue, u
 VkResult Vulkan_wDx12::hk_vkQueueSubmit2(VkQueue queue, uint32_t submitCount, const VkSubmitInfo2* pSubmits,
                                          VkFence fence)
 {
+    std::scoped_lock queueLock(QueueLock(queue));
+
     if (pSubmits == nullptr || o_vkQueueSubmit2 == nullptr)
     {
         LOG_ERROR("Invalid parameters to hk_vkQueueSubmit2");
@@ -6506,6 +6531,8 @@ VkResult Vulkan_wDx12::hk_vkQueueSubmit2(VkQueue queue, uint32_t submitCount, co
 VkResult Vulkan_wDx12::hk_vkQueueSubmit2KHR(VkQueue queue, uint32_t submitCount, const VkSubmitInfo2* pSubmits,
                                             VkFence fence)
 {
+    std::scoped_lock queueLock(QueueLock(queue));
+
     if (pSubmits == nullptr || o_vkQueueSubmit2KHR == nullptr)
     {
         LOG_ERROR("Invalid parameters to hk_vkQueueSubmit2KHR");
