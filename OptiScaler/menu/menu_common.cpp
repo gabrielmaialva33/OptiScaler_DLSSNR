@@ -2053,9 +2053,13 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                                      usesDx12CompatLayer ? " w/Dx12" : "");
             }
 
+            uint32_t interpolatedFrameCount = 0;
             if (fg != nullptr && fg->IsActive() && !fg->IsPaused())
+                interpolatedFrameCount = fg->GetInterpolatedFrameCount();
+
+            if (interpolatedFrameCount)
             {
-                const double baseFps = frameRate / (double) (fg->GetInterpolatedFrameCount() + 1);
+                const double baseFps = frameRate / (double) (interpolatedFrameCount + 1);
 
                 switch (overlayType)
                 {
@@ -3303,6 +3307,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         { FGOutput::FSRFG, "FSR FG", "FSR3/4-FG, RDNA4 autoupgrades to FSR4-FG\n\nFSR4-FG sometimes better/worse than XeFG" },
         { FGOutput::DLSSG, "DLSSG", "DLSSG output\ncan be used in conjuction with Nukem's for example" },
         { FGOutput::XeFG, "XeFG", "XeFG - heaviest, but best universal FG\n\nXeFG 3 overall deals best with HUD\n\nEnable UI Composition if HUD ghosting" },
+        { FGOutput::Reprojection, "Reprojection", "Reprojection" },
     };
 
     // clang-format on
@@ -3594,8 +3599,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         }
 
         auto fgOutput = reinterpret_cast<IFGFeature_Dx12*>(state.currentFG);
-        if (((state.activeFgOutput == FGOutput::FSRFG || state.activeFgOutput == FGOutput::XeFG ||
-              state.activeFgOutput == FGOutput::DLSSG) &&
+        if ((state.activeFgOutput != FGOutput::Reprojection && state.activeFgOutput != FGOutput::NoFG &&
              state.activeFgInput != FGInput::NoFG && state.activeFgInput != FGInput::NvngxFG) &&
             fgOutput)
         {
@@ -4381,6 +4385,46 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             LOG_DEBUG("Changed set FGDLSSGUseGamesReflexMarkers: {}", useGamesMarkers);
         }
         ImGui::EndDisabled();
+    }
+
+    if (state.activeFgOutput == FGOutput::Reprojection && fgOutput)
+    {
+        ImGui::SeparatorText("Reprojection");
+
+        if (ImGui::BeginTable("reprojection1", 2, ImGuiTableFlags_SizingStretchProp))
+        {
+            ImGui::TableNextColumn();
+            bool fgActive = config->FGEnabled.value_or_default();
+            if (ImGui::Checkbox("Active##2", &fgActive))
+            {
+                config->FGEnabled = fgActive;
+                LOG_DEBUG("Reprojection enabled: {}", fgActive);
+
+                if (config->FGEnabled.value_or_default())
+                    state.fgChanged = true;
+            }
+            ShowHelpMarker("Enable reprojection");
+
+            ImGui::TableNextColumn();
+            // clang-format off
+            static std::vector<MenuOption<ReprojectionFill>> fillModes = {
+                { ReprojectionFill::StrechEdge, "Strech edge" },
+                { ReprojectionFill::Black, "Black" },
+                { ReprojectionFill::Dithering, "Dithering" },
+                { ReprojectionFill::Noise, "Noise" }
+            };
+            // clang-format on
+
+            PopulateCombo("Edge fill mode", config->ReprojectionFillMode, fillModes);
+
+            ImGui::EndTable();
+        }
+
+        float cutoff = config->ReprojectionDepthCutoff.value_or_default();
+        if (ImGui::SliderFloat("Depth cutoff", &cutoff, 0.0f, 1.0f, "%.3f"))
+            config->ReprojectionDepthCutoff = cutoff;
+
+        ImGui::Checkbox("Show static elements", &state.fgHudlessCompare);
     }
 
     // OptiFG

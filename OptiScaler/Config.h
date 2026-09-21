@@ -225,6 +225,26 @@ enum class LowLatencyMode : uint32_t
     Reflex
 };
 
+enum class ReprojectionFill : uint32_t
+{
+    Black,
+    StrechEdge,
+    Dithering,
+    Noise
+};
+
+template <> struct EnumConfig<ReprojectionFill>
+{
+    static constexpr auto default_value = ReprojectionFill::Dithering;
+
+    static constexpr std::pair<ReprojectionFill, std::string_view> mapping[] = {
+        { ReprojectionFill::StrechEdge, "strech" },
+        { ReprojectionFill::Black, "black" },
+        { ReprojectionFill::Dithering, "dithering" },
+        { ReprojectionFill::Noise, "noise" }
+    };
+};
+
 class Config
 {
   public:
@@ -905,6 +925,11 @@ class Config
     CustomOptional<bool> FGDLSSGOverrideForceDMFG { false }; // Overrides game's DLSSG mode to Dynamic
     CustomOptional<bool> FGDLSSGForceDMFG { false };         // Overrides Opti's DLSSG mode to Dynamic
     CustomOptional<float> FGDLSSGFramerateTargetDMFG { 0.0f };
+
+    // Reprojection
+    CustomOptional<ReprojectionFill> ReprojectionFillMode { ReprojectionFill::StrechEdge };
+    CustomOptional<float> ReprojectionDepthCutoff { 0.1f };
+
     CustomOptional<bool> FGDLSSGAdaMfgUnlock { false }; // See framegen/dlssg/MfgUnlock.h
     CustomOptional<bool> FGDLSSGAdaBlackwellKernels {
         false

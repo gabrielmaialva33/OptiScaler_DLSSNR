@@ -188,6 +188,8 @@ bool Config::Reload(std::filesystem::path iniPath)
                     FGOutput.set_from_config(FGOutput::XeFG);
                 else if (lstrcmpiA(FGOutputString.value().c_str(), "dlssg") == 0)
                     FGOutput.set_from_config(FGOutput::DLSSG);
+                else if (lstrcmpiA(FGOutputString.value().c_str(), "reprojection") == 0)
+                    FGOutput.set_from_config(FGOutput::Reprojection);
             }
 
             const bool canUseNvngxReplacement =
@@ -330,6 +332,13 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGDLSSGReflexBoost.set_from_config(readBool("DLSSG", "ReflexBoost"));
             FGDLSSGAdaMfgUnlock.set_from_config(readBool("DLSSG", "AdaMfgUnlock"));
             FGDLSSGAdaBlackwellKernels.set_from_config(readBool("DLSSG", "AdaBlackwellKernels"));
+        }
+
+        {
+            ReprojectionFillMode.set_from_config(
+                readString("Reprojection", "FillMode", true).transform(CodeToEnum<ReprojectionFill>));
+
+            ReprojectionDepthCutoff.set_from_config(readFloat("Reprojection", "DepthCutoff"));
         }
 
         // FSR FG Inputs
@@ -1090,6 +1099,8 @@ bool Config::SaveIni()
                 FGOutputString = "XeFG";
             else if (FGOutputHeld.value() == FGOutput::DLSSG)
                 FGOutputString = "DLSSG";
+            else if (FGOutputHeld.value() == FGOutput::Reprojection)
+                FGOutputString = "Reprojection";
         }
         ini.SetValue("FrameGen", "FGOutput", FGOutputString.c_str());
 
@@ -1202,6 +1213,16 @@ bool Config::SaveIni()
         ini.SetValue("DLSSG", "AdaMfgUnlock", GetBoolValue(Instance()->FGDLSSGAdaMfgUnlock.value_for_config()).c_str());
         ini.SetValue("DLSSG", "AdaBlackwellKernels",
                      GetBoolValue(Instance()->FGDLSSGAdaBlackwellKernels.value_for_config()).c_str());
+    }
+
+    // Reprojection
+    {
+        std::string fillMode =
+            ReprojectionFillMode.value_for_config().transform(EnumToCode<ReprojectionFill>).value_or("auto");
+
+        ini.SetValue("Reprojection", "FillMode", fillMode.c_str());
+        ini.SetValue("Reprojection", "DepthCutoff",
+                     GetFloatValue(Instance()->ReprojectionDepthCutoff.value_for_config()).c_str());
     }
 
     // OptiFG
