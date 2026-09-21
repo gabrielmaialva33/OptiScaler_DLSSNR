@@ -128,6 +128,12 @@ WINEPREFIX=~/.local/opt/msvc-wineprefix WINEDEBUG=-all ~/.local/opt/msvc/bin/x64
   command (exit 144) and leaves the stall untouched. The bracket trick is not enough on its own
   either: it protects against matching the *pattern text*, not against matching an ancestor
   process. Walk `/proc/<pid>/stat` field 4 up from `$$` and skip any pid that is an ancestor.
+- **Never overwrite a proxy DLL while its game is running.** `cp`/`shutil.copy2` truncate and
+  rewrite the file that Wine has mapped, and the process dies minutes later somewhere unrelated
+  (Cyberpunk, 2026-09-19: deploy at 13:36:04, `EXCEPTION_ACCESS_VIOLATION` at 13:37:40 inside
+  REDGalaxy64 unwinding through our module). The guard that let it happen was `pgrep -x
+  Cyberpunk2077.exe`: `comm` is cut at 15 characters, so that pattern never matches. Check
+  `/proc/*/maps` for the target path instead, or match `ps -eo comm=` by prefix.
 - **Never pipe the script** (`./build-local.sh ... | tail`). `wineserver` daemonises and inherits
   stdout, so the pipe never reaches EOF and the output stays hidden even after the build finished —
   a success looks exactly like a hang. Redirect to a file instead.
@@ -252,7 +258,17 @@ no `EvaluateAfterUpscale` to hook. Both measured working on 2026-09-18.
   already has `nvapi64.dll`, so no `NvapiPath` is needed. Pick **DirectX 11** in Steam's launch
   selector; the DX12 entry runs a different executable in a different directory.
 
-Two traps, both paid for:
+- **DOOM Eternal** (782330), `/mnt/games/SteamLibrary/.../DOOMEternal`, installed as `winmm.dll` (the
+  exe imports no dxgi; id Tech 7 is pure Vulkan). NR runs on the Vulkan route (`EvaluateAfterUpscaleVk`,
+  3440x1440 with DLSS Quality guides at 2293x960). The game presents from its **compute** queue family,
+  so the Vulkan overlay draws on the graphics queue with a queue-family transfer around it (see
+  `menu/menu_overlay_vk.cpp`, 2026-09-19); the log line to look for is `drawing the menu on graphics
+  family 0 with a queue-family transfer around it`. A dead DualSense here was **Steam Input**, not
+  OptiScaler: the per-game layout had become `controller_base/empty.vdf` and no virtual X360 pad was
+  created (Steam `logs/controller.txt` shows `uses xinput : true` only when it works). OptiScaler's
+  XInput hook lands on `xinput1_4.dll` while this exe reads `XINPUT1_3.dll`, so it cannot be the cause.
+
+Three traps, all paid for:
 
 - **Replace the keys in the shipped ini, never insert new ones.** Copying `OptiScaler.ini` and adding
   `Enabled=true` at the top of `[DlssNr]` leaves the section's own `Enabled=auto` further down, and
@@ -260,6 +276,17 @@ Two traps, both paid for:
   builds no bridge, with nothing in the log to say why.
 - **NGX writes its own diagnosis through `LOG_DEBUG`.** At the default `LogLevel=2` it is discarded.
   Set `LogLevel=1` before investigating anything NGX refuses; the answer is usually already there.
+- **One proxy per game directory, and which one is loaded depends on the Proton build.** Divinity
+  carried both `dxgi.dll` (the 2026-09-05 install) and `winmm.dll` (added later because the dxgi one
+  was inert). Under Valve Proton 11.0 only `winmm.dll` loaded; GE-Proton11-7 (installed 2026-09-19,
+  now the Steam default) honours the game-dir `dxgi.dll` too, and `EoCApp.exe` imports dxgi
+  statically while `OptiScaler.dll` imports `winmm.dll` -- so both loaded, two sets of Detours hooks
+  fought over `LoadLibraryExW`/`CreateDXGIFactory`, and the game died before the engine started.
+  Signature: a normal-looking boot log of ~5.5 KB that stops at the first FFX `LoadLibrary`, plus a
+  **0-byte** second `OptiScaler_*.log` (the other instance's logger, never flushed). Fix was
+  `dxgi.dll -> dxgi.dll.off`. The deployment manifests had recorded `dxgi.dll` as Divinity's proxy,
+  so two "verified" deploys never touched the DLL the game actually loads; check with
+  `CheckWorkingMode OptiScaler working as <name>` in the log, not with the manifest.
 
 ## Precompiled shaders
 
@@ -339,6 +366,7 @@ competes with Streamline DLSS-G's swapchain/pacer, producing fence timeouts and
 | `33f2961` | `State.h` | `vulkanHooksSkipped` field |
 | `7fe23f4` | `wrapped/wrapped_swapchain.cpp` | With `vulkanHooksSkipped`, bypass the DXVK direct-present shortcut so `MenuOverlayDx` draws the menu via D3D12 |
 | `10c6760` | `menu/menu_overlay_vk.cpp` | `vkWaitForFences` bounded to 1 s; skip the menu frame on timeout |
+| 2026-09-19 | `menu/menu_overlay_vk.cpp`, `hooks/VulkanwDx12_Hooks.cpp` | Present on a non-graphics queue family (id Tech 7): draw the menu on the graphics queue with release/acquire ownership transfers and a three-submit semaphore chain; per-`VkQueue` recursive lock in the `vkQueueSubmit` hooks so that submit cannot race the game's |
 
 Wine detection (`wine_get_version` → `State::isRunningOnLinux`) is upstream. The upstream fix for
 issue #1101 (dxvk-nvapi recursion in `misc/IdentifyGpu.cpp`) is already in the tree; do not re-apply
@@ -356,6 +384,12 @@ rebuild, no temporal accumulator).
   calls go through `nvngx.dll_dlssnr.dll` (`dlssnr/forwarder/`, built by `dlssnr_forwarder.vcxproj`
   into `x64/<Config>/a/`, also buildable standalone with CMake). It must not tail-call the snippet;
   results go through a `volatile` local so the forwarder's frame stays on the stack.
+- **The present-time pass had never shipped.** `RunPresentPass` (wrapped swapchain and FG
+  present hooks) sat behind `#ifdef DLSS_NEURAL_RENDERING`, a macro no file, project or script ever
+  defined, so LTCG dropped it and every string it owned from every build: `HookMethod=2` on a D3D12
+  title silently ran nothing (the D3D11 bridge host is a separate path, which is why Divinity worked),
+  and the runtime status line could not appear. The guards were removed on 2026-09-19; check a build
+  with `grep -a -c 'could not reach the swapchain' OptiScaler.dll` (1 = present pass linked in).
 - **Call sites outside the module** are deliberately one-liners: `inputs/NVNGX_DLSS_Dx12.cpp` and
   `NVNGX_DLSS_Vk.cpp` (evaluate after upscale), `upscalers/IFeature_Dx11wDx12.cpp` and
   `IFeature_VkwDx12.cpp` (bridges), `menu/menu_common.cpp` (panel, timing row, toggle key, compare
