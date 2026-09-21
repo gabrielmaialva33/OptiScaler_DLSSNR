@@ -21,9 +21,7 @@
 #include <d3d12.h>
 #include <detours/detours.h>
 
-#ifdef DLSS_NEURAL_RENDERING
 #include <dlssnr/DlssNr.h>
-#endif
 
 #define XEFG_RESOURCE_REF_LIMIT 1
 
@@ -1249,7 +1247,6 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     if (willPresent)
         state.fgPresentIsCalled = true;
 
-#ifdef DLSS_NEURAL_RENDERING
     // The DLSS-NR present hook: the frame is finished at this point, and it still is the frame
     // frame generation will interpolate FROM, so enhancing it here enhances the generated frames
     // with it. It runs before the original present, which is where the SL interposer captures the
@@ -1269,7 +1266,6 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         }
 #endif
     }
-#endif
 
     HRESULT result;
     if (pPresentParameters == nullptr)
