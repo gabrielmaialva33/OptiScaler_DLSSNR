@@ -3917,9 +3917,15 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     if (!cfg.DlssNrEnabled.value_or_default() || g_nr.failed || swapchain == nullptr || queue == nullptr)
         return;
 
-    // Every present the hook sees is counted, whichever route owns the pass; it is the numerator
-    // of the on-screen ratio the status line reports.
-    ++g_presentFlip;
+    // Every present is counted once, whichever route owns the pass; it is the numerator of the
+    // on-screen ratio the status line reports. With an OptiScaler-managed frame generator both the
+    // FG present hook and the wrapped swapchain's hook reach here for the same flip, so the wrapped
+    // entry does not count while it is standing down for the FG one -- the same rule that keeps it
+    // from drawing twice below. (Read 2.00x on a 30 fps reprojection session before this check.)
+    const bool wrapStandsDown = !fgHook && g_lastFgFlip != 0 && (g_presentFlip - g_lastFgFlip) < kFgHookTimeout;
+
+    if (!wrapStandsDown)
+        ++g_presentFlip;
 
     const uint32_t method = cfg.DlssNrHookMethod.value_or_default();
 
@@ -3930,8 +3936,6 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         ReportRuntimeStatus(g_upscaleApplied, g_upscaleReason ? g_upscaleReason : "no upscaler evaluate yet");
         return;
     }
-
-    const bool wrapStandsDown = !fgHook && g_lastFgFlip != 0 && (g_presentFlip - g_lastFgFlip) < kFgHookTimeout;
 
     if (wrapStandsDown)
         return;
