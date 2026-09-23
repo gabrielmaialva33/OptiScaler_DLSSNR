@@ -2539,15 +2539,29 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const bool resolutionChanged =
         g_nr.width != width || g_nr.height != height || g_nr.workWidth != workWidth || g_nr.workHeight != workHeight;
     const bool placementChanged = g_nr.afterRayReconstruction != frame.AfterRayReconstruction;
+    const bool presetChanged = g_nr.builtPreset != presetForChain;
 
-    // The model reads its tuning once, while the feature is built, so a changed setting only takes
-    // effect when the feature is rebuilt. TuningMatchesFeature was written to notice that and then
-    // never called, which is why every one of these controls appeared to do nothing until something
-    // else -- a resolution change -- happened to force a rebuild by accident.
+    // Structural rebuild is only needed for resolution changes, pipeline placement, or weight preset changes.
+    // Dynamic tuning (Style, Intensity, Tone, Structure, Skin, AutoMask) is passed directly to the forward
+    // pass in evaluate without destroying the feature, matching NVIDIA's runtime architecture.
+    const bool structuralRebuildRequired =
+        resolutionChanged || placementChanged || presetChanged ||
+        (chainEnabled && g_nr.passBuilt[0].Preset != firstSettings.Preset);
+
     const bool tuningChanged =
-        placementChanged || (chainEnabled ? g_nr.passBuilt[0] != firstSettings : !TuningMatchesFeature(cfg));
+        (chainEnabled ? g_nr.passBuilt[0] != firstSettings : !TuningMatchesFeature(cfg));
 
-    if (g_nr.feature != nullptr && (resolutionChanged || tuningChanged))
+    if (tuningChanged && !structuralRebuildRequired)
+    {
+        // When Model/Style or tuning sliders change, pulse a 1-frame temporal history reset
+        // without destroying the feature, matching NVIDIA's CG2R_ResetTemporalHistoryOnControlChange contract.
+        g_nr.reset = true;
+        RecordBuiltTuning(cfg);
+        if (chainEnabled)
+            g_nr.passBuilt[0] = firstSettings;
+    }
+
+    if (g_nr.feature != nullptr && structuralRebuildRequired)
     {
         // Parked rather than released: with frame generation the GPU can still be several frames
         // deep in work that references all of it.
@@ -2576,11 +2590,16 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         for (unsigned i = 1; i < 3; ++i)
         {
-            if (g_nr.passFeature[i] && (i >= passSnapshot.Count || g_nr.passBuilt[i] != passSnapshot.Settings[i]))
+            if (g_nr.passFeature[i] && (i >= passSnapshot.Count || g_nr.passBuilt[i].Preset != passSnapshot.Settings[i].Preset))
             {
                 ParkNrFeature(g_nr.passFeature[i]);
                 for (unsigned downstream = i; downstream < 3; ++downstream)
                     g_nr.passReset[downstream] = true;
+            }
+            else if (g_nr.passFeature[i] && g_nr.passBuilt[i] != passSnapshot.Settings[i])
+            {
+                g_nr.passReset[i] = true;
+                g_nr.passBuilt[i] = passSnapshot.Settings[i];
             }
             if (resolutionChanged || g_nr.passBuilt[i] != passSnapshot.Settings[i])
                 g_nr.passFailed[i] = false;
