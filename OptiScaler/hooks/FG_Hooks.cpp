@@ -1152,6 +1152,11 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
                 {
                     currentFeature->ReadDetailedGpuTimes(state.currentCommandQueue, state.detailedGpuTimes);
                 }
+
+                if (auto fgGpuTime = fg->ReadGpuTime(state.currentCommandQueue))
+                {
+                    state.detailedGpuTimes.emplace_back(DetailedGpuTime { fg->Name(), fgGpuTime.value(), false });
+                }
             }
 
             if (upscalerTimeOpt.has_value())
