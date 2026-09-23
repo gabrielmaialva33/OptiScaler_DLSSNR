@@ -121,6 +121,12 @@ static bool HasLoadedDlssgCompatibilityMod()
     return found;
 }
 
+bool MenuCommon::SliderUInt(const char* label, uint32_t* v, uint32_t v_min, uint32_t v_max, const char* format,
+                            ImGuiSliderFlags flags)
+{
+    return ImGui::SliderScalar(label, ImGuiDataType_U32, v, &v_min, &v_max, format, flags);
+}
+
 static std::string windowTitle;
 static std::string selectedUpscalerName = "";
 static Upscaler currentBackend = Upscaler::Reset;
@@ -4461,11 +4467,15 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             // clang-format off
             static std::vector<MenuOption<ReprojectionFill>> fillModes = {
                 { ReprojectionFill::StrechEdge, "Strech edge" },
-                { ReprojectionFill::Black, "Black" },
                 { ReprojectionFill::Dithering, "Dithering" },
-                { ReprojectionFill::Noise, "Noise" }
+                { ReprojectionFill::Noise, "Noise" },
+                { ReprojectionFill::Debug, "Debug" }
             };
             // clang-format on
+
+            // need to have a value before combo
+            if (!config->ReprojectionFillMode.has_value())
+                config->ReprojectionFillMode = config->ReprojectionFillMode.value_or_default();
 
             PopulateCombo("Edge fill mode", config->ReprojectionFillMode, fillModes);
 
@@ -4473,10 +4483,19 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         }
 
         float cutoff = config->ReprojectionDepthCutoff.value_or_default();
-        if (ImGui::SliderFloat("Depth cutoff", &cutoff, 0.0f, 1.0f, "%.3f"))
+        if (ImGui::SliderFloat("Depth cutoff", &cutoff, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic))
             config->ReprojectionDepthCutoff = cutoff;
 
+        uint32_t cutoffExpandPx = config->ReprojectionCutoffExpand.value_or_default();
+        if (SliderUInt("Cutoff expand", &cutoffExpandPx, 0, 2))
+            config->ReprojectionCutoffExpand = cutoffExpandPx;
+        ShowHelpMarker("A toddler implemented this so it's super slow\n"
+                       "Use only when you see an outline left by the cutoff process");
+
         ImGui::Checkbox("Show static elements", &state.fgHudlessCompare);
+        ShowHelpMarker("For fine tuning the depth cutoff\n"
+                       "Shows UI and depth cutoff areas\n"
+                       "Adjust depth cutoff so that only stuff like your gun and hands are marked");
     }
 
     // OptiFG

@@ -9,24 +9,29 @@
 #include <shaders/Shader_Dx12.h>
 #include <DirectXMath.h>
 
-#define Reproject_NUM_OF_HEAPS 2
+#define Reproject_NUM_OF_HEAPS 3
 
 struct alignas(16) ReprojectionParams
 {
-    float UiDiffThreshold;
     uint32_t ScreenWidth;
     uint32_t ScreenHeight;
+    float InvScreenWidth;
+    float InvScreenHeight;
+
+    float UiDiffThreshold;
+    float DepthCutoff;
+    float DitherWidthPx;
+    uint32_t CutoffExpandPx;
+
     uint32_t EdgeMode;
+    uint32_t ShowStaticElements;
+    uint32_t InvertedDepth;
+    float Pad1;
 
     float TanHalfFovX;
     float TanHalfFovY;
     float InvTanHalfFovX;
     float InvTanHalfFovY;
-
-    float DepthCutoff;
-    uint32_t InvertedDepth;
-    uint32_t ShowStaticElements;
-    float Pad0;
 
     // Inverse reprojection rotation matrix
     DirectX::XMFLOAT4 ReprojectionRow0;
@@ -39,7 +44,7 @@ class Reproject_Dx12 : public Shader_Dx12
   private:
     FrameDescriptorHeap _frameHeaps[Reproject_NUM_OF_HEAPS];
 
-    ID3D12Resource* _buffer {};
+    ID3D12Resource* _buffer[Reproject_NUM_OF_HEAPS] = {};
 
     uint32_t InNumThreadsX = 16;
     uint32_t InNumThreadsY = 16;
@@ -48,10 +53,6 @@ class Reproject_Dx12 : public Shader_Dx12
                                 D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState);
 
   public:
-    bool CreateBufferResource(UINT index, ID3D12Device* InDevice, ID3D12Resource* InSource,
-                              D3D12_RESOURCE_STATES InState);
-    void SetBufferState(UINT index, ID3D12GraphicsCommandList* InCommandList, D3D12_RESOURCE_STATES InState);
-
     bool Dispatch(IDXGISwapChain3* sc, ID3D12GraphicsCommandList* cmdList, ReprojectionParams& params,
                   ID3D12Resource* hudless, D3D12_RESOURCE_STATES state, ID3D12Resource* depth,
                   D3D12_RESOURCE_STATES depthState);

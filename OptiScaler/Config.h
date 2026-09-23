@@ -227,10 +227,10 @@ enum class LowLatencyMode : uint32_t
 
 enum class ReprojectionFill : uint32_t
 {
-    Black,
     StrechEdge,
     Dithering,
-    Noise
+    Noise,
+    Debug,
 };
 
 template <> struct EnumConfig<ReprojectionFill>
@@ -239,9 +239,9 @@ template <> struct EnumConfig<ReprojectionFill>
 
     static constexpr std::pair<ReprojectionFill, std::string_view> mapping[] = {
         { ReprojectionFill::StrechEdge, "strech" },
-        { ReprojectionFill::Black, "black" },
         { ReprojectionFill::Dithering, "dithering" },
-        { ReprojectionFill::Noise, "noise" }
+        { ReprojectionFill::Noise, "noise" },
+        { ReprojectionFill::Debug, "debug" }
     };
 };
 
@@ -927,8 +927,9 @@ class Config
     CustomOptional<float> FGDLSSGFramerateTargetDMFG { 0.0f };
 
     // Reprojection
-    CustomOptional<ReprojectionFill> ReprojectionFillMode { ReprojectionFill::StrechEdge };
+    CustomOptional<ReprojectionFill> ReprojectionFillMode { ReprojectionFill::Dithering };
     CustomOptional<float> ReprojectionDepthCutoff { 0.1f };
+    CustomOptional<uint32_t> ReprojectionCutoffExpand { 0 };
 
     CustomOptional<bool> FGDLSSGAdaMfgUnlock { false }; // See framegen/dlssg/MfgUnlock.h
     CustomOptional<bool> FGDLSSGAdaBlackwellKernels {

@@ -360,16 +360,21 @@ bool Reprojection_Dx12::SetResource(Dx12Resource* inputResource)
 void Reprojection_Dx12::FilloutStruct(ReprojectionParams& params, float diffThreshold, uint32_t resX, uint32_t resY,
                                       int currIndex, DirectX::XMINT2 direction, DirectX::XMINT2 fullFrameMouseDelta)
 {
-    params.UiDiffThreshold = diffThreshold;
     params.ScreenWidth = resX;
     params.ScreenHeight = resY;
+    params.InvScreenWidth = 1.0f / resX;
+    params.InvScreenHeight = 1.0f / resY;
 
+    params.UiDiffThreshold = diffThreshold;
     params.DepthCutoff = Config::Instance()->ReprojectionDepthCutoff.value_or_default();
+    params.DitherWidthPx = resY / 16.0f; // TODO: configurable
+    params.CutoffExpandPx = Config::Instance()->ReprojectionCutoffExpand.value_or_default();
+
     params.InvertedDepth = _constants.flags[FG_Flags::InvertedDepth];
     params.ShowStaticElements = State::Instance().fgHudlessCompare;
 
     auto fillMode = Config::Instance()->ReprojectionFillMode.value_or_default();
-    if (fillMode == ReprojectionFill::Black)
+    if (fillMode == ReprojectionFill::Debug)
         params.EdgeMode = 0;
     else if (fillMode == ReprojectionFill::StrechEdge)
         params.EdgeMode = 1;

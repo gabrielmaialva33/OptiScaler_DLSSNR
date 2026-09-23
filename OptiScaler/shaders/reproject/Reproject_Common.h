@@ -5,20 +5,25 @@
 static std::string shaderCode = R"(
 cbuffer Params : register(b0)
 {
-    float UiDiffThreshold;
     uint ScreenWidth;
     uint ScreenHeight;
+    float InvScreenWidth;
+    float InvScreenHeight;
+    
+    float UiDiffThreshold;
+    float DepthCutoff;
+    float DitherWidthPx;
+    uint CutoffExpandPx;
+    
     uint EdgeMode;
+    uint ShowStaticElements;
+    uint InvertedDepth;
+    float Pad1;
 
     float TanHalfFovX;
     float TanHalfFovY;
     float InvTanHalfFovX;
     float InvTanHalfFovY;
-
-    float DepthCutoff;
-    uint InvertedDepth;
-    uint ShowStaticElements;
-    float Pad0;
     
     float4 ReprojectionMatrixRow0;
     float4 ReprojectionMatrixRow1;
@@ -54,6 +59,37 @@ float HashNoise(uint2 p)
     return n * (1.0f / 4294967295.0f);
 }
 
+bool IsDepthCutoutExpanded(float2 uv, int radius)
+{
+    int2 depthDimension;
+    Depth.GetDimensions(depthDimension.x, depthDimension.y);
+    int2 basePixel = int2(uv * float2(depthDimension));
+    
+    if (radius == 0)
+    {
+        float d = Depth.Load(int3(basePixel, 0));
+        return InvertedDepth ? (d > DepthCutoff) : (d < DepthCutoff);
+    }
+
+    for (int y = -radius; y <= radius; ++y)
+    {
+        for (int x = -radius; x <= radius; ++x)
+        {
+            // Clamp coordinates to prevent reading outside the texture
+            int2 sampleCoord = clamp(basePixel + int2(x, y), int2(0, 0), int2(depthDimension.x - 1, depthDimension.y - 1));
+            
+            float d = Depth.Load(int3(sampleCoord, 0));
+            bool isCutout = InvertedDepth ? (d > DepthCutoff) : (d < DepthCutoff);
+            
+            if (isCutout)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 [numthreads(16, 16, 1)]
 void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
@@ -61,10 +97,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (pixelCoord.x >= ScreenWidth || pixelCoord.y >= ScreenHeight)
         return;
-
+    
     // Screen UV calculation
-    float2 invScreenSize = 1.0f / float2(ScreenWidth, ScreenHeight);
-    float2 uv = (float2(pixelCoord) + 0.5f) * invScreenSize;
+    float2 uv = (float2(pixelCoord) + 0.5f) * float2(InvScreenWidth, InvScreenHeight);
 
     // UI Mask extraction
     float3 hudless = Hudless.Load(int3(pixelCoord, 0));
@@ -74,12 +109,12 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float uiMask = smoothstep(UiDiffThreshold, UiDiffThreshold * 2.0f, delta);
     
     // Add depth cutout mask to the uiMask
-    float depth = Depth.Load(int3(pixelCoord, 0));
-    bool isCutout = InvertedDepth ? depth > DepthCutoff : depth < DepthCutoff;
+    // float depth = Depth.Load(int3(pixelCoord, 0));
+    bool isCutout = IsDepthCutoutExpanded(uv, CutoffExpandPx);
     uiMask = max(uiMask, isCutout ? 1.0f : 0.0f);
        
-    float3 reprojectedGame = float3(0.0f, 1.0f, 0.0f); // Green
-
+    float3 reprojectedGame = 0.0f; // Black
+    
     // Vectorized Camera Ray (un-normalized)
     float2 ndc = uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f);
     float3 ray = float3(ndc * float2(TanHalfFovX, TanHalfFovY), 1.0f);
@@ -107,29 +142,29 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     bool inside = all(sourceUV >= 0.0f) && all(sourceUV <= 1.0f);
     bool modeWithBackground = EdgeMode == 2 || EdgeMode == 3;
     
+    const float3 pink = float3(1.0, 0.4, 0.6);
+    const float3 green = float3(0.0f, 1.0f, 0.0f);
+    
     if (inside)
     {
         // Depth cutoff
-        float reprojectedDepth = Depth.SampleLevel(LinearClampSampler, sourceUV, 0.0f);
-        bool isCutoutReprojected = InvertedDepth ? reprojectedDepth > DepthCutoff : reprojectedDepth < DepthCutoff;
+        bool isCutoutReprojected = IsDepthCutoutExpanded(sourceUV, CutoffExpandPx);
         
         if (isCutoutReprojected)
-            reprojectedGame = hudless; // try to fill gap with unprojected hudless
+            reprojectedGame = lerp(hudless, green, EdgeMode == 0); // try to fill gap with unprojected hudless, or green for debug
         else
             reprojectedGame = Hudless.SampleLevel(LinearClampSampler, sourceUV, 0.0f); // the fun part
                 
         if (modeWithBackground)
         {
-            const float ditherWidthPx = ScreenHeight / 16.0f;
-
             // Only measure distance to reprojected edges that fall inside the screen bounds
-            float distLeft = (sourceUV.x < uv.x) ? sourceUV.x * ScreenWidth : ditherWidthPx;
-            float distRight = (sourceUV.x > uv.x) ? (1.0f - sourceUV.x) * ScreenWidth : ditherWidthPx;
-            float distTop = (sourceUV.y < uv.y) ? sourceUV.y * ScreenHeight : ditherWidthPx;
-            float distBottom = (sourceUV.y > uv.y) ? (1.0f - sourceUV.y) * ScreenHeight : ditherWidthPx;
+            float distLeft = (sourceUV.x < uv.x) ? sourceUV.x * ScreenWidth : DitherWidthPx;
+            float distRight = (sourceUV.x > uv.x) ? (1.0f - sourceUV.x) * ScreenWidth : DitherWidthPx;
+            float distTop = (sourceUV.y < uv.y) ? sourceUV.y * ScreenHeight : DitherWidthPx;
+            float distBottom = (sourceUV.y > uv.y) ? (1.0f - sourceUV.y) * ScreenHeight : DitherWidthPx;
 
             float edgeDistancePx = min(min(distLeft, distRight), min(distTop, distBottom));
-            float projectedProbability = smoothstep(0.0f, ditherWidthPx, edgeDistancePx);
+            float projectedProbability = smoothstep(0.0f, DitherWidthPx, edgeDistancePx);
         
             float pattern = 0.0f;
             if (EdgeMode == 2) // Dither
@@ -147,9 +182,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     else
     {
         // Outside the reprojection
-        if (EdgeMode == 0) // Black
+        if (EdgeMode == 0) // Debug
         {
-            reprojectedGame = 0.0f;
+            reprojectedGame = green;
         }
         else if (EdgeMode == 1) // Strech
         {
@@ -164,7 +199,6 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // Final UI Blend
     float3 composedImage = lerp(reprojectedGame, present, uiMask);
     
-    const float3 pink = float3(1.0, 0.4, 0.6);
     Present[pixelCoord] = lerp(composedImage, pink, uiMask * 0.6f * ShowStaticElements);
 }
 )";

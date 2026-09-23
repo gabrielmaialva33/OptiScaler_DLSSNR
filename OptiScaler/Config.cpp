@@ -339,6 +339,8 @@ bool Config::Reload(std::filesystem::path iniPath)
                 readString("Reprojection", "FillMode", true).transform(CodeToEnum<ReprojectionFill>));
 
             ReprojectionDepthCutoff.set_from_config(readFloat("Reprojection", "DepthCutoff"));
+
+            ReprojectionCutoffExpand.set_from_config(readInt("Reprojection", "CutoffExpand"));
         }
 
         // FSR FG Inputs
@@ -1223,6 +1225,8 @@ bool Config::SaveIni()
         ini.SetValue("Reprojection", "FillMode", fillMode.c_str());
         ini.SetValue("Reprojection", "DepthCutoff",
                      GetFloatValue(Instance()->ReprojectionDepthCutoff.value_for_config()).c_str());
+        ini.SetValue("Reprojection", "CutoffExpand",
+                     GetIntValue(Instance()->ReprojectionCutoffExpand.value_for_config()).c_str());
     }
 
     // OptiFG
