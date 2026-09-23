@@ -106,7 +106,7 @@ static bool HasLoadedDlssgCompatibilityMod()
             // Hold a reference while inspecting exports in case a plugin unloads.
             HMODULE module = nullptr;
             if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                                   reinterpret_cast<LPCWSTR>(entry.modBaseAddr), &module))
+                                    reinterpret_cast<LPCWSTR>(entry.modBaseAddr), &module))
                 continue;
 
             found = KernelBaseProxy::GetProcAddress_()(module, "DlssgProxy_Name") != nullptr &&
@@ -2115,14 +2115,15 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                 interpolatedFrameCount = fg->GetInterpolatedFrameCount();
 
             DLSSGFrameTelemetry externalTelemetry {};
-            const bool externalFg = (!managedFg || interpolatedFrameCount == 0) && DlssgExternalTelemetry::Read(externalTelemetry);
+            const bool externalFg =
+                (!managedFg || interpolatedFrameCount == 0) && DlssgExternalTelemetry::Read(externalTelemetry);
             if (externalFg)
                 fgText += " | DLSSG source telemetry";
 
             if (interpolatedFrameCount > 0 || externalFg)
             {
-                const double baseFps = externalFg ? externalTelemetry.base_fps
-                                                  : frameRate / (double) (interpolatedFrameCount + 1);
+                const double baseFps =
+                    externalFg ? externalTelemetry.base_fps : frameRate / (double) (interpolatedFrameCount + 1);
 
                 switch (overlayType)
                 {
@@ -3467,9 +3468,9 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     }
 
     auto constexpr fgNvngxNoneIndex = (uint32_t) FGNvngxReplacement::None;
-    const bool supportsDlssg = primaryGpu.nvidiaArchInfo.architecture_id >= NV_GPU_ARCHITECTURE_AD100 ||
-                               (primaryGpu.vendorId == VendorId::Nvidia && primaryGpu.dlssCapable &&
-                                HasLoadedDlssgCompatibilityMod());
+    const bool supportsDlssg =
+        primaryGpu.nvidiaArchInfo.architecture_id >= NV_GPU_ARCHITECTURE_AD100 ||
+        (primaryGpu.vendorId == VendorId::Nvidia && primaryGpu.dlssCapable && HasLoadedDlssgCompatibilityMod());
     nvngxOptions[fgNvngxNoneIndex].set_disabled(!supportsDlssg, "Unsupported hardware");
 
     if (replaceFgOutputWithNvngx)

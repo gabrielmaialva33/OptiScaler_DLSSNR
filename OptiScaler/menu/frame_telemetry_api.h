@@ -5,9 +5,10 @@
 #define DLSSG_FRAME_TELEMETRY_VERSION 1u
 #define DLSSG_TELEMETRY_ENABLED 1u
 #define DLSSG_TELEMETRY_BASE_VALID 2u
-typedef struct DLSSGFrameTelemetry {
-    unsigned int size,version,flags,viewport;
+typedef struct DLSSGFrameTelemetry
+{
+    unsigned int size, version, flags, viewport;
     double base_fps;
-    unsigned int sample_frames,sample_ms,age_ms,reserved;
+    unsigned int sample_frames, sample_ms, age_ms, reserved;
 } DLSSGFrameTelemetry;
 #endif
