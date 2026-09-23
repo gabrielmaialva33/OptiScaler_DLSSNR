@@ -284,6 +284,12 @@
     <ClInclude Include="menu\menu_common.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="menu\DlssgExternalTelemetry.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="menu\frame_telemetry_api.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="menu\menu_dx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>
