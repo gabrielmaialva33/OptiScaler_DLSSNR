@@ -821,6 +821,16 @@ bool FSRFG_Dx12::Shutdown()
     return true;
 }
 
+ID3D12CommandQueue* FSRFG_Dx12::GameQueueFor(ID3D12CommandQueue* cmdQueue)
+{
+    ID3D12CommandQueue* realQueue = nullptr;
+
+    if (!CheckForRealObject(__FUNCTION__, cmdQueue, (IUnknown**) &realQueue))
+        realQueue = cmdQueue;
+
+    return realQueue;
+}
+
 bool FSRFG_Dx12::CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue,
                                          DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** swapChain)
 {

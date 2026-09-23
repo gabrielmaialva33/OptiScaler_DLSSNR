@@ -105,6 +105,10 @@ class IFGFeature_Dx12 : public virtual IFGFeature
                                           DXGI_SWAP_CHAIN_DESC1* desc, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
                                           IDXGISwapChain1** swapChain) = 0;
 
+    // Queue kept as _gameCommandQueue when a preserved swapchain is reused. Backends that
+    // create their swapchain on the real queue override this to strip the Streamline proxy.
+    virtual ID3D12CommandQueue* GameQueueFor(ID3D12CommandQueue* cmdQueue) { return cmdQueue; }
+
   protected:
     virtual void ReleaseObjects() = 0;
     virtual void CreateObjects(ID3D12Device* InDevice) = 0;

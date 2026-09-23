@@ -241,6 +241,16 @@ xefg_swapchain_d3d12_resource_data_t XeFG_Dx12::GetResourceData(FG_ResourceType 
     return resourceParam;
 }
 
+ID3D12CommandQueue* XeFG_Dx12::GameQueueFor(ID3D12CommandQueue* cmdQueue)
+{
+    ID3D12CommandQueue* realQueue = nullptr;
+
+    if (!CheckForRealObject(__FUNCTION__, cmdQueue, (IUnknown**) &realQueue))
+        realQueue = cmdQueue;
+
+    return realQueue;
+}
+
 bool XeFG_Dx12::CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, DXGI_SWAP_CHAIN_DESC* desc,
                                         IDXGISwapChain** swapChain)
 {
