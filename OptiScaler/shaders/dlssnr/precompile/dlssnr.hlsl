@@ -977,7 +977,16 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // neutral, NOT by clipping channels. So an over-driven colour rolls off at the gamut boundary
     // (maximally vivid but still a real colour with detail) instead of flattening into a blown peak.
     // At strength 1 the boost is the identity, so <=1 is bit-identical to before.
-    float3 result = lerp(original * boundedRatio, upgraded, min(gColourStrength, 1.0));
+    //
+    // Below a few code values the model's hue is quantisation, not information.
+    // In an 8-bit representation of near-black regions, a single bit rounding up in one channel
+    // causes ratio amplification to blow up into saturated blue/magenta dead speckles.
+    // Trust the model's hue in proportion to how much light it reported; below the noise floor
+    // (~25/255 in sRGB) the frame's own rendered hue is preserved instead.
+    const float kQuantFloor = 0.0097;  // SrgbToLinear(25/255), normalised units matching model
+    const float hueTrust = smoothstep(0.0, kQuantFloor, modelLuma);
+
+    float3 result = lerp(original * boundedRatio, upgraded, min(gColourStrength, 1.0) * hueTrust);
 
     if (gColourStrength > 1.0)
         result = ClampAp1(FromOkLab(float3(1.0, gColourStrength, gColourStrength) * ToOkLab(max(result, 0.0))));
