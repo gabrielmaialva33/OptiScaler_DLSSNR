@@ -547,6 +547,8 @@ bool IFGFeature_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue*
                               desc->BufferCount, desc->BufferDesc.Width, desc->BufferDesc.Height,
                               desc->BufferDesc.Format, desc->Flags) == S_OK;
 
+            _gameCommandQueue = cmdQueue;
+            _swapChain = State::Instance().currentFGSwapchain;
             *swapChain = State::Instance().currentFGSwapchain;
             return result;
         }
@@ -591,6 +593,8 @@ bool IFGFeature_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue
             auto result = State::Instance().currentFGSwapchain->ResizeBuffers(
                               desc->BufferCount, desc->Width, desc->Height, desc->Format, desc->Flags) == S_OK;
 
+            _gameCommandQueue = cmdQueue;
+            _swapChain = State::Instance().currentFGSwapchain;
             *swapChain = (IDXGISwapChain1*) State::Instance().currentFGSwapchain;
             return result;
         }
