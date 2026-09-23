@@ -245,8 +245,8 @@ static void RenderPassControls(Config* config, bool vulkan)
     changed |= PassFloat("Skin structure", sparse.SkinStructure, master.SkinStructure, -1.0f);
     const char* presets[] = { Localization::Tr("Default"), Localization::Tr("Preset 1"), Localization::Tr("Preset 2"),
                               Localization::Tr("Preset 3") };
-    const char* styles[] = { Localization::Tr("Default (standard)"), Localization::Tr("Natural"),
-                             Localization::Tr("Cinematic") };
+    const char* styles[] = { Localization::Tr("Model A (Default)"), Localization::Tr("Model B (Natural)"),
+                             Localization::Tr("Model C (Cinematic)") };
     changed |= PassChoice("Model preset", sparse.Preset, master.Preset, presets, IM_ARRAYSIZE(presets));
     changed |= PassChoice("Style", sparse.Style, master.Style, styles, IM_ARRAYSIZE(styles));
     ImGui::PushID("autoMask");
@@ -743,8 +743,8 @@ void RenderMenu(Config* config, float menuResScale)
                    "\n\nNot the same scale as the super resolution or ray reconstruction presets --"
                    "\nthe same number means something different here.");
 
-        static const char* nrStyleNames[] = { Localization::Label("Default (standard)"), Localization::Label("Natural"),
-                                              Localization::Label("Cinematic") };
+        static const char* nrStyleNames[] = { Localization::Label("Model A (Default)"), Localization::Label("Model B (Natural)"),
+                                              Localization::Label("Model C (Cinematic)") };
         int style = (int) master.Style;
 
         if (style > 2)
@@ -753,15 +753,11 @@ void RenderMenu(Config* config, float menuResScale)
         if (ImGui::Combo(Localization::Label("Style"), &style, nrStyleNames, IM_ARRAYSIZE(nrStyleNames)))
             config->SetDlssNrMasterSetting(&Config::DlssNrStyle, (uint32_t) style);
 
-        HelpMarker("The model's own processing profiles."
-                   "\n\nDefault (standard): the strongest. Boosts local contrast and deepens"
-                   "\nlighting, and can oversaturate or look stylised -- most of what reads as"
-                   "\n'the model changed my game's look' is this profile."
-                   "\n\nNatural: the same detail work with a gentler hand. Keeps skin tones and"
-                   "\ntonal balance closer to what the game rendered."
-                   "\n\nCinematic: tones down the shine and over-processing for a film-like look."
-                   "\n\nRead when the model is built, so a change rebuilds it after a moment. The"
-                   "\nnames come from community testing; NVIDIA ships no names in the binaries.");
+        HelpMarker("Neural Rendering Model selection (DLSSNR.Style):"
+                   "\n\nModel A (Default): standard reference neural model with default local tone and structure."
+                   "\n\nModel B (Natural): subtle contrast (-0.25) and saturation (-0.10) compensation. Preserves natural skin tones and softens harsh highlights."
+                   "\n\nModel C (Cinematic): gentle saturation adjustment (-0.15) for filmic presentation."
+                   "\n\nTuning changes apply instantly on the live frame with seamless temporal reset.");
 
         if (DeferredSlider("Intensity", &master.Intensity, 0.0f, 2.0f, 1.0f))
             config->SetDlssNrMasterSetting(&Config::DlssNrIntensity, master.Intensity);
