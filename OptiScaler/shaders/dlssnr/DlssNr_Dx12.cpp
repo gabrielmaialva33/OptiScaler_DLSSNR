@@ -2236,6 +2236,15 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return false;
     }
 
+    const HRESULT removedReason = device->GetDeviceRemovedReason();
+    if (FAILED(removedReason))
+    {
+        reportSkip("D3D12 device removed or hung");
+        LOG_ERROR("DLSS-NR: D3D12 device removed or hung (reason: 0x{:08X})", (unsigned) removedReason);
+        device->Release();
+        return false;
+    }
+
     const bool restoreRequired =
         cfg.RestoreComputeSignature.value_or_default() || cfg.RestoreGraphicSignature.value_or_default();
     if (restoreRequired && !D3D12Hooks::CanRestoreRootSignature(cmdList))
