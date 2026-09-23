@@ -1,6 +1,7 @@
 #include "pch.h"
 #include <misc/Localization.h>
 #include "menu_common.h"
+#include "DlssgExternalTelemetry.h"
 #include <dlssnr/DlssNr_ExposureScan.h>
 
 #include <algorithm>
@@ -2109,12 +2110,19 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             }
 
             uint32_t interpolatedFrameCount = 0;
-            if (fg != nullptr && fg->IsActive() && !fg->IsPaused())
+            const bool managedFg = fg != nullptr && fg->IsActive() && !fg->IsPaused();
+            if (managedFg)
                 interpolatedFrameCount = fg->GetInterpolatedFrameCount();
 
-            if (interpolatedFrameCount)
+            DLSSGFrameTelemetry externalTelemetry {};
+            const bool externalFg = (!managedFg || interpolatedFrameCount == 0) && DlssgExternalTelemetry::Read(externalTelemetry);
+            if (externalFg)
+                fgText += " | DLSSG source telemetry";
+
+            if (interpolatedFrameCount > 0 || externalFg)
             {
-                const double baseFps = frameRate / (double) (interpolatedFrameCount + 1);
+                const double baseFps = externalFg ? externalTelemetry.base_fps
+                                                  : frameRate / (double) (interpolatedFrameCount + 1);
 
                 switch (overlayType)
                 {
