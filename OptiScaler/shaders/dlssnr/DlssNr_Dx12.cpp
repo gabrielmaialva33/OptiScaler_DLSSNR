@@ -3968,6 +3968,16 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     if (wrapStandsDown)
         return;
 
+    // Fail-open startup guard: defer neural composition during initial frames (first 4 flips)
+    // so swapchains, window sizing, and DXGI/VKD3D presentation pipelines settle into a steady state.
+    // Prevents black-screen deadlocks or 0 FPS hangs at boot under Proton/Wine.
+    constexpr uint64_t kStartupWarmupFlips = 4;
+    if (g_presentFlip <= kStartupWarmupFlips)
+    {
+        ReportRuntimeStatus(false, "startup deferred (stabilizing swapchain)");
+        return;
+    }
+
     ID3D12Resource* backbuffer = nullptr;
     const UINT index = swapchain->GetCurrentBackBufferIndex();
 
