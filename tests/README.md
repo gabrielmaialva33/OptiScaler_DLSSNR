@@ -28,7 +28,7 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, and `vulkan-query-readiness` |
+| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `vulkan-query-readiness` and `mfg-pattern` |
 | `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** All thirteen build real production code with local fakes under
+**Host tier.** Seventeen suites. All but `nr-invariants` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
@@ -46,12 +46,17 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `vulkan-query-readiness` — production Vulkan upscaler timing, nonblocking
   readiness retry, error rejection and single consumption. No frame-identity
   or GPU synchronization coverage.
+- `mfg-pattern` — the real MFG byte signatures and scanner matcher against synthetic
+  buffers. Runs no patcher and touches no DLL.
 - `nr-before-upscale` — pre-upscale boundary functions against strict host fakes.
 - `nr-dispatch` — composition constants, descriptor slots and partial initialization cleanup.
 - `nr-gpu-timing` — portable timing validation, plus the duplicate-execution
   guard at the submission boundary.
 - `nr-gpu-timing-config` — the Config GPU-timing transactions and their INI
   expressions.
+- `nr-invariants` — the `DEVELOPMENT.md` §4 guards against the live tree: config
+  round-trip for every `DlssNr` key, struct equals cbuffer, precompiled headers equal
+  the committed bytecode, retired identifiers. Pure Python, no compiler.
 - `nr-localization` — the real portable `.lang` parser and the repository ImGui
   hash. Slowest suite, around 45 seconds.
 - `nr-log-rate` — the log rate limiter against injected time points, a recorded
@@ -66,6 +71,8 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   resource release.
 - `nr-timing-boundary` — timing metadata and UI boundary, and where the timing
   markers sit.
+- `nr-zero-guides` — zero depth and motion for a host with no engine buffers, and the
+  two-heap clear contract.
 
 **Wine tier.**
 
@@ -78,7 +85,9 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 
 **Not a suite.** `nr-before-upscale/verify-invariants.py` is a one-shot evidence
 script pinned to baseline commit `660303ec`. `run.py` does not call it and
-`run_all.py` does not run it. Invoke it by hand when you want that comparison.
+`run_all.py` does not run it. Invoke it by hand when you want that comparison. It
+asserts the shader is unchanged since that baseline, so it fails after any shader
+edit by design; `nr-invariants` carries its general checks against the live tree.
 
 ## What none of this covers
 

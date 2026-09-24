@@ -18,6 +18,11 @@ tier = "host"
 timeout = 300
 summary = "Pre-upscale boundary functions against strict host fakes, under ASan/UBSan."
 
+[nr-invariants]
+tier = "host"
+timeout = 120
+summary = "DEVELOPMENT.md section 4 guards: config round-trip, struct == cbuffer, headers == bytecode, retired identifiers."
+
 [nr-zero-guides]
 tier = "host"
 timeout = 300
