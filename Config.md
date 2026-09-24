@@ -397,11 +397,11 @@ UseProxy=auto
 ; over depth and motion, on the upscaler's output until then. 1 Upscaled: in place, right after the
 ; game's upscaler writes its (linear, un-tonemapped) output. 2 Present: on the finished, tone-mapped
 ; backbuffer at present, before frame generation makes its frames from it.
-; Leave it at 1 when the upscaler runs through OptiScaler's D3D12 bridge (a Vulkan or D3D11 game with
-; a DX12-only upscaler): 0 and 2 hand the pass to a present hook those games never reach, so nothing
-; runs. The one exception is 2 on a D3D11 game, which hosts the pass on the bridge's own swapchain;
-; that is decided when the swapchain is created, so a change there needs a restart. A native Vulkan
-; game ignores this key.
+; When the upscaler runs through OptiScaler's D3D12 bridge (a Vulkan or D3D11 game with a DX12-only
+; upscaler) there is no D3D12 present hook, so Auto stays on the upscaler's output and 2 runs nothing
+; -- except on a D3D11 game, where 2 hosts the pass on the bridge's own swapchain; that is decided
+; when the swapchain is created, so a change there needs a restart. A native Vulkan game ignores this
+; key.
 ; 0 to 2 - Default (auto) is 1
 HookMethod=auto
 

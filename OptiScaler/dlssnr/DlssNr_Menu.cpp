@@ -414,10 +414,10 @@ void RenderMenu(Config* config, float menuResScale)
                        "frame generation the base frame is enhanced before the generated frames are "
                        "made from it. This is how the ReShade implementations run it, and the one a "
                        "title like KCD2 wants.\n\nA native Vulkan game ignores this. When the upscaler "
-                       "runs through OptiScaler's D3D12 bridge (a Vulkan or D3D11 game), keep Upscaled: "
-                       "Auto and Present hand the pass to a present hook those games never reach, "
-                       "except Present on a D3D11 game, which hosts it on the bridge's swapchain and "
-                       "takes effect after a restart.");
+                       "runs through OptiScaler's D3D12 bridge (a Vulkan or D3D11 game) there is no "
+                       "D3D12 present hook: Auto stays on the upscaler's output and Present runs "
+                       "nothing, except on a D3D11 game, where Present hosts the pass on the bridge's "
+                       "swapchain and takes effect after a restart.");
 
             if (hookMethod == 2)
             {

@@ -169,6 +169,19 @@ int main()
       DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
       assert(g_coverage[0].totals.applied == 1 && g_coverage[0].totals.modelOk == 1);
       assert(infoLogs.back().find("stage=after calls=1") != std::string::npos); ++checks; }
+    // Auto with guides captured but no present hook running (the D3D11 bridge, Vulkan): the pass must
+    // run here, not be deferred to a hook that never comes.
+    { Fixture f; f.cfg.DlssNrStage = 0; f.cfg.DlssNrHookMethod = 0u;
+      DlssNr::g_temporalValid = true; DlssNr::presentHookLive = false;
+      DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
+      assert(g_coverage[0].totals.applied == 1);
+      DlssNr::g_temporalValid = false; ++checks; }
+    // The same with the D3D12 present hook live: deferred, the present pass owns the frame.
+    { Fixture f; f.cfg.DlssNrStage = 0; f.cfg.DlssNrHookMethod = 0u;
+      DlssNr::g_temporalValid = true; DlssNr::presentHookLive = true;
+      DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
+      assert(g_coverage[0].totals.applied == 0);
+      DlssNr::g_temporalValid = false; DlssNr::presentHookLive = false; ++checks; }
     { Fixture f; bool declined;
       { ScopedPreUpscale p(&f.cmd, &f.params, false); declined = p.Declined(); }
       DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, declined);

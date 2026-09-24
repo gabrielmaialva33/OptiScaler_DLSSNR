@@ -238,6 +238,8 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* p)
 struct TemporalFakeState { bool valid = false; };
 inline TemporalFakeState g_temporal;
 inline std::atomic<bool> g_temporalValid { false };
+inline bool presentHookLive = false;
+inline bool PresentHookLive() { return presentHookLive; }
 inline void CaptureTemporal(NVSDK_NGX_Parameter*, const DlssNrFrameInfo&) {}
 inline std::atomic<bool> g_sourceIsPresent { false };
 // The upscaled route's own render count and last outcome (DlssNr_Dx12.cpp keeps them beside

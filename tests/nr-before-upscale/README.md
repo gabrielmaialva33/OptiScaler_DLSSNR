@@ -107,7 +107,9 @@ The multipass integration extends the boundary checks to 56 cases, and the statu
 bookkeeping to 57: a recorded pass advances the counter the status window reads while a failed one
 does not, and NR found switched off by either entry point leaves a history reset owed. The 58th is
 Stage 1 under the Present hook method: the scope declines without touching the parameter block, so
-the model runs once, at present, rather than on both sides of the upscaler. A refused submission
+the model runs once, at present, rather than on both sides of the upscaler. The 59th and 60th are
+Auto with guides captured: without a live D3D12 present hook (the D3D11 bridge, Vulkan) the pass runs
+after the upscaler, and with one it is deferred to present. A refused submission
 admission records no barrier, scratch allocation, parameter substitution or fake Dispatch.
 The actual INFO spatial-contract reporter is extracted too: it distinguishes successful
 subrect queries from absent/failed ones, suppresses unchanged contracts and warns when

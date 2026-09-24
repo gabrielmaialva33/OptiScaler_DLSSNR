@@ -3708,6 +3708,25 @@ struct PresentTemporal
 // wait for a Dispatch to finish recording just to learn which route owns the frame.
 static PresentTemporal g_temporal;
 static std::atomic<bool> g_temporalValid { false };
+
+// When the D3D12 present hook last ran, for Auto. Auto hands the pass to the present hook once the
+// upscaler has handed over its guides -- but only a D3D12 swapchain has that hook. The D3D11 bridge
+// (wrapped_swapchain skips it) and every Vulkan route never reach RunPresentPass, so deferring there
+// ran nothing at all: Auto was a silent off switch on the bridges. Auto now resolves to present only
+// while the hook is demonstrably running.
+static std::atomic<long long> g_presentHookAtMs { 0 };
+
+static long long NowMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+static bool PresentHookLive()
+{
+    const long long at = g_presentHookAtMs.load();
+    return at != 0 && NowMs() - at < 500;
+}
 static unsigned long long g_renderSeq = 0;
 static unsigned long long g_nrLastEnhancedSeq = 0;
 static unsigned long long g_presentRuns = 0;
@@ -4019,7 +4038,7 @@ const char* HookStatus()
 
     if (method == 0)
     {
-        if (g_temporalValid.load())
+        if (g_temporalValid.load() && PresentHookLive())
             return "auto: present, swapchain source with DLSS temporal inputs";
         return "auto: upscaled, the upscaler has handed over no temporal inputs yet";
     }
@@ -4039,6 +4058,8 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
 
     if (g_nr.failed || swapchain == nullptr || queue == nullptr)
         return;
+
+    g_presentHookAtMs = NowMs();
 
     // Every present is counted once, whichever route owns the pass; it is the numerator of the
     // on-screen ratio the status line reports. With an OptiScaler-managed frame generator both the
@@ -4630,7 +4651,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     if (hookMethod != 1)
         CaptureTemporal(params, frame);
 
-    if (hookMethod == 2 || (hookMethod == 0 && g_temporalValid.load()))
+    if (hookMethod == 2 || (hookMethod == 0 && g_temporalValid.load() && PresentHookLive()))
     {
         coverage.sample.reason = "deferred to present-time hook";
         return;
