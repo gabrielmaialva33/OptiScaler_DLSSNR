@@ -20,12 +20,13 @@ def between(text, start, end):
 declaration = between(header, 'class ScopedPreUpscale\n', '\n};') + '\n};\n'
 allocation = between(source, 'ID3D12Resource* CreatePreUpscaleScratch(', '\nvoid Barrier(')
 scope = between(source, 'ScopedPreUpscale::ScopedPreUpscale(', '// The pass. Resources in,')
+compose = between(source, 'static void EnsureCompose(', 'struct PresentList\n')
 after = between(source, 'void EvaluateAfterUpscale(', '// ---------------------------------------------------------------------------------------------')
 coverage = between(source, 'std::mutex g_coverageMutex;', '// NGX result codes, by name.')
 resources = between(source, 'struct RestoreResourceState\n', '// The upscaler\'s own names differ')
 unit = '#include "fakes.h"\n' + coverage + allocation + resources
 spatial = between(source, 'void ReportSpatialContract(', 'DlssNrFrameInfo GatherFrame(')
-unit += '\nnamespace DlssNr {\n' + declaration + spatial + after + scope + '\n}\n#include "cases.h"\n'
+unit += '\nnamespace DlssNr {\n' + declaration + spatial + compose + after + scope + '\n}\n#include "cases.h"\n'
 (OUT / 'boundary.cpp').write_text(unit)
 subprocess.run(['g++', '-std=c++20', '-g', '-O1', '-fno-omit-frame-pointer',
                 '-fsanitize=address,undefined', '-Wall', '-Wextra', '-Wno-unused-variable',

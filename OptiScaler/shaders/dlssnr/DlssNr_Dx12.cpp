@@ -3702,7 +3702,12 @@ struct PresentTemporal
     bool valid = false;
 };
 
+// Written on the render thread (the upscaler's evaluate) and read on the present thread, so every
+// access holds g_nrMutex -- including the parking, which feeds the same retired list Dispatch trims.
+// g_temporalValid mirrors `valid` for the routing checks that run on every present and must not
+// wait for a Dispatch to finish recording just to learn which route owns the frame.
 static PresentTemporal g_temporal;
+static std::atomic<bool> g_temporalValid { false };
 static unsigned long long g_renderSeq = 0;
 static unsigned long long g_nrLastEnhancedSeq = 0;
 static unsigned long long g_presentRuns = 0;
@@ -3724,6 +3729,7 @@ static void ReleasePresentTemporal()
         g_temporal.motion = nullptr;
     }
     g_temporal.valid = false;
+    g_temporalValid = false;
 }
 
 static void CaptureTemporal(NVSDK_NGX_Parameter* params, const DlssNrFrameInfo& frame)
@@ -3733,6 +3739,8 @@ static void CaptureTemporal(NVSDK_NGX_Parameter* params, const DlssNrFrameInfo& 
 
     if (depth == nullptr || motion == nullptr)
         return;
+
+    std::lock_guard<std::mutex> nrLock(g_nrMutex);
 
     ParkNrResource(g_temporal.depth);
     ParkNrResource(g_temporal.motion);
@@ -3745,6 +3753,18 @@ static void CaptureTemporal(NVSDK_NGX_Parameter* params, const DlssNrFrameInfo& 
     g_temporal.capturedAt = g_frames;
     g_temporal.renderSeq = ++g_renderSeq;
     g_temporal.valid = true;
+    g_temporalValid = true;
+}
+
+// The pass object, built once on the device the first frame arrives on. Four routes reach for it and
+// two of them run on the present thread, so the build holds the lock: two threads each building one
+// would leak the first and hand a caller an object the other has replaced.
+static void EnsureCompose(ID3D12Device* device)
+{
+    std::lock_guard<std::mutex> nrLock(g_nrMutex);
+
+    if (g_compose == nullptr)
+        g_compose = std::make_unique<DlssNr_Dx12>("Neural Rendering", device);
 }
 
 struct PresentList
@@ -3774,7 +3794,9 @@ static unsigned long long g_upscaleRenders = 0;
 static std::atomic<bool> g_upscaleApplied { false };
 static std::atomic<const char*> g_upscaleReason { nullptr };
 static std::atomic<unsigned long long> g_passesRecorded { 0 };
-static bool g_sourceIsPresent = false;
+// Which route the model's history belongs to. Switching routes owes a reset, requested through
+// g_resetOnReturn because neither route holds the lock at the point it notices.
+static std::atomic<bool> g_sourceIsPresent { false };
 static ID3D12Resource* g_bbCopy = nullptr;
 static unsigned int g_bbCopyWidth = 0;
 static unsigned int g_bbCopyHeight = 0;
@@ -3988,7 +4010,7 @@ const char* HookStatus()
 
     if (method == 2)
     {
-        if (g_temporal.valid)
+        if (g_temporalValid.load())
             return "present: active, swapchain source with DLSS temporal inputs";
         if (Config::Instance()->DlssNrRequireDlss.value_or_default())
             return "present: waiting for DLSS temporal inputs from the upscaler";
@@ -3997,7 +4019,7 @@ const char* HookStatus()
 
     if (method == 0)
     {
-        if (g_temporal.valid)
+        if (g_temporalValid.load())
             return "auto: present, swapchain source with DLSS temporal inputs";
         return "auto: upscaled, the upscaler has handed over no temporal inputs yet";
     }
@@ -4030,7 +4052,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
 
     const uint32_t method = cfg.DlssNrHookMethod.value_or_default();
 
-    if (method != 2 && !(method == 0 && g_temporal.valid))
+    if (method != 2 && !(method == 0 && g_temporalValid.load()))
     {
         // The upscaled route recorded (or declined) its pass on the upscaler's command list; this
         // is still the one place per present to say so.
@@ -4070,8 +4092,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         return;
     }
 
-    if (g_compose == nullptr)
-        g_compose = std::make_unique<DlssNr_Dx12>("Neural Rendering", device);
+    EnsureCompose(device);
 
     if (g_compose == nullptr)
     {
@@ -4096,14 +4117,20 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     const unsigned int width = (unsigned int) bbDesc.Width;
     const unsigned int height = bbDesc.Height;
 
+    // This is the present thread. Everything below that the render thread also touches -- the
+    // backbuffer copy's retirement (the retired list Dispatch trims), the captured guides, the failure
+    // latch -- is read or written under the lock, which is released again before the evaluate takes it.
+    std::unique_lock<std::mutex> nrLock(g_nrMutex);
+
     if (!EnsureBbCopy(device, width, height, bbDesc.Format))
     {
-        DropPresentList(slot);
-        backbuffer->Release();
-        device->Release();
         g_nr.failed = true;
         g_nr.reason = "the present hook's backbuffer copy could not be created";
         LOG_ERROR("DLSS-NR present: {}", g_nr.reason);
+        nrLock.unlock();
+        DropPresentList(slot);
+        backbuffer->Release();
+        device->Release();
         return;
     }
 
@@ -4111,15 +4138,23 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     ID3D12Resource* motion = nullptr;
     DlssNrFrameInfo frame {};
 
-    static ZeroGuides s_dummyGuides;
+    // A snapshot: the render thread may replace the capture as soon as the lock is released, and a
+    // replaced capture is parked for 32 evaluates rather than released, so these stay valid.
+    const bool temporalValid = g_temporal.valid;
+    const unsigned long long temporalSeq = g_temporal.renderSeq;
 
-    if (g_temporal.valid)
+    if (temporalValid)
     {
         depth = g_temporal.depth;
         motion = g_temporal.motion;
         frame = g_temporal.frame;
     }
-    else if (cfg.DlssNrRequireDlss.value_or_default())
+
+    nrLock.unlock();
+
+    static ZeroGuides s_dummyGuides;
+
+    if (!temporalValid && cfg.DlssNrRequireDlss.value_or_default())
     {
         DropPresentList(slot);
         backbuffer->Release();
@@ -4127,13 +4162,14 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         ReportSkipOnce("the present hook is waiting for the upscaler's temporal inputs");
         return;
     }
-    else
+    else if (!temporalValid)
     {
         if (!s_dummyGuides.Ensure(device, width, height))
         {
             DropPresentList(slot);
             backbuffer->Release();
             device->Release();
+            std::lock_guard<std::mutex> failLock(g_nrMutex);
             g_nr.failed = true;
             g_nr.reason = "the present hook's dummy temporals could not be created";
             LOG_ERROR("DLSS-NR present: {}", g_nr.reason);
@@ -4145,7 +4181,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         frame = DlssNrFrameInfo {};
     }
 
-    if (g_temporal.valid && g_temporal.renderSeq == g_nrLastEnhancedSeq)
+    if (temporalValid && temporalSeq == g_nrLastEnhancedSeq)
     {
         ++g_presentSkips;
         DropPresentList(slot);
@@ -4154,8 +4190,8 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         return;
     }
 
-    if (g_temporal.valid)
-        g_nrLastEnhancedSeq = g_temporal.renderSeq;
+    if (temporalValid)
+        g_nrLastEnhancedSeq = temporalSeq;
 
     ++g_presentRuns;
     g_sameBbStreak = (backbuffer == g_lastEnhancedBb) ? g_sameBbStreak + 1 : 0;
@@ -4163,11 +4199,8 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     g_lastEnhancedBb = backbuffer;
     g_lastEnhancedBbIdx = index;
 
-    if (!g_sourceIsPresent)
-    {
-        g_sourceIsPresent = true;
-        g_nr.reset = true;
-    }
+    if (!g_sourceIsPresent.exchange(true))
+        g_resetOnReturn = true;
 
     const D3D12_RESOURCE_STATES bbState = D3D12_RESOURCE_STATE_PRESENT;
 
@@ -4592,7 +4625,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     if (hookMethod != 1)
         CaptureTemporal(params, frame);
 
-    if (hookMethod == 2 || (hookMethod == 0 && g_temporal.valid))
+    if (hookMethod == 2 || (hookMethod == 0 && g_temporalValid.load()))
     {
         coverage.sample.reason = "deferred to present-time hook";
         return;
@@ -4603,11 +4636,8 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     g_upscaleApplied = false;
     g_upscaleReason = coverage.sample.reason;
 
-    if (g_sourceIsPresent)
-    {
-        g_sourceIsPresent = false;
-        g_nr.reset = true;
-    }
+    if (g_sourceIsPresent.exchange(false))
+        g_resetOnReturn = true;
 
     // The upscaler's inputs are at render resolution while colour and output are at display
     // resolution; the model takes that as a subrect per resource, which the pass reads from the
@@ -4623,8 +4653,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     }
 
     // The pass is the object, so the caller holds it. Built once, on the device the frame is on.
-    if (g_compose == nullptr)
-        g_compose = std::make_unique<DlssNr_Dx12>("Neural Rendering", device);
+    EnsureCompose(device);
 
     device->Release();
 
@@ -4664,6 +4693,10 @@ bool CapturedPresentGuides(ID3D12Resource** depth, ID3D12Resource** motion, Dlss
 {
     if (depth == nullptr || motion == nullptr || frame == nullptr)
         return false;
+
+    // The D3D11 host calls from its own present thread; the pointers stay alive past this because a
+    // replaced capture is parked, not released.
+    std::lock_guard<std::mutex> nrLock(g_nrMutex);
 
     if (!g_temporal.valid || g_temporal.depth == nullptr || g_temporal.motion == nullptr)
         return false;
@@ -4736,8 +4769,7 @@ bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colou
         return answer(false, "the colour belongs to no D3D12 device");
     }
 
-    if (g_compose == nullptr)
-        g_compose = std::make_unique<DlssNr_Dx12>("Neural Rendering", device);
+    EnsureCompose(device);
 
     device->Release();
 
@@ -5083,8 +5115,7 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     ReadScope motionRead(cmdList, motion, motionRest);
     ReadScope exposureRead(cmdList, static_cast<ID3D12Resource*>(frame.ExposureTexture), exposureRest);
 
-    if (g_compose == nullptr)
-        g_compose = std::make_unique<DlssNr_Dx12>("Neural Rendering", device);
+    EnsureCompose(device);
 
     device->Release();
 
