@@ -393,23 +393,28 @@ ApplyModel=auto
 ; true or false - Default (auto) is false
 UseProxy=auto
 
-; Where the pass runs. 0 Auto: on the swapchain backbuffer once the game's upscaler has handed over
-; its depth and motion, on the upscaler's output until then. 1 Upscaled: in place, right after the
+; Where the pass runs. 0 Auto: on a D3D12 game's swapchain backbuffer once its upscaler has handed
+; over depth and motion, on the upscaler's output until then. 1 Upscaled: in place, right after the
 ; game's upscaler writes its (linear, un-tonemapped) output. 2 Present: on the finished, tone-mapped
-; backbuffer at present, before frame generation makes its frames from it. Direct3D only; a Vulkan
-; game keeps running where it always has. On the D3D11 bridge this is read when the swapchain is
-; created, so a change there needs a restart.
+; backbuffer at present, before frame generation makes its frames from it.
+; Leave it at 1 when the upscaler runs through OptiScaler's D3D12 bridge (a Vulkan or D3D11 game with
+; a DX12-only upscaler): 0 and 2 hand the pass to a present hook those games never reach, so nothing
+; runs. The one exception is 2 on a D3D11 game, which hosts the pass on the bridge's own swapchain;
+; that is decided when the swapchain is created, so a change there needs a restart. A native Vulkan
+; game ignores this key.
 ; 0 to 2 - Default (auto) is 1
 HookMethod=auto
 
-; Present (HookMethod=2) only: require the game's DLSS depth and motion. On, a frame with no temporal
-; inputs yet is shown as the game rendered it; off, the pass runs on constant depth and no motion,
-; which is right for a title whose upscaler is not DLSS.
+; D3D12 Present (HookMethod=2) only: require the game's DLSS depth and motion. On, a frame with no
+; temporal inputs yet is shown as the game rendered it; off, the pass runs on constant depth and no
+; motion, which is right for a title whose upscaler is not DLSS. The D3D11 bridge's host always runs
+; on constant depth and no motion, whatever this says.
 ; true or false - Default (auto) is false
 RequireDlss=auto
 
-; HookMethod 0 or 2 only: wait for the pass's backbuffer write-back to finish on the GPU before the
-; flip, so the frame that reaches the screen (and frame generation) is the finished one.
+; D3D12, HookMethod 0 or 2 only: wait for the pass's backbuffer write-back to finish on the GPU before
+; the flip, so the frame that reaches the screen (and frame generation) is the finished one. No effect
+; on the D3D11 bridge's host, whose work is already on the flip's own queue.
 ; true or false - Default (auto) is true
 PresentSync=auto
 
