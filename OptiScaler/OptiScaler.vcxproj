@@ -850,6 +850,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="dlssnr\DlssNr_Proxy.cpp" />
     <ClCompile Include="dlssnr\DlssNr_Menu.cpp" />
     <ClCompile Include="dlssnr\DlssNr_Consumers.cpp" />
+    <ClCompile Include="dlssnr\DlssNr_ModelLog.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ZeroGuides.cpp" />
     <ClCompile Include="dlssnr\DlssNr_PresentHost.cpp" />
     <ClCompile Include="inputs\NVNGX_DLSS_Dx12.cpp" />
@@ -896,6 +897,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\DlssNr_SubmissionModel.h" />
     <ClInclude Include="dlssnr\DlssNr_PassSettings.h" />
     <ClInclude Include="dlssnr\DlssNr_Consumers.h" />
+    <ClInclude Include="dlssnr\DlssNr_ModelLog.h" />
     <ClInclude Include="dlssnr\DlssNr_ZeroGuides.h" />
     <ClInclude Include="dlssnr\DlssNr_PresentHost.h" />
     <ClInclude Include="dlssnr\DlssNr_Exposure.h" />

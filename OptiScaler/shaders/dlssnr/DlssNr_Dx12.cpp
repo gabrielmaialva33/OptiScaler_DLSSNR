@@ -9,6 +9,7 @@
 #include <dlssnr/DlssNr_Chain.h>
 #include <dlssnr/DlssNr_Consumers.h>
 #include <dlssnr/DlssNr_Submission.h>
+#include <dlssnr/DlssNr_ModelLog.h>
 #include <dxgi1_4.h>
 
 #include "DlssNr_Dx12.h"
@@ -2696,6 +2697,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             device->Release();
             return false;
         }
+
+        // Before the build, so the model's own account of it ("Created feature ...") is in the log.
+        DlssNr::ModelLog::Install(*snippet);
 
         SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
         DXGI_QUERY_VIDEO_MEMORY_INFO memoryBefore {};

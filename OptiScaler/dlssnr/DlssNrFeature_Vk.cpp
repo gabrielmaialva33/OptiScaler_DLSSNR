@@ -7,6 +7,7 @@
 #include <Util.h>
 #include <NVNGX_Parameter.h>
 #include <dlssnr/DlssNr_Consumers.h>
+#include <dlssnr/DlssNr_ModelLog.h>
 
 #include <shaders/dlssnr/DlssNr_Vk.h>
 #include <shaders/output_scaling/OS_Vk.h>
@@ -730,6 +731,9 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
             Fail("nvngx_dlssnr.dll was not found beside OptiScaler or the game");
             return;
         }
+
+        // Before init and the first build, so the model's own account of them is in the log.
+        DlssNr::ModelLog::Install(*snippet);
 
         const int probe = g_vk.probe != nullptr ? g_vk.probe(snippet->wstring().c_str()) : 0;
 
