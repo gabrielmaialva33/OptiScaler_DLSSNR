@@ -1000,20 +1000,19 @@ void ParkNrResource(ID3D12Resource*& res)
     g_nrRetired.push_back(r);
 }
 
+// Parked like everything else, tracked or not. The scaler owns descriptor heaps and buffers that the
+// previous frame's recording still references; deleting it here on the untracked path freed them
+// under the GPU whenever the NR downscaler changed during supersampling.
 void ParkNrScaler(OS_Dx12*& scaler)
 {
     if (!scaler)
         return;
-    if (!g_tracked)
-    {
-        delete scaler;
-        scaler = nullptr;
-        return;
-    }
+
     NrRetired r;
+    r.tracked = g_tracked;
+    if (g_tracked)
+        r.usage = g_usage;
     r.scaler = scaler;
-    r.tracked = true;
-    r.usage = g_usage;
     scaler = nullptr;
     g_nrRetired.push_back(r);
 }
