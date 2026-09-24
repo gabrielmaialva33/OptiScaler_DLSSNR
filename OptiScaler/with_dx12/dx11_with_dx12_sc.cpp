@@ -14,6 +14,8 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
+#include <thread>
+
 #pragma intrinsic(_ReturnAddress)
 
 namespace Dx11wDx12
@@ -650,6 +652,30 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 // XeFG: the presenter stays windowed, the window becomes a borderless popup over the target output,
 // and the game is told it is fullscreen. A real frame-generation presenter keeps its own path
 // (FGHooks::hkSetFullscreenState), untouched.
+// Style and placement for the emulated fullscreen, applied without ever blocking the caller.
+//
+// SetWindowLongPtr and SetWindowPos send messages synchronously to the thread that owns the window.
+// A game calls SetFullscreenState from its render thread, and if its window thread is waiting on
+// that render thread at that moment, the two wait on each other for good: Generation Zero hung that
+// way before its first frame (Windows AppHangB1, 2026-09-24), on the run where it asked for
+// fullscreen before presenting, and not on the one where it presented first. When another thread
+// owns the window, the change is made from a detached helper, which may wait for the window thread
+// as long as it likes; the caller returns at once.
+static void ApplyWindowPlacement(HWND hwnd, LONG_PTR style, LONG_PTR exStyle, HWND insertAfter, RECT rect, UINT flags)
+{
+    const auto apply = [=]()
+    {
+        SetWindowLongPtr(hwnd, GWL_STYLE, style);
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle);
+        SetWindowPos(hwnd, insertAfter, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, flags);
+    };
+
+    if (GetWindowThreadProcessId(hwnd, nullptr) == GetCurrentThreadId())
+        apply();
+    else
+        std::thread(apply).detach();
+}
+
 bool Dx11wDx12SC::_EmulatesFullscreen() const
 {
     return _fgSwapChain != nullptr && FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
@@ -675,13 +701,14 @@ void Dx11wDx12SC::_EnterBorderless(IDXGIOutput* target)
     const auto info = _emulatedTarget != nullptr ? Util::GetMonitorInfoForOutput(_emulatedTarget)
                                                  : Util::GetMonitorInfoForWindow(_handle);
 
-    SetWindowLongPtr(_handle, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-    SetWindowLongPtr(_handle, GWL_EXSTYLE, WS_EX_APPWINDOW);
-    SetWindowPos(_handle, HWND_TOP, info.x, info.y, info.width, info.height, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-
+    // Logged before the window is touched, so a hang there would still leave its last line.
     if (!_emulatedFullscreen)
         LOG_INFO("Dx11wDx12SC {}: exclusive fullscreen emulated as a borderless window, {}x{} at {},{}", _id,
                  info.width, info.height, info.x, info.y);
+
+    const RECT placement = { info.x, info.y, info.x + info.width, info.y + info.height };
+    ApplyWindowPlacement(_handle, WS_POPUP | WS_VISIBLE, WS_EX_APPWINDOW, HWND_TOP, placement,
+                         SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 
     _emulatedFullscreen = true;
 }
@@ -690,11 +717,9 @@ void Dx11wDx12SC::_LeaveBorderless()
 {
     if (_emulatedFullscreen)
     {
-        SetWindowLongPtr(_handle, GWL_STYLE, _savedStyle);
-        SetWindowLongPtr(_handle, GWL_EXSTYLE, _savedExStyle);
-        SetWindowPos(_handle, nullptr, _savedRect.left, _savedRect.top, _savedRect.right - _savedRect.left,
-                     _savedRect.bottom - _savedRect.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE);
-        LOG_INFO("Dx11wDx12SC {}: left emulated fullscreen, window restored", _id);
+        LOG_INFO("Dx11wDx12SC {}: leaving emulated fullscreen, window restored", _id);
+        ApplyWindowPlacement(_handle, _savedStyle, _savedExStyle, nullptr, _savedRect,
+                             SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
     SafeRelease(_emulatedTarget);
