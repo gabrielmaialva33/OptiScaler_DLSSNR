@@ -3281,8 +3281,15 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const int guideDepthInverted = g_nr.guideDepthInverted ? 1 : 0;
     const bool isLogFrame = g_frames % 120 == 0;
 
-    SetExtras(cfg, nullptr, frame.PresentSource ? target : nullptr, 0, 0, frame.PresentSource ? width : 0,
-              frame.PresentSource ? height : 0);
+    // On a present source the model is also handed the back buffer -- and it reads it in its own working
+    // space. Handing it the full-size frame while the model worked at 960x540 showed up as the top-left
+    // quarter of the screen, HUD included, magnified 2x and blended over the picture (Generation Zero and
+    // Divinity at WorkingScale 0.5 on a Windows 3060, 2026-09-24). With the matched-residual transfer a
+    // wrong input would cancel out, so the magnified content could only have come in through here. It is
+    // now the model's own input at the working size: the same pixels as before at scale 1 (on a present
+    // source the proxy is the frame), and a match at any other scale.
+    SetExtras(cfg, nullptr, frame.PresentSource ? modelInput : nullptr, 0, 0, frame.PresentSource ? workWidth : 0,
+              frame.PresentSource ? workHeight : 0);
 
     // The proxy path, when asked for. Same inputs, same model -- the difference is who calls it.
     //
