@@ -3716,8 +3716,13 @@ static constexpr unsigned long long kFgHookTimeout = 16;
 // enters the present-time body, so it keeps its own render count and last outcome here.
 // ReportRuntimeStatus reads both; that is what makes the status line route-agnostic.
 static unsigned long long g_upscaleRenders = 0;
-static bool g_upscaleApplied = false;
-static const char* g_upscaleReason = nullptr;
+// Written on the render thread, read on the present thread, so atomic. The last outcome alone is not
+// the window's: an evaluate clears it before it dispatches, and a present that reads it in that gap
+// reported "no pass this window" over windows where every frame ran (STALKER 2, Starfield, Cyberpunk).
+// The window's answer is g_passesRecorded, which only ever counts up; the flag stays for the reason.
+static std::atomic<bool> g_upscaleApplied { false };
+static std::atomic<const char*> g_upscaleReason { nullptr };
+static std::atomic<unsigned long long> g_passesRecorded { 0 };
 static bool g_sourceIsPresent = false;
 static ID3D12Resource* g_bbCopy = nullptr;
 static unsigned int g_bbCopyWidth = 0;
@@ -3893,6 +3898,7 @@ void ReportRuntimeStatus(bool passRecorded, const char* skipReason)
 {
     static unsigned long long lastPresent = 0;
     static unsigned long long lastRender = 0;
+    static unsigned long long lastPasses = 0;
     static std::chrono::steady_clock::time_point lastAt {};
 
     const auto now = std::chrono::steady_clock::now();
@@ -3902,8 +3908,11 @@ void ReportRuntimeStatus(bool passRecorded, const char* skipReason)
     const auto renderCount = g_renderSeq + g_upscaleRenders;
     const auto presents = g_presentFlip - lastPresent;
     const auto renders = renderCount - lastRender;
+    const auto passCount = g_passesRecorded.load();
+    const bool anyPass = passCount != lastPasses;
     lastPresent = g_presentFlip;
     lastRender = renderCount;
+    lastPasses = passCount;
     lastAt = now;
 
     if (renders == 0 && presents == 0)
@@ -3911,7 +3920,7 @@ void ReportRuntimeStatus(bool passRecorded, const char* skipReason)
 
     const double ratio = renders != 0 ? (double) presents / (double) renders : 0.0;
 
-    if (passRecorded)
+    if (passRecorded || anyPass)
         LOG_INFO("DLSS-NR status: {} | {} presents : {} renders = {:.2f}x on screen", HookStatus(), presents, renders,
                  ratio);
     else
@@ -3968,7 +3977,8 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     {
         // The upscaled route recorded (or declined) its pass on the upscaler's command list; this
         // is still the one place per present to say so.
-        ReportRuntimeStatus(g_upscaleApplied, g_upscaleReason ? g_upscaleReason : "no upscaler evaluate yet");
+        const char* upscaleReason = g_upscaleReason.load();
+        ReportRuntimeStatus(g_upscaleApplied.load(), upscaleReason ? upscaleReason : "no upscaler evaluate yet");
         return;
     }
 
@@ -4131,6 +4141,8 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     // side only, on paths facing the identical situation.
     const char* reason = "";
     const bool recorded = EvaluateAtPresent(list, g_bbCopy, depth, motion, frame, queue, &reason);
+    if (recorded)
+        ++g_passesRecorded;
 
     // The one status line, on its own cadence. present:render is the multiplier that actually reached
     // the screen -- the number a session spends the most effort reconstructing by hand otherwise.
@@ -4575,6 +4587,8 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
         coverage.sample.reason = "composition recorded into upscaler output";
     g_upscaleApplied = coverage.sample.applied;
     g_upscaleReason = coverage.sample.reason;
+    if (coverage.sample.applied)
+        ++g_passesRecorded;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4721,6 +4735,8 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
         {
             g_upscaleApplied = scope.sample.applied;
             g_upscaleReason = scope.sample.reason;
+            if (scope.sample.applied)
+                ++g_passesRecorded;
         }
     } publishOutcome { coverage };
 
