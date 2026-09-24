@@ -797,9 +797,8 @@ extern "C"
     // Creates the feature on a Vulkan command buffer. Same contract as the D3D12 one: initialisation work
     // is recorded into the buffer, so the handle has to outlive its execution.
     //
-    // The tuning is set here and not at evaluate, for the same reason it is on the D3D12 path: the model
-    // reads these once, when it builds the feature, and anything set only at evaluate is ignored. That was
-    // why none of these controls did anything for a long time.
+    // The tuning is set here as well as at evaluate, as on the D3D12 path: the feature is built with it,
+    // and the model reads it again at every evaluate. Only the preset is create-time.
     __declspec(dllexport) void* dlssnr_vk_create(void* cmdBuffer, void* capabilityParams, unsigned int width,
                                                  unsigned int height, int preset, float intensity, int style,
                                                  float localStructure, float localTone, float skinStructure,
@@ -949,9 +948,11 @@ extern "C"
         // in it -- and going back to default did nothing at all.
         setUInt(capabilityParams, "DLSSNR.Hint.Render.Preset", (unsigned int) preset);
 
-        // The tuning has to be here rather than at evaluate. Everything this sets before create takes
-        // effect; everything set only at evaluate is ignored, which is why none of these controls did
-        // anything for a long time. The model reads them once, when it builds the feature.
+        // The tuning is set here as well as at evaluate, so the feature is built with it. For a long time
+        // these controls appeared to do nothing unless they were here, and the model was believed to read
+        // them only at build; the RenoDX trace in neural-amd (RESULTADO-nvidia-preset-style-ets2) shows it
+        // taking a Style change at evaluate with no rebuild, which is what the host relies on since
+        // 748f8896. The preset is the one that stays create-time.
         setFloat(capabilityParams, "DLSSNR.Intensity", intensity);
         setUInt(capabilityParams, "DLSSNR.Style", (unsigned int) style);
         setFloat(capabilityParams, "DLSSNR.LocalStructureStrength", localStructure);

@@ -1,5 +1,10 @@
 # NR without an upscaler — use the existing D3D11-to-D3D12 swapchain bridge
 
+Update 2026-09-23: **implemented** as `a62a0ec8` (the pass at present on the D3D11 bridge) with
+zero guides from `5964fe3e`, gated on `HookMethod=2` since `e7ca0209`, and measured working in
+Divinity: Original Sin 2 and The Witcher 3 on 2026-09-18 (see "Measured" below). Supersampling on
+zero guides is clamped to native (`fcc5fdf0`).
+
 Status: design for review, **not implemented**. Source audit against `f4b23a31` (2026-09-12),
 including the independent review appended to [nr-present-hook.md](nr-present-hook.md) and the
 updated step 2 in [nr-without-game-dlss.md](nr-without-game-dlss.md). Line references below are

@@ -1,5 +1,10 @@
 # NR without a game DLSS call — where the evaluate could come from when nothing asks for it
 
+Update 2026-09-23: the prerequisite and the first two steps have shipped -- the D3D11 bridge host
+(`a62a0ec8`), zero guides (`5964fe3e`) and the D3D12 present pass (`3e1b3960`). Real motion without
+engine buffers is [synthesized-motion.md](synthesized-motion.md), still unbuilt; depth is not
+started.
+
 Status: **design only, and deliberately blocked behind a prerequisite.** Not scheduled. Written after
 surveying the ReShade-addon ecosystem that solves the same problem a different way (2026-09-11), so
 the reasoning does not have to be rediscovered.

@@ -1,5 +1,10 @@
 # Synthesized motion vectors for the no-upscaler NR path
 
+Update 2026-09-23: the §11 step 1 experiment ran. `b5db624e` gave the zero field real units
+(`MvScale` = frame size, depth inverted); `fcc5fdf0` took it out again and clamps a zero-guide caller
+to native instead, so units alone did not clear the above-1.0 refusal and that question now rests on
+§11 step 2. The skeleton is still unbuilt.
+
 Status: **design + unbuilt skeleton.** Not scheduled, not built, not wired. The skeleton files named
 in [§10](#10-skeleton-files-in-this-change-unbuilt) exist but are in no `.vcxproj`, generate no
 precompiled header, and are not referenced by any existing source. Written against the tree at

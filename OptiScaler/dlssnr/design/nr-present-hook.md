@@ -1,5 +1,9 @@
 # Present-time NR — port the host, preserve this fork's contracts
 
+Update 2026-09-23: **implemented.** `3e1b3960` (the D3D12 present-time pass and temporal capture,
+`HookMethod=2`) and `37db9f65` (the `DLSS_NEURAL_RENDERING` gate removed, without which LTCG dropped
+the pass from every build). The text below is the design as written; the code is the authority.
+
 Status: **design only, reviewed twice; no implementation or deployment.** Written 2026-09-12 against
 `393cd0b04e80d16923969c1a9d302983318c51e9`, re-audited 2026-09-13 against `150b49d0` — see the
 2026-09-13 update at the end, which changes the recommended first slice and settles the one hazard

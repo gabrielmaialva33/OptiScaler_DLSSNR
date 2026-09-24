@@ -16,17 +16,29 @@ claimed to be — one line each — so deleting them is the removal.
 
 1. Delete `OptiScaler/dlssnr/` and `OptiScaler/shaders/dlssnr/`.
 2. Drop `dlssnr_forwarder.vcxproj` from the solution.
-3. Delete the six call sites below, and the `[DlssNr]` block in `Config.h` / `Config.cpp`.
+3. Delete the call sites below, and the `[DlssNr]` block in `Config.h` / `Config.cpp`.
 
-Nothing else refers to it.
+Nothing else refers to it. The list grew with the present-time host, the exposure scan and the
+Vulkan route; it was six files once, and a grep for `DlssNr` outside the two module directories is
+what keeps it honest (last taken 2026-09-23).
 
-| File | Sites | What the calls do |
-|---|---|---|
-| `inputs/NVNGX_DLSS_Dx12.cpp` | 2 | the pass after an upscale, on each of the two evaluate routes |
-| `menu/menu_common.cpp` | 2 | the settings panel, and the cost row in the timing table |
-| `upscalers/IFeature_Dx11wDx12.cpp` | 1 | the pass inside the D3D11-on-D3D12 bridge |
-| `upscalers/IFeature_VkwDx12.cpp` | 1 | the pass inside the Vulkan-on-D3D12 bridge |
-| `Config.h` / `Config.cpp` | 3 | the `[DlssNr]` declarations and their read/write runs |
+| File | What the calls do |
+|---|---|
+| `inputs/NVNGX_DLSS_Dx12.cpp` | the pass after an upscale on each evaluate route, the pre-upscale scope, an exposure-scan note |
+| `inputs/NVNGX_DLSS_Vk.cpp` | the Vulkan pass after an upscale |
+| `upscalers/IFeature_Dx11wDx12.cpp` | the pass and pre-upscale scope inside the D3D11-on-D3D12 bridge, the D3D11 probe |
+| `upscalers/IFeature_VkwDx12.cpp` | the pass and pre-upscale scope inside the Vulkan-on-D3D12 bridge |
+| `wrapped/wrapped_swapchain.cpp` | the present-time pass (`RunPresentPass`) |
+| `hooks/FG_Hooks.cpp` | the present-time pass from OptiScaler's frame-generation present |
+| `with_dx12/dx11_with_dx12_sc.{h,cpp}` | the D3D11 bridge's present host (`PresentHost`) |
+| `hooks/D3D12_Hooks.cpp` | exposure-scan resource notes |
+| `resource_tracking/ResTrack_dx12.cpp` | exposure-scan resource notes and submission tracking |
+| `hooks/Vulkan_Hooks.cpp` | the device extensions the Vulkan route needs (`VkExt`) |
+| `menu/menu_common.cpp` | the settings panel, the timing row, the toggle key, compare tags, the scan meter |
+| `Config.h` / `Config.cpp` | the `[DlssNr]` declarations and their read/write runs |
+
+`shaders/output_scaling/OS_Dx12.h` also takes a downscaler argument NR passes; it defaults, so it
+needs no edit.
 
 The config block is contiguous and marked `removable as one block` at both ends, so it lifts out
 whole rather than needing to be picked apart.
@@ -57,17 +69,22 @@ experiment.
 
 ### Editing the shader
 
-`dlssnr.hlsl` is **precompiled**; editing it alone changes nothing. Rebuild the header:
+`dlssnr.hlsl` is **precompiled**; editing it alone changes nothing. Rebuild **both** targets and
+both headers (`design/DEVELOPMENT.md` invariant 6 is the authority):
 
 ```
 cd OptiScaler/shaders/dlssnr/precompile
-../../shader_tools/fxc.exe -T cs_5_0 -E CSMain -O3 dlssnr.hlsl -Fo DlssNr_Shader.cso
+../../shader_tools/dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect dlssnr.hlsl -Fo DlssNr_Shader.cso
+../../shader_tools/dxc.exe -spirv -T cs_6_0 -E CSMain -O3 -Qstrip_debug -D VK_MODE -Cc -Vi dlssnr.hlsl -Fo DlssNr_Shader_Vk.spv
 python ../../shader_tools/create_header.py DlssNr_Shader.cso DlssNr_Shader.h DlssNr_cso
+python ../../shader_tools/create_header.py DlssNr_Shader_Vk.spv DlssNr_Shader_Vk.h dlssnr_spv
 ```
 
-**fxc `cs_5_0`, not the dxc in `build_precompiled_shader.bat` next to it.** Only fxc reproduces the
-committed header byte for byte; dxc emits DXIL and would silently change what the pass runs on.
-Verified by recompiling the unmodified shader both ways and diffing.
+On Linux run `dxc.exe` under the msvc-wine prefix (`WINEPREFIX=~/.local/opt/msvc-wineprefix wine
+...`), and not while a build is using it. The committed `.cso` is DXIL from dxc `cs_6_0`; an older
+revision of this section said fxc `cs_5_0`, which no longer reproduces it. `tests/nr-invariants`
+checks that each header is exactly the bytecode beside it; that the bytecode is the compile of the
+current `.hlsl` is yours to check.
 
 ## Attribution
 
@@ -94,11 +111,17 @@ part of the solution, and builds with everything else.
   chroma added. Composing it additively — which earlier revisions did — discards the model's
   behaviour in highlights and makes every arrangement look alike. At strength zero the frame is
   bit-identical, always.
-- **Create-time parameters.** The model's tuning (preset, style, intensity, local *) is latched at
-  feature creation; changes rebuild the feature after a settle. The driver's parameter block is not
-  the SDK header's vtable (floats sit at slot 6); the forwarder probes it. Rebuilding every frame
-  exhausts the driver's latches and the feature stops responding until the process restarts, which
-  is why the rebuild is debounced.
+- **Create-time and live parameters.** The preset (the weight set) is read when the feature is
+  built, so a preset change rebuilds it after a settle, as do resolution and placement. Style,
+  intensity, local structure and tone, skin and the auto mask are read at every evaluate and apply
+  without a rebuild (`748f8896`); a change pulses a history reset. That was once measured the other
+  way, and the README said so; the RenoDX trace in neural-amd
+  (`handoffs/RESULTADO-nvidia-preset-style-ets2-20260921.md`) shows the model taking a Style change
+  with no CreateFeature and logging its own "reset temporal history ... after control change", and
+  with the model's diagnostics now in `OptiScaler.log` (`DlssNr_ModelLog`) a session shows it
+  directly. The driver's parameter block is not the SDK header's vtable (floats sit at slot 6); the
+  forwarder probes it. Rebuilding every frame exhausts the driver's latches and the feature stops
+  responding until the process restarts, which is why the rebuild is debounced.
 - **Never free under the GPU.** Every retired feature or surface is parked and freed 32 evaluates
   later; every internal feature is created on a private queue and fenced before use. Both rules were
   paid for with device hangs.
