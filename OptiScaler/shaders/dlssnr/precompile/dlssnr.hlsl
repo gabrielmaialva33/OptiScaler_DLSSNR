@@ -963,7 +963,35 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // distorter -- on a saturated pixel the smallest channel reaches the bound first, so an
     // achromatic edit lands as a colour shift.
     const float guard = max(gMaxRatio, 1.0);
-    float boundedRatio = clamp(amplified, 1.0 / guard, guard);
+
+    // Relighting cannot invent light, so the room to brighten shrinks toward none as a pixel
+    // approaches black.
+    //
+    // The composed pixel is the frame's own pixel times this number, and a scalar cannot move hue,
+    // so whatever tint the texture already had is multiplied along with everything else -- and a
+    // dark pixel's tint is the most saturated thing about it. RGB (2, 4, 20) is almost invisible
+    // with a chroma of 0.9; at a guard of 8 it becomes (15, 25, 67), a glaring blue block, and the
+    // game's own colour every step of the way. Below this floor there is also nothing to relight
+    // *from*: at a couple of counts the pixel's value is mostly quantisation, so a full lift
+    // amplifies the transport rather than the model's verdict. Measured in DLSS5VKLayer (ab31968),
+    // which carries this same shader: a shadowed (20, 26, 44) keeps 6.4x of an 8x guard, anything at
+    // mid shadow or brighter is untouched, and the near-black ring keeps 1.2x.
+    //
+    // Only upward. Darkening a near-black pixel further is harmless -- it stays black.
+    const float lift = lerp(1.0, guard, smoothstep(0.0, 8.0 * kRatioFloor, originalLuma));
+
+    // And the room to darken shrinks toward none as a pixel approaches white, the same reason read
+    // the other way round.
+    //
+    // The guard is symmetric, so raising it to allow stronger relighting allowed equally strong
+    // darkening, and a light source is exactly where that shows: at a guard of 3 a lamp may fall to
+    // a third of itself and visibly dims, which reads as the value inverting. Detail strength makes
+    // it worse, because it raises the ratio to a power -- at 2.0 a ratio of 0.85 becomes 0.72, the
+    // lamp core DLSS5VKLayer measured before this and 1.00 after. The floor now rises to one as the
+    // pixel reaches paper white, so a highlight cannot be pulled down however high the guard goes,
+    // while a bright wall at 0.75 and everything below it is bounded exactly as before.
+    const float drop = lerp(1.0 / guard, 1.0, smoothstep(0.6, 1.1, originalLuma));
+    float boundedRatio = clamp(amplified, drop, lift);
 
     // Exactly one while the ratio is already inside the guard, so a frame that never needed bounding
     // is untouched rather than rounded, and strength zero stays bit-identical.
