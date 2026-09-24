@@ -988,8 +988,11 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // a third of itself and visibly dims, which reads as the value inverting. Detail strength makes
     // it worse, because it raises the ratio to a power -- at 2.0 a ratio of 0.85 becomes 0.72, the
     // lamp core DLSS5VKLayer measured before this and 1.00 after. The floor now rises to one as the
-    // pixel reaches paper white, so a highlight cannot be pulled down however high the guard goes,
-    // while a bright wall at 0.75 and everything below it is bounded exactly as before.
+    // pixel passes paper white, so an HDR highlight cannot be pulled down however high the guard goes,
+    // while a bright wall at 0.75 and everything below it is bounded exactly as before. On a frame that
+    // arrives display-referred (passthrough, the present route) white is 1.0 and never reaches 1.1, so
+    // there the floor stops at about 0.9 + 0.1 / guard -- 0.95 at the default guard of 2: a highlight
+    // can still lose a few percent, not a third.
     const float drop = lerp(1.0 / guard, 1.0, smoothstep(0.6, 1.1, originalLuma));
     float boundedRatio = clamp(amplified, drop, lift);
 
