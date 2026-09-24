@@ -11,7 +11,10 @@ repo), which adds Linux/Proton overlay patches on top.
 
 - Working and default branch: `dlss-neural-rendering` = Dagherbou's `v0.2.0-dlssnr` (commit `9737616`)
   plus our Linux patches. `up/master` is plain upstream OptiScaler, ~150 commits behind.
-- Remotes: `origin` (SSH, push target) and `up` (Dagherbou, read-only).
+- Remotes: `origin` (SSH, push target) and `up` (Dagherbou, read-only), plus two read-only
+  references: `optiscaler` (plain upstream OptiScaler, for auditing and cherry-picking its fixes)
+  and `scottmudge` (another NR fork; its present-hook work is already in this tree, rewritten, so
+  compare behaviour rather than patches -- `git apply --check` calls all of it "diverged").
 - Update flow: `git fetch up && git merge up/dlss-neural-rendering`. `fetch.recurseSubmodules=no` is
   already set in the repo config; keep it.
 - Commit subjects use prefixes seen in history: `DLSS-NR:` for the module, `linux:` for Proton
@@ -171,39 +174,44 @@ Vendored headers the build includes directly live in `OptiScaler/include/` and `
 
 ### Formatting
 
-CI runs clang-format 20 over `OptiScaler/` excluding `external/`, `OptiScaler/include/` and
-`/precompile/`. Style is in `.clang-format`: LLVM base, Allman braces, 4-space indent, 120 columns,
+CI runs clang-format **22** over `OptiScaler/` excluding `external/`, `OptiScaler/include/` and
+`/precompile/` (`.github/workflows/clang-format.yml`, moved from 20 to 22 in `cec3c146` along with
+upstream). Style is in `.clang-format`: LLVM base, Allman braces, 4-space indent, 120 columns,
 `SortIncludes: false`, `Type* ptr` pointer alignment.
 
-**Use the pinned binary, not the one on `PATH`.** `PATH` has clang-format 22, which disagrees with
-CI: it reported 13 upstream files as violations that version 20 accepts.
+**Use the `clang-format` on `PATH`** (22.x), which is the version CI pins. The Arch `clang20` binary
+at `/usr/lib/llvm20/bin/clang-format` was the pin before that and now disagrees with CI in the other
+direction: it flags upstream's 22-formatted `Config.h` and `NVNGX_Proxy.h`.
 
 ```bash
-CF=/usr/lib/llvm20/bin/clang-format          # Arch package clang20; PATH has 22, do not use it
-for f in $(fd -e cpp -e h . OptiScaler --exclude include --exclude external); do
-    "$CF" --dry-run --Werror "$f" >/dev/null 2>&1 || echo "$f"
+for f in $(fd -e cpp -e h . OptiScaler --exclude include --exclude external --exclude precompile); do
+    clang-format --dry-run --Werror "$f" >/dev/null 2>&1 || echo "$f"
 done
 ```
 
 `.clang-format-ignore` at the repo root excludes the generated shader bytecode headers
 (`*_Shader.h`, `*_Shader_Dx11.h`, `*_Shader_Vk.h`). They are emitted by `create_header.py`, so
 formatting them is undone by the next shader rebuild; the CI `exclude-regex` carries `/precompile/`
-for the same reason. The tree is currently clean under version 20.
+for the same reason. The tree is clean under 22 as of `5360a854` (2026-09-23); run the loop above
+before committing C++, because nothing local enforces it and it had drifted by 500+ lines once.
 
 ### Tests
 
-`tests/README.md` is the index; read it before adding or changing a suite. Fifteen directories under
+`tests/README.md` is the index; read it before adding or changing a suite. Twenty directories under
 `tests/`, each self-contained with its own `run.py` and README, registered in `tests/suites.toml`.
 
 ```bash
-python3 tests/run_all.py            # host tier, the default; 12 suites, ~50 s
+python3 tests/run_all.py            # host tier, the default; 17 suites, ~50 s
 python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
 python3 tests/run_all.py --tier all # adds the three wine suites
 python3 tests/<name>/run.py         # one suite, unchanged
 ```
 
-Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the eleven `nr-*`
-suites plus `bridge-lifetime`. **wine** needs the msvc-wine prefix and runs serially, because these suites contend for the
+Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the fourteen
+`nr-*` suites plus `bridge-lifetime`, `vulkan-query-readiness` and `mfg-pattern`. One of them,
+`nr-invariants`, is the `DEVELOPMENT.md` §4 mechanical guard (config round-trip for every `DlssNr`
+key, struct equals cbuffer, precompiled headers equal the committed bytecode, retired identifiers);
+it is pure Python and the one to run after touching `Config.*`, `OptiScaler.ini` or the shader. **wine** needs the msvc-wine prefix and runs serially, because these suites contend for the
 same prefix `build-local.sh` uses: `nr-gpu-timing-d3d12`, `vulkan-overlay` (which also needs a
 graphical session and a working Vulkan loader), and `dlssnr-loopback` (real NGX/NR under Proton).
 There are currently no **wip** suites.
@@ -396,6 +404,16 @@ rebuild, no temporal accumulator).
   tags, scan meter), `hooks/Vulkan_Hooks.cpp` (device extensions), `hooks/D3D12_Hooks.cpp` and
   `resource_tracking/ResTrack_dx12.cpp` (exposure-scan resource notes), and the `[DlssNr]` block in
   `Config.h/.cpp` marked `removable as one block`. Everything must be inert when `DlssNrEnabled` is off.
+  The full list, with what each site does, is in `dlssnr/README.md`.
+- **The model's own log is in `OptiScaler.log`.** `DlssNr_ModelLog` patches the model's
+  `OutputDebugStringA/W` import before the first feature build, so its lines appear as
+  `DLSS-NR model: ...` (feature built at WxH with which weights, history reset after a control
+  change). It also reads "N config(s) available": 310.8 reports one, which is why the preset combo is
+  hidden then. Look there before measuring pixels to learn what the model did.
+- **A fault inside the model no longer takes the game down.** The forwarder makes every model call
+  inside `__try`; the first fault is recorded, every later call is refused (release included -- the
+  model can be left holding its lock), and the host switches NR off for the session with
+  `DLSS-NR: the model faulted inside its own code ... (exception 0x... at module+0x...)` in the log.
 - **Invariants** (`dlssnr/design/DEVELOPMENT.md` §1, enforced by review): default-identical when off;
   no control shown for a thing that does not exist; one quantity, one control; four-point config
   round-trip; `DlssNrConstants` (C++) and the `Params` cbuffer (HLSL) are one ordered scalar list,
