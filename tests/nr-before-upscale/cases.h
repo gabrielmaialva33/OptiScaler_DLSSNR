@@ -181,6 +181,11 @@ int main()
       assert(DlssNr::g_passesRecorded.load() == passesBefore); // a failed pass is not a recorded one
       assert(g_coverage[1].totals.modelFailed == 1 && g_coverage[1].totals.applied == 0);
       assert(infoLogs.back().find("model_ok=0 model_failed=1 applied_recorded=0") != std::string::npos); ++checks; }
+    { Fixture f; f.cfg.DlssNrStage = 1; f.cfg.DlssNrHookMethod = 2u;
+      { ScopedPreUpscale p(&f.cmd, &f.params, true);
+        assert(!p.Swapped() && p.Declined()); } // Present owns the frame: no second run before the upscaler
+      assert(f.params.gets == 0 && f.params.sets == 0 && f.device.allocations == 0);
+      f.Restored(); ++checks; }
     { Fixture f; f.cfg.DlssNrEnabled = false;
       DlssNr::g_resetOnReturn = false;
       { ScopedPreUpscale p(&f.cmd, &f.params, true); }

@@ -4816,6 +4816,18 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     if (!enabled || stage != 1)
         return;
 
+    // Present owns the frame whatever the stage; the menu hides Stage under Present for that reason.
+    // This scope never read the hook method, so Stage 1 with Present ran the model here, at render
+    // size, and again at present at display size -- and the size alternating every frame reset the
+    // model and rebuilt it on each. Declined rather than returned, so the after-upscale call for this
+    // evaluate still runs and captures the guides the present pass reprojects with.
+    if (cfg.DlssNrHookMethod.value_or_default() == 2)
+    {
+        _declined = true;
+        ReportSkipOnce("before the upscaler: the hook method is Present, which runs the pass at present instead");
+        return;
+    }
+
     CoverageScope coverage(1);
 
     // This route owns the frame from here: one render for the status line, and the outcome it will

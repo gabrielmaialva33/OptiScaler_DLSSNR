@@ -105,7 +105,9 @@ completion and resource retirement are still not proven by this host suite.
 
 The multipass integration extends the boundary checks to 56 cases, and the status and reset
 bookkeeping to 57: a recorded pass advances the counter the status window reads while a failed one
-does not, and NR found switched off by either entry point leaves a history reset owed. A refused submission
+does not, and NR found switched off by either entry point leaves a history reset owed. The 58th is
+Stage 1 under the Present hook method: the scope declines without touching the parameter block, so
+the model runs once, at present, rather than on both sides of the upscaler. A refused submission
 admission records no barrier, scratch allocation, parameter substitution or fake Dispatch.
 The actual INFO spatial-contract reporter is extracted too: it distinguishes successful
 subrect queries from absent/failed ones, suppresses unchanged contracts and warns when
