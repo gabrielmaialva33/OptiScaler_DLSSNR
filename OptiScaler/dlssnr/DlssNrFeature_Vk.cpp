@@ -685,6 +685,11 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     const uint32_t workHeight = (uint32_t) (height * workScale + 0.5f);
     const bool reduced = workWidth != width || workHeight != height;
 
+    // See kDlssNrMinExtent: a probe-sized swapchain must never get a model built for it.
+    if (width < kDlssNrMinExtent || height < kDlssNrMinExtent || workWidth < kDlssNrMinExtent ||
+        workHeight < kDlssNrMinExtent)
+        return;
+
     g_vk.instance = instance;
     g_vk.physicalDevice = physicalDevice;
 

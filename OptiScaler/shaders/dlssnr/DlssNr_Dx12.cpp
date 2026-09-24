@@ -2468,6 +2468,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
 
+    if (width < kDlssNrMinExtent || height < kDlssNrMinExtent || workWidth < kDlssNrMinExtent ||
+        workHeight < kDlssNrMinExtent)
+    {
+        reportSkip("the frame or working size is below 64 pixels; the model is not built that small");
+        device->Release();
+        return false;
+    }
+
     if (chainEnabled && !g_chainExtent.Observe(workWidth, workHeight, now, static_cast<uint32_t>(desc.Format)))
     {
         reportSkip("chain working resolution is settling (500 ms); no model reconstruction");

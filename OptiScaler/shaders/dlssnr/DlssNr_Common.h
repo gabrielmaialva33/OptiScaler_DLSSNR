@@ -26,6 +26,12 @@
 // comment on dlssnr_abi_version in dlssnr_forwarder.cpp records what each version means.
 constexpr int kDlssNrForwarderAbi = 2;
 
+// The smallest frame or working size the model is built for, on either side. A launcher's or a
+// title's probe swapchain can be 1x1, and a model built at that size hung the GPU on its first
+// submit in DLSS5VKLayer (Linux NVRM Xid 109, CTX SWITCH TIMEOUT; its commit edebf18). Nothing real
+// is lost below this: no one plays at 64 pixels.
+constexpr unsigned int kDlssNrMinExtent = 64;
+
 // Which of the passes a dispatch is. One shader, because they read and write the same set of
 // resources and differ only in what they compute.
 enum DlssNrMode : uint32_t
