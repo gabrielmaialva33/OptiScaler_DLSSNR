@@ -1014,7 +1014,30 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     const float kQuantFloor = 0.0097;  // SrgbToLinear(25/255), normalised units matching model
     const float hueTrust = smoothstep(0.0, kQuantFloor, modelLuma);
 
-    float3 result = lerp(original * boundedRatio, upgraded, min(gColourStrength, 1.0) * hueTrust);
+    // How far taking the model's colour would move this pixel, and how much of that to take.
+    //
+    // Both ends of the blend carry the same luminance -- the guard above bound them together -- so
+    // what separates them is chroma and nothing else. On a flat surface the model agrees with the
+    // frame about hue and the separation is small. On an edge it differs most, because an edge is
+    // precisely what the model was asked to re-decide, and taking its hue whole puts one colour on
+    // one side of the edge and its complement on the other: blue and orange fringing. Measured in
+    // DLSS5VKLayer (ab31968) on a game frame, the pass moved colour balance three to five times more
+    // at edges than on flat pixels, all of it from this blend.
+    //
+    // Bounded rather than gated. A gate that faded the model's colour out as disagreement grew was
+    // tried there first and was backwards: a large disagreement is also what a real correction
+    // looks like (a strip light the game renders blue and the model corrects to white swings 1.82),
+    // so it discarded the model's verdict exactly where it had one. The bound keeps the direction
+    // and limits only the length, at twice the pixel's own luminance -- the value that shipped
+    // there. A correction of ordinary size passes whole; only a larger swing is shortened, never
+    // inverted.
+    const float kColourBound = 2.0;
+    const float3 lumaOnly = original * boundedRatio;
+    const float3 colourDev = upgraded - lumaOnly;
+    const float chromaSwing = length(colourDev) / max(dot(lumaOnly, kLuma), 1e-4);
+    const float colourAllow = min(1.0, kColourBound / max(chromaSwing, 1e-6));
+
+    float3 result = lerp(lumaOnly, lumaOnly + colourDev * colourAllow, min(gColourStrength, 1.0) * hueTrust);
 
     if (gColourStrength > 1.0)
         result = ClampAp1(FromOkLab(float3(1.0, gColourStrength, gColourStrength) * ToOkLab(max(result, 0.0))));
