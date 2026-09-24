@@ -125,6 +125,10 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     UINT _GetDx11BackBufferIndexForPresent() const;
     void _AdvanceFakeBackBufferIndex();
     bool _WaitForInteropCopyOnPresentQueue();
+    bool _EmulatesFullscreen() const;
+    void _EnterBorderless(IDXGIOutput* target);
+    void _LeaveBorderless();
+    HRESULT _RecoverPresenterFromFullscreen();
 
     IDXGISwapChain* _real = nullptr;
     IDXGISwapChain1* _real1 = nullptr;
@@ -180,6 +184,15 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     bool _wasCurrentOnRelease = false;
     bool _hasInteropWork = false;
     bool _resizeIncomplete = false;
+
+    // Exclusive fullscreen as the game sees it, when the presenter is the plain D3D12 one; see
+    // SetFullscreenState. The window style and rect are the game's own, put back on leaving.
+    bool _emulatedFullscreen = false;
+    IDXGIOutput* _emulatedTarget = nullptr;
+    LONG_PTR _savedStyle = 0;
+    LONG_PTR _savedExStyle = 0;
+    RECT _savedRect {};
+    bool _presentFailureReported = false;
     UINT64 _dx11DrainValue = 0;
     ID3D12Fence* _drainFences[2] {};
     bool _drainSignaled[2] {};

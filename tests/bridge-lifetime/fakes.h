@@ -80,6 +80,9 @@ void SafeCloseHandle(HANDLE& value)
         value = nullptr;
     }
 }
+struct IDXGIOutput : Ref
+{
+};
 struct ID3D12Fence : Ref
 {
     UINT64 completed = 0;
@@ -352,6 +355,7 @@ class Dx11wDx12SC
     ID3D12Fence* _drainFences[2] {};
     bool _drainSignaled[2] {};
     bool _resizeIncomplete = false;
+    IDXGIOutput* _emulatedTarget = nullptr; // emulated fullscreen's output, released by the destructor
     bool _hasInteropWork = false, _interopInitialized = false, _wasCurrentOnRelease = false;
     LONG _refcount = 1;
     HWND _handle = reinterpret_cast<HWND>(456);

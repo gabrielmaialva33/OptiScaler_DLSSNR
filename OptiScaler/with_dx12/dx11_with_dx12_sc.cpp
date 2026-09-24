@@ -208,6 +208,7 @@ Dx11wDx12SC::~Dx11wDx12SC()
     // Release (or the retirement collector) has already proved completion, or confirmed
     // device loss. Direct destruction is not a supported ownership path.
     _ReleaseInteropObjects();
+    SafeRelease(_emulatedTarget);
 
     SafeRelease(_real4);
     SafeRelease(_real3);
@@ -601,12 +602,132 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     auto result = _fgSwapChain->Present(SyncInterval, Flags);
 
+    // DXGI can still put the presenter into exclusive fullscreen behind the wrapper -- its own
+    // Alt+Enter handling watches the window for the presenter's factory -- and a flip-model
+    // swapchain in fullscreen refuses every Present until a ResizeBuffers after the transition.
+    // Take it back to a window, keep the fullscreen the game believes in, and let this frame go.
+    if (result == DXGI_ERROR_INVALID_CALL && _EmulatesFullscreen())
+    {
+        const auto recovered = _RecoverPresenterFromFullscreen();
+        if (SUCCEEDED(recovered))
+            return S_OK;
+    }
+
     if (SUCCEEDED(result))
+    {
         _AdvanceFakeBackBufferIndex();
+    }
     else
+    {
+        if (!_presentFailureReported)
+        {
+            _presentFailureReported = true;
+            BOOL presenterFullscreen = FALSE;
+            _fgSwapChain->GetFullscreenState(&presenterFullscreen, nullptr);
+            LOG_ERROR("fg Present failed: {:X} (sync interval {}, flags {:X}, presenter fullscreen {}, game "
+                      "fullscreen {}, plain presenter {}); reported once, every failure below",
+                      (UINT) result, SyncInterval, Flags, presenterFullscreen != FALSE, _emulatedFullscreen,
+                      _EmulatesFullscreen());
+        }
         LOG_ERROR("fg Present failed: {:X}", (UINT) result);
+    }
 
     return result;
+}
+
+// Exclusive fullscreen is not something the plain D3D12 presenter can give a D3D11 game.
+//
+// It is a flip-model swapchain in the game's window, and a flip-model swapchain in exclusive
+// fullscreen refuses every Present (DXGI_ERROR_INVALID_CALL) until ResizeBuffers is called after
+// the transition. A D3D11 game written for the blt model resizes before it goes fullscreen instead,
+// which is right for its own swapchain and wrong for this one. Measured on a Windows box rendering
+// on an RTX 3060 with the display on an RX 570 (Generation Zero, 2026-09-24): every Present failed
+// from the game's SetFullscreenState(TRUE) and succeeded again in the second it spent windowed, so
+// the neural pass ran and nothing reached the screen. On that machine exclusive fullscreen is not
+// available to the render adapter at all (887A0022 from the game's own swapchain in Divinity).
+//
+// So, for the plain presenter only, fullscreen is emulated the way FGXeFGForceBorderless does it for
+// XeFG: the presenter stays windowed, the window becomes a borderless popup over the target output,
+// and the game is told it is fullscreen. A real frame-generation presenter keeps its own path
+// (FGHooks::hkSetFullscreenState), untouched.
+bool Dx11wDx12SC::_EmulatesFullscreen() const
+{
+    return _fgSwapChain != nullptr && FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
+}
+
+void Dx11wDx12SC::_EnterBorderless(IDXGIOutput* target)
+{
+    if (!_emulatedFullscreen)
+    {
+        _savedStyle = GetWindowLongPtr(_handle, GWL_STYLE);
+        _savedExStyle = GetWindowLongPtr(_handle, GWL_EXSTYLE);
+        GetWindowRect(_handle, &_savedRect);
+    }
+
+    if (target != nullptr)
+        target->AddRef();
+    else if (_fgSwapChain != nullptr)
+        _fgSwapChain->GetContainingOutput(&target);
+
+    SafeRelease(_emulatedTarget);
+    _emulatedTarget = target;
+
+    const auto info = _emulatedTarget != nullptr ? Util::GetMonitorInfoForOutput(_emulatedTarget)
+                                                 : Util::GetMonitorInfoForWindow(_handle);
+
+    SetWindowLongPtr(_handle, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+    SetWindowLongPtr(_handle, GWL_EXSTYLE, WS_EX_APPWINDOW);
+    SetWindowPos(_handle, HWND_TOP, info.x, info.y, info.width, info.height, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+
+    if (!_emulatedFullscreen)
+        LOG_INFO("Dx11wDx12SC {}: exclusive fullscreen emulated as a borderless window, {}x{} at {},{}", _id,
+                 info.width, info.height, info.x, info.y);
+
+    _emulatedFullscreen = true;
+}
+
+void Dx11wDx12SC::_LeaveBorderless()
+{
+    if (_emulatedFullscreen)
+    {
+        SetWindowLongPtr(_handle, GWL_STYLE, _savedStyle);
+        SetWindowLongPtr(_handle, GWL_EXSTYLE, _savedExStyle);
+        SetWindowPos(_handle, nullptr, _savedRect.left, _savedRect.top, _savedRect.right - _savedRect.left,
+                     _savedRect.bottom - _savedRect.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE);
+        LOG_INFO("Dx11wDx12SC {}: left emulated fullscreen, window restored", _id);
+    }
+
+    SafeRelease(_emulatedTarget);
+    _emulatedFullscreen = false;
+}
+
+HRESULT Dx11wDx12SC::_RecoverPresenterFromFullscreen()
+{
+    BOOL presenterFullscreen = FALSE;
+    IDXGIOutput* target = nullptr;
+
+    if (FAILED(_fgSwapChain->GetFullscreenState(&presenterFullscreen, &target)) || !presenterFullscreen)
+    {
+        SafeRelease(target);
+        return E_FAIL;
+    }
+
+    LOG_WARN("Dx11wDx12SC {}: the presenter was put into exclusive fullscreen outside the wrapper; taking it back "
+             "to a borderless window",
+             _id);
+
+    _fgSwapChain->SetFullscreenState(FALSE, nullptr);
+    _EnterBorderless(target);
+    SafeRelease(target);
+
+    // The transition back owes the flip-model presenter its ResizeBuffers too; through the wrapper,
+    // at the size it already has and with count and format left alone (the D3D11 side has its own),
+    // so the D3D11 swapchain and the interop buffers follow.
+    DXGI_SWAP_CHAIN_DESC1 desc {};
+    if (FAILED(_fgSwapChain->GetDesc1(&desc)))
+        return E_FAIL;
+
+    return ResizeBuffers(0, desc.Width, desc.Height, DXGI_FORMAT_UNKNOWN, _lastFlags);
 }
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetBuffer(UINT Buffer, REFIID riid, void** ppSurface)
@@ -619,6 +740,24 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetFullscreenState(BOOL Fullscreen, IDXGI
     LOG_DEBUG("Dx11wDx12SC SetFullscreenState: {}, target: {:X}, caller: {}", Fullscreen, (size_t) pTarget,
               Util::WhoIsTheCaller(_ReturnAddress()));
 
+    // See _EmulatesFullscreen: the plain presenter is kept windowed and the game's fullscreen emulated.
+    if (_EmulatesFullscreen())
+    {
+        BOOL presenterFullscreen = FALSE;
+        if (SUCCEEDED(_fgSwapChain->GetFullscreenState(&presenterFullscreen, nullptr)) && presenterFullscreen)
+            _fgSwapChain->SetFullscreenState(FALSE, nullptr);
+
+        State::Instance().realExclusiveFullscreen = false;
+        State::Instance().SCExclusiveFullscreen = Fullscreen != FALSE;
+
+        if (Fullscreen)
+            _EnterBorderless(pTarget);
+        else
+            _LeaveBorderless();
+
+        return S_OK;
+    }
+
     State::Instance().realExclusiveFullscreen = Fullscreen;
 
     if (_fgSwapChain != nullptr)
@@ -629,6 +768,21 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetFullscreenState(BOOL Fullscreen, IDXGI
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetFullscreenState(BOOL* pFullscreen, IDXGIOutput** ppTarget)
 {
+    if (_EmulatesFullscreen())
+    {
+        if (pFullscreen != nullptr)
+            *pFullscreen = _emulatedFullscreen ? TRUE : FALSE;
+
+        if (ppTarget != nullptr)
+        {
+            *ppTarget = _emulatedFullscreen ? _emulatedTarget : nullptr;
+            if (*ppTarget != nullptr)
+                (*ppTarget)->AddRef();
+        }
+
+        return S_OK;
+    }
+
     if (_fgSwapChain != nullptr)
         return _fgSwapChain->GetFullscreenState(pFullscreen, ppTarget);
 
@@ -738,7 +892,12 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetDesc1(DXGI_SWAP_CHAIN_DESC1* pDesc)
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetFullscreenDesc(DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pDesc)
 {
     if (_fgSwapChain != nullptr)
-        return _fgSwapChain->GetFullscreenDesc(pDesc);
+    {
+        const auto result = _fgSwapChain->GetFullscreenDesc(pDesc);
+        if (SUCCEEDED(result) && pDesc != nullptr && _EmulatesFullscreen())
+            pDesc->Windowed = _emulatedFullscreen ? FALSE : TRUE;
+        return result;
+    }
 
     return _real1 != nullptr ? _real1->GetFullscreenDesc(pDesc) : DXGI_ERROR_DEVICE_REMOVED;
 }
