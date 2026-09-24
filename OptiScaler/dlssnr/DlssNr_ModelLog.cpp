@@ -7,7 +7,9 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
+#include <format>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -197,6 +199,23 @@ void* PatchImport(HMODULE module, const char* importDll, const char* function, v
 } // namespace
 
 int ConfigCount() { return g_configCount.load(); }
+
+std::string DescribeFault(unsigned long code, void* address)
+{
+    HMODULE owner = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(address), &owner);
+
+    wchar_t path[MAX_PATH] = {};
+    if (owner != nullptr)
+        GetModuleFileNameW(owner, path, MAX_PATH);
+
+    const std::string module = owner != nullptr ? std::filesystem::path(path).filename().string() : "unknown module";
+    const auto offset = owner != nullptr ? reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(owner)
+                                         : reinterpret_cast<uintptr_t>(address);
+
+    return std::format("exception 0x{:08X} at {}+0x{:X}", code, module, offset);
+}
 
 void Install(const std::filesystem::path& snippet)
 {

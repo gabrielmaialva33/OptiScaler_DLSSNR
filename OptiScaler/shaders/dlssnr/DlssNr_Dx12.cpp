@@ -253,6 +253,9 @@ struct NrState
     int* lastInit = nullptr;
     int* lastCreate = nullptr;
 
+    // The forwarder's record of a fault caught inside the model. Null on a forwarder that predates it.
+    int (*faultState)(unsigned long*, void**) = nullptr;
+
     NVSDK_NGX_Parameter* capabilityParams = nullptr;
     void* feature = nullptr;
 
@@ -679,6 +682,7 @@ bool EnsureForwarder()
     g_nr.probeFloat = (PFN_NrProbeFloat) GetProcAddress(g_nr.forwarder, "dlssnr_call_probe_float");
     g_nr.lastInit = (int*) GetProcAddress(g_nr.forwarder, "dlssnr_call_last_init");
     g_nr.lastCreate = (int*) GetProcAddress(g_nr.forwarder, "dlssnr_call_last_create");
+    g_nr.faultState = (int (*)(unsigned long*, void**)) GetProcAddress(g_nr.forwarder, "dlssnr_fault_state");
 
     if (g_nr.create == nullptr || g_nr.evaluate == nullptr)
     {
@@ -2047,6 +2051,20 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             coverage->reason = why;
         ReportSkipOnce(why);
     };
+
+    // A fault the forwarder caught inside the model, on this frame or any before it, ends the session's
+    // NR here: the forwarder already refuses to enter the model again, and this stops asking.
+    {
+        unsigned long faultCode = 0;
+        void* faultAddress = nullptr;
+
+        if (!g_nr.failed && g_nr.faultState != nullptr && g_nr.faultState(&faultCode, &faultAddress) != 0)
+        {
+            g_nr.failed = true;
+            g_nr.reason = "the model faulted inside its own code; off for this session";
+            LOG_ERROR("DLSS-NR: {} ({})", g_nr.reason, DlssNr::ModelLog::DescribeFault(faultCode, faultAddress));
+        }
+    }
 
     if (g_nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr || motion == nullptr ||
         output == nullptr)

@@ -97,6 +97,70 @@ bool loadSnippet(const wchar_t* path)
 // What the host said its evaluate signature is, or zero if it never said. See dlssnr_abi_version.
 int g_hostAbi = 0;
 
+// Fault containment for every call into the model.
+//
+// A fault inside nvngx_dlssnr.dll -- an access violation in D3D12Core under its evaluate has been
+// recorded by the feeder project -- used to take the game down with it. Worse than the crash is what
+// follows one that is caught: the model can be left holding its own lock, and the feeder saw the
+// next call into it throw "resource deadlock would occur". So a fault is caught once, remembered for
+// the life of the process, and from then on nothing enters the model again -- not an evaluate, not a
+// create, not even a release or shutdown. The host reads the state through dlssnr_fault_state and
+// switches Neural Rendering off for the session. What the model had already recorded into the game's
+// command list before faulting cannot be taken back; that is the part this does not fix.
+//
+// The value returned for a faulted or refused call. Outside the NGX result range (0xBAD00000 plus a
+// small index) so it cannot be mistaken for anything the model says itself.
+constexpr int kFaulted = static_cast<int>(0xBAD0FA17u);
+
+struct FaultState
+{
+    volatile long faulted = 0;
+    unsigned long code = 0;
+    void* address = nullptr;
+};
+
+FaultState g_fault;
+
+int FaultFilter(unsigned long code, EXCEPTION_POINTERS* info)
+{
+    // Only an error-severity exception or an escaping C++ throw is a fault. Informational ones -- a
+    // debug string, a thread name -- are raised to be seen by a debugger and continued, and are not
+    // ours to swallow.
+    if ((code & 0xC0000000ul) != 0xC0000000ul && code != 0xE06D7363ul)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    if (InterlockedCompareExchange(&g_fault.faulted, 1, 0) == 0)
+    {
+        g_fault.code = code;
+        g_fault.address =
+            info != nullptr && info->ExceptionRecord != nullptr ? info->ExceptionRecord->ExceptionAddress : nullptr;
+    }
+
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+// Calls into the model from inside this module, so its caller check still sees this module's return
+// address; the call sits inside __try, so it is never a tail call either. Arguments are all pointers
+// and scalars, which is what lets __try live here (nothing to unwind).
+template <typename Fn, typename... Args> int Guarded(Fn fn, Args... args)
+{
+    if (g_fault.faulted != 0)
+        return kFaulted;
+
+    int result = kFaulted;
+
+    __try
+    {
+        result = fn(args...);
+    }
+    __except (FaultFilter(GetExceptionCode(), GetExceptionInformation()))
+    {
+        result = kFaulted;
+    }
+
+    return result;
+}
+
 } // namespace
 
 extern "C"
@@ -134,6 +198,23 @@ extern "C"
     // Refusing costs the picture the model would have edited. Running would cost it the picture the
     // game rendered, and say nothing.
     __declspec(dllexport) void dlssnr_set_host_abi(int version) { g_hostAbi = version; }
+
+    // Whether a call into the model has faulted, and where. Sticky for the process: once it returns 1,
+    // every export below refuses to enter the model. A host built before this export does not ask, and
+    // still gets the refusals.
+    __declspec(dllexport) int dlssnr_fault_state(unsigned long* code, void** address)
+    {
+        if (g_fault.faulted == 0)
+            return 0;
+
+        if (code != nullptr)
+            *code = g_fault.code;
+
+        if (address != nullptr)
+            *address = g_fault.address;
+
+        return 1;
+    }
 
     // Called once, after the host has worked out which slot this block keeps floats in.
     __declspec(dllexport) void dlssnr_call_set_float_slot(int slot)
@@ -270,7 +351,7 @@ extern "C"
 
         if (populate != nullptr)
         {
-            volatile int populated = populate(capabilityParams);
+            volatile int populated = Guarded(populate, capabilityParams);
             (void) populated;
             dlssnr_last_ratio_stage = 2;
         }
@@ -293,7 +374,7 @@ extern "C"
         setFloat(capabilityParams, "DLSSNR.ScalingRatio", -1.0f);
 
         // Assigned rather than returned, for the same reason every other call through this module is.
-        volatile int result = reinterpret_cast<PFN_NrRatioCallback>((void*) raw)(capabilityParams);
+        volatile int result = Guarded(reinterpret_cast<PFN_NrRatioCallback>((void*) raw), capabilityParams);
         dlssnr_last_ratio_result = (int) result;
 
         if (result != 1)
@@ -459,7 +540,7 @@ extern "C"
 
         // The adapter is not optional. Passing null the first time produced AdapterUnsupported, which
         // reads like an answer about the hardware and is actually an answer about the question.
-        volatile int result = req(adapter, &discovery, requirement);
+        volatile int result = Guarded(req, adapter, &discovery, requirement);
 
         const unsigned int* out = reinterpret_cast<const unsigned int*>(requirement);
 
@@ -578,7 +659,7 @@ extern "C"
                     continue;
                 }
 
-                result = fn(0x24480451ull, dataPath, device, sdkVersion, nullptr);
+                result = Guarded(fn, 0x24480451ull, dataPath, device, sdkVersion, nullptr);
             }
             else
             {
@@ -591,7 +672,7 @@ extern "C"
                     continue;
                 }
 
-                result = fn(0x24480451ull, dataPath, device, nullptr, sdkVersion);
+                result = Guarded(fn, 0x24480451ull, dataPath, device, nullptr, sdkVersion);
             }
 
             last = (int) result;
@@ -652,7 +733,7 @@ extern "C"
         setUInt(capabilityParams, "DLSSNR.UICorrection", (unsigned int) uiCorrection);
 
         void* feature = nullptr;
-        volatile int result = g_d3d11.create(deviceContext, 18, capabilityParams, &feature);
+        volatile int result = Guarded(g_d3d11.create, deviceContext, 18, capabilityParams, &feature);
 
         dlssnr_d3d11_last_create = (int) result;
 
@@ -663,7 +744,7 @@ extern "C"
     {
         if (g_d3d11.release != nullptr && feature != nullptr)
         {
-            volatile int ignored = g_d3d11.release(feature);
+            volatile int ignored = Guarded(g_d3d11.release, feature);
             (void) ignored;
         }
     }
@@ -703,7 +784,7 @@ extern "C"
         // Assigned rather than returned directly. A tail call becomes a jmp, and the snippet resolves its
         // caller from the return address -- so tail calling hands it whoever called this instead of this
         // module, and the caller gate rejects it before a single argument is read.
-        volatile int result = g_vk.init(0x0, dataPath, instance, physicalDevice, device, nullptr, sdkVersion);
+        volatile int result = Guarded(g_vk.init, 0x0, dataPath, instance, physicalDevice, device, nullptr, sdkVersion);
 
         dlssnr_vk_last_init = (int) result;
         g_vk.initialised = result == 1;
@@ -748,7 +829,7 @@ extern "C"
         setUInt(capabilityParams, "DLSSNR.UICorrection", (unsigned int) uiCorrection);
 
         void* feature = nullptr;
-        volatile int result = g_vk.create(cmdBuffer, 18, capabilityParams, &feature);
+        volatile int result = Guarded(g_vk.create, cmdBuffer, 18, capabilityParams, &feature);
 
         dlssnr_vk_last_create = (int) result;
 
@@ -819,7 +900,7 @@ extern "C"
 
         // Assigned rather than returned. A tail call becomes a jmp and the snippet would resolve its
         // caller past this module, which the gate rejects.
-        volatile int result = g_vk.evaluate(cmdBuffer, feature, capabilityParams, nullptr);
+        volatile int result = Guarded(g_vk.evaluate, cmdBuffer, feature, capabilityParams, nullptr);
 
         return (int) result;
     }
@@ -828,7 +909,7 @@ extern "C"
     {
         if (g_vk.release != nullptr && feature != nullptr)
         {
-            volatile int ignored = g_vk.release(feature);
+            volatile int ignored = Guarded(g_vk.release, feature);
             (void) ignored;
         }
     }
@@ -851,7 +932,7 @@ extern "C"
             // OptiScaler's own generic application id, the one it already hands DLSS when a game's id is
             // not wanted. What was here before was 0x4350324B -- "CP2K" -- so every game that ever loaded
             // this announced itself to the driver as Cyberpunk 2077.
-            dlssnr_call_last_init = g_snip.init(0x24480451ull, dataPath, device, 0x0000015, capabilityParams);
+            dlssnr_call_last_init = Guarded(g_snip.init, 0x24480451ull, dataPath, device, 0x0000015, capabilityParams);
             g_snip.initialised = (dlssnr_call_last_init == 1);
             if (!g_snip.initialised)
             {
@@ -879,8 +960,8 @@ extern "C"
         setUInt(capabilityParams, "DLSSNR.UseAutoMask", (unsigned int) useAutoMask);
         setUInt(capabilityParams, "DLSSNR.UICorrection", (unsigned int) uiCorrection);
         void* handle = nullptr;
-        dlssnr_call_last_create = g_snip.create(cmd, 18, capabilityParams, &handle);
-        return handle;
+        dlssnr_call_last_create = Guarded(g_snip.create, cmd, 18, capabilityParams, &handle);
+        return dlssnr_call_last_create == kFaulted ? nullptr : handle;
     }
 
     // Colour and output are display resolution; depth and motion come from the game's own DLSS evaluation and
@@ -945,7 +1026,7 @@ extern "C"
         // jmp rather than a call, which leaves this module's frame behind: the snippet then resolves its
         // caller to whoever called us and rejects it. Keeping the value in a volatile forces a real call and
         // a return through this module, which is the whole reason this file exists.
-        volatile int result = g_snip.evaluate(cmd, feature, capabilityParams, nullptr);
+        volatile int result = Guarded(g_snip.evaluate, cmd, feature, capabilityParams, nullptr);
         return result;
     }
 
@@ -990,7 +1071,7 @@ extern "C"
     {
         if (feature && g_snip.release)
         {
-            volatile int result = g_snip.release(feature); // not a tail call, for the reason above
+            volatile int result = Guarded(g_snip.release, feature); // not a tail call, for the reason above
             (void) result;
         }
     }

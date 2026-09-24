@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <string>
 
 namespace DlssNr::ModelLog
 {
@@ -22,4 +23,9 @@ void Install(const std::filesystem::path& snippet);
 // feature build; -1 until it has said. The preset is an index into these, so with one there is
 // nothing to choose (310.8 reports one, and a request for another falls back to it).
 int ConfigCount();
+
+// "exception 0xC0000005 at nvngx_dlssnr.dll+0x1A2B3C", for a fault the forwarder caught inside the
+// model (dlssnr_fault_state). The module is whichever one owns the address, which need not be the
+// model: a fault in the D3D12 runtime under its evaluate names the runtime.
+std::string DescribeFault(unsigned long code, void* address);
 } // namespace DlssNr::ModelLog

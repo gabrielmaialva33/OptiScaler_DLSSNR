@@ -68,6 +68,9 @@ struct VkState
     PFN_VkEvaluate evaluate = nullptr;
     PFN_VkRelease release = nullptr;
 
+    // The forwarder's record of a fault caught inside the model. Null on a forwarder that predates it.
+    int (*faultState)(unsigned long*, void**) = nullptr;
+
     // Where this block keeps floats, and the forwarder calls that find out. Optional: an older
     // forwarder lacks them and the floats go to the header's slot, as they always did here.
     PFN_NrSetFloatSlot setFloatSlot = nullptr;
@@ -443,6 +446,7 @@ bool LoadForwarder()
     g_vk.create = (PFN_VkCreate) GetProcAddress(g_vk.forwarder, "dlssnr_vk_create");
     g_vk.evaluate = (PFN_VkEvaluate) GetProcAddress(g_vk.forwarder, "dlssnr_vk_evaluate");
     g_vk.release = (PFN_VkRelease) GetProcAddress(g_vk.forwarder, "dlssnr_vk_release");
+    g_vk.faultState = (int (*)(unsigned long*, void**)) GetProcAddress(g_vk.forwarder, "dlssnr_fault_state");
     // Optional, and shared with the D3D12 path: one global slot inside the forwarder.
     g_vk.setFloatSlot = (PFN_NrSetFloatSlot) GetProcAddress(g_vk.forwarder, "dlssnr_call_set_float_slot");
     g_vk.probeFloat = (PFN_NrProbeFloat) GetProcAddress(g_vk.forwarder, "dlssnr_call_probe_float");
@@ -588,6 +592,19 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
     if (g_vkResetOnReturn.exchange(false))
         g_vk.reset = true;
+
+    // A fault the forwarder caught inside the model ends the session's NR; see dlssnr_fault_state.
+    {
+        unsigned long faultCode = 0;
+        void* faultAddress = nullptr;
+
+        if (g_vk.faultState != nullptr && g_vk.faultState(&faultCode, &faultAddress) != 0)
+        {
+            LOG_ERROR("DLSS-NR Vulkan: {}", DlssNr::ModelLog::DescribeFault(faultCode, faultAddress));
+            Fail("the model faulted inside its own code; off for this session");
+            return;
+        }
+    }
 
     // The game's own resources, already wrapped: NGX hands Vulkan resources over as
     // NVSDK_NGX_Resource_VK, so only this pass's own images need building.
