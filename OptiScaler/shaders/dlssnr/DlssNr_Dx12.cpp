@@ -4179,6 +4179,11 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         depth = s_dummyGuides.Depth();
         motion = s_dummyGuides.Motion();
         frame = DlssNrFrameInfo {};
+
+        // Zero guides above native are refused by the model (FAIL_InvalidParameter), so a working
+        // scale above 1 is clamped to native here, as the D3D11 host does since fcc5fdf0. This route
+        // reset the frame to its defaults, where supersampling is allowed, and so was left out.
+        frame.AllowSupersampling = false;
     }
 
     if (temporalValid && temporalSeq == g_nrLastEnhancedSeq)
