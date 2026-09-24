@@ -4205,6 +4205,9 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         // scale above 1 is clamped to native here, as the D3D11 host does since fcc5fdf0. This route
         // reset the frame to its defaults, where supersampling is allowed, and so was left out.
         frame.AllowSupersampling = false;
+
+        // See DlssNrZeroGuideReset: no real motion, so optionally no history to ghost from.
+        frame.Reset = cfg.DlssNrZeroGuideReset.value_or_default();
     }
 
     if (temporalValid && temporalSeq == g_nrLastEnhancedSeq)

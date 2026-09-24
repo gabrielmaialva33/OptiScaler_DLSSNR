@@ -430,6 +430,16 @@ void RenderMenu(Config* config, float menuResScale)
                            "it. With it off, the pass runs on dummy temporals -- constant depth, no "
                            "motion -- and treats the scene as standing still, which is right for a "
                            "title whose upscaler is not DLSS.");
+
+                bool zeroGuideReset = config->DlssNrZeroGuideReset.value_or_default();
+                if (ImGui::Checkbox(Localization::Label("No history without motion"), &zeroGuideReset))
+                    config->DlssNrZeroGuideReset = zeroGuideReset;
+
+                HelpMarker("Only for frames that run on dummy temporals. The model is told nothing moved, "
+                           "so a moving camera leaves ghosts and doubled edges where things used to be. "
+                           "On, it starts its history over every frame: no ghosts, but none of its "
+                           "temporal smoothing either. Frames with the game's own depth and motion "
+                           "are not affected.");
             }
 
             if (hookMethod != 1)

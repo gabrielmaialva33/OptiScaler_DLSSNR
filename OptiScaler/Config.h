@@ -292,6 +292,8 @@ class Config
     CustomOptional<uint32_t> DlssNrHookMethod { 1 };
     // Present hook: require DLSS temporal inputs or fall back to zero/dummy guides. Default false.
     CustomOptional<bool> DlssNrRequireDlss { false };
+    // Present hosts on zero guides: start the model's history over every frame. Default false.
+    CustomOptional<bool> DlssNrZeroGuideReset { false };
     // Present hook: wait for GPU completion before flip. Default true.
     CustomOptional<bool> DlssNrPresentSync { true };
     CustomOptional<uint32_t> DlssNrPreset { 0 };

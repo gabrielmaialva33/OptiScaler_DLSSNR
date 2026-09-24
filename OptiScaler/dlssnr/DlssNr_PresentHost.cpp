@@ -6,6 +6,7 @@
 
 #include <shaders/format_transfer/FT_Dx12.h>
 
+#include <Config.h>
 #include <Logger.h>
 
 namespace DlssNr
@@ -351,6 +352,12 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
             LOG_INFO("DLSS-NR present host: using the upscaler's own depth and motion, not the zero guides");
         }
     }
+
+    // Zero guides tell the model nothing moved, and it blends each frame with its history accordingly:
+    // ghosts and doubled edges under a moving camera (Generation Zero, 2026-09-24). Opt-in, because a
+    // slow isometric camera (Divinity) was measured fine with history, and history is what smooths.
+    if (depth == _guides.Depth() && Config::Instance()->DlssNrZeroGuideReset.value_or_default())
+        frame.Reset = true;
 
     const char* frameReason = "";
     const bool passed = EvaluateAtPresent(cmdList, _toWorking->Buffer(), depth, motion, frame, queue, &frameReason);

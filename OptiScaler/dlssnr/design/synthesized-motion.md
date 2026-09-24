@@ -5,6 +5,14 @@ Update 2026-09-23: the §11 step 1 experiment ran. `b5db624e` gave the zero fiel
 to native instead, so units alone did not clear the above-1.0 refusal and that question now rests on
 §11 step 2. The skeleton is still unbuilt.
 
+Update 2026-09-24: the fast-camera case this note could not measure has now been seen. Generation
+Zero (D3D11, no upscaler, first-person) on the D3D11 host, on an RTX 3060 under Windows: with NR on,
+the picture fills with ghosts and doubled edges whenever the camera moves -- the model reprojecting
+its history with zero motion, exactly as the review quoted in nr-without-game-dlss.md predicted.
+Divinity's slow isometric camera never showed it. Interim, opt-in: `[DlssNr] ZeroGuideReset` starts the
+model's history over on every zero-guide frame, trading its temporal smoothing for no ghosts. This
+note remains the real answer.
+
 Status: **design + unbuilt skeleton.** Not scheduled, not built, not wired. The skeleton files named
 in [§10](#10-skeleton-files-in-this-change-unbuilt) exist but are in no `.vcxproj`, generate no
 precompiled header, and are not referenced by any existing source. Written against the tree at
