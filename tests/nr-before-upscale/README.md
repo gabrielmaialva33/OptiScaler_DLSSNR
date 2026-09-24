@@ -103,7 +103,9 @@ Exposure texture validation is conservative: unknown/integer/depth/array/MSAA or
 non-loadable views are rejected and the existing CPU fallback is used. Readback
 completion and resource retirement are still not proven by this host suite.
 
-The multipass integration extends the boundary checks to 56 cases. A refused submission
+The multipass integration extends the boundary checks to 56 cases, and the status and reset
+bookkeeping to 57: a recorded pass advances the counter the status window reads while a failed one
+does not, and NR found switched off by either entry point leaves a history reset owed. A refused submission
 admission records no barrier, scratch allocation, parameter substitution or fake Dispatch.
 The actual INFO spatial-contract reporter is extracted too: it distinguishes successful
 subrect queries from absent/failed ones, suppresses unchanged contracts and warns when

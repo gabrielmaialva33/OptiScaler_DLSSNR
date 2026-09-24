@@ -176,13 +176,25 @@ int main()
       assert(g_coverage[2].totals.applied == 1 && g_coverage[0].totals.calls == 0);
       assert(infoLogs.back().find("stage=after-fallback calls=1") != std::string::npos); ++checks; }
     { Fixture f; DlssNr_Dx12::writes = false; DlssNr_Dx12::modelResult = -1;
+      const auto passesBefore = DlssNr::g_passesRecorded.load();
       { ScopedPreUpscale p(&f.cmd, &f.params, true); }
+      assert(DlssNr::g_passesRecorded.load() == passesBefore); // a failed pass is not a recorded one
       assert(g_coverage[1].totals.modelFailed == 1 && g_coverage[1].totals.applied == 0);
       assert(infoLogs.back().find("model_ok=0 model_failed=1 applied_recorded=0") != std::string::npos); ++checks; }
     { Fixture f; f.cfg.DlssNrEnabled = false;
+      DlssNr::g_resetOnReturn = false;
       { ScopedPreUpscale p(&f.cmd, &f.params, true); }
+      assert(DlssNr::g_resetOnReturn.exchange(false)); // off, seen by the pre-upscale scope
       DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
+      assert(DlssNr::g_resetOnReturn.exchange(false)); // off, seen by the after-upscale entry
       assert(infoLogs.empty() && g_coverage[0].totals.calls == 0 && g_coverage[1].totals.calls == 0); ++checks; }
+    { Fixture f;
+      const auto passesBefore = DlssNr::g_passesRecorded.load();
+      { ScopedPreUpscale p(&f.cmd, &f.params, true); }
+      assert(g_coverage[1].totals.applied == 1);
+      assert(DlssNr::g_passesRecorded.load() == passesBefore + 1); // the status window sees this pass
+      assert(!DlssNr::g_resetOnReturn.load());                     // on, so nothing is owed
+      ++checks; }
     { Fixture f;
       { ScopedPreUpscale p(&f.cmd, &f.params, true); }
       DlssNr_Dx12::writes = false; DlssNr_Dx12::modelResult = -1;

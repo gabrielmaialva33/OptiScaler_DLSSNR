@@ -8,7 +8,9 @@ The suite extracts the actual deferred slider and pass-editor functions from
 using the production sparse settings types. Fifteen frames cover unsupported backends,
 one/master defaults, every optional field, live inheritance, explicit overrides,
 field/pass clearing, active-pass selection, retained inactive settings and disabling then
-reenabling individual tuning. Source guards reject direct master writes and check both
+reenabling individual tuning. Four more cover the two controls the model itself makes inert: the
+per-pass preset is not drawn once the model reports one weight set (`DlssNr::ModelLog`,
+faked here), and skin structure is drawn disabled, taking no click, while the auto mask is off. Source guards reject direct master writes and check both
 new runtime translation units are registered exactly once in the project and filters.
 This complements the real Config transaction/codec and real ImGui hash suites. It does
 not render pixels or exercise the actual Windows Config, renderer, NGX or GPU.

@@ -18,5 +18,16 @@ int main() {
  ImGui::Reset(); ImGui::actions["Individual pass settings###nrIndividualPassSettings"]=false; run(); assert(c.overrides.at(2)==third); assert(!ImGui::Saw("1/Intensity/Override###override"));
  ImGui::Reset(); ImGui::actions["Requested passes###nrPassCount"]=3; ImGui::actions["Individual pass settings###nrIndividualPassSettings"]=true; ImGui::actions["Edit pass###nrEditPass"]=3; run(); assert(c.overrides.at(2)==third);
  ImGui::Reset(); ImGui::actions["3/Inherit all master settings###nrClearPass"]=true; run(); assert(c.overrides.empty());
- std::cout << "PASS: 15 scripted menu frames: unsupported paths, inheritance, seven fields, clear, retained inactive passes\n";
+ // One weight set: the per-pass preset override is not drawn at all (DEVELOPMENT.md rule 2).
+ DlssNr::ModelLog::configCount=1;
+ ImGui::Reset(); run(); assert(!ImGui::Saw("3/Model preset/Override###override")); assert(ImGui::Saw("3/Style/Override###override"));
+ DlssNr::ModelLog::configCount=-1;
+ ImGui::Reset(); run(); assert(ImGui::Saw("3/Model preset/Override###override"));
+ // Auto mask off: skin is drawn but inert, so a click on its override writes nothing.
+ c.master.AutoMask=false;
+ ImGui::Reset(); ImGui::actions["3/Skin structure/Override###override"]=true; run();
+ assert(ImGui::shownDisabled.count("3/Skin structure/Override###override")); assert(c.overrides.empty());
+ c.master.AutoMask=true;
+ ImGui::Reset(); ImGui::actions["3/Skin structure/Override###override"]=true; run(); assert(c.overrides.at(2).SkinStructure==-1.0f);
+ std::cout << "PASS: 19 scripted menu frames: unsupported paths, inheritance, seven fields, clear, retained inactive passes, preset hidden at one weight set, skin inert with the mask off\n";
 }
