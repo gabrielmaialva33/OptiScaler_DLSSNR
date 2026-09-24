@@ -97,15 +97,15 @@ class SynthMotion
     // A small readback/UAV for the scene-score reduction, so a static or cut frame skips the search.
     ID3D12Resource* _sceneScore = nullptr;
 
-    uint32_t _width = 0;  // working resolution
+    uint32_t _width = 0; // working resolution
     uint32_t _height = 0;
-    uint32_t _flowWidth = 0;  // estimation resolution (~320 wide, even, >= 64)
+    uint32_t _flowWidth = 0; // estimation resolution (~320 wide, even, >= 64)
     uint32_t _flowHeight = 0;
 
-    bool _hasPrevious = false;      // false on first frame and after a reset/abandon
+    bool _hasPrevious = false; // false on first frame and after a reset/abandon
     bool _producedThisFrame = false;
     bool _resetThisFrame = false;
-    bool _resetOwed = true;         // first frame, resize, or a dropped recording
+    bool _resetOwed = true; // first frame, resize, or a dropped recording
     bool _recorded = false;
 };
 

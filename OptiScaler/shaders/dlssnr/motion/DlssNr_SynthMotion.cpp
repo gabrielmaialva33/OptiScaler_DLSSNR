@@ -110,9 +110,9 @@ bool SynthMotion::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     // Set _producedThisFrame only when real (or intentionally-zero-with-reset) motion reached _motion.
     (void) resetNow;
 
-    _recorded = true;   // a real implementation sets this once it has put work on the list
-    _recorded = false;  // skeleton: nothing was recorded
-    return false;       // not built -> caller uses the zero field
+    _recorded = true;  // a real implementation sets this once it has put work on the list
+    _recorded = false; // skeleton: nothing was recorded
+    return false;      // not built -> caller uses the zero field
 }
 
 void SynthMotion::ConfirmExecuted()

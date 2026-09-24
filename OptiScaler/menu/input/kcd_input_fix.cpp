@@ -40,7 +40,7 @@ DWORD g_hold[256] = {};
 // winmm is not linked into OptiScaler, so load timeBeginPeriod/timeEndPeriod at
 // runtime to get ~1 ms timer granularity for the high-rate poll. Falls back to
 // plain Sleep (coarser granularity) if winmm cannot be loaded.
-typedef UINT (WINAPI *PFN_TimerPeriod)(UINT);
+typedef UINT(WINAPI* PFN_TimerPeriod)(UINT);
 PFN_TimerPeriod pfnTimeBeginPeriod = nullptr;
 PFN_TimerPeriod pfnTimeEndPeriod = nullptr;
 
@@ -279,9 +279,7 @@ void Update()
     if (cfg == nullptr)
         return;
 
-    const int desired = cfg->KcdInputFixEnabled.value_or_default()
-                            ? cfg->KcdInputFixMode.value_or_default()
-                            : -1;
+    const int desired = cfg->KcdInputFixEnabled.value_or_default() ? cfg->KcdInputFixMode.value_or_default() : -1;
 
     std::lock_guard<std::mutex> lk(g_ctl_mtx);
 
@@ -330,10 +328,7 @@ void SetCaptureAllowed(bool allowed)
     }
 }
 
-bool IsRunning()
-{
-    return g_poll_running.load() || g_hook_running.load();
-}
+bool IsRunning() { return g_poll_running.load() || g_hook_running.load(); }
 
 Mode ActiveMode()
 {

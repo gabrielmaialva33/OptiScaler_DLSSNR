@@ -2580,12 +2580,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Structural rebuild is only needed for resolution changes, pipeline placement, or weight preset changes.
     // Dynamic tuning (Style, Intensity, Tone, Structure, Skin, AutoMask) is passed directly to the forward
     // pass in evaluate without destroying the feature, matching NVIDIA's runtime architecture.
-    const bool structuralRebuildRequired =
-        resolutionChanged || placementChanged || presetChanged ||
-        (chainEnabled && g_nr.passBuilt[0].Preset != firstSettings.Preset);
+    const bool structuralRebuildRequired = resolutionChanged || placementChanged || presetChanged ||
+                                           (chainEnabled && g_nr.passBuilt[0].Preset != firstSettings.Preset);
 
-    const bool tuningChanged =
-        (chainEnabled ? g_nr.passBuilt[0] != firstSettings : !TuningMatchesFeature(cfg));
+    const bool tuningChanged = (chainEnabled ? g_nr.passBuilt[0] != firstSettings : !TuningMatchesFeature(cfg));
 
     if (tuningChanged && !structuralRebuildRequired)
     {
@@ -2626,7 +2624,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         for (unsigned i = 1; i < 3; ++i)
         {
-            if (g_nr.passFeature[i] && (i >= passSnapshot.Count || g_nr.passBuilt[i].Preset != passSnapshot.Settings[i].Preset))
+            if (g_nr.passFeature[i] &&
+                (i >= passSnapshot.Count || g_nr.passBuilt[i].Preset != passSnapshot.Settings[i].Preset))
             {
                 ParkNrFeature(g_nr.passFeature[i]);
                 for (unsigned downstream = i; downstream < 3; ++downstream)
