@@ -12,6 +12,7 @@
 #include <shaders/output_scaling/OS_Vk.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -152,6 +153,11 @@ constexpr uint32_t kTimingSlots = 4;
 
 VkState g_vk;
 std::mutex g_vkMutex;
+
+// Set whenever an evaluate finds the pass switched off, taken under the lock by the next one that
+// runs, so switching NR back on starts the model's history over instead of resuming the one from
+// before. Same rule as g_resetOnReturn on the D3D12 side.
+std::atomic<bool> g_vkResetOnReturn { false };
 
 void Fail(const char* why)
 {
@@ -565,7 +571,10 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     auto& cfg = *Config::Instance();
 
     if (!cfg.DlssNrEnabled.value_or_default())
+    {
+        g_vkResetOnReturn = true;
         return;
+    }
 
     if (cmdBuffer == VK_NULL_HANDLE || params == nullptr || device == VK_NULL_HANDLE ||
         physicalDevice == VK_NULL_HANDLE)
@@ -575,6 +584,9 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
     if (g_vk.failed)
         return;
+
+    if (g_vkResetOnReturn.exchange(false))
+        g_vk.reset = true;
 
     // The game's own resources, already wrapped: NGX hands Vulkan resources over as
     // NVSDK_NGX_Resource_VK, so only this pass's own images need building.

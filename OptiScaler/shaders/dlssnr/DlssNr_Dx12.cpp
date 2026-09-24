@@ -885,6 +885,13 @@ uint32_t PostContract(unsigned int nativeWidth, unsigned int nativeHeight, uint3
 std::atomic<unsigned int> g_activePasses { 0 };
 std::atomic<const char*> g_chainStatus { "Single pass (master settings)" };
 
+// Set by every entry point that finds the pass switched off, taken by the next Dispatch. The model's
+// history is only ever told to reset by things the game or this module noticed, and the game cannot
+// know NR was off: without this, switching it back on (the toggle key, mid-A/B) resumed on the
+// history of whatever was on screen when it was switched off. Atomic because the entry points that
+// see "off" do not take the lock Dispatch runs under.
+std::atomic<bool> g_resetOnReturn { false };
+
 void ChainStatus(const char* reason)
 {
     if (g_chainStatus.exchange(reason) != reason)
@@ -2374,6 +2381,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     g_nr.guideMvScaleX = frame.MvScaleX;
     g_nr.guideMvScaleY = frame.MvScaleY;
 
+    if (g_resetOnReturn.exchange(false))
+        g_nr.reset = true;
+
     if (frame.Reset)
     {
         g_nr.reset = true;
@@ -3059,10 +3069,12 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
         else if (g_nr.heldActive)
         {
-            // Released: let go of the frozen frame and resume live input next frame.
+            // Released: let go of the frozen frame and resume live input. The model's history is of
+            // the frozen frame, which this live one no longer resembles, so it starts over here.
             if (g_nr.heldColor != nullptr)
                 ParkNrResource(g_nr.heldColor);
             g_nr.heldActive = false;
+            g_nr.reset = true;
         }
     }
 
@@ -3958,7 +3970,13 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
 {
     const Config& cfg = *Config::Instance();
 
-    if (!cfg.DlssNrEnabled.value_or_default() || g_nr.failed || swapchain == nullptr || queue == nullptr)
+    if (!cfg.DlssNrEnabled.value_or_default())
+    {
+        g_resetOnReturn = true;
+        return;
+    }
+
+    if (g_nr.failed || swapchain == nullptr || queue == nullptr)
         return;
 
     // Every present is counted once, whichever route owns the pass; it is the numerator of the
@@ -4453,6 +4471,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 
     if (!dlssNrEnabled)
     {
+        g_resetOnReturn = true;
         GpuTiming::SetEnabled(false);
         ReportSkipOnce("it is switched off");
         return;
@@ -4663,7 +4682,10 @@ bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colou
     };
 
     if (!Config::Instance()->DlssNrEnabled.value_or_default())
+    {
+        g_resetOnReturn = true;
         return answer(false, "the pass is disabled");
+    }
 
     if (cmdList == nullptr || colour == nullptr || depth == nullptr || motion == nullptr)
         return answer(false, "the host passed a null resource");
@@ -4716,6 +4738,9 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     const bool useProxy = cfg.DlssNrUseProxy.value_or_default();
     const int stage = cfg.DlssNrStage.value_or_default();
     const bool enabled = cfg.DlssNrEnabled.value_or_default();
+
+    if (!enabled)
+        g_resetOnReturn = true;
 
     if (!enabled || stage != 1)
         return;
