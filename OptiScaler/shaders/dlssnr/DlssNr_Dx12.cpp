@@ -93,6 +93,8 @@ const char* NgxResultName(unsigned int r)
     {
     case 0x1:
         return "Success";
+    case 0xBAD0FA17:
+        return "forwarder: the model faulted, call refused";
     case 0xBAD00001:
         return "FAIL_FeatureNotSupported";
     case 0xBAD00002:
@@ -723,6 +725,31 @@ bool EnsureForwarder()
 // The model needs the driver core's own capability block: it carries the snippet and preset callbacks a
 // feature expects at create time, which a freshly allocated block does not have.
 void DiscoverFloatSlot(NVSDK_NGX_Parameter* params);
+// Whether the forwarder has caught a fault inside the model, reported once with its exception code
+// and faulting module. Checked independently of g_nr.failed, because a faulted call comes back as an
+// ordinary failed result (0xBAD0FA17) and the paths that handle one set failed first: gating this on
+// !failed was how the one line that says what happened never got written.
+bool NoteModelFault()
+{
+    static bool reported = false;
+    unsigned long code = 0;
+    void* address = nullptr;
+
+    if (g_nr.faultState == nullptr || g_nr.faultState(&code, &address) == 0)
+        return false;
+
+    g_nr.failed = true;
+    g_nr.reason = "the model faulted inside its own code; off for this session";
+
+    if (!reported)
+    {
+        reported = true;
+        LOG_ERROR("DLSS-NR: {} ({})", g_nr.reason, DlssNr::ModelLog::DescribeFault(code, address));
+    }
+
+    return true;
+}
+
 void ReportScalingRatios();
 
 bool EnsureCapabilityParams(ID3D12Device* device)
@@ -2054,17 +2081,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // A fault the forwarder caught inside the model, on this frame or any before it, ends the session's
     // NR here: the forwarder already refuses to enter the model again, and this stops asking.
-    {
-        unsigned long faultCode = 0;
-        void* faultAddress = nullptr;
-
-        if (!g_nr.failed && g_nr.faultState != nullptr && g_nr.faultState(&faultCode, &faultAddress) != 0)
-        {
-            g_nr.failed = true;
-            g_nr.reason = "the model faulted inside its own code; off for this session";
-            LOG_ERROR("DLSS-NR: {} ({})", g_nr.reason, DlssNr::ModelLog::DescribeFault(faultCode, faultAddress));
-        }
-    }
+    NoteModelFault();
 
     if (g_nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr || motion == nullptr ||
         output == nullptr)
@@ -2758,6 +2775,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             // 0x-452FFFFF, which no one can decode back to 0xBAD00001.
             LOG_ERROR("DLSS-NR create failed: init 0x{:X} ({}), create 0x{:X} ({})", initResult,
                       NgxResultName(initResult), createResult, NgxResultName(createResult));
+            NoteModelFault(); // a fault in init or create says where, here, while the log is on it
             device->Release();
             return false;
         }
@@ -3628,7 +3646,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.rejectedWorkWidth = workWidth;
         g_nr.rejectedWorkHeight = workHeight;
     }
-    else
+    else if (!NoteModelFault())
     {
         g_nr.failed = true;
         g_nr.reason = "the model refused to run";

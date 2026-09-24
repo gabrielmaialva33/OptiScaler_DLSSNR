@@ -173,6 +173,24 @@ void Fail(const char* why)
     LOG_ERROR("DLSS-NR Vulkan unavailable: {}", why);
 }
 
+// Whether the forwarder has caught a fault inside the model; if so, says where once and fails the
+// session with that reason. Called before the generic "refused" failures, because a faulted call comes
+// back as an ordinary failed result and would otherwise be reported as one.
+bool NoteModelFault()
+{
+    unsigned long code = 0;
+    void* address = nullptr;
+
+    if (g_vk.faultState == nullptr || g_vk.faultState(&code, &address) == 0)
+        return false;
+
+    if (!g_vk.failed)
+        LOG_ERROR("DLSS-NR Vulkan: {}", DlssNr::ModelLog::DescribeFault(code, address));
+
+    Fail("the model faulted inside its own code; off for this session");
+    return true;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Images this pass owns
 // ---------------------------------------------------------------------------------------------
@@ -594,17 +612,8 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         g_vk.reset = true;
 
     // A fault the forwarder caught inside the model ends the session's NR; see dlssnr_fault_state.
-    {
-        unsigned long faultCode = 0;
-        void* faultAddress = nullptr;
-
-        if (g_vk.faultState != nullptr && g_vk.faultState(&faultCode, &faultAddress) != 0)
-        {
-            LOG_ERROR("DLSS-NR Vulkan: {}", DlssNr::ModelLog::DescribeFault(faultCode, faultAddress));
-            Fail("the model faulted inside its own code; off for this session");
-            return;
-        }
-    }
+    if (NoteModelFault())
+        return;
 
     // The game's own resources, already wrapped: NGX hands Vulkan resources over as
     // NVSDK_NGX_Resource_VK, so only this pass's own images need building.
@@ -769,6 +778,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         if (result != 1)
         {
             LOG_ERROR("DLSS-NR Vulkan: NVSDK_NGX_VULKAN_Init_Ext returned {}", result);
+            NoteModelFault();
             Fail("the model would not initialise on this Vulkan device");
             return;
         }
@@ -896,6 +906,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
         if (g_vk.feature == nullptr)
         {
+            NoteModelFault();
             Fail("the model would not build a feature on this device");
             return;
         }
@@ -1250,6 +1261,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     if (evaluated != 1)
     {
         LOG_ERROR("DLSS-NR Vulkan: evaluate returned {}", evaluated);
+        NoteModelFault();
         Fail("the model refused to evaluate");
         return;
     }
