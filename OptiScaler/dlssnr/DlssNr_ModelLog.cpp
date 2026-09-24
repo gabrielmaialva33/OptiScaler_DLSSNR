@@ -5,10 +5,12 @@
 #include <Logger.h>
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 namespace DlssNr::ModelLog
 {
@@ -20,6 +22,7 @@ using PFN_OutputDebugStringW = void(WINAPI*)(LPCWSTR);
 std::atomic<PFN_OutputDebugStringA> g_realA { nullptr };
 std::atomic<PFN_OutputDebugStringW> g_realW { nullptr };
 std::mutex g_installMutex;
+std::atomic<int> g_configCount { -1 };
 
 // The model is not expected to talk per frame, but nothing guarantees it, and a per-frame line would
 // bury everything else in the log. Forty lines per ten seconds is far above anything event-driven
@@ -32,6 +35,23 @@ std::chrono::steady_clock::time_point g_windowStart {};
 unsigned int g_inWindow = 0;
 unsigned int g_dropped = 0;
 
+// "DLSSNR: 1 config(s) available:" -- read before the rate limit, so a dropped line still counts.
+void NoteConfigCount(const std::string& text)
+{
+    constexpr std::string_view kMarker = " config(s) available";
+    const auto at = text.find(kMarker);
+
+    if (at == std::string::npos)
+        return;
+
+    size_t start = at;
+    while (start > 0 && std::isdigit(static_cast<unsigned char>(text[start - 1])) && at - start < 4)
+        --start;
+
+    if (start != at)
+        g_configCount = std::stoi(text.substr(start, at - start));
+}
+
 void Emit(std::string text)
 {
     while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == ' '))
@@ -39,6 +59,8 @@ void Emit(std::string text)
 
     if (text.empty())
         return;
+
+    NoteConfigCount(text);
 
     unsigned int dropped = 0;
     {
@@ -173,6 +195,8 @@ void* PatchImport(HMODULE module, const char* importDll, const char* function, v
 }
 
 } // namespace
+
+int ConfigCount() { return g_configCount.load(); }
 
 void Install(const std::filesystem::path& snippet)
 {

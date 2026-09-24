@@ -5,6 +5,7 @@
 #include "DlssNr.h"
 #include "DlssNr_ExposureScan.h"
 #include "DlssNr_GpuTiming.h"
+#include "DlssNr_ModelLog.h"
 
 #include <Config.h>
 #include <State.h>
@@ -242,12 +243,17 @@ static void RenderPassControls(Config* config, bool vulkan)
     changed |= PassFloat("Intensity", sparse.Intensity, master.Intensity, 0.0f);
     changed |= PassFloat("Local structure", sparse.LocalStructure, master.LocalStructure, 0.0f);
     changed |= PassFloat("Local tone", sparse.LocalTone, master.LocalTone, 0.0f);
+    // Read by the model only with the mask on; see the master slider.
+    ImGui::BeginDisabled(!sparse.AutoMask.value_or(master.AutoMask));
     changed |= PassFloat("Skin structure", sparse.SkinStructure, master.SkinStructure, -1.0f);
+    ImGui::EndDisabled();
     const char* presets[] = { Localization::Tr("Default"), Localization::Tr("Preset 1"), Localization::Tr("Preset 2"),
                               Localization::Tr("Preset 3") };
     const char* styles[] = { Localization::Tr("Model A (Default)"), Localization::Tr("Model B (Natural)"),
                              Localization::Tr("Model C (Cinematic)") };
-    changed |= PassChoice("Model preset", sparse.Preset, master.Preset, presets, IM_ARRAYSIZE(presets));
+    // One weight set means nothing to choose; see the master combo.
+    if (DlssNr::ModelLog::ConfigCount() != 1)
+        changed |= PassChoice("Model preset", sparse.Preset, master.Preset, presets, IM_ARRAYSIZE(presets));
     changed |= PassChoice("Style", sparse.Style, master.Style, styles, IM_ARRAYSIZE(styles));
     ImGui::PushID("autoMask");
     bool maskOverride = sparse.AutoMask.has_value();
@@ -729,19 +735,32 @@ void RenderMenu(Config* config, float menuResScale)
 
         ImGui::SeparatorText(Localization::Tr("Model"));
 
-        ImGui::TextUnformatted(
-            Localization::Tr("Read when the model is built, so a change rebuilds it after a moment."));
-
-        static const char* nrPresetNames[] = { Localization::Label("Default"), Localization::Label("Preset 1"),
-                                               Localization::Label("Preset 2"), Localization::Label("Preset 3") };
         auto master = config->GetDlssNrMasterSettings();
-        int preset = (int) master.Preset;
-        if (ImGui::Combo(Localization::Label("Model preset"), &preset, nrPresetNames, IM_ARRAYSIZE(nrPresetNames)))
-            config->SetDlssNrMasterSetting(&Config::DlssNrPreset, (uint32_t) preset);
 
-        HelpMarker("Default leaves the choice to the model."
-                   "\n\nNot the same scale as the super resolution or ray reconstruction presets --"
-                   "\nthe same number means something different here.");
+        // The preset picks one of the model's weight sets, and only the model knows how many it has.
+        // 310.8 says "1 config(s) available" and falls back to that one whatever is asked, so a combo
+        // there edits nothing and still rebuilds the model on every change (DEVELOPMENT.md rule 2).
+        // Until the model has said, the control stays as it was.
+        if (DlssNr::ModelLog::ConfigCount() == 1)
+        {
+            ImGui::TextDisabled("%s", Localization::Tr("Model preset: this model has one weight set, so there is "
+                                                       "nothing to choose."));
+        }
+        else
+        {
+            ImGui::TextUnformatted(
+                Localization::Tr("Read when the model is built, so a change rebuilds it after a moment."));
+
+            static const char* nrPresetNames[] = { Localization::Label("Default"), Localization::Label("Preset 1"),
+                                                   Localization::Label("Preset 2"), Localization::Label("Preset 3") };
+            int preset = (int) master.Preset;
+            if (ImGui::Combo(Localization::Label("Model preset"), &preset, nrPresetNames, IM_ARRAYSIZE(nrPresetNames)))
+                config->SetDlssNrMasterSetting(&Config::DlssNrPreset, (uint32_t) preset);
+
+            HelpMarker("Default leaves the choice to the model."
+                       "\n\nNot the same scale as the super resolution or ray reconstruction presets --"
+                       "\nthe same number means something different here.");
+        }
 
         static const char* nrStyleNames[] = { Localization::Label("Model A (Default)"), Localization::Label("Model B (Natural)"),
                                               Localization::Label("Model C (Cinematic)") };
@@ -771,17 +790,23 @@ void RenderMenu(Config* config, float menuResScale)
         if (DeferredSlider("Local tone", &master.LocalTone, 0.0f, 2.0f, 1.0f))
             config->SetDlssNrMasterSetting(&Config::DlssNrLocalTone, master.LocalTone);
 
-        if (DeferredSlider("Skin structure", &master.SkinStructure, -1.0f, 2.0f, -1.0f))
-            config->SetDlssNrMasterSetting(&Config::DlssNrSkinStructure, master.SkinStructure);
-
-        HelpMarker("-1 means follow local structure, and is the model's own default -- it is not a"
-                   "\nstrength of zero. 0 and above set skin independently of the rest of the frame.");
-
         bool autoMask = master.AutoMask;
         if (ImGui::Checkbox(Localization::Label("Auto skin mask"), &autoMask))
             config->SetDlssNrMasterSetting(&Config::DlssNrAutoMask, autoMask);
 
         HelpMarker("Lets the model find skin itself rather than treating the frame uniformly.");
+
+        // With the mask off the model sets its effective skin strength to -1 whatever it is given
+        // (310.8, read in its own parameter handling), so the slider would edit nothing. Above the
+        // slider now, since the slider depends on it.
+        ImGui::BeginDisabled(!autoMask);
+        if (DeferredSlider("Skin structure", &master.SkinStructure, -1.0f, 2.0f, -1.0f))
+            config->SetDlssNrMasterSetting(&Config::DlssNrSkinStructure, master.SkinStructure);
+        ImGui::EndDisabled();
+
+        HelpMarker("-1 means follow local structure, and is the model's own default -- it is not a"
+                   "\nstrength of zero. 0 and above set skin independently of the rest of the frame."
+                   "\n\nRead only with the auto skin mask on; with it off the model ignores this.");
 
         // Runtime activity alone cannot identify a native Vulkan backend before its first NR frame.
         const auto& state = State::Instance();

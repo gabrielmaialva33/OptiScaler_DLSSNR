@@ -17,4 +17,9 @@ namespace DlssNr::ModelLog
 // feature is created. Idempotent: a second call finds its own hook in the import table and does
 // nothing. Only NR paths call it, so it is inert when NR is off.
 void Install(const std::filesystem::path& snippet);
+
+// How many weight sets the model says it carries, from its own "N config(s) available" line at a
+// feature build; -1 until it has said. The preset is an index into these, so with one there is
+// nothing to choose (310.8 reports one, and a request for another falls back to it).
+int ConfigCount();
 } // namespace DlssNr::ModelLog
