@@ -37,7 +37,15 @@ bool WantedForFrameGeneration();
 // Deliberately not expressed by setting activeFgInput. Frame generation state means an FG object, an
 // FG backend and an FG queue, and none of that is wanted or created here; borrowing the flag to open
 // a gate would make every later reader of it wrong.
+//
+// Alongside frame generation only when it is synthesized FG, which has no upscaler either: the pass
+// then runs in the bridge copy, once per base frame, and FG interpolates from its output.
 bool WantedForNeuralRendering();
+
+// A bridge built for synthesized FG with DLSS-NR off at creation but HookMethod 2 set: it keeps a host
+// that builds nothing until the neural toggle switches the pass on, so the toggle has a route that is
+// not the wrapped FFX swapchain.
+bool WantedIdleForNeuralRendering();
 
 // Either reason. What the factory sites ask.
 bool Wanted();
@@ -200,11 +208,11 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     bool _drainSignaled[2] {};
     ID3D12CommandQueue* _presentQueue = nullptr;
 
-    // The neural pass, when this bridge was built for it rather than for frame generation. One per
-    // wrapper: it owns its working colour, its zero guides and its own frame serial, and never
-    // reaches for a global. Null unless Dx11wDx12::WantedForNeuralRendering() was true at creation,
-    // which is read once, because this decides a swapchain's topology and a menu toggle cannot
-    // replace a game's swapchain in flight.
+    // The neural pass, when this bridge carries it: built for it alone, or alongside synthesized frame
+    // generation. One per wrapper: it owns its working colour, its zero guides and its own frame
+    // serial, and never reaches for a global. Null unless Dx11wDx12::WantedForNeuralRendering() or
+    // WantedIdleForNeuralRendering() was true at creation, which is read once, because this decides a
+    // swapchain's topology and a menu toggle cannot replace a game's swapchain in flight.
     std::unique_ptr<DlssNr::PresentHost> _nrHost;
     std::vector<ID3D12Resource*> _copyDestinations;
 

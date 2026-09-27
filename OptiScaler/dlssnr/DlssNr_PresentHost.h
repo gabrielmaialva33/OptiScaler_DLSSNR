@@ -3,6 +3,7 @@
 #include "DlssNr_ZeroGuides.h"
 
 #include <d3d12.h>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 
@@ -76,6 +77,11 @@ class PresentHost
     // need nothing, because they are used once and then kept until teardown.
     bool _EnsureFeature(ID3D12Device* device, ID3D12CommandQueue* queue);
 
+    // One line every two seconds while the pass is on: frames handed to this host against frames the
+    // model actually ran on. The process-wide status line is counted at the D3D12 present hook, which a
+    // bridge never reaches, so without this the hosted route said nothing about itself at all.
+    void _ReportWindow();
+
     ZeroGuides _guides;
 
     // The colour the model reads and writes. A wide float format rather than the backbuffer's own,
@@ -96,6 +102,9 @@ class PresentHost
     bool _reportedCapture = false;
 
     uint64_t _serial = 0;
+    uint64_t _windowFrames = 0;
+    uint64_t _windowSerial = 0;
+    std::chrono::steady_clock::time_point _windowAt {};
     uint32_t _width = 0;
     uint32_t _height = 0;
     unsigned int _sourceFormat = 0;

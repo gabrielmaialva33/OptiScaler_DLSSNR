@@ -47,10 +47,21 @@ bool WantedForNeuralRendering()
     if (!cfg.DlssNrEnabled.value_or_default() || cfg.DlssNrHookMethod.value_or_default() != 2)
         return false;
 
-    // Never alongside frame generation in this slice. FG owns the presenter, the submission order and
-    // the buffer rotation, and an NR dispatch placed into that without its own design is a second
-    // writer on the frame rather than a second reason for the transport.
-    return !WantedForFrameGeneration();
+    // Alongside frame generation only when that frame generation has no upscaler either. Fed by an
+    // upscaler (FGInput::Upscaler), the pass has its own route after that upscaler, and a second one
+    // here would be a second writer on the frame. Synthesized FG has none: the bridge copy is the one
+    // place a base frame exists before FG, and FG interpolates whatever lands in the presenter's
+    // backbuffer, so the pass runs there once per base frame and the generated frames inherit it
+    // (dlssnr/design/synthesized-frame-generation.md, step 2).
+    return !WantedForFrameGeneration() || State::Instance().activeFgInput == FGInput::Synthesized;
+}
+
+bool WantedIdleForNeuralRendering()
+{
+    const auto& cfg = *Config::Instance();
+
+    return !cfg.DlssNrEnabled.value_or_default() && cfg.DlssNrHookMethod.value_or_default() == 2 &&
+           WantedForFrameGeneration() && State::Instance().activeFgInput == FGInput::Synthesized;
 }
 
 bool Wanted() { return WantedForFrameGeneration() || WantedForNeuralRendering(); }
@@ -174,15 +185,33 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
 
     // Read once, here, and never again. This decides what this swapchain is for, and a menu toggle
     // cannot replace a game's swapchain while it is presenting.
+    const bool synthesizedFg =
+        Dx11wDx12::WantedForFrameGeneration() && State::Instance().activeFgInput == FGInput::Synthesized;
+
     if (Dx11wDx12::WantedForNeuralRendering())
     {
         _nrHost = std::make_unique<DlssNr::PresentHost>();
         State::Instance().nrPresentHostActive = true;
         LOG_INFO("bridge {} hosts the neural pass: no upscaler in this title", _id);
+
+        if (synthesizedFg)
+            LOG_INFO("bridge {} runs the neural pass once per base frame, before synthesized frame generation "
+                     "interpolates from it",
+                     _id);
+    }
+    else if (Dx11wDx12::WantedIdleForNeuralRendering())
+    {
+        // This swapchain is built for synthesized FG anyway, so the neural toggle can have a route on it
+        // without changing its topology. The host builds nothing while the pass is off; without it, a
+        // toggle mid-session had only the wrapped FFX swapchain left, which runs on every presented frame.
+        _nrHost = std::make_unique<DlssNr::PresentHost>();
+        LOG_INFO("bridge {} keeps an idle neural host for synthesized frame generation: nothing is built until "
+                 "DLSS-NR is switched on",
+                 _id);
     }
 
     // Same rule: read once. With no upscaler to feed frame generation, this bridge feeds it itself.
-    if (Dx11wDx12::WantedForFrameGeneration() && State::Instance().activeFgInput == FGInput::Synthesized)
+    if (synthesizedFg)
     {
         _synthInputs = std::make_unique<SynthInputsDx11wDx12>();
         LOG_INFO("bridge {} feeds frame generation synthesized inputs: no upscaler in this title", _id);
@@ -512,7 +541,9 @@ ID3D12CommandQueue* Dx11wDx12SC::_PresentQueueForFrame()
 {
     auto* queue = _fg != nullptr ? _fg->GetCommandQueue() : nullptr;
 
-    if (queue == nullptr && _nrHost != nullptr)
+    // Only a bridge with no frame generation falls back. One hosting the pass alongside synthesized FG
+    // is still an FG bridge, and an FG object without a queue is still a bridge in trouble.
+    if (queue == nullptr && _fg == nullptr && _nrHost != nullptr)
         queue = _dx12CommandQueue;
 
     return queue;

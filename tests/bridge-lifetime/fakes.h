@@ -225,8 +225,31 @@ enum class SwapchainInteropApi
     None,
     Dx11wDx12
 };
+// Production's order, so a value the predicates compare against means the same thing here.
+enum class FGInput
+{
+    NoFG,
+    Upscaler,
+    DLSSG,
+    NvngxFG,
+    FSRFG,
+    FSRFG30,
+    XeFG,
+    Synthesized,
+};
+enum class FGOutput
+{
+    NoFG,
+    FSRFG,
+    DLSSG,
+    XeFG,
+    Reprojection
+};
 struct State
 {
+    FGInput activeFgInput = FGInput::NoFG;
+    FGOutput activeFgOutput = FGOutput::NoFG;
+    bool nrPresentHostActive = false;
     void* currentSwapchain = nullptr;
     void* currentWrappedSwapchain = nullptr;
     Swapchain* currentRealSwapchain = nullptr;
@@ -244,12 +267,20 @@ struct State
         return state;
     }
 };
+template <typename T> struct ConfigValue
+{
+    T value {};
+    T value_or_default() const { return value; }
+};
 struct Config
 {
     struct
     {
         bool value_or_default() { return false; }
     } FGEnabled;
+    // The two keys the bridge's neural predicates read, at production's defaults.
+    ConfigValue<bool> DlssNrEnabled { false };
+    ConfigValue<uint32_t> DlssNrHookMethod { 1 };
     static Config* Instance()
     {
         static Config config;
