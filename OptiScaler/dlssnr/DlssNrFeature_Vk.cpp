@@ -8,6 +8,7 @@
 #include <NVNGX_Parameter.h>
 #include <dlssnr/DlssNr_Consumers.h>
 #include <dlssnr/DlssNr_ModelLog.h>
+#include <dlssnr/DlssNr_WorkingScale.h>
 
 #include <shaders/dlssnr/DlssNr_Vk.h>
 #include <shaders/output_scaling/OS_Vk.h>
@@ -719,7 +720,19 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     // reduced path below never runs, so the default is byte-for-byte what it was.
     // Above 1 the model supersamples (up to 2x): the proxy is enlarged, the model runs above native,
     // and superDown averages the answer back. Vulkan matches the D3D12 cap.
-    const float workScale = std::clamp(cfg.DlssNrWorkingScale.value_or_default(), 0.25f, 2.0f);
+    // WorkingScale=auto depends on the GPU; see DlssNr_WorkingScale.h. Vulkan knows it by PCI id.
+    {
+        static VkPhysicalDevice noted = VK_NULL_HANDLE;
+
+        if (physicalDevice != noted)
+        {
+            VkPhysicalDeviceProperties props {};
+            vkGetPhysicalDeviceProperties(physicalDevice, &props);
+            DlssNr::NoteAdapter(props.vendorID, props.deviceID);
+            noted = physicalDevice;
+        }
+    }
+    const float workScale = std::clamp(DlssNr::WorkingScale(), 0.25f, 2.0f);
     const uint32_t workWidth = (uint32_t) (width * workScale + 0.5f);
     const uint32_t workHeight = (uint32_t) (height * workScale + 0.5f);
     const bool reduced = workWidth != width || workHeight != height;

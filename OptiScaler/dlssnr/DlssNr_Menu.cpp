@@ -6,6 +6,7 @@
 #include "DlssNr_ExposureScan.h"
 #include "DlssNr_GpuTiming.h"
 #include "DlssNr_ModelLog.h"
+#include "DlssNr_WorkingScale.h"
 
 #include <Config.h>
 #include <State.h>
@@ -578,8 +579,11 @@ void RenderMenu(Config* config, float menuResScale)
         // reads live; only the commit waits.
         static int pendingScale = -1;
 
-        int scalePercent =
-            pendingScale >= 0 ? pendingScale : (int) lroundf(config->DlssNrWorkingScale.value_or_default() * 100.0f);
+        // What the pass will use, not the key: auto depends on the GPU (DlssNr_WorkingScale.h), and a
+        // slider reading 100% while the model ran at 50% would be a control that lies. Until the pass has
+        // seen its device, auto reads as 100%.
+        const bool autoScale = !config->DlssNrWorkingScale.has_value();
+        int scalePercent = pendingScale >= 0 ? pendingScale : (int) lroundf(DlssNr::WorkingScale() * 100.0f);
 
         // On the ray-reconstruction route the model works at RRWorkingScale, and this slider is not
         // read at all. Leaving it live was worse than hiding it: it moved, it accepted 200%, and the
@@ -592,13 +596,24 @@ void RenderMenu(Config* config, float menuResScale)
         }
         else
         {
-            if (ImGui::SliderInt(Localization::Label("Model resolution"), &scalePercent, 25, 200, "%d%%"))
+            if (ImGui::SliderInt(Localization::Label("Model resolution"), &scalePercent, 25, 200,
+                                 autoScale && pendingScale < 0 ? "%d%% (auto)" : "%d%%"))
                 pendingScale = scalePercent;
 
             if (ImGui::IsItemDeactivatedAfterEdit() && pendingScale >= 0)
             {
                 config->DlssNrWorkingScale = std::clamp(pendingScale, 25, 200) / 100.0f;
                 pendingScale = -1;
+            }
+
+            // The way back to auto, once the slider has been moved. Only while there is a set value to
+            // clear: auto means something different per GPU, so it is not just another percentage.
+            if (!autoScale && pendingScale < 0)
+            {
+                ImGui::SameLine();
+
+                if (ImGui::SmallButton(Localization::Label("Auto###nrWorkingScaleAuto")))
+                    config->DlssNrWorkingScale = std::optional<float> {};
             }
         }
 
@@ -636,13 +651,16 @@ void RenderMenu(Config* config, float menuResScale)
                    "\nthe fine structure it synthesises does not, and softens. Worth having when the"
                    "\npass costs more than you want to pay for the detail it returns."
                    "\n\nThe frame itself stays at full detail whatever this says -- only the"
-                   "\nmodel's own work is done small.");
+                   "\nmodel's own work is done small."
+                   "\n\nauto is 100% on RTX 40 and later and 50% on RTX 20 and 30: an RTX 3060"
+                   "\nmeasured 25 times an RTX 4090's per-pixel cost. Moving the slider replaces"
+                   "\nit; Auto puts it back.");
 
         // Meaningful only when the model runs BELOW the frame's size. At 100% -- and above, where
         // supersampling composites its down-legged answer at native -- the residual collapses to the
         // model's own picture and the two modes are identical, so the control says so by going grey.
         {
-            const bool reduced = config->DlssNrWorkingScale.value_or_default() < 0.999f;
+            const bool reduced = DlssNr::WorkingScale() < 0.999f;
 
             if (!reduced)
                 ImGui::BeginDisabled();

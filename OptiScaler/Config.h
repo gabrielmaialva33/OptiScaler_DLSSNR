@@ -393,7 +393,10 @@ class Config
     // The fraction of the frame's resolution the model works at. The frame itself is never reduced --
     // only the model's contribution is computed small and enlarged, so the picture underneath is
     // untouched whatever this is set to. 1.0 is full resolution and behaves exactly as before.
-    CustomOptional<float> DlssNrWorkingScale { 1.0f };
+    // Unset (auto) is not 1.0 everywhere: read it through DlssNr::WorkingScale(), which resolves auto
+    // for the GPU (dlssnr/DlssNr_WorkingScale.h). SoftDefault because of that: an explicit 1.0 on a card
+    // where auto is 0.5 must survive a save, and the WithDefault rule would write it back as auto.
+    CustomOptional<float, SoftDefault> DlssNrWorkingScale { 1.0f };
 
     // Filter used for NR supersampling (working scale > 1): the model runs above native, and this is
     // the downscaler that averages its answer back to native. Independent of OutputScalingDownscaler

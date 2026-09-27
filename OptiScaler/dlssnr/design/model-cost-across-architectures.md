@@ -4,6 +4,8 @@ Status: **measurement, not a design.** Nothing here proposes a change. It record
 second machine, because every number this project has is from one GPU, and a single architecture is
 not a hardware requirement until somebody checks the next one.
 
+Acted on since in [working-scale-auto.md](working-scale-auto.md): `WorkingScale=auto` is 0.5 below Ada.
+
 ## Why this exists
 
 [model-cost-vs-working-scale.md](model-cost-vs-working-scale.md) settled what the pass costs and how
@@ -76,9 +78,17 @@ unlock raises a ceiling on a card where frame generation already works; on Amper
 generation to multiply. This is a hardware gate in the vendor's runtime, not something a fork can
 reach.
 
-The session log also reports `arch=0x170` for this adapter. **No meaning is drawn from that number**
-— `feed_opti.h` in the external survey records `0x160` for an RTX 5090, which means these ids are not
-ordered by generation and this project cannot decode them. The capability answer is what settles it.
+The session log also reports `arch=0x170` for this adapter, which is `NV_GPU_ARCHITECTURE_GA100`:
+NVAPI's id for the Ampere generation, whatever the die.
+
+*Corrected 2026-09-27.* This paragraph used to draw no meaning from that number. It said
+`feed_opti.h` in the external survey recorded `0x160` for an RTX 5090, so the ids could not be ordered
+by generation. That was a misreading. Feeder's `0x160` is the `MinHWArchitecture` the driver returns
+for the SuperSampling requirements query, the oldest architecture DLSS accepts (Turing), not the
+card's architecture. The ids rise by generation, TU100 0x160 < GA100 0x170 < GH100 0x180 < AD100
+0x190 < GB200 0x1B0, and upstream's `>= AD100` test for real DLSS-G depends on it. The capability
+answer above still settles the frame generation question; the architecture id is now what
+[working-scale-auto.md](working-scale-auto.md) keys on.
 
 ## What this changes
 

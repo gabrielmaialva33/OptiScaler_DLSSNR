@@ -1588,6 +1588,9 @@
     <ClInclude Include="dlssnr\DlssNr_Submission.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_WorkingScale.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="dlssnr\DlssNr_SubmissionModel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1619,6 +1622,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="dlssnr\DlssNr_ZeroGuides.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dlssnr\DlssNr_WorkingScale.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="dlssnr\DlssNr_PresentHost.cpp">

@@ -253,6 +253,13 @@ inline std::atomic<unsigned long long> g_passesRecorded { 0 };
 inline std::atomic<bool> g_resetOnReturn { false };
 struct NrFakeState { bool reset = false; };
 inline NrFakeState g_nr;
+// DlssNr_WorkingScale.cpp resolves auto for the GPU the pass runs on. There is no GPU here, so auto is
+// 1.0, which is what it resolves to on Ada and on anything unidentified.
+inline float WorkingScale()
+{
+    const auto& scale = Config::Instance()->DlssNrWorkingScale;
+    return scale.has_value() ? *scale : 1.0f;
+}
 }
 
 namespace DlssNr::GpuTiming { inline void SetEnabled(bool) {} }

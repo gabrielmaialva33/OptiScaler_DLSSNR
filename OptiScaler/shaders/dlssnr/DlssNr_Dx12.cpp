@@ -23,6 +23,7 @@
 #include <dlssnr/DlssNr_GpuTiming.h>
 #include <dlssnr/DlssNr_LogRate.h>
 #include <dlssnr/DlssNr_ZeroGuides.h>
+#include <dlssnr/DlssNr_WorkingScale.h>
 
 #include <mutex>
 #include <optional>
@@ -2525,8 +2526,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // the model runs reduced and cheaper; above 1 it SUPERSAMPLES -- the proxy is upscaled to a larger
     // working size so the model denoises a super-native input, which the resolve then samples back down.
     // Capped at 2x: cost grows with the area and NGX acceptance above native is what this probe tests.
-    const float configuredWorkScale = frame.AfterRayReconstruction ? cfg.DlssNrRRWorkingScale.value_or_default()
-                                                                   : cfg.DlssNrWorkingScale.value_or_default();
+    // WorkingScale=auto depends on the GPU this device is on; see DlssNr_WorkingScale.h.
+    DlssNr::NoteAdapter(device->GetAdapterLuid());
+    const float configuredWorkScale =
+        frame.AfterRayReconstruction ? cfg.DlssNrRRWorkingScale.value_or_default() : DlssNr::WorkingScale();
     // The upper bound is 1.0 for a caller with no real motion: above native the model refuses zero
     // guides (see DlssNrFrameInfo::AllowSupersampling), so clamping here turns a would-be refusal of
     // the user's chosen scale into the nearest size that runs, silently and every frame.
@@ -4472,7 +4475,7 @@ void ReportSpatialContract(NVSDK_NGX_Parameter* params, ID3D12Resource* color, I
                     NVSDK_NGX_Result_Success;
     now.haveHeight = params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &now.subHeight) ==
                      NVSDK_NGX_Result_Success;
-    now.scale = Config::Instance()->DlssNrWorkingScale.value_or_default();
+    now.scale = DlssNr::WorkingScale();
     // Match Dispatch's clamping for logging only; never feed diagnostic values back to rendering.
     if (std::isfinite(now.scale))
     {
