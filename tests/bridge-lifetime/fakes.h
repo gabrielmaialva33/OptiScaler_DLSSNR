@@ -122,8 +122,16 @@ struct ID3D12CommandAllocator : Ref
         return resetResult;
     }
 };
+struct D3D12_RESOURCE_DESC
+{
+    UINT64 Width = 0;
+    UINT Height = 0;
+    DXGI_FORMAT Format = 0;
+};
 struct ID3D12Resource : Ref
 {
+    D3D12_RESOURCE_DESC desc {};
+    D3D12_RESOURCE_DESC GetDesc() const { return desc; }
 };
 struct ID3D12GraphicsCommandList : ID3D12CommandList
 {
@@ -312,6 +320,42 @@ struct PresentHost
 };
 } // namespace DlssNr
 
+// The synthesized FG input, reduced to what the bridge owes it: its one-time clear rides the copy list
+// and is confirmed or abandoned with that list, and its pair is freed only behind a proved drain.
+struct SynthInputsDx11wDx12
+{
+    unsigned records = 0, confirms = 0, abandons = 0, releases = 0;
+    UINT64 lastWidth = 0;
+    UINT lastHeight = 0;
+    bool recordingOutstanding = false;
+
+    bool RecordInit(void* device, ID3D12GraphicsCommandList* cmdList, UINT width, UINT height, DXGI_FORMAT)
+    {
+        assert(device != nullptr && cmdList != nullptr);
+        assert(!recordingOutstanding && "a second RecordInit before the last one was resolved");
+        ++records;
+        lastWidth = width;
+        lastHeight = height;
+        recordingOutstanding = true;
+        return true;
+    }
+    void ConfirmExecuted()
+    {
+        ++confirms;
+        recordingOutstanding = false;
+    }
+    void AbandonRecording()
+    {
+        ++abandons;
+        recordingOutstanding = false;
+    }
+    void Release()
+    {
+        ++releases;
+        recordingOutstanding = false;
+    }
+};
+
 class Dx11wDx12SC
 {
   public:
@@ -364,6 +408,7 @@ class Dx11wDx12SC
     UINT _currentFakeIndex = 0;
     Dx11wDx12SC* _nextLive = nullptr;
     std::unique_ptr<DlssNr::PresentHost> _nrHost;
+    std::unique_ptr<SynthInputsDx11wDx12> _synthInputs;
     inline static Dx11wDx12SC* _live = nullptr;
     Dx11wDx12SC* _nextRetired = nullptr;
     inline static Dx11wDx12SC* _retired = nullptr;

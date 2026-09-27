@@ -3313,7 +3313,9 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             "Can be used with any FG Output\n\nRequires enabling FSR-FG in game settings\nSupports HUDless out of the box" },
         { FGInput::FSRFG30, "FSR 3.0 FG",
             "Can be used with any FG Output\n\nRequires enabling FSR-FG in game settings\nSupports HUDless out of the box" },
-        { FGInput::XeFG, "XeFG" }
+        { FGInput::XeFG, "XeFG" },
+        { FGInput::Synthesized, "Synthesized",
+            "Experimental, for games with no upscaler\n\nNo motion vectors needed, uses only the presented image\nFSR FG output only" }
     };
 
     // clang-format on
@@ -3342,6 +3344,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         XeFGProxy::InitXeFG();
         inputOptions[optiFgIndex].set_disabled(XeFGProxy::Module() == nullptr, "libxess_fg.dll is missing");
     }
+
+    // Synthesized input requirements
+    auto constexpr synthesizedInputIndex = (uint32_t) FGInput::Synthesized;
+    inputOptions[synthesizedInputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
 
     // DLSSG inputs requirements
     auto constexpr dlssgInputIndex = (uint32_t) FGInput::DLSSG;

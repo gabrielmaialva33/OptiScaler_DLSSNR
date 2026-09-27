@@ -462,6 +462,61 @@ void neuralHostCases()
     }
 }
 
+void synthInputCases()
+{
+    // The ordinary frame: the clear is recorded at the presenter's backbuffer size and confirmed with
+    // the list that carried it.
+    {
+        Fixture f;
+        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        auto* synth = f.sc->_synthInputs.get();
+        f.presenter.buffer.desc = { 3440, 1440, 24 };
+        f.sc->_hasInteropWork = true;
+        assert(f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(synth->records == 1 && synth->confirms == 1 && synth->abandons == 0);
+        assert(synth->lastWidth == 3440 && synth->lastHeight == 1440);
+        assert(!synth->recordingOutstanding);
+        assert(f.list.copiedFrom == f.sc->_openedDx11BackBuffers[0]);
+    }
+
+    // The list could not be closed: the clear never ran and must stay owed.
+    {
+        Fixture f;
+        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        auto* synth = f.sc->_synthInputs.get();
+        f.sc->_hasInteropWork = true;
+        f.list.closeResult = E_FAIL;
+        assert(!f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(synth->records == 1 && synth->abandons == 1 && synth->confirms == 0);
+    }
+
+    // A resize frees the pair, and only once the drain in front of it has been proved.
+    {
+        Fixture f;
+        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        auto* synth = f.sc->_synthInputs.get();
+        f.sc->_hasInteropWork = true;
+        f.sc->_copyAllocatorFenceValues[0] = 5;
+        f.sc->_lastInteropCopyFenceValue = 5;
+        f.copyFence.completed = 5;
+        f.presentQueue.completeSignals = false;
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+        assert(synth->releases == 0);
+        f.presentQueue.signaled[0]->completed = 1;
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == S_OK);
+        assert(synth->releases == 1);
+    }
+
+    // Teardown frees it behind the same drain as the rest of the interop.
+    {
+        Fixture f;
+        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        auto* synth = f.sc->_synthInputs.get();
+        f.sc->_ReleaseInteropObjects();
+        assert(synth->releases == 1);
+    }
+}
+
 int main()
 {
     waitCases();
@@ -475,6 +530,7 @@ int main()
     retirementRecoveryCase();
     presentQueueCases();
     neuralHostCases();
+    synthInputCases();
     assert(Dx11wDx12SC::_retired == nullptr);
-    std::cout << "bridge lifetime: production wait, copy, resize, release, retirement and neural host cases passed\n";
+    std::cout << "bridge lifetime: production wait, copy, resize, release, retirement, neural host and synthesized input cases passed\n";
 }

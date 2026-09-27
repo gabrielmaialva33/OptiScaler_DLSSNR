@@ -3,6 +3,7 @@
 #include "SysUtils.h"
 #include <Config.h>
 #include <dlssnr/DlssNr_PresentHost.h>
+#include <inputs/FG/Synth_Inputs_Dx11wDx12.h>
 
 #include "dxgi1_6.h"
 #include "d3d11_4.h"
@@ -23,7 +24,8 @@ using Microsoft::WRL::ComPtr;
 // everywhere or the bridge appears on some routes and not others.
 namespace Dx11wDx12
 {
-// Frame generation: an upscaler feeds it and an FG output consumes it. Unchanged.
+// Frame generation: an FG output consumes it, fed either by an upscaler (FGInput::Upscaler) or, in a
+// title with no upscaler, by the presented frame alone (FGInput::Synthesized).
 bool WantedForFrameGeneration();
 
 // Neural rendering in a title that never calls an upscaler.
@@ -205,6 +207,11 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     // replace a game's swapchain in flight.
     std::unique_ptr<DlssNr::PresentHost> _nrHost;
     std::vector<ID3D12Resource*> _copyDestinations;
+
+    // Frame generation's depth and motion when nothing upstream provides them (FGInput::Synthesized).
+    // Null unless that input was active and frame generation wanted at creation, read once for the
+    // same reason as _nrHost.
+    std::unique_ptr<SynthInputsDx11wDx12> _synthInputs;
 
     // Intrusive retirement needs no allocation at the failure boundary. Deliberately no static
     // destructor: unproven live-device work stays quarantined until process exit.

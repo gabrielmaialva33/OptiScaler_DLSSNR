@@ -169,6 +169,8 @@ bool Config::Reload(std::filesystem::path iniPath)
                     FGInput.set_from_config(FGInput::FSRFG);
                 else if (lstrcmpiA(FGInputString.value().c_str(), "fsrfg30") == 0)
                     FGInput.set_from_config(FGInput::FSRFG30);
+                else if (lstrcmpiA(FGInputString.value().c_str(), "synthesized") == 0)
+                    FGInput.set_from_config(FGInput::Synthesized);
 
                 if (lstrcmpiA(FGInputString.value().c_str(), "nukems") == 0)
                 {
@@ -1090,6 +1092,8 @@ bool Config::SaveIni()
                 FGInputString = "FSRFG";
             else if (FGInputHeld.value() == FGInput::FSRFG30)
                 FGInputString = "FSRFG30";
+            else if (FGInputHeld.value() == FGInput::Synthesized)
+                FGInputString = "Synthesized";
         }
         ini.SetValue("FrameGen", "FGInput", FGInputString.c_str());
 

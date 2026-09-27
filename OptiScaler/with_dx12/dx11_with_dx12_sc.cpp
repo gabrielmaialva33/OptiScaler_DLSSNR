@@ -23,8 +23,8 @@ namespace Dx11wDx12
 bool WantedForFrameGeneration()
 {
     const auto& state = State::Instance();
-    return state.activeFgInput == FGInput::Upscaler && state.activeFgOutput != FGOutput::NoFG &&
-           state.activeFgInput != FGInput::NvngxFG;
+    const bool bridgeInput = state.activeFgInput == FGInput::Upscaler || state.activeFgInput == FGInput::Synthesized;
+    return bridgeInput && state.activeFgOutput != FGOutput::NoFG && state.activeFgInput != FGInput::NvngxFG;
 }
 
 bool WantedForNeuralRendering()
@@ -179,6 +179,13 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
         _nrHost = std::make_unique<DlssNr::PresentHost>();
         State::Instance().nrPresentHostActive = true;
         LOG_INFO("bridge {} hosts the neural pass: no upscaler in this title", _id);
+    }
+
+    // Same rule: read once. With no upscaler to feed frame generation, this bridge feeds it itself.
+    if (Dx11wDx12::WantedForFrameGeneration() && State::Instance().activeFgInput == FGInput::Synthesized)
+    {
+        _synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        LOG_INFO("bridge {} feeds frame generation synthesized inputs: no upscaler in this title", _id);
     }
 
     {
@@ -602,6 +609,12 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
             LOG_WARN("hidden real DX11 Present failed: {:X}", (UINT) realPresentResult);
     }
 
+    // FGHooks::FGPresent runs inside the Present below and dispatches FG for the frame started here.
+    // The pair's one-time clear went onto the copy list the present queue has just been made to wait
+    // for, so it is ordered before FG reads them whichever queue FG submits on.
+    if (_synthInputs != nullptr && _fg != nullptr)
+        _synthInputs->Feed(_fg, _dx12Device);
+
     auto result = _fgSwapChain->Present(SyncInterval, Flags);
 
     // DXGI can still put the presenter into exclusive fullscreen behind the wrapper -- its own
@@ -844,6 +857,11 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     _ResetTeardownDrain();
     _ReleaseInteropBackBuffers();
 
+    // The drain above covered the present queue FG reads them on; the next copy reallocates at the
+    // new size.
+    if (_synthInputs != nullptr)
+        _synthInputs->Release();
+
     HRESULT realResult = _real != nullptr ? _real->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags)
                                           : DXGI_ERROR_DEVICE_REMOVED;
 
@@ -1069,6 +1087,11 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
     _ResetTeardownDrain();
     _ReleaseInteropBackBuffers();
+
+    // The drain above covered the present queue FG reads them on; the next copy reallocates at the
+    // new size.
+    if (_synthInputs != nullptr)
+        _synthInputs->Release();
 
     HRESULT realResult =
         _real3->ResizeBuffers1(BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, ppPresentQueue);
@@ -1492,6 +1515,15 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
             transferSource = composed;
     }
 
+    // Frame generation's stand-in depth and motion, when this bridge feeds it. Only their one-time
+    // clear is ever recorded, sized to the presenter's backbuffer; Present hands them to FG.
+    if (_synthInputs != nullptr)
+    {
+        const auto fgDesc = fgBackBuffer->GetDesc();
+        _synthInputs->RecordInit(_dx12Device, _copyCommandLists[copySlot], (UINT) fgDesc.Width, fgDesc.Height,
+                                 fgDesc.Format);
+    }
+
     _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, transferSource);
 
     TransitionResource(_copyCommandLists[copySlot], fgBackBuffer, D3D12_RESOURCE_STATE_COPY_DEST,
@@ -1514,6 +1546,8 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
         // host's one-time guide initialization, which must stay owed rather than be assumed done.
         if (_nrHost != nullptr)
             _nrHost->AbandonRecording();
+        if (_synthInputs != nullptr)
+            _synthInputs->AbandonRecording();
         return false;
     }
 
@@ -1524,6 +1558,8 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     // advance: its guides are initialized and its frame serial moves for a frame the model saw.
     if (_nrHost != nullptr)
         _nrHost->ConfirmExecuted();
+    if (_synthInputs != nullptr)
+        _synthInputs->ConfirmExecuted();
 
     const auto signalValue = ++_copyFenceValue;
 
@@ -1677,6 +1713,10 @@ void Dx11wDx12SC::_ReleaseInteropObjects()
     // one place they can be freed without asking the GPU again.
     if (_nrHost != nullptr)
         _nrHost->Release();
+
+    // Read by FG on the present queue, which the same drain covers.
+    if (_synthInputs != nullptr)
+        _synthInputs->Release();
 
     _ReleaseInteropBackBuffers();
 

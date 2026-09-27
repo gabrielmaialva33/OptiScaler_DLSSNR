@@ -1267,7 +1267,9 @@ void FSRFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
                 DestroyFGContext();
         }
 
-        if (_fgContext != nullptr && State::Instance().activeFgInput == FGInput::Upscaler && !IsPaused() && !IsActive())
+        const auto fgInput = State::Instance().activeFgInput;
+        if (_fgContext != nullptr && (fgInput == FGInput::Upscaler || fgInput == FGInput::Synthesized) && !IsPaused() &&
+            !IsActive())
             Activate();
     }
     else if (IsActive())
