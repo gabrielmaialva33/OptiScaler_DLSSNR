@@ -19,6 +19,34 @@ testing representative content; the synthetic present fixture cannot establish e
 
 ## Status
 
+**2026-09-27 — Transfer A/B at half size.**
+`python3 tests/dlssnr-loopback/run.py --present-nr --transfer-ab` runs production's reduced-size
+pipeline around the real model:
+
+- **Pipeline:** encode at 1280×720, production's downsample to 640×360, the model there, and the
+  resolve back at full size.
+- **Trials:** Transfer 0, 1 and 3, each in eight-bit passthrough and linear, 24 frames each.
+- **Bytecode:** the run was repeated with the previous bytecode, clocks locked at 2100 / 10501 MHz.
+
+Results:
+
+- **Unchanged paths:** Transfer 0 and 1 are byte-identical across the two bytecodes.
+- **Transfer 3 against 1:**
+  - MAE 0.10 / 255, 7–9% of channels differ, and no new black pixels.
+  - The edit's high-pass energy is +20% in passthrough and +2% in linear.
+  - The resolve side costs +0.02 ms and +0.045 ms respectively.
+
+See `OptiScaler/dlssnr/design/sharp-residual.md`.
+
+**2026-09-27 — ControlMask A/B: no observed effect.**
+`python3 tests/dlssnr-loopback/run.py --present-nr --mask-ab` sets `DLSSNR.ControlMask`, a
+resource key the model binary names beside Color/MVec/Depth, over the HUD fixture. It ran thirteen
+trials: masks of all 0, all 1 and over the HUD, in R8_UNORM, R16_FLOAT, R32_FLOAT and RGBA8, with the
+automatic mask on and off, and skin structure 0 against local 1 so that a mask-driven difference would
+show. All 416 evaluations succeeded, and every masked output was byte-identical to its unmasked
+twin. `UseAutoMask` alone moved 31–44% of the channels in the same run. See
+[the report](control-mask.md).
+
 **2026-09-14 — passthrough chroma hypothesis falsified for the step-1 fixture.**
 `--present-nr --composition-ab` compares direct model output with composition, then sweeps
 transfer/colour strengths using the original source and three-size sequence. All 624 evaluations,

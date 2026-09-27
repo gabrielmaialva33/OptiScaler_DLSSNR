@@ -137,7 +137,7 @@ def check_present_coverage(harness):
 
 def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_ab=False, cold_size=None,
                      cold_ui=None, cold_sdk=None, cold_load_opti=False, cold_from_d3d11=False,
-                     cold_siblings=False):
+                     cold_siblings=False, mask_ab=False, transfer_ab=False):
     """Run the harness the way a Steam game runs: through Proton, in a compatdata prefix of its own.
 
     Hand-mirroring what Proton provides (vkd3d-proton, dxvk-nvapi, the driver's nvngx pair and the
@@ -170,13 +170,17 @@ def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_
         if composition_ab:
             (RUN / 'composition-report.json').unlink(missing_ok=True)
             (RUN / 'composition-vs-direct.png').unlink(missing_ok=True)
+        if mask_ab:
+            (RUN / 'mask-report.json').unlink(missing_ok=True)
+        if transfer_ab:
+            (RUN / 'transfer-report.json').unlink(missing_ok=True)
         if hud_ab:
             (RUN / 'hud-report.json').unlink(missing_ok=True)
             for stale in RUN.glob('hud-f*.png'):
                 stale.unlink()
     print(f'running under {proton.parent.name}')
     p = subprocess.run([str(proton), 'run', str(RUN / 'dlssnr-loopback.exe'), 'OptiScaler.dll'] +
-                       (['--present-composition-ab'] if composition_ab else ['--present-hud-ab'] if hud_ab else ['--present-nr'] if present_nr else ['--cold-nr'] if cold_nr else [])
+                       (['--present-composition-ab'] if composition_ab else ['--present-mask-ab'] if mask_ab else ['--present-transfer-ab'] if transfer_ab else ['--present-hud-ab'] if hud_ab else ['--present-nr'] if present_nr else ['--cold-nr'] if cold_nr else [])
                        + (['--cold-size', cold_size] if cold_nr and cold_size else [])
                        + (['--cold-ui-correction', cold_ui] if cold_nr and cold_ui else [])
                        + (['--cold-core-sdk', cold_sdk] if cold_nr and cold_sdk else [])
@@ -198,6 +202,16 @@ def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_
             if not re.search(r'^COMPOSITION-AB PASS: trials=25 attempts=1200 successes=1200 presents=1200 pending_resize_drains=50 controls=75 capture_pairs=225$', harness, re.M):
                 raise SystemExit('ZERO COVERAGE: incomplete composition sweep')
             run([sys.executable, HERE / 'analyze_composition.py', RUN])
+        elif transfer_ab:
+            import re
+            if not re.search(r'^TRANSFER-AB PASS: trials=6 attempts=144 successes=144 presents=144 controls=6 capture_pairs=18$', harness, re.M):
+                raise SystemExit('ZERO COVERAGE: incomplete Transfer A/B')
+            run([sys.executable, HERE / 'analyze_transfer.py', RUN])
+        elif mask_ab:
+            import re
+            if not re.search(r'^MASK-AB PASS: trials=13 attempts=416 successes=416 presents=416 controls=13 capture_pairs=91$', harness, re.M):
+                raise SystemExit('ZERO COVERAGE: incomplete ControlMask A/B')
+            run([sys.executable, HERE / 'analyze_mask.py', RUN])
         elif hud_ab:
             import re
             if not re.search(r'^HUD-AB PASS: trials=6 attempts=192 successes=192 presents=192 controls=6 capture_pairs=192$', harness, re.M):
@@ -278,21 +292,29 @@ def main():
     experiments = ap.add_mutually_exclusive_group()
     experiments.add_argument('--hud-ab', action='store_true', help='with --present-nr: paired HUD/UICorrection experiment')
     experiments.add_argument('--composition-ab', action='store_true', help='with --present-nr: direct/composed and strength sweep')
+    experiments.add_argument('--mask-ab', action='store_true', help='with --present-nr: whether DLSSNR.ControlMask changes the output')
+    experiments.add_argument('--transfer-ab', action='store_true', help='with --present-nr: Transfer 0/1/3 with the model at half size')
     args = ap.parse_args()
     if args.composition_ab and not args.present_nr:
         ap.error('--composition-ab requires --present-nr')
     if args.hud_ab and not args.present_nr:
         ap.error('--hud-ab requires --present-nr')
+    if args.mask_ab and not args.present_nr:
+        ap.error('--mask-ab requires --present-nr')
+    if args.transfer_ab and not args.present_nr:
+        ap.error('--transfer-ab requires --present-nr')
     if args.present_nr and args.runtime != 'proton':
         ap.error('--present-nr requires --runtime proton')
-    if args.hud_ab or args.composition_ab:
+    if args.hud_ab or args.composition_ab or args.mask_ab or args.transfer_ab:
         import importlib.util
         for module in ('numpy', 'PIL'):
             if importlib.util.find_spec(module) is None:
                 ap.error('image analysis requires numpy and Pillow in the runner Python environment')
     standalone = args.cold_nr or args.present_nr
     if args.present_nr:
-        RUN = OUT / ('composition-run' if args.composition_ab else 'hud-run' if args.hud_ab else 'present-run')
+        RUN = OUT / ('composition-run' if args.composition_ab else 'mask-run' if args.mask_ab else
+                     'transfer-run' if args.transfer_ab else
+                     'hud-run' if args.hud_ab else 'present-run')
     if args.cold_nr:
         RUN = OUT / 'cold-run'
 
@@ -400,7 +422,8 @@ def main():
     if args.runtime == 'proton':
         return run_under_proton(args.cold_nr, args.present_nr, args.hud_ab, args.composition_ab, args.cold_size,
                                 args.cold_ui_correction, args.cold_core_sdk, args.cold_load_optiscaler,
-                                args.cold_device_from_d3d11, args.cold_sibling_snippets)
+                                args.cold_device_from_d3d11, args.cold_sibling_snippets, mask_ab=args.mask_ab,
+                                transfer_ab=args.transfer_ab)
 
     # A separate runtime prefix: the compiler prefix is configured for MSVC, not for graphics, and
     # running the app there conflates "the harness is wrong" with "this prefix has no D3D12".

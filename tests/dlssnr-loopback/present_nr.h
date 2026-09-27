@@ -56,6 +56,25 @@ struct Host
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT linearFootprint {};
     UINT64 linearBytes = 0;
     int switchTo = -1;
+    // --present-mask-ab: whether DLSSNR.ControlMask, a resource key the model's binary names beside
+    // Color/MVec/Depth, changes anything. Its neighbours in the binary are UseAutoMask and
+    // SkinStructureStrength, so the hypothesis under test is "a caller-supplied mask standing in for the
+    // automatic one": skin 0 against local structure 1 makes a region the model treats as masked differ
+    // from one it does not. -1 writes a null resource, which is what production does by never setting it.
+    bool maskAb = false;
+    int maskPattern = -1; // -1 null, 0 all zero, 1 all one, 2 one over the HUD and zero elsewhere
+    unsigned useAutoMask = 1;
+    float skinStructure = -1;
+    DXGI_FORMAT maskFormat = DXGI_FORMAT_R8_UNORM;
+    std::vector<unsigned char> hudCover; // one byte per pixel, 255 where any frame's HUD lands
+    Com<ID3D12Resource> mask, maskUpload;
+    // --present-transfer-ab: the model at half the frame's size, the way production runs it below 100%.
+    // Encode at full size, production's own downsample to the working size, the model there, and the
+    // resolve back at full size, so the resolve's reduced-size branches (modelRanSmall) are what runs.
+    bool transferAb = false;
+    unsigned transferMode = 1;
+    unsigned workWidth = 0, workHeight = 0; // the frame's size unless transferAb
+    Com<ID3D12Resource> proxySmall, answerSmall;
     std::string trial;
     Com<IDXGISwapChain3> swapchain;
     Com<ID3D12RootSignature> root;
@@ -313,12 +332,12 @@ struct Host
         Check(device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pipeline)), "production NR compute pipeline");
         D3D12_DESCRIPTOR_HEAP_DESC hd {};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        hd.NumDescriptors = 16;
+        hd.NumDescriptors = 24; // encode 0-6, resolve 7-13, guides 14-15, downsample 16-22
         Check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&cpuHeap)), "CPU views");
         hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         Check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&gpuHeap)), "GPU views");
         stride = device->GetDescriptorHandleIncrementSize(hd.Type);
-        constants.p = Buffer(2 * sizeof(DlssNrConstants), D3D12_HEAP_TYPE_UPLOAD);
+        constants.p = Buffer(3 * sizeof(DlssNrConstants), D3D12_HEAP_TYPE_UPLOAD);
         Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)), "resize gate fence");
 
         D3D12_QUERY_HEAP_DESC qd {};
@@ -463,6 +482,8 @@ struct Host
         stage = "generation resources and clear-once guides";
         width = w;
         height = h;
+        workWidth = transferAb ? w / 2 : w;
+        workHeight = transferAb ? h / 2 : h;
         ++generation;
         for (unsigned i = 0; i < backs.size(); ++i)
             Check(swapchain->GetBuffer(i, IID_PPV_ARGS(&backs[i].p)), "GetBuffer");
@@ -472,8 +493,14 @@ struct Host
         proxy.p = MakeTexture(device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, true, Uav);
         original.p = MakeTexture(device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, true, Uav);
         answer.p = MakeTexture(device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, true, Uav);
-        depth.p = MakeTexture(device, w, h, DXGI_FORMAT_R32_FLOAT, true, Uav);
-        motion.p = MakeTexture(device, w, h, DXGI_FORMAT_R16G16_FLOAT, true, Uav);
+        // The guides are the model's, so they live at its working size.
+        depth.p = MakeTexture(device, workWidth, workHeight, DXGI_FORMAT_R32_FLOAT, true, Uav);
+        motion.p = MakeTexture(device, workWidth, workHeight, DXGI_FORMAT_R16G16_FLOAT, true, Uav);
+        if (transferAb)
+        {
+            proxySmall.p = MakeTexture(device, workWidth, workHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, true, Uav);
+            answerSmall.p = MakeTexture(device, workWidth, workHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, true, Uav);
+        }
         // This footprint describes the EIGHT-BIT backbuffer upload and the readbacks, so it must be
         // taken from that format and not from `source`, which the linear mode widens to four floats.
         // Deriving it from `source` silently repitched every row of the fixture upload.
@@ -494,12 +521,20 @@ struct Host
             FixtureLinear();
             UploadLinear();
         }
+        ID3D12Resource* modelIn = transferAb ? proxySmall.p : proxy.p;
+        ID3D12Resource* modelOut = transferAb ? answerSmall.p : answer.p;
         ID3D12Resource* encode[] = { source, source, source, source, source, proxy, original };
-        ID3D12Resource* resolve[] = { proxy, answer, original, motion, proxy, target, target };
+        ID3D12Resource* resolve[] = { modelIn, modelOut, original, motion, modelIn, target, target };
         for (unsigned i = 0; i < 7; ++i)
         {
             View(i, encode[i], i >= 5);
             View(7 + i, resolve[i], i >= 5);
+        }
+        if (transferAb)
+        {
+            ID3D12Resource* down[] = { proxy, proxy, proxy, proxy, proxy, proxySmall, proxySmall };
+            for (unsigned i = 0; i < 7; ++i)
+                View(16 + i, down[i], i >= 5);
         }
         View(14, depth, true);
         View(15, motion, true);
@@ -511,6 +546,8 @@ struct Host
         list->ClearUnorderedAccessViewFloat(Gpu(15), Cpu(15), motion, zero, 0, nullptr);
         Transition(list, depth, Uav, Srv);
         Transition(list, motion, Uav, Srv);
+        if (maskAb && maskPattern >= 0)
+            UploadMask();
         Submit();
         Say("  generation=%u extent=%ux%u guides cleared once and completed serial=%llu\n", generation, w, h, serial);
         stage = "CreateFeature(18)";
@@ -519,12 +556,14 @@ struct Host
         // Default 1 matches production; the opt-in HUD experiment varies only this create argument.
         if (hud)
             extras(params, 1, nullptr, nullptr, nullptr, 0, 0, 0, 0);
+        if (maskAb)
+            SetMask();
         // SkinStructure is -1, not 1. Minus one means "follow local structure", which is the model's
         // own default; one is an explicit strength. Passing 1 here made every measurement taken with
         // this harness a measurement of a configuration no user runs. Found by reading NIGos/ngxGym's
         // scenario files (MIT), which set NRSkinStructure=-1 throughout.
-        feature = create(snippetPath, L"", device, list, params, w, h, 0, 1, static_cast<int>(style), 1, 1, -1, 1,
-                         uiCorrection);
+        feature = create(snippetPath, L"", device, list, params, workWidth, workHeight, 0, 1, static_cast<int>(style), 1, 1,
+                         maskAb ? skinStructure : -1, maskAb ? static_cast<int>(useAutoMask) : 1, uiCorrection);
         Submit();
         ColdNr::NgxResult("snippet Init", static_cast<unsigned>(*lastInit));
         ColdNr::NgxResult("CreateFeature(18)", static_cast<unsigned>(*lastCreate));
@@ -535,19 +574,117 @@ struct Host
             ColdNr::NgxResult("UICorrection Get after create", params->Get("DLSSNR.UICorrection", &read));
             Require(read == uiCorrection, "create UI parameter did not round-trip");
             Say("  HUD trial=%s create_ui=%u\n", trial.c_str(), read);
+            if (maskAb)
+                Say("  MASK trial=%s pattern=%d auto_mask=%u skin=%.1f format=%d\n", trial.c_str(), maskPattern,
+                    useAutoMask, skinStructure, static_cast<int>(maskFormat));
         }
     }
 
-    void Shader(unsigned slot)
+    // Every pixel any of the 32 frames' HUD changes, grown by two so the glyph edges are inside it.
+    void CoverHud()
+    {
+        std::vector<unsigned char> hit(static_cast<size_t>(width) * height, 0);
+        for (unsigned frame = 0; frame < 32; ++frame)
+        {
+            Fixture();
+            const auto clean = pixels;
+            HudFixture(pixels, width, height, frame);
+            for (size_t i = 0; i < hit.size(); ++i)
+                if (memcmp(&clean[i * 4], &pixels[i * 4], 3) != 0)
+                    hit[i] = 1;
+        }
+        Fixture();
+        hudCover.assign(hit.size(), 0);
+        for (int y = 0; y < static_cast<int>(height); ++y)
+            for (int x = 0; x < static_cast<int>(width); ++x)
+                if (hit[static_cast<size_t>(y) * width + x])
+                    for (int dy = -2; dy <= 2; ++dy)
+                        for (int dx = -2; dx <= 2; ++dx)
+                        {
+                            const int u = x + dx, v = y + dy;
+                            if (u >= 0 && v >= 0 && u < static_cast<int>(width) && v < static_cast<int>(height))
+                                hudCover[static_cast<size_t>(v) * width + u] = 255;
+                        }
+        std::vector<unsigned char> shown(hudCover.size() * 4, 255);
+        for (size_t i = 0; i < hudCover.size(); ++i)
+            shown[i * 4] = shown[i * 4 + 1] = shown[i * 4 + 2] = hudCover[i];
+        Save("mask-hud-cover.ppm", shown);
+    }
+
+    // Records the mask's upload onto the open list. The model's expected format is unknown, so the
+    // trials try R8_UNORM first and then the float and four-channel formats a mask could plausibly be.
+    void UploadMask()
+    {
+        mask.p = MakeTexture(device, width, height, maskFormat, false, D3D12_RESOURCE_STATE_COPY_DEST);
+        auto desc = mask->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};
+        UINT64 bytes = 0;
+        device->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &bytes);
+        maskUpload.p = Buffer(bytes, D3D12_HEAP_TYPE_UPLOAD);
+        unsigned char* mapped = nullptr;
+        const D3D12_RANGE noRead { 0, 0 };
+        Check(maskUpload->Map(0, &noRead, reinterpret_cast<void**>(&mapped)), "mask upload Map");
+        for (unsigned y = 0; y < height; ++y)
+            for (unsigned x = 0; x < width; ++x)
+            {
+                const unsigned char v = maskPattern == 1   ? 255
+                                        : maskPattern == 2 ? hudCover[static_cast<size_t>(y) * width + x]
+                                                           : 0;
+                unsigned char* at = mapped + fp.Offset + static_cast<UINT64>(y) * fp.Footprint.RowPitch;
+                if (maskFormat == DXGI_FORMAT_R32_FLOAT)
+                {
+                    const float f = v / 255.0f;
+                    memcpy(at + x * 4, &f, 4);
+                }
+                else if (maskFormat == DXGI_FORMAT_R16_FLOAT)
+                {
+                    const uint16_t h = v == 0 ? 0 : v == 255 ? 0x3C00 : 0x3800; // 0, 1.0, 0.5
+                    memcpy(at + x * 2, &h, 2);
+                }
+                else if (maskFormat == DXGI_FORMAT_R8G8B8A8_UNORM)
+                    memset(at + x * 4, v, 4);
+                else
+                    at[x] = v;
+            }
+        maskUpload->Unmap(0, nullptr);
+        D3D12_TEXTURE_COPY_LOCATION from {}, to {};
+        from.pResource = maskUpload;
+        from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        from.PlacedFootprint = fp;
+        to.pResource = mask;
+        to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        Transition(list, mask, D3D12_RESOURCE_STATE_COPY_DEST, Srv);
+    }
+
+    // The same block serves every trial, so a trial without a mask must write null over the last one.
+    // Written through the unsigned-long-long slot, which is how the forwarder writes every resource.
+    void SetMask()
+    {
+        ID3D12Resource* resource = maskPattern >= 0 ? mask.p : nullptr;
+        const auto value = static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(resource));
+        params->Set("DLSSNR.ControlMask", value);
+        params->Set("DLSSNR.ControlMaskSubrectBaseX", 0u);
+        params->Set("DLSSNR.ControlMaskSubrectBaseY", 0u);
+        params->Set("DLSSNR.ControlMaskSubrectWidth", resource ? width : 0u);
+        params->Set("DLSSNR.ControlMaskSubrectHeight", resource ? height : 0u);
+        unsigned long long read = ~0ull;
+        ColdNr::NgxResult("ControlMask Get", params->Get("DLSSNR.ControlMask", &read));
+        Require(read == value, "ControlMask did not round-trip");
+    }
+
+    void ShaderAt(unsigned table, unsigned cb, unsigned w, unsigned h)
     {
         ID3D12DescriptorHeap* heaps[] = { gpuHeap.p };
         list->SetDescriptorHeaps(1, heaps);
         list->SetComputeRootSignature(root);
         list->SetPipelineState(pipeline);
-        list->SetComputeRootDescriptorTable(0, Gpu(slot * 7));
-        list->SetComputeRootConstantBufferView(1, constants->GetGPUVirtualAddress() + slot * sizeof(DlssNrConstants));
-        list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        list->SetComputeRootDescriptorTable(0, Gpu(table));
+        list->SetComputeRootConstantBufferView(1, constants->GetGPUVirtualAddress() + cb * sizeof(DlssNrConstants));
+        list->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
     }
+
+    void Shader(unsigned slot) { ShaderAt(slot * 7, slot, width, height); }
 
     void Readback(ID3D12Resource* back, ID3D12Resource* buffer)
     {
@@ -572,6 +709,8 @@ struct Host
             Fixture();
             HudFixture(pixels, width, height, frame);
             UploadFixture(); // Begin has already proved the upload is no longer in use.
+            if (maskAb)
+                SetMask();
             if (switchTo >= 0 && frame >= 8)
             {
                 params->Set("DLSSNR.UICorrection", static_cast<unsigned>(switchTo));
@@ -580,9 +719,10 @@ struct Host
                 Require(read == static_cast<unsigned>(switchTo), "evaluate UI parameter did not round-trip");
             }
         }
-        DlssNrConstants c[2] {};
-        for (auto& item : c)
+        DlssNrConstants c[3] {};
+        for (unsigned i = 0; i < 2; ++i)
         {
+            auto& item = c[i];
             item.Width = width;
             item.Height = height;
             // Passthrough 1 is the explicit SDR contract: no exposure texture, white-point law or
@@ -594,11 +734,15 @@ struct Host
             item.ColourStrength = colourStrength;
             item.ReversibleMode = reversibleMode;
             item.MaxRatio = 2;
-            item.Transfer = 1;
+            item.Transfer = transferAb ? transferMode : 1;
             item.ApplyModel = frame != 0; // One negative composition control per generation.
         }
         c[0].Mode = DlssNrMode_Encode;
         c[1].Mode = DlssNrMode_Resolve;
+        // What production's downsample is given: the mode and the working size, nothing else.
+        c[2].Mode = DlssNrMode_Downsample;
+        c[2].Width = workWidth;
+        c[2].Height = workHeight;
         void* mapped = nullptr;
         const D3D12_RANGE noRead { 0, 0 };
         Check(constants->Map(0, &noRead, &mapped), "constants Map");
@@ -637,10 +781,19 @@ struct Host
         Shader(0);
         Transition(list, proxy, Uav, Srv);
         Transition(list, original, Uav, Srv);
+        if (transferAb)
+        {
+            ShaderAt(16, 2, workWidth, workHeight);
+            Transition(list, proxySmall, Uav, Srv);
+        }
         list->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+        ID3D12Resource* modelIn = transferAb ? proxySmall.p : proxy.p;
+        ID3D12Resource* modelOut = transferAb ? answerSmall.p : answer.p;
         ++attempts;
-        auto result = evaluate(list, feature, params, proxy, depth, motion, answer, width, height, width, height, width,
-                               height, 0, 0, 0, 0, 0, frame == 0 ? 1 : 0, 1, 0, 1, 1, 1, 1, 1, 1);
+        auto result = evaluate(list, feature, params, modelIn, depth, motion, modelOut, workWidth, workHeight, workWidth,
+                               workHeight, workWidth, workHeight, 0, 0, 0, 0, 0, frame == 0 ? 1 : 0, 1, 0, 1, 1,
+                               maskAb ? skinStructure : 1,
+                               maskAb ? static_cast<int>(useAutoMask) : 1, 1, 1);
         Say("  EvaluateFeature(18) generation=%u frame=%u result=0x%08X\n", generation, frame,
             static_cast<unsigned>(result));
         // A failed evaluate may have recorded GPU work. Submit/drain before diagnosing; never copy back.
@@ -651,7 +804,7 @@ struct Host
         }
         ++successes;
         list->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, 2);
-        Transition(list, answer, Uav, Srv);
+        Transition(list, modelOut, Uav, Srv);
         Shader(1);
         list->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, 3);
         list->ResolveQueryData(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, 0, 4, timings, 0);
@@ -665,7 +818,9 @@ struct Host
         Transition(list, target, D3D12_RESOURCE_STATE_COPY_SOURCE, Uav);
         Transition(list, proxy, Srv, Uav);
         Transition(list, original, Srv, Uav);
-        Transition(list, answer, Srv, Uav);
+        Transition(list, modelOut, Srv, Uav);
+        if (transferAb)
+            Transition(list, proxySmall, Srv, Uav);
         Transition(list, source, Srv, D3D12_RESOURCE_STATE_COPY_DEST);
     }
 
@@ -689,7 +844,8 @@ struct Host
             return;
         }
         const auto ms = [&](UINT64 a, UINT64 b) { return (b - a) * 1000.0 / static_cast<double>(gpuHz); };
-        samples.push_back({ trial, generation, frame, width, height, ms(t[1], t[2]), ms(t[0], t[1]) + ms(t[2], t[3]) });
+        samples.push_back(
+            { trial, generation, frame, workWidth, workHeight, ms(t[1], t[2]), ms(t[0], t[1]) + ms(t[2], t[3]) });
     }
 
     void ReportTiming()
@@ -814,10 +970,12 @@ struct Host
         }
         // First, second and last. At the default sixteen the last is frame 15, so the names the
         // analyzer anchors on are unchanged; a longer run moves that name and needs the analyzer told.
-        if (hud || frame == 0 || frame == 1 || frame == framesPerGeneration - 1)
+        // The mask A/B keeps seven frames a trial rather than all 32: ten trials of every frame is 1.7 GB.
+        const bool keep = maskAb ? (frame % 8 == 0 || frame == 31) : hud;
+        if (keep || frame == 0 || frame == 1 || frame == framesPerGeneration - 1)
         {
-            auto prefix = (hud ? trial : (composition ? trial + "-" : "") + "g" + std::to_string(generation)) + "-f" +
-                          std::to_string(frame);
+            auto prefix = (hud || transferAb ? trial : (composition ? trial + "-" : "") + "g" + std::to_string(generation)) +
+                          "-f" + std::to_string(frame);
             Save(prefix + "-before.ppm", a);
             Save(prefix + "-after.ppm", b);
             ++captures;
@@ -845,7 +1003,8 @@ struct Host
             feature = nullptr;
         }
         for (auto* resource :
-             { &upload, &before, &after, &source, &proxy, &original, &answer, &target, &depth, &motion })
+             { &upload, &before, &after, &source, &proxy, &original, &answer, &target, &depth, &motion, &mask,
+               &maskUpload, &proxySmall, &answerSmall })
         {
             if (*resource)
                 (*resource)->Release();
@@ -921,7 +1080,7 @@ struct Host
 
 static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D12CommandQueue* queue,
                 ID3D12CommandAllocator* alloc, ID3D12GraphicsCommandList* list, ID3D12Fence* fence, HANDLE event,
-                bool hud = false, bool composition = false)
+                bool hud = false, bool composition = false, bool maskAb = false, bool transferAb = false)
 {
     Host host { device, queue, alloc, list, fence, event };
     try
@@ -930,10 +1089,88 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
         Say("  full resolution, one pass, zero guides, no confidence, no upscaler, no FG\n");
         Say(hud ? "  UICorrection A/B: per-trial create value, then optional evaluate-only switch\n"
                 : "  UICorrection=1\n");
-        host.hud = hud;
+        host.hud = hud || maskAb;
+        host.maskAb = maskAb;
+        host.transferAb = transferAb;
         host.composition = composition;
         host.Init(factory, window);
-        if (hud)
+        if (transferAb)
+        {
+            // Transfer 0, 1 and 3 with the model at 640x360 under a 1280x720 frame, eight-bit passthrough
+            // and linear. Every trial creates its own model with the same history, so trials differ only
+            // in the resolve.
+            struct Trial
+            {
+                const char* name;
+                unsigned transfer;
+                bool linear;
+            };
+            const Trial trials[] = { { "sdr-t0", 0, false }, { "sdr-t1", 1, false }, { "sdr-t3", 3, false },
+                                     { "lin-t0", 0, true },  { "lin-t1", 1, true },  { "lin-t3", 3, true } };
+            host.framesPerGeneration = 24;
+            for (const auto& t : trials)
+            {
+                host.trial = t.name;
+                host.transferMode = t.transfer;
+                host.linearInput = t.linear;
+                Say("TRANSFER-TRIAL name=%s transfer=%u linear=%d\n", t.name, t.transfer, t.linear ? 1 : 0);
+                host.Allocate(1280, 720);
+                for (unsigned frame = 0; frame < host.framesPerGeneration; ++frame)
+                {
+                    host.Record(frame);
+                    host.Submit();
+                    host.ReadTiming(frame);
+                    host.Inspect(frame);
+                    host.Present();
+                }
+                Check(queue->Signal(fence, ++host.serial), "transfer post-Present Signal");
+                host.ReleaseGeneration();
+            }
+            host.linearInput = false;
+        }
+        else if (maskAb)
+        {
+            struct Trial
+            {
+                const char* name;
+                int pattern;
+                unsigned autoMask;
+                float skin;
+                DXGI_FORMAT format = DXGI_FORMAT_R8_UNORM;
+            };
+            // Controls first, so every mask trial has an unmasked twin that ran before any mask was
+            // written; the last trial writes null again after the masks, to prove null means "none".
+            const Trial trials[] = {
+                { "base-r0", -1, 1, -1.0f },   { "base-r1", -1, 1, -1.0f },   { "a0s0-null", -1, 0, 0.0f },
+                { "a1s0-null", -1, 1, 0.0f },  { "a0s0-zeros", 0, 0, 0.0f },  { "a0s0-ones", 1, 0, 0.0f },
+                { "a0s0-hud", 2, 0, 0.0f },    { "a1s0-hud", 2, 1, 0.0f },    { "a1s0-ones", 1, 1, 0.0f },
+                { "a0s0-cleared", -1, 0, 0.0f },
+                { "a0s0-ones-r16f", 1, 0, 0.0f, DXGI_FORMAT_R16_FLOAT },
+                { "a0s0-ones-r32f", 1, 0, 0.0f, DXGI_FORMAT_R32_FLOAT },
+                { "a0s0-ones-rgba8", 1, 0, 0.0f, DXGI_FORMAT_R8G8B8A8_UNORM },
+            };
+            for (const auto& t : trials)
+            {
+                host.trial = t.name;
+                host.maskPattern = t.pattern;
+                host.useAutoMask = t.autoMask;
+                host.skinStructure = t.skin;
+                host.maskFormat = t.format;
+                host.Allocate(1280, 720);
+                if (host.hudCover.empty())
+                    host.CoverHud();
+                for (unsigned frame = 0; frame < 32; ++frame)
+                {
+                    host.Record(frame);
+                    host.Submit();
+                    host.Inspect(frame);
+                    host.Present();
+                }
+                Check(queue->Signal(fence, ++host.serial), "mask post-Present Signal");
+                host.ReleaseGeneration();
+            }
+        }
+        else if (hud)
         {
             const char* names[] = { "ui0-r0", "ui1-r0", "ui0-r1", "ui1-r1", "ui0-to1", "ui1-to0" };
             for (unsigned trial = 0; trial < 6; ++trial)
@@ -1026,7 +1263,13 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
         unsigned remaining = 0;
         ColdNr::NgxResult("core Shutdown1", host.shutdown(device, &remaining));
         Check(device->GetDeviceRemovedReason(), "final device health");
-        if (hud)
+        if (transferAb)
+            Say("TRANSFER-AB PASS: trials=6 attempts=%u successes=%u presents=%u controls=%u capture_pairs=%u\n",
+                host.attempts, host.successes, host.presents, host.controls, host.captures);
+        else if (maskAb)
+            Say("MASK-AB PASS: trials=13 attempts=%u successes=%u presents=%u controls=%u capture_pairs=%u\n",
+                host.attempts, host.successes, host.presents, host.controls, host.captures);
+        else if (hud)
             Say("HUD-AB PASS: trials=6 attempts=%u successes=%u presents=%u controls=%u capture_pairs=%u\n",
                 host.attempts, host.successes, host.presents, host.controls, host.captures);
         else if (composition)
