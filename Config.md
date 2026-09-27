@@ -457,10 +457,12 @@ ScanTrim=auto
 ; true or false - Default (auto) is false
 ScanMeter=auto
 
-; How a model running below full resolution is enlarged: 0 classic, 1 matched residual.
+; How a model running below full resolution is enlarged: 0 classic, 1 matched residual,
+; 3 matched residual with a sharp enlargement (2 is reserved).
 ; Matched residual carries only the model's edit onto the full-size frame's proxy, avoiding
-; the shrink's blur being treated as an edit. No effect at full resolution or above.
-; 0 or 1 - Default (auto) is 1 (matched residual)
+; the shrink's blur being treated as an edit. 3 enlarges that edit with Catmull-Rom instead of
+; bilinear, clamped to its neighbours. No effect at full resolution or above.
+; 0, 1 or 3 - Default (auto) is 1 (matched residual)
 Transfer=auto
 
 ; Freeze the input NR works on for comparing live NR settings on the same frame.

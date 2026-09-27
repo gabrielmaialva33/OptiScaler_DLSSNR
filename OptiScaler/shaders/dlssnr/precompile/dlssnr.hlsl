@@ -23,7 +23,7 @@ cbuffer Params : register(b0)
     float gCompareSplit; // where the wipe cuts, 0..1
     float gCompareZoom;  // side by side: 1 fits the frame, 2 fills the half
     uint  gCompareSwap;  // put the edited frame on the other side
-    uint  gTransfer;     // 0 classic, 1 matched residual -- how a below-size model comes back
+    uint  gTransfer;     // 0 classic, 1 matched residual, 3 matched residual with a sharp enlargement
     float gDebugScale;   // what the debug views are scaled by, held still while the meter moves
     uint  gReversibleMode; // 0 knee, 1 Neutwo+composed, 2 Neutwo+replace, 3 hybrid+composed, 4 hybrid+replace
     uint  gApplyModel;     // 0 output the clean frame (pass still runs), 1 apply the model's edit
@@ -292,6 +292,66 @@ float3 EditAt(float2 uvq)
     }
 
     return m - p;
+}
+
+// One texel of the edit, each picture decoded on its own. Clamped to the raster, so the kernel below
+// can reach past the edge.
+float3 TexelEdit(int2 t, int2 last)
+{
+    t = clamp(t, int2(0, 0), last);
+    float3 p = gSource.Load(int3(t, 0)).rgb;
+    float3 m = gModel.Load(int3(t, 0)).rgb;
+
+    if (gPassthrough == 0)
+    {
+        p = SrgbToLinear(p);
+        m = SrgbToLinear(m);
+    }
+
+    return m - p;
+}
+
+// Transfer 3: the edit at a position, enlarged with Catmull-Rom instead of the sampler's bilinear
+// filter, which flattens exactly the band near the small raster's limit where the model's fine
+// structure lives. Taken in linear light, texel by texel, before it is interpolated. Then held to the
+// range of the four texels around the position: Catmull-Rom overshoots at a step, and an overshooting
+// difference is a halo. dlssnr/design/sharp-residual.md.
+float3 SharpEditAt(float2 uvq, uint w, uint h)
+{
+    const float2 pos = uvq * float2(w, h) - 0.5;
+    const float2 base = floor(pos);
+    const float2 f = pos - base;
+
+    // The four weights for the taps at base-1 .. base+2. They sum to one; at f = 0 they are 0, 1, 0, 0.
+    const float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    const float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    const float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    const float2 w3 = f * f * (-0.5 + 0.5 * f);
+    const float wx[4] = { w0.x, w1.x, w2.x, w3.x };
+    const float wy[4] = { w0.y, w1.y, w2.y, w3.y };
+
+    const int2 last = int2(w, h) - 1;
+    const int2 b = int2(base);
+    float3 sum = 0.0;
+    float3 lo = 1e30;
+    float3 hi = -1e30;
+
+    [unroll] for (int y = 0; y < 4; ++y)
+    {
+        [unroll] for (int x = 0; x < 4; ++x)
+        {
+            const float3 e = TexelEdit(b + int2(x - 1, y - 1), last);
+            sum += e * (wx[x] * wy[y]);
+
+            if (x >= 1 && x <= 2 && y >= 1 && y <= 2)
+            {
+                lo = min(lo, e);
+                hi = max(hi, e);
+            }
+        }
+    }
+
+    return clamp(sum, lo, hi);
 }
 
 
@@ -788,8 +848,14 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     if (gDebugView == 3)
     {
+        // The edit this pixel will actually get: under Transfer 3 at a reduced size that is the sharp
+        // enlargement, not the bilinear one, or the view would hide the one thing that mode changes.
+        uint dw, dh;
+        gSource.GetDimensions(dw, dh);
+        const float3 applied = gTransfer == 3 && (dw != gWidth || dh != gHeight) ? SharpEditAt(cmpUv, dw, dh) : edit;
+
         // Amplified and centred on grey, so both directions of the edit are visible at once.
-        float3 shown = saturate(0.5 + edit * 20.0);
+        float3 shown = saturate(0.5 + applied * 20.0);
         gTarget[id.xy] = float4(SrgbToLinear(shown) * gDebugScale, originalSample.a);
         return;
     }
@@ -832,7 +898,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     gSource.GetDimensions(proxyW, proxyH);
     const bool modelRanSmall = proxyW != gWidth || proxyH != gHeight;
 
-    if (gTransfer == 1 && modelRanSmall)
+    if ((gTransfer == 1 || gTransfer == 3) && modelRanSmall)
     {
         // Saturated, because that is what the encode does and this has to reproduce it exactly.
         //
@@ -861,6 +927,12 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                                                          : NeutwoEncode(original));
         proxy = fullProxy;
         proxyLuma = dot(proxy, kLuma);
+
+        // Transfer 3 changes one thing: how the edit was enlarged. The model's output and its input share
+        // the working size, so one texel grid serves both. (2 is left alone: upstream's multi-pass PR
+        // gives it another meaning.)
+        if (gTransfer == 3)
+            edit = SharpEditAt(cmpUv, proxyW, proxyH);
 
         // At the same rate there is no residual to carry: the model's own picture is already at the
         // frame's resolution, and P + (m - p) collapses to m exactly.

@@ -221,7 +221,8 @@ struct alignas(256) DlssNrConstants
     // left and right, so a difference can look like an improvement purely from where it sits.
     uint32_t CompareSwap;
 
-    // How a model that worked below the frame's size is brought back. 0 classic, 1 matched residual.
+    // How a model that worked below the frame's size is brought back. 0 classic, 1 matched residual,
+    // 3 matched residual with a sharp enlargement (dlssnr/design/sharp-residual.md).
     //
     // Classic composes the model's own low-resolution picture against the full-resolution frame, so
     // the two disagree by the blur the downsample introduced as well as by the edit -- and the

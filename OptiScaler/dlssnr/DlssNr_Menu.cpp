@@ -666,11 +666,14 @@ void RenderMenu(Config* config, float menuResScale)
                 ImGui::BeginDisabled();
 
             static const char* enlargeNames[] = { Localization::Label("Classic"),
-                                                  Localization::Label("Matched residual") };
-            int enlarge = config->DlssNrTransfer.value_or_default() == 1 ? 1 : 0;
+                                                  Localization::Label("Matched residual"),
+                                                  Localization::Label("Matched residual, sharp") };
+            // Index 2 is Transfer 3; anything the shader does not know runs Classic, and shows as it.
+            const uint32_t transfer = config->DlssNrTransfer.value_or_default();
+            int enlarge = transfer == 1 ? 1 : transfer == 3 ? 2 : 0;
 
             if (ImGui::Combo(Localization::Label("Enlargement"), &enlarge, enlargeNames, IM_ARRAYSIZE(enlargeNames)))
-                config->DlssNrTransfer = (uint32_t) enlarge;
+                config->DlssNrTransfer = enlarge == 2 ? 3u : (uint32_t) enlarge;
 
             if (!reduced)
                 ImGui::EndDisabled();
@@ -684,7 +687,10 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nMatched residual carries up only the model's difference and lays it on the"
                        "\nframe's own proxy, so both pictures being compared are full size and the only"
                        "\nthing that came from the small raster is the edit itself."
-                       "\n\nNo effect at 100% or above: there is no residual to carry and the two are"
+                       "\n\nMatched residual, sharp is the same, with the model's difference enlarged by"
+                       "\na sharper filter (Catmull-Rom, held to its neighbours so it cannot ring), so"
+                       "\nmore of the fine structure the model drew at the small size survives."
+                       "\n\nNo effect at 100% or above: there is no residual to carry and all three are"
                        "\nidentical (supersampling brings its answer down to frame size before this)."
                        "\n\nFrom hhkbble's multi-pass work on this fork.");
         }

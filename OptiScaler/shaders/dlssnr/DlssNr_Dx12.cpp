@@ -3643,9 +3643,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                      "stabilizer {:.2f} (tolerance {:.2f})",
                      composeNow.whitePoint, composeNow.transfer, composeNow.colour, composeNow.maxRatio,
                      composeNow.passthrough != 0 ? "off (frame already tone mapped)" : "on (linear HDR)",
-                     composeNow.residual == 1 ? "matched residual" : "classic", composeNow.workW, composeNow.workH,
-                     composeNow.debugView, composeNow.compareMode, composeNow.stabilizer,
-                     composeNow.stabilizerTolerance);
+                     composeNow.residual == 1   ? "matched residual"
+                     : composeNow.residual == 3 ? "matched residual, sharp"
+                                                : "classic",
+                     composeNow.workW, composeNow.workH, composeNow.debugView, composeNow.compareMode,
+                     composeNow.stabilizer, composeNow.stabilizerTolerance);
         }
 
         Barrier(cmdList, finalOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
