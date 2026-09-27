@@ -66,6 +66,7 @@ experiment.
 | `shaders/dlssnr/DlssNr_Common.h` | the constant buffer, shared by the host and the shader |
 | `shaders/dlssnr/precompile/dlssnr.hlsl` | **the live shader**: encode (scale and sRGB-encode with a soft knee), area downsample, resolve (RenoDX's two-branch composition, OkLab hue correction, AP1 clamp, the guard) |
 | `shaders/dlssnr/precompile/DlssNr_Shader.h` | that shader compiled, as bytes |
+| `shaders/dlssnr/DlssNr_Stabilizer_Dx12.h/.cpp`, `precompile/dlssnr_stabilizer.hlsl` | the output stabilizer, off by default; `design/output-stabilizer.md` |
 
 ### Editing the shader
 
@@ -96,6 +97,11 @@ their upstream licence text before any build is distributed.
 
 What is not theirs: the OkLab matrices are Bjorn Ottosson's published constants, and the AP1, sRGB
 and PQ transforms are standard colour science.
+
+The output stabilizer's gate -- the 3x3 input box held against an anchor from when the pixel last moved
+-- is **taken from DLSS5-Feeder's `feed_hold12.h` by Jean-Laurent Rouzies**
+(https://github.com/jlrouzies-fr/DLSS5-Feeder, MIT). `Licenses/DLSS5-Feeder_LICENSE.txt` carries their
+licence and says which parts are theirs.
 
 ## Why a forwarder DLL exists
 
@@ -132,6 +138,9 @@ part of the solution, and builds with everything else.
   a trained DLAA pass): the model re-decides detail with the framing, so old answers do not belong
   to new frames. There is no accumulator; the composition is re-anchored to the model every frame
   instead, which is what makes it steady.
+  The output stabilizer (`design/output-stabilizer.md`) is not that and does not reopen it: it is gated
+  by the model's *input* and reprojects nothing, so a pixel whose input changed shows the current answer
+  that frame, and only pixels the game left alone keep what was shown.
 - **The model's own UI correction went with it.** It only ever acted on a UI layer the game tagged
   through Streamline, which almost no title does, and it could not be shown to change anything when
   one did. Removing it removed the Streamline tag hook as well, so the module no longer touches that

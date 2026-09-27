@@ -40,6 +40,13 @@ int main()
     ManualChange("hold state", 1, [](auto& s) { s.holdFrame = true; });
     ManualChange("model dimensions", 1, [](auto& s) { s.g_nr.workWidth = 2560; });
     ManualChange("composition detail", 1, [](auto& s) { s.detail = 0.5f; });
+    ManualChange("stabilizer strength", 1, [](auto& s) { s.stabilizerStrength = 0.5f; });
+
+    // The tolerance is normalised out while the stabilizer is off, like the other inactive controls.
+    ComposeSite stabilizerOff;
+    Expect(stabilizerOff.Observe(At(0)), "first composition with the stabilizer off");
+    stabilizerOff.stabilizerTolerance = 0.1f;
+    Expect(!stabilizerOff.Observe(At(100)), "a tolerance with the stabilizer off is not a configuration event");
 
     ComposeSite inactive;
     Expect(inactive.Observe(At(0)), "first manual source");

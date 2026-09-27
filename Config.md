@@ -469,6 +469,18 @@ Transfer=auto
 ; true or false - Default (auto) is false
 HoldFrame=auto
 
+; Output stabilizer. Where the picture the model was shown did not change, keep what was shown last
+; frame and let the model's new answer in at (1 - strength) per frame; where it changed, show the
+; model's answer as it is. Aimed at the model re-deciding still content from frame to frame. D3D12 only,
+; and not on the before-upscale stage. Off allocates and dispatches nothing.
+; 0 to 1 - Default (auto) is 0 (off); 1 holds a still pixel outright
+StabilizerStrength=auto
+
+; How far the model's input may drift, relative to its brightness, before a pixel counts as moved. Lower
+; follows subtle lighting changes sooner; higher tolerates more flicker in the input before letting go.
+; 0.01 to 0.20 - Default (auto) is 0.05
+StabilizerTolerance=auto
+
 ; Compare the clean upscaler frame with the NR edit: 0 off, 1 side by side, 2 wipe.
 ; Both comparison modes keep working with the menu closed.
 ; 0 to 2 - Default (auto) is 0 (off)

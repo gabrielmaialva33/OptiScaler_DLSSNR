@@ -134,6 +134,7 @@ create_header = root / 'OptiScaler/shaders/shader_tools/create_header.py'
 targets = [
     ('DlssNr_Shader.cso', 'DlssNr_Shader.h', 'DlssNr_cso', b'DXBC'),
     ('DlssNr_Shader_Vk.spv', 'DlssNr_Shader_Vk.h', 'dlssnr_spv', bytes.fromhex('03022307')),
+    ('DlssNr_Stabilizer_Shader.cso', 'DlssNr_Stabilizer_Shader.h', 'DlssNr_Stabilizer_cso', b'DXBC'),
 ]
 
 with tempfile.TemporaryDirectory() as scratch:
@@ -148,8 +149,8 @@ with tempfile.TemporaryDirectory() as scratch:
             fail(f'{header} is not what create_header.py makes from {binary}: regenerate it (array {array})')
 
 if len(failures) == before:
-    print('PASS: DlssNr_Shader.h and DlssNr_Shader_Vk.h are byte-identical to create_header.py over the '
-          'committed .cso and .spv')
+    print('PASS: DlssNr_Shader.h, DlssNr_Shader_Vk.h and DlssNr_Stabilizer_Shader.h are byte-identical to '
+          'create_header.py over the committed .cso and .spv')
 
 # --- 4. Retired identifiers -------------------------------------------------------------------------
 

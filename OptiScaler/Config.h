@@ -326,6 +326,13 @@ class Config
     // default. See dlssnr/design/frame-hold.md.
     CustomOptional<bool> DlssNrHoldFrame { false };
 
+    // The output stabilizer: holds a pixel's shown picture while the model's input there did not change,
+    // and shows the model's answer as it is where it did. Strength 0 is off -- nothing allocated, nothing
+    // dispatched; 1 holds a still pixel outright. Tolerance is how far the input may drift, relative to
+    // its brightness, before a pixel counts as moved. D3D12 only. See dlssnr/design/output-stabilizer.md.
+    CustomOptional<float> DlssNrStabilizerStrength { 0.0f };
+    CustomOptional<float> DlssNrStabilizerTolerance { 0.05f };
+
     // The most the pass may multiply or divide a pixel by. A detail pass has no business restyling a
     // light source, whatever the model returns.
     CustomOptional<float> DlssNrMaxRatio { 2.0f };

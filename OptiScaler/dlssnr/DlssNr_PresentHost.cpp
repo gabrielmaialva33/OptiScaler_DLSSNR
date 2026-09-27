@@ -357,7 +357,12 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     // ghosts and doubled edges under a moving camera (Generation Zero, 2026-09-24). Opt-in, because a
     // slow isometric camera (Divinity) was measured fine with history, and history is what smooths.
     if (depth == _guides.Depth() && Config::Instance()->DlssNrZeroGuideReset.value_or_default())
+    {
+        // Policy only if nothing real was already owed: a host rebuilt at the same size carries a genuine
+        // reset in from PresentFrameDefaults, and that one must still read as a cut.
+        frame.ResetIsPolicy = !frame.Reset;
         frame.Reset = true;
+    }
 
     const char* frameReason = "";
     const bool passed = EvaluateAtPresent(cmdList, _toWorking->Buffer(), depth, motion, frame, queue, &frameReason);

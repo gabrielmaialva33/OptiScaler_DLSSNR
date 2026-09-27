@@ -134,3 +134,6 @@ Apply after Ray Reconstruction	Aplicar após Ray Reconstruction
 RR Passes	Passes de RR
 RR Working scale	Escala de trabalho RR
 Runs Neural Rendering over native Ray Reconstruction (DLSSD) output.\n\nDisabled by default: Ray Reconstruction already synthesizes denoised output.\nEnable if you want to run DLSS-NR over the final RR result at configured scale.	Executa a renderização neural sobre a saída nativa de Ray Reconstruction (DLSSD).\n\nDesativado por padrão: Ray Reconstruction já sintetiza uma saída com redução de ruído.\nAtive se desejar aplicar o DLSS-NR sobre o resultado final de RR na escala configurada.
+Output stabilizer	Estabilizador de saída
+Stabilizer strength	Intensidade do estabilizador
+Stabilizer tolerance	Tolerância do estabilizador

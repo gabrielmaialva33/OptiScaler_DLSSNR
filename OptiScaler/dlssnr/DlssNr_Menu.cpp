@@ -830,6 +830,38 @@ void RenderMenu(Config* config, float menuResScale)
         RenderPassControls(config, nativeVulkan);
         RenderGpuTiming(config, nativeVulkan);
 
+        // The output stabilizer (design/output-stabilizer.md) runs after the D3D12 resolve. Native Vulkan has
+        // none, and the driver proxy returns before the resolve, so on either it has nothing to act on and
+        // is not offered -- as the pass controls and the GPU timing are not.
+        if (!nativeVulkan && !config->DlssNrUseProxy.value_or_default())
+        {
+            ImGui::SeparatorText(Localization::Tr("Output stabilizer"));
+
+            float stabilizerStrength = config->DlssNrStabilizerStrength.value_or_default();
+            if (DeferredSlider("Stabilizer strength###nrStabilizerStrength", &stabilizerStrength, 0.0f, 1.0f, 0.0f))
+                config->DlssNrStabilizerStrength = stabilizerStrength;
+
+            HelpMarker("Holds still parts of the picture still. Where the frame the model was shown did not"
+                       "\nchange, keep what was shown last frame and let the model's new answer in slowly;"
+                       "\nwhere it changed, show the model's answer as it is. Aimed at the model re-deciding"
+                       "\nstill content -- a slope that brightens and darkens with nothing moving."
+                       "\n\n0 is off and costs nothing. 1 holds a still pixel outright. It stands down on the"
+                       "\nbefore-upscale stage, where the frame is jittered and every pixel moves.");
+
+            // The tolerance means nothing while the stabilizer is off.
+            if (stabilizerStrength > 0.0f)
+            {
+                float stabilizerTolerance = config->DlssNrStabilizerTolerance.value_or_default();
+                if (DeferredSlider("Stabilizer tolerance###nrStabilizerTolerance", &stabilizerTolerance, 0.01f, 0.20f,
+                                   0.05f))
+                    config->DlssNrStabilizerTolerance = stabilizerTolerance;
+
+                HelpMarker("How far the model's input may drift, relative to its brightness, before a pixel"
+                           "\ncounts as moved. Lower follows subtle lighting changes sooner; higher tolerates"
+                           "\nmore flicker in the input before letting go.");
+            }
+        }
+
         ImGui::SeparatorText(Localization::Tr("Colour"));
 
         if (config->DlssNrHookMethod.value_or_default() == 2)

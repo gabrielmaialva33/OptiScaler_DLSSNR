@@ -26,12 +26,14 @@
 
 #include <mutex>
 #include <optional>
+#include <tuple>
 #include <algorithm>
 #include <cstring>
 #include <vector>
 #include <chrono>
 #include "precompile/DlssNr_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
+#include "DlssNr_Stabilizer_Dx12.h"
 
 namespace
 {
@@ -318,6 +320,13 @@ struct NrState
     unsigned int heldHeight = 0;
     DXGI_FORMAT heldFormat = DXGI_FORMAT_UNKNOWN;
     float heldWhitePoint = 1.0f;
+
+    // The output stabilizer (design/output-stabilizer.md). Built for one output size and format, parked
+    // like the downscalers when that changes or when it is switched off. stabilizerLast is when it last
+    // ran, so a gap -- NR toggled, the stabilizer toggled, a stretch on the before-upscale stage --
+    // drops history that no longer describes the screen.
+    DlssNr_Stabilizer_Dx12* stabilizer = nullptr;
+    std::chrono::steady_clock::time_point stabilizerLast {};
 
     unsigned int workWidth = 0;
     unsigned int workHeight = 0;
@@ -1007,6 +1016,7 @@ struct NrRetired
     bool tracked = false;
     DlssNr::Submission::Usage usage;
     OS_Dx12* scaler = nullptr;
+    DlssNr_Stabilizer_Dx12* stabilizer = nullptr;
 };
 
 std::vector<NrRetired> g_nrRetired;
@@ -1056,6 +1066,22 @@ void ParkNrScaler(OS_Dx12*& scaler)
     g_nrRetired.push_back(r);
 }
 
+// The stabilizer owns its history, descriptor heaps and constants, which the last recordings still
+// reference; a new output size or switching it off parks it rather than deleting it.
+void ParkNrStabilizer(DlssNr_Stabilizer_Dx12*& stabilizer)
+{
+    if (!stabilizer)
+        return;
+
+    NrRetired r;
+    r.tracked = g_tracked;
+    if (g_tracked)
+        r.usage = g_usage;
+    r.stabilizer = stabilizer;
+    stabilizer = nullptr;
+    g_nrRetired.push_back(r);
+}
+
 void TickNrRetired()
 {
     for (size_t i = 0; i < g_nrRetired.size();)
@@ -1074,6 +1100,7 @@ void TickNrRetired()
             retired.resource->Release();
 
         delete retired.scaler;
+        delete retired.stabilizer;
 
         g_nrRetired[i] = std::move(g_nrRetired.back());
         g_nrRetired.pop_back();
@@ -2420,15 +2447,29 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (g_resetOnReturn.exchange(false))
         g_nr.reset = true;
 
+    // Whether anything had already asked for a reset before the frame's own flag is read. The zero-guide
+    // policy sets that flag on every frame for the model's sake alone; the stabilizer below must not read
+    // it as a cut, so on those frames this is what it goes by.
+    const bool resetBeforeFrameFlag = g_nr.reset;
+
     if (frame.Reset)
     {
         g_nr.reset = true;
 
+        // Two counters, because only one of them is the game. ZeroGuideReset asks on every zero-guide
+        // frame, and a log saying "the game asked" 69300 times described a game that asked for nothing.
         static unsigned long long resets = 0;
-        ++resets;
+        static unsigned long long policyResets = 0;
+        auto& count = frame.ResetIsPolicy ? policyResets : resets;
+        ++count;
 
-        if (resets <= 3 || resets % 100 == 0)
-            LOG_INFO("DLSS-NR: the game asked for a history reset ({} so far)", resets);
+        if (count <= 3 || count % 100 == 0)
+        {
+            if (frame.ResetIsPolicy)
+                LOG_INFO("DLSS-NR: model history dropped on zero guides, as ZeroGuideReset asks ({} so far)", count);
+            else
+                LOG_INFO("DLSS-NR: the game asked for a history reset ({} so far)", count);
+        }
     }
 
     // Logged whenever it changes, not once per session.
@@ -2588,6 +2629,12 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_lastBeforeUpscale = beforeUpscale;
         g_lastAfterRayReconstruction = frame.AfterRayReconstruction;
     }
+
+    // The output stabilizer switched off, or on the stage where it cannot run: its history -- ~200 MB at
+    // 4K -- goes back once the GPU is done with it, rather than waiting for a frame it will not see.
+    // Written as !(x > 0) so a NaN from a hand-edited ini counts as off.
+    if (!(cfg.DlssNrStabilizerStrength.value_or_default() > 0.0f) || beforeUpscale)
+        ParkNrStabilizer(g_nr.stabilizer);
 
     const bool resolutionChanged =
         g_nr.width != width || g_nr.height != height || g_nr.workWidth != workWidth || g_nr.workHeight != workHeight;
@@ -3408,6 +3455,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (coverage != nullptr)
         coverage->ModelResult(result, workWidth, workHeight);
 
+    // Read before it is cleared: everything that reset the model this frame resets the stabilizer too,
+    // except the zero-guide policy, which changes nothing on screen.
+    const bool stabilizerReset = frame.ResetIsPolicy ? resetBeforeFrameFlag : g_nr.reset;
+
     g_nr.reset = false;
 
     // Supersampling probe: report the model working ABOVE native so a test log tells us whether NGX even
@@ -3489,6 +3540,16 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         resolveParams.CompareZoom = std::max(1.0f, cfg.DlssNrCompareZoom.value_or_default());
         resolveParams.CompareSwap = cfg.DlssNrCompareSwap.value_or_default() ? 1u : 0u;
 
+        // The output stabilizer's two numbers, clamped to what its controls offer, so a hand-edited ini
+        // cannot hand the shader a negative strength or a NaN. Read here because the composition report
+        // below carries them: a screenshot taken with the stabilizer on must be tellable from a bug.
+        const float stabilizerStrengthRaw = cfg.DlssNrStabilizerStrength.value_or_default();
+        const float stabilizerStrength =
+            std::isfinite(stabilizerStrengthRaw) ? std::clamp(stabilizerStrengthRaw, 0.0f, 1.0f) : 0.0f;
+        const float stabilizerToleranceRaw = cfg.DlssNrStabilizerTolerance.value_or_default();
+        const float stabilizerTolerance =
+            std::isfinite(stabilizerToleranceRaw) ? std::clamp(stabilizerToleranceRaw, 0.01f, 0.2f) : 0.05f;
+
         // The numbers the composition actually ran with, logged when any of them changes.
         //
         // A colour report without these cannot be read. Paper white alone decides whether the model
@@ -3516,6 +3577,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             float scanTrim;
             bool scanEnabled;
             bool hold;
+            float stabilizer;
+            float stabilizerTolerance;
             std::vector<DlssNr::ExposureScan::AnchorPoint> anchors;
 
             bool SameAs(const ComposeReport& other) const { return whitePoint == other.whitePoint && SameShape(other); }
@@ -3530,6 +3593,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                        workH == other.workH && whiteSource == other.whiteSource && whiteScale == other.whiteScale &&
                        whiteTrim == other.whiteTrim && scanInverted == other.scanInverted &&
                        scanTrim == other.scanTrim && scanEnabled == other.scanEnabled && hold == other.hold &&
+                       stabilizer == other.stabilizer && stabilizerTolerance == other.stabilizerTolerance &&
                        std::equal(anchors.begin(), anchors.end(), other.anchors.begin(), other.anchors.end(),
                                   [](const auto& a, const auto& b) { return a.scan == b.scan && a.white == b.white; });
             }
@@ -3564,17 +3628,21 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             whitePointSource == 2 ? std::clamp(scanTrim, 0.01f, 4.0f) : 1.0f,
             whitePointSource == 2 && cfg.DlssNrScanExposure.value_or_default(),
             holdFrame,
+            stabilizerStrength,
+            stabilizerStrength > 0.0f ? stabilizerTolerance : 0.0f,
             whitePointSource == 2 ? DlssNr::ExposureScan::Anchors() : std::vector<DlssNr::ExposureScan::AnchorPoint>()
         };
 
         if (composeReporter.Observe(composeNow, DlssNr::LogRate::Clock::now()))
         {
             LOG_INFO("DLSS-NR composition: paper white {:.2f}x, detail {:.2f}, colour {:.2f}, guard "
-                     "{:.1f}x, colour transform {}, transfer {}, model {}x{}, debug view {}, compare {}",
+                     "{:.1f}x, colour transform {}, transfer {}, model {}x{}, debug view {}, compare {}, "
+                     "stabilizer {:.2f} (tolerance {:.2f})",
                      composeNow.whitePoint, composeNow.transfer, composeNow.colour, composeNow.maxRatio,
                      composeNow.passthrough != 0 ? "off (frame already tone mapped)" : "on (linear HDR)",
                      composeNow.residual == 1 ? "matched residual" : "classic", composeNow.workW, composeNow.workH,
-                     composeNow.debugView, composeNow.compareMode);
+                     composeNow.debugView, composeNow.compareMode, composeNow.stabilizer,
+                     composeNow.stabilizerTolerance);
         }
 
         Barrier(cmdList, finalOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -3611,6 +3679,55 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (superDownOk)
             Barrier(cmdList, g_nr.outputNative, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        // The output stabilizer (design/output-stabilizer.md), last, over what the resolve just wrote.
+        //
+        // Only where the pass edits the frame in place. Before the upscaler the input is the jittered
+        // render-size frame about to go into it: jitter reads as change on every pixel, and a held pixel
+        // would hand the upscaler a stale jittered sample to accumulate.
+        //
+        // The gate reads hdrCopy, the frame as the upscaler left it, scaled by the white point the
+        // composition used -- not colorCopy, the model's proxy, whose knee flattens every stop above white
+        // while the resolve takes those highlights from hdrCopy. And only over a frame the resolve actually
+        // wrote; otherwise there is no answer to hold. Off and before-upscale were parked at the top.
+        if (stabilizerStrength > 0.0f && !beforeUpscale && wrote)
+        {
+            const auto outputDesc = target->GetDesc();
+            if (g_nr.stabilizer != nullptr && !g_nr.stabilizer->Fits(device, outputDesc))
+                ParkNrStabilizer(g_nr.stabilizer);
+            if (g_nr.stabilizer == nullptr)
+                g_nr.stabilizer = new DlssNr_Stabilizer_Dx12("DLSS-NR stabilizer", device, outputDesc);
+
+            // What else drops its history, beyond what reset the model. Any setting that changes the
+            // composed picture -- at strength 1 a still pixel never takes a new answer, so without this a
+            // slider moved on a still scene would seem to do nothing, and HoldFrame + ApplyModel, the A/B
+            // pair, would compare a frame with itself. And a gap: the pass or the stabilizer was off, or
+            // the stage was before the upscaler, so the history no longer describes the screen.
+            static std::optional<ComposeReport> stabilizerShape;
+            static DlssNrPassSnapshot stabilizerPasses {};
+            static std::tuple<float, float, uint32_t, uint32_t, uint32_t, bool, Scaler> stabilizerExtras {};
+            const auto extrasNow = std::make_tuple(
+                resolveParams.CompareSplit, resolveParams.CompareZoom, resolveParams.CompareSwap,
+                resolveParams.ReversibleMode, resolveParams.ApplyModel, frame.AfterRayReconstruction, nrScalerForChain);
+            const bool settingsChanged = !stabilizerShape || !stabilizerShape->SameShape(composeNow) ||
+                                         stabilizerPasses.Count != passSnapshot.Count ||
+                                         stabilizerPasses.Individual != passSnapshot.Individual ||
+                                         stabilizerPasses.Settings != passSnapshot.Settings ||
+                                         stabilizerExtras != extrasNow;
+            const auto now = std::chrono::steady_clock::now();
+            const bool lapsed = now - g_nr.stabilizerLast > std::chrono::milliseconds(250);
+
+            if (stabilizerReset || settingsChanged || lapsed)
+                g_nr.stabilizer->Invalidate();
+
+            stabilizerShape = composeNow;
+            stabilizerPasses = passSnapshot;
+            stabilizerExtras = extrasNow;
+            g_nr.stabilizerLast = now;
+
+            g_nr.stabilizer->Dispatch(cmdList, g_nr.hdrCopy, target, stabilizerStrength, stabilizerTolerance,
+                                      resolveParams.WhitePoint, resolveParams.Passthrough != 0);
+        }
 
         // On-demand capture works in this path too: the staging copy still holds the frame as the
         // upscaler produced it, and the edited frame is the output itself. The write happens a few
@@ -4213,8 +4330,10 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         // reset the frame to its defaults, where supersampling is allowed, and so was left out.
         frame.AllowSupersampling = false;
 
-        // See DlssNrZeroGuideReset: no real motion, so optionally no history to ghost from.
+        // See DlssNrZeroGuideReset: no real motion, so optionally no history to ghost from. Ours, not the
+        // game's, and it says so.
         frame.Reset = cfg.DlssNrZeroGuideReset.value_or_default();
+        frame.ResetIsPolicy = frame.Reset;
     }
 
     if (temporalValid && temporalSeq == g_nrLastEnhancedSeq)
@@ -5433,6 +5552,7 @@ void Shutdown()
     for (auto& r : g_nrRetired)
     {
         delete r.scaler;
+        delete r.stabilizer;
         if (r.feature != nullptr && g_nr.release != nullptr)
             g_nr.release(r.feature);
 
@@ -5521,6 +5641,12 @@ void Shutdown()
         g_nr.heldColor = nullptr;
     }
     g_nr.heldActive = false;
+
+    if (g_nr.stabilizer != nullptr)
+    {
+        delete g_nr.stabilizer;
+        g_nr.stabilizer = nullptr;
+    }
 
     if (g_nr.meter != nullptr)
     {

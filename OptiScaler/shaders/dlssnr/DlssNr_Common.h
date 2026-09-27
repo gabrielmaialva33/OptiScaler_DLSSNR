@@ -88,6 +88,11 @@ struct DlssNrFrameInfo
     // Throw away the model's history. Set it on a cut, a teleport, or the first frame of a feature.
     bool Reset = false;
 
+    // Reset above was our own policy, not the game's: ZeroGuideReset drops the model's history on every
+    // zero-guide frame. Nothing on screen cut, so whatever reads Reset as "the scene changed" -- the
+    // output stabilizer, the log line that says the game asked -- must not.
+    bool ResetIsPolicy = false;
+
     // Whether the colour buffer holds linear, open-ended light or a frame that has already been
     // through a tonemapper. Getting this wrong encodes an encoded frame a second time, which looks
     // washed out and banded.

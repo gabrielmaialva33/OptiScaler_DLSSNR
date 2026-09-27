@@ -45,6 +45,7 @@ struct ComposeInputs {
     int whitePointSource = 0;
     float whitePointScale = 1, whitePointTrim = 1, scanTrim = 1, gameExposure = 1, detail = 1;
     bool scanInverted = false, holdFrame = false;
+    float stabilizerStrength = 0, stabilizerTolerance = 0.05f;
     struct { Value<bool> DlssNrScanExposure; } cfg;
     std::vector<ExposureScan::AnchorPoint> anchors { { 1, 1 } };
     struct { unsigned workWidth = 1720, workHeight = 720; } g_nr;

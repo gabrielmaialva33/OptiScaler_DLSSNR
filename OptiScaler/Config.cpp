@@ -494,6 +494,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrReversibleMode.set_from_config(readUInt("DlssNr", "ReversibleMode"));
             DlssNrApplyModel.set_from_config(readBool("DlssNr", "ApplyModel"));
             DlssNrHoldFrame.set_from_config(readBool("DlssNr", "HoldFrame"));
+            DlssNrStabilizerStrength.set_from_config(readFloat("DlssNr", "StabilizerStrength"));
+            DlssNrStabilizerTolerance.set_from_config(readFloat("DlssNr", "StabilizerTolerance"));
             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
 
             RenderPresetOverride.set_from_config(readBool("DLSS", "RenderPresetOverride"));
@@ -1445,6 +1447,10 @@ bool Config::SaveIni()
                      GetIntValue(Instance()->DlssNrReversibleMode.value_for_config()).c_str());
         ini.SetValue("DlssNr", "ApplyModel", GetBoolValue(Instance()->DlssNrApplyModel.value_for_config()).c_str());
         ini.SetValue("DlssNr", "HoldFrame", GetBoolValue(Instance()->DlssNrHoldFrame.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "StabilizerStrength",
+                     GetFloatValue(Instance()->DlssNrStabilizerStrength.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "StabilizerTolerance",
+                     GetFloatValue(Instance()->DlssNrStabilizerTolerance.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",
                      GetBoolValue(Instance()->RenderPresetOverride.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetForAll",
