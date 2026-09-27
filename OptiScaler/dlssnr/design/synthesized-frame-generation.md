@@ -1,7 +1,7 @@
 # Frame generation for titles that give no motion
 
-Status: **step 1 built and measured on branch `synth-fg`** (`90990bba`, see
-[Step 1, measured](#step-1-measured)). Written 2026-09-27 against `944aff56`. The code this plans lives
+Status: **steps 1 and 2 built and measured on branch `synth-fg`** (`90990bba`, `d954692d`; see
+[Step 1, measured](#step-1-measured) and [Step 2, measured](#step-2-measured)). Written 2026-09-27 against `944aff56`. The code this plans lives
 outside the NR module (see [Where the code goes](#where-the-code-goes)); the note sits here because
 it builds on the present host and on [synthesized-motion.md](synthesized-motion.md).
 
@@ -265,8 +265,24 @@ this is one person's eye at a 60 fps base, not a measurement of error.
   where it runs once per base frame (the bridge host, before FG), instead of on every presented
   frame after it.
 
+## Step 2, measured
+
+Same setup, build `d954692d` (20260927_182832), NR on at launch (`HookMethod=2`).
+
+- **Once per base frame.** The bridge logged that it runs the pass once per base frame, before
+  synthesized FG. The new host line read `the model ran on 120 of the 120 base frames … 2.0 s`
+  window after window: 60 model runs per second at the 60 fps cap, against about 100 in step 1.
+- **The duplicate route is closed.** Not one `swapchain hook` pass and no process-wide `DLSS-NR
+  status` line all session: nothing ran on FFX's swapchain.
+- **FG ran as in step 1.** MangoHud showed 120, and nothing reported `not ready`.
+- **Size.** The model tried 2x (6880x2880) from the ini's `WorkingScale=2.0`, was refused on zero
+  guides as before, and ran at native.
+- **F7** switched the pass off (`the pass is disabled`) and back on mid-session.
+- **Startup noise.** `Frame count jumped too much` warnings appear over the first ten frames only,
+  while the FSR-FG context comes up.
+
 **Order from here:**
-1. Step 2: move NR to once per base frame, before FG.
+1. ~~Step 2: move NR to once per base frame, before FG.~~ Done, above.
 2. The D3D12 present path (step 5), for PCSX2.
 3. Rafael's 3060 (step 6).
 4. The estimator (step 3) and the HUD mask (step 4), when a title needs them.
