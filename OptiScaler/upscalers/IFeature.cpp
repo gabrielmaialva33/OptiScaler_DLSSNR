@@ -263,7 +263,7 @@ float IFeature::GetSharpness(const NVSDK_NGX_Parameter* InParameters)
     return sharpness;
 }
 
-void IFeature::TickFrozenCheck()
+void IFeature::TickFrozenCheck(uint32_t presentPerEval)
 {
     static long updatesWithoutFramecountChange = 0;
 
@@ -280,8 +280,10 @@ void IFeature::TickFrozenCheck()
 
         // Ticked once per present, but _frameCount only advances on an evaluate. Frame generation
         // presents its generated frames between evaluates, so the count reaches the multiplier every
-        // real frame with nothing wrong. Scale the threshold by it.
-        const auto presentsPerEvaluate = std::max(1, State::Instance().dlssgDetectedInterpolationCount + 1);
+        // real frame with nothing wrong. The caller passes OptiScaler's own frame generation count; a
+        // game's own DLSS-G, which OptiScaler only observes, has no FG object to ask and is scaled here.
+        const long presentsPerEvaluate =
+            std::max<long>(presentPerEval, State::Instance().dlssgDetectedInterpolationCount + 1);
 
         _featureFrozen = updatesWithoutFramecountChange > 10L * presentsPerEvaluate;
     }

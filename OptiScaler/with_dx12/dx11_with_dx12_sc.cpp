@@ -2,9 +2,13 @@
 #include "dx11_with_dx12_sc.h"
 
 #include <with_dx12/with_dx12.h>
+#include <with_dx12/dx11_with_dx12_sync.h>
 
 #include <hooks/FG_Hooks.h>
 #include <menu/menu_overlay_dx.h>
+
+#include <hudfix/Hudfix_Dx11.h>
+#include <resource_tracking/ResTrack_dx11.h>
 
 #include <Util.h>
 #include <Config.h>
@@ -136,6 +140,24 @@ DXGI_FORMAT ResolveBufferFormat(IDXGISwapChain* swapchain, IDXGISwapChain1* swap
 
     return DXGI_FORMAT_UNKNOWN;
 }
+
+bool IsSame(IDXGISwapChain* swapchain, UINT bufferCount, UINT width, UINT height, DXGI_FORMAT format, UINT flags)
+{
+    if (swapchain == nullptr)
+        return false;
+
+    DXGI_SWAP_CHAIN_DESC desc {};
+    if (FAILED(swapchain->GetDesc(&desc)))
+        return false;
+
+    const UINT resolvedBufferCount = bufferCount != 0 ? bufferCount : desc.BufferCount;
+    const UINT resolvedWidth = width != 0 ? width : desc.BufferDesc.Width;
+    const UINT resolvedHeight = height != 0 ? height : desc.BufferDesc.Height;
+    const DXGI_FORMAT resolvedFormat = format != DXGI_FORMAT_UNKNOWN ? format : desc.BufferDesc.Format;
+
+    return resolvedBufferCount == desc.BufferCount && resolvedWidth == desc.BufferDesc.Width &&
+           resolvedHeight == desc.BufferDesc.Height && resolvedFormat == desc.BufferDesc.Format && flags == desc.Flags;
+}
 } // namespace
 
 Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Device* pDevice, HWND hWnd, UINT flags)
@@ -172,6 +194,12 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
             if (FAILED(context4Result))
                 LOG_WARN("ID3D11DeviceContext4 unavailable: {:X}", (UINT) context4Result);
         }
+    }
+
+    if (_dx11Device != nullptr && State::Instance().activeFgInput == FGInput::Upscaler &&
+        !Config::Instance()->FGDisableHUDFix.value_or_default())
+    {
+        ResTrack_Dx11::HookDevice(_dx11Device);
     }
 
     if (WithDx12::PrepareD3D12ForD3D11(_dx11Device, D3D_FEATURE_LEVEL_11_0))
@@ -467,6 +495,10 @@ void Dx11wDx12SC::_FinishRelease(bool deviceLost)
     }
     if (_wasCurrentOnRelease && !deviceLost && (fg == nullptr || fg->Mutex.getOwner() != 1))
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
+
+    // Upstream calls this just before its delete; here that is the end of the release proper, which
+    // both an immediate release and a retired wrapper collected later come through, after the drain.
+    ResTrack_Dx11::OnDeviceReleased(_dx11Device);
 }
 
 void Dx11wDx12SC::_CollectRetired()
@@ -582,6 +614,15 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
             return result;
         _ResetTeardownDrain();
     }
+
+    const bool dx11HudfixPresent = Config::Instance()->FGHUDFix.value_or_default() &&
+                                   State::Instance().activeFgInput == FGInput::Upscaler &&
+                                   State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+    if (dx11HudfixPresent)
+    {
+        ResTrack_Dx11::ClearPossibleHudless();
+        Hudfix_Dx11::PresentStart();
+    }
     if (!_InitInteropObjects())
         return DXGI_ERROR_DEVICE_REMOVED;
 
@@ -653,6 +694,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
         _synthInputs->Feed(_fg, _dx12Device);
 
     auto result = _fgSwapChain->Present(SyncInterval, Flags);
+
+    if (dx11HudfixPresent)
+        Hudfix_Dx11::PresentEnd();
 
     // DXGI can still put the presenter into exclusive fullscreen behind the wrapper -- its own
     // Alt+Enter handling watches the window for the presenter's factory -- and a flip-model
@@ -882,6 +926,28 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) NewFormat, SwapChainFlags);
 
+    const bool skipFgResize = IsSame(_fgSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+    const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
+                                        State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+
+    std::unique_lock<std::shared_mutex> presentResizeLock(Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock);
+    if (synchronizeXeFGPresent)
+    {
+        auto fg = State::Instance().currentFG;
+        if (fg != nullptr && fg->FrameGenerationContext() != nullptr && fg->IsActive())
+        {
+            State::Instance().fgChanged = true;
+            fg->UpdateTarget();
+            fg->Deactivate();
+        }
+
+        LOG_DEBUG("Waiting for XeFG native presents before equivalent ResizeBuffers");
+        presentResizeLock.lock();
+        LOG_DEBUG("XeFG native present barrier acquired");
+    }
+
+    // The drain covers the copy queue and the present queue FG submits on, which is what upstream's
+    // copy-queue idle wait and its FG/present queue idle wait each prove for one queue.
     const auto drainResult = _DrainForTeardown(5000);
     if (FAILED(drainResult))
     {
@@ -904,7 +970,17 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
 
     HRESULT fgResult = DXGI_ERROR_DEVICE_REMOVED;
     if (SUCCEEDED(realResult) && _fgSwapChain != nullptr)
-        fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
+    {
+        if (skipFgResize)
+        {
+            LOG_DEBUG("Skipping FG ResizeBuffers");
+            fgResult = S_OK;
+        }
+        else
+        {
+            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
+        }
+    }
 
     if (SUCCEEDED(realResult))
         _resizeIncomplete = FAILED(fgResult);
@@ -1113,6 +1189,26 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     if (_real3 == nullptr)
         return ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
 
+    const bool skipFgResize = IsSame(_fgSwapChain, BufferCount, Width, Height, Format, SwapChainFlags);
+    const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
+                                        State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+
+    std::unique_lock<std::shared_mutex> presentResizeLock(Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock);
+    if (synchronizeXeFGPresent)
+    {
+        auto fg = State::Instance().currentFG;
+        if (fg != nullptr && fg->FrameGenerationContext() != nullptr && fg->IsActive())
+        {
+            State::Instance().fgChanged = true;
+            fg->UpdateTarget();
+            fg->Deactivate();
+        }
+
+        LOG_DEBUG("Waiting for XeFG native presents before equivalent ResizeBuffers1");
+        presentResizeLock.lock();
+        LOG_DEBUG("XeFG native present barrier acquired");
+    }
+
     const auto drainResult = _DrainForTeardown(5000);
     if (FAILED(drainResult))
     {
@@ -1137,7 +1233,15 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     if (SUCCEEDED(realResult) && _fgSwapChain != nullptr)
     {
         // The game's ppPresentQueue is not valid for the DX12 FG swapchain. Use ResizeBuffers for phase 1.
-        fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
+        if (skipFgResize)
+        {
+            LOG_DEBUG("Skipping FG ResizeBuffers1");
+            fgResult = S_OK;
+        }
+        else
+        {
+            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
+        }
     }
 
     if (SUCCEEDED(realResult))

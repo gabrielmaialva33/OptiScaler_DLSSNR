@@ -7,14 +7,9 @@
 
 GpuTime_Dx12::GpuTime_Dx12(ID3D12Device* device)
 {
-    // The one construction site passes Shader_Dx12's device straight through
-    // (shaders/Shader_Dx12.cpp:9), so a shader built without one dereferenced null here. Leaving
-    // early is safe rather than merely quieter: _init stays false, and Start, End and ReadGpuTime
-    // all test `_init && _queryHeap != nullptr` before touching anything, so the object degrades to
-    // measuring nothing instead of crashing. Same fix as upstream 4bd61744.
     if (device == nullptr)
     {
-        LOG_ERROR("GpuTime_Dx12 created with a nullptr device; timing is off for this shader");
+        LOG_ERROR("GpuTime_Dx12 created with nullptr device");
         return;
     }
 

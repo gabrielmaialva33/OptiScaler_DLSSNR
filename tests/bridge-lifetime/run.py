@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Execute production bridge lifetime functions with scripted COM/fence/Win32 fakes."""
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -50,7 +51,9 @@ predicates = 'namespace Dx11wDx12\n{\n' + ''.join(map(function, [
     'bool WantedForNeuralRendering()',
     'bool WantedIdleForNeuralRendering()',
 ])) + '} // namespace Dx11wDx12\n'
-unit = ((here / 'fakes.h').read_text() + waiter + predicates + '\n'.join(map(function, signatures)) +
+# Upstream's skip-resize test lives in the production file's anonymous namespace; verbatim here too.
+helpers = 'namespace\n{\n' + function('bool IsSame(IDXGISwapChain* swapchain,') + '} // namespace\n'
+unit = ((here / 'fakes.h').read_text() + waiter + predicates + helpers + '\n'.join(map(function, signatures)) +
         (here / 'cases.cpp').read_text())
 with tempfile.TemporaryDirectory(prefix='optiscaler-bridge-lifetime-') as directory:
     cpp = Path(directory) / 'bridge.cpp'
@@ -69,7 +72,11 @@ header = (root / 'OptiScaler/upscalers/IFeature_Dx11wDx12.h').read_text()
 submit_start = upscaler.index('    if (dx12EvalResult)\n    {\n        ID3D12CommandList*')
 submit_end = upscaler.index('    auto evalResult = false;', submit_start)
 base_fakes = (here / 'fakes.h').read_text().split('struct Dx11Context')[0]
-upscaler_unit = base_fakes + waiter
+# Production's ring sizes, verbatim: the command ring (upscaler header) and the resource ring (cache).
+cache_header = (root / 'OptiScaler/with_dx12/dx11_with_dx12.h').read_text()
+defines = ''.join(re.search(rf'^#define {name} \d+\n', text, re.M).group(0) for name, text in (
+    ('DX11WDX12_COMMAND_BUFFER_COUNT', header), ('DX11_WITH_DX12_CACHED_FRAMES', cache_header)))
+upscaler_unit = base_fakes + defines + waiter
 upscaler_unit += (here / 'upscaler_fakes.h').read_text()
 upscaler_unit += function('bool IsInited() override', header)
 upscaler_unit += """
@@ -77,11 +84,12 @@ upscaler_unit += """
     ID3D11DeviceContext* DeviceContext = nullptr;
     ID3D12Device* _dx11on12Device = nullptr;
     ID3D12CommandQueue* Dx12CommandQueue = nullptr;
-    ID3D12CommandAllocator* Dx12CommandAllocator[2] {};
-    ID3D12GraphicsCommandList* Dx12CommandList[2] {};
+    ID3D12CommandAllocator* Dx12CommandAllocator[DX11WDX12_COMMAND_BUFFER_COUNT] {};
+    ID3D12GraphicsCommandList* Dx12CommandList[DX11WDX12_COMMAND_BUFFER_COUNT] {};
     ID3D12Fence* Dx12Fence = nullptr;
     HANDLE Dx12FenceEvent = nullptr;
-    UINT64 Dx12FenceValue = 0, Dx12CommandAllocatorFenceValue[2] {};
+    UINT64 Dx12FenceValue = 0, Dx12CommandAllocatorFenceValue[DX11WDX12_COMMAND_BUFFER_COUNT] {};
+    std::unique_ptr<GpuTime_Dx11> UpscalerTime;
     unsigned _frameCount = 0;
     struct FakeHandle { unsigned Id = 0; } handle;
     FakeHandle* Handle() { return &handle; }
@@ -92,7 +100,8 @@ upscaler_unit += """
     bool ProcessDx11Textures(const NVSDK_NGX_Parameter*);
     bool SubmitEvaluateForTest(UINT frame)
     {
-        auto cmdList = Dx12CommandList[frame];
+        const auto commandFrame = frame;
+        auto cmdList = Dx12CommandList[commandFrame];
         bool dx12EvalResult = true, commandListExecuted = false;
         HRESULT result;
 """ + upscaler[submit_start:submit_end] + """
@@ -107,7 +116,9 @@ with tempfile.TemporaryDirectory(prefix='optiscaler-upscaler-fence-') as directo
     cpp = Path(directory) / 'upscaler.cpp'
     binary = Path(directory) / 'upscaler'
     cpp.write_text(upscaler_unit)
+    # -Wno-unused-variable: the log macros compile out here, and production keeps locals (fence values
+    # read before and after a wait) whose only reader is a LOG_WARN.
     subprocess.run(['g++', '-std=c++20', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
-                    '-Wno-unused-parameter', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-                    str(cpp), '-o', str(binary)], check=True)
+                    '-Wno-unused-parameter', '-Wno-unused-variable', '-fsanitize=address,undefined',
+                    '-fno-omit-frame-pointer', str(cpp), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

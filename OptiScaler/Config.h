@@ -802,6 +802,7 @@ class Config
 
     // NVAPI Override
     CustomOptional<bool> DisableFlipMetering { false };
+    CustomOptional<bool> DisableOTA { false };
 
     // Spoofing
     CustomOptional<bool, SoftDefault> DxgiSpoofing { true };
@@ -852,6 +853,7 @@ class Config
     CustomOptional<bool> FGModifySCIndex { false };
     CustomOptional<float> FGHudCutoff { 0.0f };
     CustomOptional<FrameTimeSource> FTInput { FrameTimeSource::Input };
+    CustomOptional<bool> FGReprojectionEnabled { false }; // WIP Not saved or loaded
 
     // OptiFG
     CustomOptional<bool> FGEnabled { false };
@@ -935,19 +937,17 @@ class Config
     CustomOptional<int, NoDefault>
         FGDLSSGOverrideInterpolationCount; // For overriding game's value sent to SL, could be Nvngx FG, could be noFG
                                            // but someone just uses real DLSSG
-    CustomOptional<bool> FGDLSSGOverrideForceDMFG { false }; // Overrides game's DLSSG mode to Dynamic
-    CustomOptional<bool> FGDLSSGForceDMFG { false };         // Overrides Opti's DLSSG mode to Dynamic
-    CustomOptional<float> FGDLSSGFramerateTargetDMFG { 0.0f };
+    CustomOptional<bool> FGDLSSGOverrideForceDMFG { false };   // Overrides game's DLSSG mode to Dynamic
+    CustomOptional<bool> FGDLSSGForceDMFG { false };           // Overrides Opti's DLSSG mode to Dynamic
+    CustomOptional<float> FGDLSSGFramerateTargetDMFG { 0.0f }; // 0.0 means auto-detects the display refresh rate
+
+    CustomOptional<bool> FGDLSSGAdaMfgUnlock { false };        // See framegen/dlssg/MfgUnlock.h
+    CustomOptional<bool> FGDLSSGAdaBlackwellKernels { false }; // See framegen/dlssg/MfgUnlock.h
 
     // Reprojection
     CustomOptional<ReprojectionFill> ReprojectionFillMode { ReprojectionFill::Dithering };
     CustomOptional<float> ReprojectionDepthCutoff { 0.1f };
     CustomOptional<uint32_t> ReprojectionCutoffExpand { 0 };
-
-    CustomOptional<bool> FGDLSSGAdaMfgUnlock { false }; // See framegen/dlssg/MfgUnlock.h
-    CustomOptional<bool> FGDLSSGAdaBlackwellKernels {
-        false
-    }; // See framegen/dlssg/MfgUnlock.h // 0.0 means auto-detects the display refresh rate
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033

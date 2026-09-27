@@ -6,6 +6,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <vector>
 using HRESULT = int32_t;
 using UINT = unsigned;
@@ -16,6 +17,7 @@ using LONG = int;
 using HWND = void*;
 using HANDLE = void*;
 using DXGI_FORMAT = int;
+constexpr DXGI_FORMAT DXGI_FORMAT_UNKNOWN = 0;
 constexpr HRESULT S_OK = 0, E_FAIL = -1, E_UNEXPECTED = -2, E_INVALIDARG = -3;
 constexpr HRESULT DXGI_ERROR_DEVICE_REMOVED = -4, DXGI_ERROR_DEVICE_HUNG = -5;
 constexpr DWORD ERROR_TIMEOUT = 1460, WAIT_TIMEOUT = 258, WAIT_OBJECT_0 = 0, WAIT_FAILED = UINT32_MAX;
@@ -179,11 +181,30 @@ struct Dx11Context : Ref
     void Flush() {}
 };
 void TransitionResource(ID3D12GraphicsCommandList*, ID3D12Resource*, int, int) {}
+struct DXGI_SWAP_CHAIN_DESC
+{
+    struct
+    {
+        UINT Width = 0, Height = 0;
+        DXGI_FORMAT Format = DXGI_FORMAT_UNKNOWN;
+    } BufferDesc;
+    UINT BufferCount = 0, Flags = 0;
+};
 struct Swapchain : Ref
 {
     int resizes = 0;
     HRESULT resizeResult = S_OK;
     ID3D12Resource buffer;
+    // What the presenter says it is, for upstream's IsSame skip-resize. Failing by default: an
+    // unknown description never matches, so every resize reaches the presenter as it did before.
+    HRESULT descResult = E_FAIL;
+    DXGI_SWAP_CHAIN_DESC desc {};
+    HRESULT GetDesc(DXGI_SWAP_CHAIN_DESC* out)
+    {
+        if (SUCCEEDED(descResult))
+            *out = desc;
+        return descResult;
+    }
     UINT GetCurrentBackBufferIndex() { return 0; }
     HRESULT GetBuffer(UINT, ID3D12Resource** out)
     {
@@ -219,6 +240,29 @@ struct FG
     ID3D12CommandQueue* GetCommandQueue() { return queue; }
     void Deactivate() { ++deactivations; }
     void ReleaseSwapchain(HWND) { ++releases; }
+    // Upstream's XeFG resize lock asks these; the bridge's own lifetime never depends on them.
+    bool active = false;
+    int targetUpdates = 0;
+    void* FrameGenerationContext() { return context; }
+    bool IsActive() { return active; }
+    void UpdateTarget() { ++targetUpdates; }
+};
+using IDXGISwapChain = Swapchain;
+// Upstream's present/resize barrier for XeFG on the bridge.
+namespace Dx11wDx12Sync
+{
+std::shared_mutex& PresentResizeMutex()
+{
+    static std::shared_mutex mutex;
+    return mutex;
+}
+} // namespace Dx11wDx12Sync
+// Upstream's DX11 resource tracker. Only hooked for FGInput::Upscaler; teardown tells it the device
+// is gone either way.
+struct ResTrack_Dx11
+{
+    inline static int deviceReleases = 0;
+    static void OnDeviceReleased(void*) { ++deviceReleases; }
 };
 enum class SwapchainInteropApi
 {

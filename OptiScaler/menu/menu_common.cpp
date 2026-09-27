@@ -22,6 +22,7 @@
 #include <tlhelp32.h>
 
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <framegen/reprojection/Reprojection_Dx12.h>
 
 #include <nvapi/fakenvapi.h>
 #include <hooks/Reflex_Hooks.h>
@@ -120,12 +121,6 @@ static bool HasLoadedDlssgCompatibilityMod()
 
     CloseHandle(snapshot);
     return found;
-}
-
-bool MenuCommon::SliderUInt(const char* label, uint32_t* v, uint32_t v_min, uint32_t v_max, const char* format,
-                            ImGuiSliderFlags flags)
-{
-    return ImGui::SliderScalar(label, ImGuiDataType_U32, v, &v_min, &v_max, format, flags);
 }
 
 static std::string windowTitle;
@@ -407,6 +402,12 @@ void MenuCommon::SeparatorWithHelpMarker(const char* label, const char* tip)
     ImGui::SeparatorTextEx(0, label, ImGui::FindRenderedTextEnd(label),
                            ImGui::CalcTextSize(marker, ImGui::FindRenderedTextEnd(marker)).x);
     ShowHelpMarker(tip);
+}
+
+bool MenuCommon::SliderUInt(const char* label, uint32_t* v, uint32_t v_min, uint32_t v_max, const char* format,
+                            ImGuiSliderFlags flags)
+{
+    return ImGui::SliderScalar(label, ImGuiDataType_U32, v, &v_min, &v_max, format, flags);
 }
 
 class Keybind
@@ -1152,6 +1153,8 @@ inline static std::string GetSourceString(UINT source)
         return "SCR";
     case 64:
         return "SGR";
+    case 128:
+        return "OMUAV";
     default:
         return std::format("{}", source);
     }
@@ -1161,6 +1164,8 @@ inline static std::string GetDispatchString(UINT source)
 {
     switch (source)
     {
+    case 0:
+        return "-";
     case 512:
         return "DI";
     case 1024:
@@ -3379,9 +3384,9 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     outputOptions = {
         { FGOutput::NoFG, "None" },
         { FGOutput::FSRFG, "FSR FG", "FSR3/4-FG, RDNA4 autoupgrades to FSR4-FG\n\nFSR4-FG sometimes better/worse than XeFG" },
-        { FGOutput::DLSSG, "DLSSG", "DLSSG output\ncan be used in conjuction with Nukem's for example" },
+        { FGOutput::DLSSG, "DLSSG", "DLSSG output\nCan be used in conjuction with Nukem's for example" },
         { FGOutput::XeFG, "XeFG", "XeFG - heaviest, but best universal FG\n\nXeFG 3 overall deals best with HUD\n\nEnable UI Composition if HUD ghosting" },
-        { FGOutput::Reprojection, "Reprojection", "Reprojection" },
+        { FGOutput::Reprojection, "Reprojection (WIP)", "Reprojects the game image using new mouse data\nKinda like Reflex 2, perceived latency improvement\n\n- REQUIRES DLSSG VIA STREAMLINE AS INPUT\n- Only works with first person perspective games\n- Only mouse, no controller\n- If possible, disable any mouse/camera smoothing in the game\n" },
     };
 
     // clang-format on
@@ -4464,13 +4469,22 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ImGui::EndDisabled();
     }
 
-    if (state.activeFgOutput == FGOutput::Reprojection && fgOutput)
+    if (fgOutput && fgOutput->HasReprojection())
     {
         ImGui::SeparatorText("Reprojection");
 
-        if (ImGui::BeginTable("reprojection1", 2, ImGuiTableFlags_SizingStretchProp))
+        if (fgOutput->IsActive() && fgOutput->IsReprojectionActive())
         {
-            ImGui::TableNextColumn();
+            ImGui::Text("Updated camera rotation by: %.1fms",
+                        (float) fgOutput->GetLastTimeSinceSimStartNs() / 1'000'000.f);
+        }
+        else
+        {
+            ImGui::TextDisabled("Not updating camera rotation");
+        }
+
+        if (state.activeFgOutput == FGOutput::Reprojection)
+        {
             bool fgActive = config->FGEnabled.value_or_default();
             if (ImGui::Checkbox("Active##2", &fgActive))
             {
@@ -4480,41 +4494,60 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 if (config->FGEnabled.value_or_default())
                     state.fgChanged = true;
             }
-            ShowHelpMarker("Enable reprojection");
-
-            ImGui::TableNextColumn();
-            // clang-format off
-            static std::vector<MenuOption<ReprojectionFill>> fillModes = {
-                { ReprojectionFill::StrechEdge, "Strech edge" },
-                { ReprojectionFill::Dithering, "Dithering" },
-                { ReprojectionFill::Noise, "Noise" },
-                { ReprojectionFill::Debug, "Debug" }
-            };
-            // clang-format on
-
-            // need to have a value before combo
-            if (!config->ReprojectionFillMode.has_value())
-                config->ReprojectionFillMode = config->ReprojectionFillMode.value_or_default();
-
-            PopulateCombo("Edge fill mode", config->ReprojectionFillMode, fillModes);
-
-            ImGui::EndTable();
         }
+        else
+        {
+            bool reprojectionActive = config->FGReprojectionEnabled.value_or_default();
+            if (ImGui::Checkbox("Active##5", &reprojectionActive))
+            {
+                config->FGReprojectionEnabled = reprojectionActive;
+                LOG_DEBUG("Reprojection enabled: {}", reprojectionActive);
+            }
+        }
+        ShowHelpMarker("Enable reprojection");
+
+        ImGui::SameLine();
+
+        ImGui::Checkbox("Show static elements", &state.fgHudlessCompare);
+        ShowHelpMarker("For fine tuning the depth cutoff\n"
+                       "Shows UI and depth cutoff areas\n"
+                       "Adjust depth cutoff so that only stuff like your gun and hands are marked");
+
+        ImGui::Spacing();
+
+        // clang-format off
+        static std::vector<MenuOption<ReprojectionFill>> fillModes = {
+            { ReprojectionFill::StrechEdge, "Strech edge" },
+            { ReprojectionFill::Dithering, "Dithering" },
+            { ReprojectionFill::Noise, "Noise" },
+            { ReprojectionFill::Debug, "Debug" }
+        };
+        // clang-format on
+
+        // need to have a value before combo
+        if (!config->ReprojectionFillMode.has_value())
+            config->ReprojectionFillMode = config->ReprojectionFillMode.value_or_default();
+
+        PopulateCombo("Edge fill mode", config->ReprojectionFillMode, fillModes);
+        ShowHelpMarker("You want either dither or noise\n"
+                       "Those two use the unprojected image as fill\n"
+                       "and then some blending on the edges to fool the eye");
 
         float cutoff = config->ReprojectionDepthCutoff.value_or_default();
         if (ImGui::SliderFloat("Depth cutoff", &cutoff, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic))
             config->ReprojectionDepthCutoff = cutoff;
+        ShowHelpMarker("Selects how many elements close to the camera\n"
+                       "should be shown over the reprojected image.\n"
+                       "This prevents your gun from being moved in weird ways.\n\n"
+                       "Use \"Show static elements\" to help you adjust it\n"
+                       "Unreal Engine games are usually around 0.10\n"
+                       "Cyberpunk is around 0.02");
 
         uint32_t cutoffExpandPx = config->ReprojectionCutoffExpand.value_or_default();
         if (SliderUInt("Cutoff expand", &cutoffExpandPx, 0, 2))
             config->ReprojectionCutoffExpand = cutoffExpandPx;
         ShowHelpMarker("A toddler implemented this so it's super slow\n"
                        "Use only when you see an outline left by the cutoff process");
-
-        ImGui::Checkbox("Show static elements", &state.fgHudlessCompare);
-        ShowHelpMarker("For fine tuning the depth cutoff\n"
-                       "Shows UI and depth cutoff areas\n"
-                       "Adjust depth cutoff so that only stuff like your gun and hands are marked");
     }
 
     // OptiFG
@@ -4525,10 +4558,15 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         if (currentFeature != nullptr && !currentFeature->IsFrozen() &&
             ((state.activeFgOutput == FGOutput::FSRFG && FfxApiProxy::IsFGReady()) ||
              (state.activeFgOutput == FGOutput::XeFG && XeFGProxy::Module() != nullptr) ||
-             (state.activeFgOutput == FGOutput::DLSSG && StreamlineProxy::Module() != nullptr)))
+             (state.activeFgOutput == FGOutput::DLSSG && StreamlineProxy::Module() != nullptr) ||
+             state.activeFgOutput == FGOutput::Reprojection))
         {
-            if (!Config::Instance()->FGDisableHUDFix.value_or_default() &&
-                state.swapchainInteropApi == SwapchainInteropApi::None)
+            const bool dx11HudfixTracking = state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+            const bool hudfixTrackingSupported =
+                !Config::Instance()->FGDisableHUDFix.value_or_default() &&
+                (state.swapchainInteropApi == SwapchainInteropApi::None || dx11HudfixTracking);
+
+            if (hudfixTrackingSupported)
             {
                 bool fgHudfix = config->FGHUDFix.value_or_default();
 
@@ -4613,8 +4651,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             {
                 ScopedIndent indent {};
 
-                if (!Config::Instance()->FGDisableHUDFix.value_or_default() &&
-                    state.swapchainInteropApi == SwapchainInteropApi::None)
+                if (hudfixTrackingSupported)
                 {
                     ImGui::Spacing();
 
@@ -4681,14 +4718,20 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                     ImGui::Spacing();
                     if (ImGui::TreeNode("Tracking Settings"))
                     {
+                        ImGui::BeginDisabled(dx11HudfixTracking);
+
                         auto ath = config->FGAlwaysTrackHeaps.value_or_default();
                         if (ImGui::Checkbox("Always Track Heaps", &ath))
                         {
                             config->FGAlwaysTrackHeaps = ath;
                             LOG_DEBUG("Enabled set FGAlwaysTrackHeaps: {}", ath);
                         }
-                        ShowHelpMarker("Always track resources, might cause performance issues\n, but also might "
-                                       "fix HUDFix related crashes!");
+                        ImGui::EndDisabled();
+
+                        ShowHelpMarker(dx11HudfixTracking
+                                           ? "D3D12 only; not applicable to DX11."
+                                           : "Always track resources, might cause performance issues\n, but also might "
+                                             "fix HUDFix related crashes!");
 
                         auto disableRTV = config->FGHudfixDisableRTV.value_or_default();
                         if (ImGui::Checkbox("Disable RTV Tracking", &disableRTV))

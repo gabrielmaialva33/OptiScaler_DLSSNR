@@ -27,6 +27,15 @@ struct ID3D11Device
 struct ID3D11DeviceContext
 {
 };
+// Upstream's interop timer. Init creates one; nothing this suite checks reads it.
+struct GpuTime_Dx11
+{
+    explicit GpuTime_Dx11(ID3D11Device*) {}
+};
+namespace Util
+{
+double MillisecondsNow() { return static_cast<double>(clockMs); }
+} // namespace Util
 template <class T> struct Option
 {
     T value {};

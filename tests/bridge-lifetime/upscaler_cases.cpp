@@ -18,8 +18,11 @@ struct UpscalerFixture
         bridge.dx12Feature = &backend;
         bridge._dx11on12Device = &device;
         bridge.Dx12CommandQueue = &queue;
-        bridge.Dx12CommandAllocator[0] = bridge.Dx12CommandAllocator[1] = &allocator;
-        bridge.Dx12CommandList[0] = bridge.Dx12CommandList[1] = &list;
+        for (auto i = 0u; i < DX11WDX12_COMMAND_BUFFER_COUNT; ++i)
+        {
+            bridge.Dx12CommandAllocator[i] = &allocator;
+            bridge.Dx12CommandList[i] = &list;
+        }
         bridge.Dx12Fence = &fence;
         bridge.Dx12FenceEvent = reinterpret_cast<HANDLE>(1);
     }

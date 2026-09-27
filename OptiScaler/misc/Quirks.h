@@ -41,6 +41,7 @@ enum class GameQuirk : uint64_t
     DoNotLoadAmdxc64,
     DontUseUnrealMVBarriers,
     DontUseUnrealColorBarriers,
+    DisableOTA,
 
     // Quirks that are applied deeper in code
     CyberpunkHudlessState,
@@ -454,6 +455,11 @@ static const QuirkEntry quirkTable[] = {
     // SL spoof enough to unlock everything DLSS
     QUIRK_ENTRY("fbcfirebreak.exe", GameQuirk::DisableDxgiSpoofing),
 
+    // CONTROL Resonant
+    // SL spoof enough to unlock everything DLSS, Preserve FG Swapchain just crashes the DLSSG inputs
+    QUIRK_ENTRY("controlresonant.exe", GameQuirk::DisableDxgiSpoofing, GameQuirk::DoNotPreserveFGSwapChain,
+                GameQuirk::DisableOTA),
+
     // SL spoof enough to unlock everything DLSS/No spoof needed for DLSS inputs
     //
     // Crysis 3 Remastered, Warhammer 40,000: Darktide, Rise of the Ronin, DYNASTY WARRIORS: ORIGINS, Crysis Remastered,
@@ -511,7 +517,7 @@ static const QuirkEntry quirkTable[] = {
 
     // Disable FSR2/3 inputs due to crashing/custom implementations
     //
-    // Forgive Me Father 2, Revenge of the Savage Planet, F1 22, Metal Eden, Until Dawn, Bloomand Rage, 171, Microsoft
+    // Forgive Me Father 2, Revenge of the Savage Planet, F1 22, Metal Eden, Until Dawn, Bloom and Rage, 171, Microsoft
     // Flight Simulator (2020) - MSFS2020, Banishers: Ghosts of New Eden,Rune Factory Guardians of Azuma, Supraworld, F1
     // Manager 2024, Keeper (+ WinGDK PaganIdol version), Assetto Corsa Rally
     QUIRK_ENTRY_UE(fmf2, GameQuirk::DisableFSR2Inputs, GameQuirk::DisableFSR3Inputs),
@@ -558,12 +564,6 @@ static const QuirkEntry quirkTable[] = {
     // Shadow of the Tomb Raider
     // Hudfix incompatible
     QUIRK_ENTRY("sottr.exe", GameQuirk::DisableHudfix),
-
-    // Trails in the Sky the 2nd Chapter
-    QUIRK_ENTRY("ed6_win2.exe", GameQuirk::DisableDxgiSpoofing, GameQuirk::UseFsr2Dx11Inputs),
-
-    // Sword and Fairy 7
-    QUIRK_ENTRY("pal7-win64-shipping.exe", GameQuirk::DontUseUnrealColorBarriers, GameQuirk::DontUseUnrealMVBarriers),
 
     // Stellar Blade
     // Hudfix incompatible

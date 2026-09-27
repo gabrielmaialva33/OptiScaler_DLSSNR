@@ -588,6 +588,42 @@ void synthInputCases()
         assert(synth->releases == 1);
     }
 
+    // Upstream's skip-resize: identical parameters leave the presenter alone, while the bridge side
+    // of the resize still runs behind its drain. The host is kept; the synthesized pair is freed and
+    // re-cleared at the same size on the next copy, which is safe (drained) and costs one reallocation.
+    {
+        Fixture f;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        auto* host = f.sc->_nrHost.get();
+        auto* synth = f.sc->_synthInputs.get();
+        f.presenter.descResult = S_OK;
+        f.presenter.desc.BufferCount = 2;
+        f.presenter.desc.BufferDesc.Width = 800;
+        f.presenter.desc.BufferDesc.Height = 600;
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == S_OK);
+        assert(f.presenter.resizes == 0 && f.real.resizes == 1);
+        assert(host->releases == 0 && f.sc->_nrHost != nullptr);
+        assert(synth->releases == 1 && f.sc->_synthInputs != nullptr);
+        assert(f.fg.targetUpdates == 0);
+    }
+
+    // The same with XeFG: the equivalent resize first takes XeFG's present barrier and restarts it.
+    {
+        Fixture f;
+        State::Instance().activeFgOutput = FGOutput::XeFG;
+        f.fg.active = true;
+        f.presenter.descResult = S_OK;
+        f.presenter.desc.BufferCount = 2;
+        f.presenter.desc.BufferDesc.Width = 800;
+        f.presenter.desc.BufferDesc.Height = 600;
+        const auto deactivations = f.fg.deactivations;
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == S_OK);
+        assert(f.presenter.resizes == 0 && f.fg.targetUpdates == 1 && f.fg.deactivations == deactivations + 1);
+        assert(Dx11wDx12Sync::PresentResizeMutex().try_lock());
+        Dx11wDx12Sync::PresentResizeMutex().unlock();
+    }
+
     // Teardown frees it behind the same drain as the rest of the interop.
     {
         Fixture f;

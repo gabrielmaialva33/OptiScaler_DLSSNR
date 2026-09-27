@@ -38,7 +38,7 @@ static HANDLE _semaphore = nullptr;
 inline static std::vector<void*> oldBackBuffers;
 #endif
 
-bool WaitForQueueIdle(ID3D12CommandQueue* queue, ID3D12Fence* fence, HANDLE fenceEvent, UINT64& fenceValue)
+static bool WaitForQueueIdle(ID3D12CommandQueue* queue, ID3D12Fence* fence, HANDLE fenceEvent, UINT64& fenceValue)
 {
     if (queue == nullptr || fence == nullptr || fenceEvent == nullptr)
         return true;
@@ -47,7 +47,7 @@ bool WaitForQueueIdle(ID3D12CommandQueue* queue, ID3D12Fence* fence, HANDLE fenc
     auto result = queue->Signal(fence, waitValue);
     if (FAILED(result))
     {
-        LOG_ERROR("Signal failed: {:X}", (UINT) result);
+        LOG_ERROR("FG/present queue idle Signal failed: {:X}", (UINT) result);
         return false;
     }
 
@@ -57,7 +57,7 @@ bool WaitForQueueIdle(ID3D12CommandQueue* queue, ID3D12Fence* fence, HANDLE fenc
     result = fence->SetEventOnCompletion(waitValue, fenceEvent);
     if (FAILED(result))
     {
-        LOG_ERROR("SetEventOnCompletion failed. fence {}, completed {}, result {:X}", waitValue,
+        LOG_ERROR("FG/present queue idle SetEventOnCompletion failed. fence {}, completed {}, result {:X}", waitValue,
                   fence->GetCompletedValue(), (UINT) result);
         return false;
     }
@@ -65,8 +65,8 @@ bool WaitForQueueIdle(ID3D12CommandQueue* queue, ID3D12Fence* fence, HANDLE fenc
     const auto waitResult = WaitForSingleObject(fenceEvent, 5000);
     if (waitResult != WAIT_OBJECT_0)
     {
-        LOG_ERROR("wait failed. fence {}, completed {}, waitResult {:X}", waitValue, fence->GetCompletedValue(),
-                  waitResult);
+        LOG_ERROR("FG/present queue idle wait failed. fence {}, completed {}, waitResult {:X}", waitValue,
+                  fence->GetCompletedValue(), waitResult);
         return false;
     }
 
@@ -222,6 +222,7 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
             {
                 LOG_DEBUG("Waiting for GPU to finish");
 
+                resizeFenceValue++;
                 const auto waitResult = WaitForQueueIdle(State::Instance().currentCommandQueue, resizeFence,
                                                          resizeFenceEvent, resizeFenceValue);
 
@@ -341,6 +342,7 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
             {
                 LOG_DEBUG("Waiting for GPU to finish");
 
+                resizeFenceValue++;
                 const auto waitResult = WaitForQueueIdle(State::Instance().currentCommandQueue, resizeFence,
                                                          resizeFenceEvent, resizeFenceValue);
 
@@ -669,6 +671,7 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
     {
         LOG_DEBUG("Waiting for GPU to finish before resizing buffers");
 
+        resizeFenceValue++;
         const auto waitResult =
             WaitForQueueIdle(State::Instance().currentCommandQueue, resizeFence, resizeFenceEvent, resizeFenceValue);
 
@@ -780,6 +783,14 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
         State::Instance().fgChanged = true;
         fg->UpdateTarget();
         fg->Deactivate();
+
+        // Let's try Dx11 like approach on Dx12
+        std::shared_lock<std::shared_mutex> resizeLock(_resizeMutex, std::defer_lock);
+        if (State::Instance().activeFgOutput == FGOutput::XeFG &&
+            State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+        {
+            resizeLock.lock();
+        }
     }
 
     _skipResize1 = true;
@@ -879,6 +890,7 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
     {
         LOG_DEBUG("Waiting for GPU to finish before resizing buffers");
 
+        resizeFenceValue++;
         const auto waitResult =
             WaitForQueueIdle(State::Instance().currentCommandQueue, resizeFence, resizeFenceEvent, resizeFenceValue);
 
@@ -987,6 +999,14 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
         State::Instance().fgChanged = true;
         fg->UpdateTarget();
         fg->Deactivate();
+
+        // Let's try Dx11 like approach on Dx12
+        std::shared_lock<std::shared_mutex> resizeLock(_resizeMutex, std::defer_lock);
+        if (State::Instance().activeFgOutput == FGOutput::XeFG &&
+            State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+        {
+            resizeLock.lock();
+        }
     }
 
     // Release menu render targets
@@ -1176,7 +1196,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
                 state.currentD3D11Device->GetImmediateContext(&context);
 
                 if (upscalerTimeOpt = currentFeature->ReadUpscalerTime(context); upscalerTimeOpt.has_value())
-                    currentFeature->ReadDetailedGpuTimes(context, State::Instance().detailedGpuTimes);
+                    currentFeature->ReadDetailedGpuTimes(context, state.detailedGpuTimes);
 
                 context->Release();
             }
@@ -1412,6 +1432,7 @@ ULONG FGHooks::hkFGRelease(IUnknown* This)
             {
                 LOG_DEBUG("Waiting for GPU to finish");
 
+                resizeFenceValue++;
                 const auto waitResult = WaitForQueueIdle(State::Instance().currentCommandQueue, resizeFence,
                                                          resizeFenceEvent, resizeFenceValue);
 

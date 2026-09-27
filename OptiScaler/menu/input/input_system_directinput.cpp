@@ -4,6 +4,8 @@
 
 #include <hooks/Kernel_Hooks.h>
 
+#include <hooks/Kernel_Hooks.h>
+
 #include <detours/detours.h>
 
 #include <cstring>

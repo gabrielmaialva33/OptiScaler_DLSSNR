@@ -206,10 +206,12 @@ void Shader_Dx12::CreateShaderResourceView(ID3D12Device* device, ID3D12Resource*
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     const auto viewFormat = (format != DXGI_FORMAT_UNKNOWN) ? format : desc.Format;
+
     if (translateTypeless)
         srvDesc.Format = TranslateTypelessFormats(viewFormat);
     else
         srvDesc.Format = viewFormat;
+
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
     const UINT mipLevels = (desc.MipLevels) ? static_cast<UINT>(desc.MipLevels) : static_cast<UINT>(-1);

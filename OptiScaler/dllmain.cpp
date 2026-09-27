@@ -40,8 +40,6 @@
 #include <hooks/Advapi32_Hooks.h>
 #include <hooks/Streamline_Hooks.h>
 
-#include <framegen/reprojection/RawInputHook.h>
-
 #include <nvapi/NvApiHooks.h>
 
 #include "spoofing/User32_Spoofing.h"
@@ -1347,6 +1345,9 @@ static void printQuirks(flag_set<GameQuirk>& quirks)
     if (quirks & GameQuirk::CreateSLOnThe2ndDevice)
         stringQuirks.push_back("Create SL on the 2nd device");
 
+    if (quirks & GameQuirk::DisableOTA)
+        stringQuirks.push_back("Disable Streamline OTA");
+
     state->detectedQuirks.append_range(stringQuirks);
     for (auto& stringQuirk : stringQuirks)
         spdlog::info("Quirk: {}", stringQuirk);
@@ -1593,6 +1594,11 @@ static void CheckQuirks(bool isNvidia)
     else
         quirks.reset(GameQuirk::DoNotLoadAmdxc64);
 
+    if (quirks & GameQuirk::DisableOTA && !Config::Instance()->DisableOTA.has_value())
+        Config::Instance()->DisableOTA.set_volatile_value(true);
+    else
+        quirks.reset(GameQuirk::DisableOTA);
+
     // For Luma, we assume if Luma addon in game folder it's used
     const auto dir = Util::ExePath().parent_path();
     bool lumaDetected = false;
@@ -1761,6 +1767,9 @@ void CheckMemoryForProxies()
 
 DWORD WINAPI getGpuInfo(LPVOID hModuleVoid)
 {
+    // TODO: dxvk deadlocks when the game and identify gpu calls create at the same time
+    // Sleep(1000);
+
     auto primaryGpu = IdentifyGpu::getPrimaryGpu();
 
     // We don't yet know if the GPU supports FSR 4 so hook any AMD
@@ -1900,9 +1909,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         if (State::Instance().activeFgInput == FGInput::NvngxFG)
             State::Instance().activeFgOutput = FGOutput::NoFG;
-
-        if (State::Instance().activeFgOutput == FGOutput::Reprojection)
-            RawInputHook::getInstance().start();
 
         // Init Kernel proxies
         NtdllProxy::Init();

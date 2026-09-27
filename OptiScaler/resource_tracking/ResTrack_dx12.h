@@ -695,6 +695,8 @@ class ResTrack_Dx12
                                             ID3D12Resource* pCounterResource, D3D12_UNORDERED_ACCESS_VIEW_DESC* pDesc,
                                             D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor);
 
+    // Kept for DLSS-NR submission tracking only (EnableNrSubmissionTracking); upstream dropped the queue
+    // hook along with JustTrackCmdList
     static void hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumCommandLists,
                                       ID3D12CommandList* const* ppCommandLists);
 
