@@ -9,14 +9,30 @@ its upscaler / frame-gen SDKs and swaps the backend) → **Dagherbou/OptiScaler_
 Neural Rendering module under `OptiScaler/dlssnr/`) → **gabrielmaialva33/OptiScaler_DLSSNR** (this
 repo), which adds Linux/Proton overlay patches on top.
 
-- Working and default branch: `dlss-neural-rendering` = Dagherbou's `v0.2.0-dlssnr` (commit `9737616`)
-  plus our Linux patches. `up/master` is plain upstream OptiScaler, ~150 commits behind.
-- Remotes: `origin` (SSH, push target) and `up` (Dagherbou, read-only), plus two read-only
-  references: `optiscaler` (plain upstream OptiScaler, for auditing and cherry-picking its fixes)
-  and `scottmudge` (another NR fork; its present-hook work is already in this tree, rewritten, so
-  compare behaviour rather than patches -- `git apply --check` calls all of it "diverged").
-- Update flow: `git fetch up && git merge up/dlss-neural-rendering`. `fetch.recurseSubmodules=no` is
-  already set in the repo config; keep it.
+- Working and default branch: `dlss-neural-rendering`. It began as Dagherbou's `v0.2.0-dlssnr`
+  (commit `9737616`) plus our Linux patches.
+  - Dagherbou has not moved since 2026-09-03, and everything he published is in this tree.
+  - The NR module has since been largely rewritten here: about +25.6k/−6k lines against his last
+    commit, as of 2026-09-27.
+- Remotes:
+  - `origin` (SSH, push target);
+  - `optiscaler` (plain upstream OptiScaler, read-only): **the one we sync from**;
+  - `up` (Dagherbou, read-only, dormant);
+  - `scottmudge` (another NR fork, read-only). Its present-hook work is already in this tree,
+    rewritten, so compare behaviour rather than patches: `git apply --check` calls all of it
+    "diverged".
+- Update flow, since 2026-09-27: `git fetch optiscaler && git merge optiscaler/master`, on a scratch
+  branch, then build and test before the default branch gets it.
+  - The first such merge was `7de75fc1` (113 commits).
+  - Conflicts resolve as upstream's structure first, with our changes re-applied on top. Where one
+    of our commits was a port of upstream work that later landed there (reprojection, the
+    FGPreserveSwapChain factoring), take upstream's.
+  - Test paths after a merge, one title each: Crimson Desert (after-upscale NR + DLSS-G),
+    Divinity (D3D11 bridge + NR + synthesized FG), DOOM Eternal (Vulkan NR + menu), and PCSX2
+    (`~/Games/pcsx2-nr-test/run.sh`, D3D12 present pass).
+  - Before 2026-09-27 we merged Dagherbou and cherry-picked upstream fixes one by one, with
+    per-commit decisions (`512e168d`, `acfeab51`).
+  - `fetch.recurseSubmodules=no` is already set in the repo config; keep it.
 - Commit subjects use prefixes seen in history: `DLSS-NR:` for the module, `linux:` for Proton
   patches, `ci:` for workflows.
 - **Do not push. But do not believe the tree is private either.** Never run `git push` unless the
@@ -34,13 +50,23 @@ repo), which adds Linux/Proton overlay patches on top.
   the machine. Production changes and anything unproven go on a branch and merge to
   `dlss-neural-rendering` once they are measured; committing straight to the default branch
   publishes the tip of a public repository that other projects reference.
+  **On 2026-09-27 the same unidentified actor did more than push.**
+  - At 19:31:41 the reflog shows `checkout: moving from merge-optiscaler-20260927 to
+    dlss-neural-rendering`, then a fast-forward of the default branch to that scratch branch's
+    untested merge commit.
+  - At 19:32 the scratch branches `merge-optiscaler-20260927` and `synth-fg` were deleted.
+  - At 18:39 a `reset: moving to HEAD` discarded another session's uncommitted edit.
+  - No agent of this session was running at those moments, and no other Claude session had this
+    repository as its cwd.
+  - So a scratch branch is not a guarantee either. Keep what matters committed, and check
+    `git reflog --date=iso` before assuming the default branch is where you left it.
 - **Never commit** `OptiScaler/resource_build_date.h`, `OptiScaler/resource_build_commit.h`, `x64/`,
   or `.winx/`. All are gitignored.
 - **The tree layout is upstream's, and stays that way.** The usual C++ advice (Pitchfork, the
   Canonical Project Structure) says `src/`, `include/`, `tools/`, `docs/`. Do not apply it here.
-  731 of the 943 tracked files live under `OptiScaler/` and belong to upstream; moving them turns
-  every `git merge up/dlss-neural-rendering` into a whole-tree conflict, and this branch already
-  carries 74 commits of our own. Organise inside what this fork owns — `tests/`, `build-local.sh`,
+  Most tracked files live under `OptiScaler/` and belong to upstream; moving them turns every
+  `git merge optiscaler/master` into a whole-tree conflict, and this branch carries hundreds of
+  commits of our own (393 not in Dagherbou's fork as of 2026-09-27). Organise inside what this fork owns — `tests/`, `build-local.sh`,
   `CLAUDE.md`, `.github/workflows/nr-tests.yml`, `.clang-format-ignore`, and the files listed under
   "Linux / Proton patches" — and leave upstream's paths byte-identical.
 
