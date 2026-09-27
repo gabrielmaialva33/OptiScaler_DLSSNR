@@ -1,5 +1,15 @@
 # Synthesized motion vectors for the no-upscaler NR path
 
+Update 2026-09-27: [synthesized-frame-generation.md](synthesized-frame-generation.md) makes this
+estimator shared with frame generation. It changes two things here:
+- **The kernel** becomes a port of the FidelityFX optical flow: MIT, in the tree under
+  `external/FidelityFX-SDK-v2`, 8x8 blocks over a 7-level luma pyramid, with scene-cut detection. It
+  replaces the block matching §3 would have written by hand; the skeleton is the same.
+- **The producer** moves to `OptiScaler/shaders/synth_motion/`, so FG does not depend on the NR
+  module. The skeleton under `shaders/dlssnr/motion/` is superseded.
+
+The output contract in §4 and the plug point in §5 stand.
+
 Update 2026-09-23: the §11 step 1 experiment ran. `b5db624e` gave the zero field real units
 (`MvScale` = frame size, depth inverted); `fcc5fdf0` took it out again and clamps a zero-guide caller
 to native instead, so units alone did not clear the above-1.0 refusal and that question now rests on
