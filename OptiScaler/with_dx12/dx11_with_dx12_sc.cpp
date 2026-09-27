@@ -23,8 +23,13 @@ namespace Dx11wDx12
 bool WantedForFrameGeneration()
 {
     const auto& state = State::Instance();
-    const bool bridgeInput = state.activeFgInput == FGInput::Upscaler || state.activeFgInput == FGInput::Synthesized;
-    return bridgeInput && state.activeFgOutput != FGOutput::NoFG && state.activeFgInput != FGInput::NvngxFG;
+    // The synthesized input feeds only FSR FG so far. With another output FG is refused later, and a
+    // bridge built for it would copy every frame for nothing.
+    if (state.activeFgInput == FGInput::Synthesized)
+        return state.activeFgOutput == FGOutput::FSRFG;
+
+    return state.activeFgInput == FGInput::Upscaler && state.activeFgOutput != FGOutput::NoFG &&
+           state.activeFgInput != FGInput::NvngxFG;
 }
 
 bool WantedForNeuralRendering()
@@ -541,9 +546,10 @@ ID3D12CommandQueue* Dx11wDx12SC::_PresentQueueForFrame()
 {
     auto* queue = _fg != nullptr ? _fg->GetCommandQueue() : nullptr;
 
-    // Only a bridge with no frame generation falls back. One hosting the pass alongside synthesized FG
-    // is still an FG bridge, and an FG object without a queue is still a bridge in trouble.
-    if (queue == nullptr && _fg == nullptr && _nrHost != nullptr)
+    // Also when an FG object exists without a queue: with synthesized FG, a context FFX failed to create
+    // leaves the bridge on its plain presenter, and the pass it hosts is then the only thing this title
+    // still has. Keying this on _fg took that away, and took it from an NR-only bridge too.
+    if (queue == nullptr && _nrHost != nullptr)
         queue = _dx12CommandQueue;
 
     return queue;
@@ -1542,6 +1548,9 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
         _nrHost->Record(_dx12Device, _copyCommandLists[copySlot], _openedDx11BackBuffers[copySlot],
                         D3D12_RESOURCE_STATE_COPY_SOURCE, _dx12CommandQueue))
     {
+        // An idle host kept for the neural toggle counts from the first frame it actually ran.
+        State::Instance().nrPresentHostActive = true;
+
         if (auto* composed = _nrHost->Output(); composed != nullptr)
             transferSource = composed;
     }

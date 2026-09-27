@@ -387,13 +387,14 @@ void presentQueueCases()
         assert(f.sc->_PresentQueueForFrame() == nullptr);
     }
 
-    // The same, with the neural pass hosted alongside synthesized FG. Still an FG bridge, still in
-    // trouble: the host is no licence to fall back.
+    // The same, with the neural pass hosted: falls back to the wrapper's own queue. With synthesized FG
+    // a context FFX failed to create leaves the bridge on its plain presenter, and the hosted pass is
+    // then all the title has; an NR-only bridge with a stray FG object needs the same.
     {
         Fixture f;
         f.fg.queue = nullptr;
         f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
-        assert(f.sc->_PresentQueueForFrame() == nullptr);
+        assert(f.sc->_PresentQueueForFrame() == &f.copyQueue);
     }
 
     // And with a queue, FG's queue carries the frame whether or not a host rides along.
@@ -452,6 +453,13 @@ void predicateCases()
     // No FG output means no FG bridge, and an idle host has nothing to ride along with.
     set(false, 2, FGInput::Synthesized, FGOutput::NoFG);
     assert(!Dx11wDx12::WantedForFrameGeneration() && !Dx11wDx12::WantedIdleForNeuralRendering());
+
+    // Synthesized with an output it does not feed: FG will be refused, so no bridge is built for it.
+    set(true, 2, FGInput::Synthesized, FGOutput::XeFG);
+    assert(!Dx11wDx12::WantedForFrameGeneration());
+    assert(Dx11wDx12::WantedForNeuralRendering());
+    set(false, 1, FGInput::Synthesized, FGOutput::DLSSG);
+    assert(!Dx11wDx12::WantedForFrameGeneration() && !Dx11wDx12::WantedForNeuralRendering());
 
     // An upscaler-fed FG bridge never keeps one.
     set(false, 2, FGInput::Upscaler, FGOutput::FSRFG);

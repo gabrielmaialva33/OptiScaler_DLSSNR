@@ -3347,7 +3347,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     // Synthesized input requirements
     auto constexpr synthesizedInputIndex = (uint32_t) FGInput::Synthesized;
-    inputOptions[synthesizedInputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
+    // Fed only on the D3D11-to-D3D12 bridge so far. A bridged game's presenter reports DX12, so ask the
+    // bridge too.
+    inputOptions[synthesizedInputIndex].set_disabled(state.swapchainApi != API::DX11 &&
+                                                         state.swapchainInteropApi != SwapchainInteropApi::Dx11wDx12,
+                                                     "D3D11 games only for now");
 
     // DLSSG inputs requirements
     auto constexpr dlssgInputIndex = (uint32_t) FGInput::DLSSG;

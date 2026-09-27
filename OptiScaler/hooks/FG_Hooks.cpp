@@ -141,8 +141,16 @@ static bool CheckForFGStatus()
 }
 
 HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI_SWAP_CHAIN_DESC* pDesc,
-                                 IDXGISwapChain** ppSwapChain)
+                                 IDXGISwapChain** ppSwapChain, bool forDx11Bridge)
 {
+    // Nothing feeds the synthesized input on a native D3D12 swapchain yet (synthesized-frame-generation.md,
+    // step 5), so an FG swapchain there would replace the game's presenter and never generate a frame
+    if (State::Instance().activeFgInput == FGInput::Synthesized && !forDx11Bridge)
+    {
+        LOG_WARN("Synthesized FG input is fed only on the D3D11 bridge for now, not creating an FG swapchain");
+        return E_NOINTERFACE;
+    }
+
     if (!CheckForFGStatus())
     {
         LOG_WARN("Can't init FG Feature or invalid FGOutput setting!");
@@ -250,8 +258,17 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
 
 HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevice, HWND hWnd,
                                         DXGI_SWAP_CHAIN_DESC1* pDesc, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
-                                        IDXGIOutput* pRestrictToOutput, IDXGISwapChain1** ppSwapChain)
+                                        IDXGIOutput* pRestrictToOutput, IDXGISwapChain1** ppSwapChain,
+                                        bool forDx11Bridge)
 {
+    // Nothing feeds the synthesized input on a native D3D12 swapchain yet (synthesized-frame-generation.md,
+    // step 5), so an FG swapchain there would replace the game's presenter and never generate a frame
+    if (State::Instance().activeFgInput == FGInput::Synthesized && !forDx11Bridge)
+    {
+        LOG_WARN("Synthesized FG input is fed only on the D3D11 bridge for now, not creating an FG swapchain");
+        return E_NOINTERFACE;
+    }
+
     if (!CheckForFGStatus())
     {
         LOG_WARN("Can't init FG Feature or invalid FGOutput setting!");

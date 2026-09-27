@@ -281,6 +281,26 @@ Same setup, build `d954692d` (20260927_182832), NR on at launch (`HookMethod=2`)
 - **Startup noise.** `Frame count jumped too much` warnings appear over the first ten frames only,
   while the FSR-FG context comes up.
 
+## Review after the merge
+
+An adversarial review of steps 1 and 2 (after merge `54d900e7`) found no blockers. Fixed on top:
+
+- **Native D3D12.** The input was selectable there, and it got an FFX swapchain nothing ever feeds.
+  `FGHooks::CreateSwapChain*` now refuse `Synthesized` unless the bridge is the caller
+  (`forDx11Bridge`). The menu offers it only when the swapchain is DX11 or bridged, and the ini and
+  `Config.md` say "D3D11 games only for now". Step 5 lifts this.
+- **Present queue.** Step 2 keyed the bridge's fallback to its own queue on "no FG object". A
+  synthesized-FG bridge whose FFX context failed was then left with no queue, and so was an NR-only
+  bridge with a stray FG object; both had worked before. The fallback is back to "a host exists".
+- **Wasted bridges.** `Synthesized` with an output other than FSR FG no longer asks for a bridge,
+  since that FG is refused anyway.
+- **Menu.** An idle host sets `nrPresentHostActive` from the first frame it actually runs, so the
+  panel stops pointing at an upscaler the game does not have.
+
+Left as found, because it predates this work: a built host switched off, then resized, reallocates
+and spends its one model-creation attempt while off. The model is then created on the frame's list
+when NR comes back.
+
 **Order from here:**
 1. ~~Step 2: move NR to once per base frame, before FG.~~ Done, above.
 2. The D3D12 present path (step 5), for PCSX2.

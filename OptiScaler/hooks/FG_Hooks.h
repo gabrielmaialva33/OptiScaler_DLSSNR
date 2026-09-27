@@ -7,13 +7,16 @@
 class FGHooks
 {
   public:
+    // forDx11Bridge: the caller is the D3D11-to-D3D12 bridge, the only place FGInput::Synthesized is
+    // fed so far. Anywhere else that input gets no FG swapchain.
     static HRESULT CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI_SWAP_CHAIN_DESC* pDesc,
-                                   IDXGISwapChain** ppSwapChain);
+                                   IDXGISwapChain** ppSwapChain, bool forDx11Bridge = false);
 
     static HRESULT CreateSwapChainForHwnd(IDXGIFactory* This, IUnknown* pDevice, HWND hWnd,
                                           DXGI_SWAP_CHAIN_DESC1* pDesc,
                                           DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
-                                          IDXGIOutput* pRestrictToOutput, IDXGISwapChain1** ppSwapChain);
+                                          IDXGIOutput* pRestrictToOutput, IDXGISwapChain1** ppSwapChain,
+                                          bool forDx11Bridge = false);
 
     // Registers a real FG swapchain created through FGHooks::CreateSwapChain*().
     static void SetFGSwapchain(IDXGISwapChain* pSwapChain, HWND hWnd);

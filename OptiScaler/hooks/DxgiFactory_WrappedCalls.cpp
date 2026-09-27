@@ -269,7 +269,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
                     {
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
-                            fgScResult = FGHooks::CreateSwapChain(wrappedFactory, dx12Queue, &fgDesc, &fgSwapChain);
+                            fgScResult =
+                                FGHooks::CreateSwapChain(wrappedFactory, dx12Queue, &fgDesc, &fgSwapChain, true);
                             fgSwapChainIsRealFG = SUCCEEDED(fgScResult) && fgSwapChain != nullptr;
                         }
 
@@ -658,7 +659,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
                             fgScResult = FGHooks::CreateSwapChainForHwnd(
                                 wrappedFactory, dx12Queue, hWnd, &fgDesc,
                                 pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr, pRestrictToOutput,
-                                &fgSwapChain1);
+                                &fgSwapChain1, true);
                             fgSwapChainIsRealFG = SUCCEEDED(fgScResult) && fgSwapChain1 != nullptr;
                         }
 
