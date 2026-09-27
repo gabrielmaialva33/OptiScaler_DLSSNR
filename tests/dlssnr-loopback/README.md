@@ -19,6 +19,20 @@ testing representative content; the synthetic present fixture cannot establish e
 
 ## Status
 
+**2026-09-27 — Reset on every frame costs nothing extra.**
+`python3 tests/dlssnr-loopback/run.py --present-nr --reset-cost` compares two ways of running the
+model at 1280×720, 48 frames per trial, in the order A B A B, on an RTX 4090 with clocks locked at
+2100 / 10501 MHz:
+
+- **A:** Reset only on the first evaluate.
+- **B:** Reset on every evaluate, which is what `ZeroGuideReset` asks for on a title with no guides.
+
+Median `model_ms`: A 3.549 / 3.507, B 3.519 / 3.481. There is no cost to dropping history. The
+earlier reading, from Rafael's RTX 3060, was that it costs about 40%: Divinity measured 25.9 ms with
+the flag on and Subnautica 2 18.1 ms without it, both at 960×540. That comparison was not like for
+like. Divinity runs on the D3D11 bridge and Subnautica 2 on the native D3D12 route, so the gap came
+from something else.
+
 **2026-09-27 — Transfer A/B at half size.**
 `python3 tests/dlssnr-loopback/run.py --present-nr --transfer-ab` runs production's reduced-size
 pipeline around the real model:

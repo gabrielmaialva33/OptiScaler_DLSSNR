@@ -75,6 +75,9 @@ struct Host
     unsigned transferMode = 1;
     unsigned workWidth = 0, workHeight = 0; // the frame's size unless transferAb
     Com<ID3D12Resource> proxySmall, answerSmall;
+    // --present-reset-cost: Reset on every evaluate instead of only the first, which is what
+    // ZeroGuideReset asks for on a title with no guides.
+    bool resetEvery = false;
     std::string trial;
     Com<IDXGISwapChain3> swapchain;
     Com<ID3D12RootSignature> root;
@@ -791,7 +794,7 @@ struct Host
         ID3D12Resource* modelOut = transferAb ? answerSmall.p : answer.p;
         ++attempts;
         auto result = evaluate(list, feature, params, modelIn, depth, motion, modelOut, workWidth, workHeight, workWidth,
-                               workHeight, workWidth, workHeight, 0, 0, 0, 0, 0, frame == 0 ? 1 : 0, 1, 0, 1, 1,
+                               workHeight, workWidth, workHeight, 0, 0, 0, 0, 0, frame == 0 || resetEvery ? 1 : 0, 1, 0, 1, 1,
                                maskAb ? skinStructure : 1,
                                maskAb ? static_cast<int>(useAutoMask) : 1, 1, 1);
         Say("  EvaluateFeature(18) generation=%u frame=%u result=0x%08X\n", generation, frame,
@@ -1080,7 +1083,8 @@ struct Host
 
 static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D12CommandQueue* queue,
                 ID3D12CommandAllocator* alloc, ID3D12GraphicsCommandList* list, ID3D12Fence* fence, HANDLE event,
-                bool hud = false, bool composition = false, bool maskAb = false, bool transferAb = false)
+                bool hud = false, bool composition = false, bool maskAb = false, bool transferAb = false,
+                bool resetCost = false)
 {
     Host host { device, queue, alloc, list, fence, event };
     try
@@ -1094,7 +1098,39 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
         host.transferAb = transferAb;
         host.composition = composition;
         host.Init(factory, window);
-        if (transferAb)
+        if (resetCost)
+        {
+            // What dropping the model's history on every frame costs. A B A B, so a clock that drifts
+            // over the run cannot pass for a difference between the two.
+            struct Trial
+            {
+                const char* name;
+                bool every;
+            };
+            const Trial trials[] = { { "reset-first-1", false },
+                                     { "reset-every-1", true },
+                                     { "reset-first-2", false },
+                                     { "reset-every-2", true } };
+            host.framesPerGeneration = 48;
+            for (const auto& t : trials)
+            {
+                host.trial = t.name;
+                host.resetEvery = t.every;
+                host.Allocate(1280, 720);
+                for (unsigned frame = 0; frame < host.framesPerGeneration; ++frame)
+                {
+                    host.Record(frame);
+                    host.Submit();
+                    host.ReadTiming(frame);
+                    host.Inspect(frame);
+                    host.Present();
+                }
+                Check(queue->Signal(fence, ++host.serial), "reset post-Present Signal");
+                host.ReleaseGeneration();
+            }
+            host.resetEvery = false;
+        }
+        else if (transferAb)
         {
             // Transfer 0, 1 and 3 with the model at 640x360 under a 1280x720 frame, eight-bit passthrough
             // and linear. Every trial creates its own model with the same history, so trials differ only
@@ -1263,7 +1299,10 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
         unsigned remaining = 0;
         ColdNr::NgxResult("core Shutdown1", host.shutdown(device, &remaining));
         Check(device->GetDeviceRemovedReason(), "final device health");
-        if (transferAb)
+        if (resetCost)
+            Say("RESET-COST PASS: trials=4 attempts=%u successes=%u presents=%u controls=%u capture_pairs=%u\n",
+                host.attempts, host.successes, host.presents, host.controls, host.captures);
+        else if (transferAb)
             Say("TRANSFER-AB PASS: trials=6 attempts=%u successes=%u presents=%u controls=%u capture_pairs=%u\n",
                 host.attempts, host.successes, host.presents, host.controls, host.captures);
         else if (maskAb)
