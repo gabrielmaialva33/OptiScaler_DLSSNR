@@ -446,18 +446,24 @@ void MfgUnlock::TryApply()
             const PatchStatus advertise = PatchAdvertise(module) ? PatchStatus::Ok : PatchStatus::Miss;
             const PatchStatus validate = PatchValidate(module) ? PatchStatus::Ok : PatchStatus::Miss;
 
-            // Default on where it applies: below Blackwell the unlock alone produces frames that do
-            // not advance the picture, so the two belong together. dlssCapable is set from the same
-            // field, so an architecture that never reported leaves this off.
+            // Default on where it applies: on Ada the unlock alone produces frames that do not advance
+            // the picture, so the two belong together. dlssCapable is set from the same field, so an
+            // architecture that never reported leaves this off.
+            //
+            // Ada only, not everything below Blackwell. The one-field read is Ada's kernel, and Ada is
+            // where the swap was measured. Below Ada NVIDIA's runtime refuses frame generation outright
+            // (dlssnr/design/model-cost-across-architectures.md), so there was never anything to patch
+            // -- except under a third-party loader such as dlssg_for_sm86, which makes it run on
+            // Ampere. What that loader does to these same kernel images is unknown, and relabelling
+            // them underneath it was never tried; AdaBlackwellKernels=true still forces it.
             const auto& gpu = IdentifyGpu::getPrimaryGpu();
-            const bool preBlackwell = gpu.vendorId == VendorId::Nvidia &&
-                                      gpu.nvidiaArchInfo.architecture_id >= NV_GPU_ARCHITECTURE_TU100 &&
-                                      gpu.nvidiaArchInfo.architecture_id <= NV_GPU_ARCHITECTURE_AD100;
+            const bool ada =
+                gpu.vendorId == VendorId::Nvidia && gpu.nvidiaArchInfo.architecture_id == NV_GPU_ARCHITECTURE_AD100;
 
             // Skip is not a miss: a build or a card that does not want the kernel swap says so here,
             // and the summary must not read it as a half-applied patch.
             PatchStatus blackwellKernels = PatchStatus::Skip;
-            if (Config::Instance()->FGDLSSGAdaBlackwellKernels.value_or(preBlackwell))
+            if (Config::Instance()->FGDLSSGAdaBlackwellKernels.value_or(ada))
                 blackwellKernels = PatchBlackwellKernels(module) ? PatchStatus::Ok : PatchStatus::Miss;
 
             // One line so a half-applied module cannot hide behind a single buried warning in a

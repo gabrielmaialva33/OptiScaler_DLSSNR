@@ -78,6 +78,14 @@ unlock raises a ceiling on a card where frame generation already works; on Amper
 generation to multiply. This is a hardware gate in the vendor's runtime, not something a fork can
 reach.
 
+*Since then (2026-09-24), same machine:* a third-party loader, `dlssg_for_sm86` 0.3.5 (a `version.dll`
+beside the game), gets past that gate. Subnautica 2 ran 52944 frame-generation evaluates with no
+creation failures, and the MFG count override raised the game's 2X to 4X. The runtime's refusal is
+still what stock drivers do; the loader is what changed. Whether the generated frames advance the
+picture at 4X on that card was not checked. Since 2026-09-27, `AdaBlackwellKernels` is off there by
+default; before that its default covered Turing through Ada. The reason is that what the loader does
+to the same kernel images is unknown.
+
 The session log also reports `arch=0x170` for this adapter, which is `NV_GPU_ARCHITECTURE_GA100`:
 NVAPI's id for the Ampere generation, whatever the die.
 
