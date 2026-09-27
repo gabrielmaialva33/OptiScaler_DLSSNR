@@ -596,6 +596,75 @@ Two corrections to the research this replaces:
 Environment kept at `~/Games/xenia-nr-test` — emulator, NR kit, its own Proton prefix, minimal ini.
 It is a scratch target, not a deployment.
 
+## The pass on real content: PCSX2, 2026-09-27
+
+The first time the present pass ran on a real emulator's frames. PCSX2 2.9.23 (the official Windows
+build, `pcsx2-v2.9.23-windows-x64-Qt.7z`) under Proton Experimental, `Renderer = 15` (Direct3D 12),
+God Hand (SLUS-21503, 30 fps), OptiScaler `a928279f` as `dxgi.dll` with the NR kit beside it.
+
+- **`[DlssNr]`:** `Enabled=true`, `HookMethod=2`, `ZeroGuideReset=true`, `Transfer=3`, `GpuTiming=true`.
+- **Loader:** `WINEDLLOVERRIDES="dxgi=n,b;d3dcompiler_47=n;ucrtbase=n,b"`, `PROTON_ENABLE_NVAPI=1`.
+- **Beside the exe:** `_nvngx.dll` from `/usr/lib/nvidia/wine/` and the `optiscaler_skip_vulkan_hooks`
+  marker.
+
+```
+DlssNr::RunPresentPass DLSS-NR present: first pass on the backbuffer (3396x1312, swapchain hook)
+DLSS-NR status: present: active, presentation backbuffer with dummy temporal inputs
+```
+
+Measured on the RTX 4090, clocks left unlocked, which inflates every number below:
+
+- **Windowed, at the working scale Rafael's 3060 uses:** `WorkingScale=0.5`, 3 minutes, 183 timing
+  samples, `model_ms` median 10.4 ms (p10 4.5). Zero errors. 29.96 fps at speed 100%.
+- **At the best image the emulator can give:**
+  - PCSX2 at 8x internal (5120×3584), blending accuracy maximum, bilinear (PS2) texture filtering,
+    forced trilinear, 16x anisotropic, dithering forced to 32-bit.
+  - Integer scaling, FXAA, CAS and Shade Boost off: they either shrink the image or edit it before
+    the model does.
+  - The pass at `WorkingScale=auto` (1.0 on Ada) on the 3440×1396 view, 4.80 Mpx: `model_ms` median
+    7.0 ms. PCSX2 reports GPU 13% and speed 100% at 30 fps.
+- **Unchanged on Rafael's PC:** the D3D12 route there uses the same code with no Wine in the way.
+  The 3060 costs about 18 ms at 960×540, which fits a 30 fps game's 33 ms. A 60 fps game needs about
+  0.35–0.4.
+
+**PCSX2's Windows build does not run on stock Wine as it stands.** These are three of its
+dependencies, none of them ours, found in this order:
+
+1. **It does not start.** `Qt6Core.dll` imports `icuuc.dll`, which Windows 10 1903+ ships as a
+   forwarder to `icu.dll` and Wine does not ship at all. Proton's own `icu.dll`
+   (`files/lib/wine/x86_64-windows/icu.dll`), copied beside the exe as `icuuc.dll`, loads as
+   builtin and satisfies it.
+2. **Sound, no picture.** The D3D12 renderer compiles HLSL at run time, and Wine's builtin
+   `d3dcompiler_47` refuses one of its vertex shaders:
+   `E5017: Aborting due to not yet implemented feature: Method 'Load' for structured buffers`. The
+   OSD, a different shader, still draws, which is what gave it away: a pass that blanked the frame
+   would have blanked the OSD with it. Microsoft's `d3dcompiler_47.dll` fixes it.
+3. **Crashes after 20–40 s.**
+   - `HashBucket::reset()` (`Vif_HashBucket.h`) allocates each bucket with
+     `_aligned_malloc(size, 16)`, and `add()` grows it with `_aligned_realloc(ptr, size, 64)`.
+     Microsoft's CRT tolerates the change of alignment. Wine's returns NULL whenever the block does
+     not happen to be 64-aligned.
+   - It surfaces as `Assertion failed in HashBucket::add ... Failed to allocate HashBucket Chain`,
+     or as a null write in the MTVU thread (`pcsx2-qt.exe+0x1631EF`, resolved with the release's
+     breakpad symbols).
+   - A control run without OptiScaler crashed the same way.
+   - Microsoft's `ucrtbase.dll` as `ucrtbase=n,b` fixes it: native beside the exe, builtin for
+     Wine's own processes. Plain `ucrtbase=n` breaks `wineboot`.
+
+What the run shows is still open:
+
+- **Letterbox bars.** The pass runs on the whole backbuffer, bars included. Fullscreen on a 21:9
+  panel, the bars are about 44% of the pixels the model is paid for. Cropping to the active image
+  is the largest saving left for emulators, and it matters most on the 3060.
+- **Model rebuilds on resize.** Entering fullscreen under Hyprland, the backbuffer alternated between
+  window and screen sizes a few times, and each size rebuilt the model. Nothing broke. Waiting for the
+  size to settle would save the rebuilds.
+- **The HUD goes through the model with everything else**, as the section on protecting it predicted.
+
+Environment kept at `~/Games/pcsx2-nr-test`: emulator in portable mode, NR kit, its own Proton
+prefix, `run.sh`. PCSX2's own screenshots are taken from its render before presentation, so they
+never show the pass. A compositor capture does.
+
 ## Cost, now that the pass has been measured
 
 [model-cost-vs-working-scale.md](model-cost-vs-working-scale.md) measured the inference at **2.90 ms
