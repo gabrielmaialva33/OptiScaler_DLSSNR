@@ -82,6 +82,19 @@ static bool CheckForFGStatus()
     if (State::Instance().activeFgInput == FGInput::NoFG || State::Instance().activeFgInput == FGInput::NvngxFG)
         return false;
 
+    // The synthesized input feeds only FSR FG so far; any other output would be created and never fed
+    if (State::Instance().activeFgInput == FGInput::Synthesized &&
+        State::Instance().activeFgOutput != FGOutput::FSRFG && State::Instance().activeFgOutput != FGOutput::NoFG)
+    {
+        ImGui::InsertNotification(
+            { ImGuiToastType::Error, 20000, "Synthesized FG input\nworks with the FSR FG output only" });
+
+        LOG_WARN("Synthesized FG input supports only FGOutput=fsrfg for now, disabling FGOutput {}",
+                 magic_enum::enum_name(State::Instance().activeFgOutput));
+        Config::Instance()->FGOutput.set_volatile_value(FGOutput::NoFG);
+        State::Instance().activeFgOutput = Config::Instance()->FGOutput.value_or_default();
+    }
+
     // Disable FG if amd dll is not found
     if (State::Instance().activeFgOutput == FGOutput::FSRFG)
     {

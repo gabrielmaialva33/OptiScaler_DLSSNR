@@ -250,6 +250,38 @@ bool PresentHost::_EnsureFeature(ID3D12Device* device, ID3D12CommandQueue* queue
     return true;
 }
 
+void PresentHost::_ReportWindow()
+{
+    const auto now = std::chrono::steady_clock::now();
+
+    // Nothing to say while the pass is off, and the window starts over when it comes back.
+    if (!Config::Instance()->DlssNrEnabled.value_or_default())
+    {
+        _windowFrames = 0;
+        return;
+    }
+
+    if (_windowFrames == 0)
+    {
+        _windowAt = now;
+        _windowSerial = _serial;
+    }
+    else if (now - _windowAt >= std::chrono::seconds(2))
+    {
+        // Counted in frames this host was handed, which on a bridge are base frames: the frames frame
+        // generation adds never come through here, so this cannot claim them.
+        const double seconds = std::chrono::duration<double>(now - _windowAt).count();
+        LOG_INFO("DLSS-NR present host: the model ran on {} of the {} base frames handed to it in the last {:.1f} s",
+                 _serial - _windowSerial, _windowFrames, seconds);
+
+        _windowFrames = 0;
+        _windowAt = now;
+        _windowSerial = _serial;
+    }
+
+    ++_windowFrames;
+}
+
 bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
                          D3D12_RESOURCE_STATES sourceState, ID3D12CommandQueue* queue)
 {
@@ -258,6 +290,16 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
 
     if (_failed || device == nullptr || cmdList == nullptr || source == nullptr)
         return false;
+
+    // Build nothing while the pass is off. A bridge built for synthesized frame generation keeps a host
+    // for the neural toggle even when DLSS-NR starts disabled, and that host must stay an empty object
+    // -- no buffers, no guides, no model -- until the pass is switched on. Once built, a host that is
+    // switched off keeps what it has and goes on exactly as before: the pass itself declines, and asks
+    // for the reset the next frame needs.
+    if (!Config::Instance()->DlssNrEnabled.value_or_default() && _toWorking == nullptr && !_featureAttempted)
+        return false;
+
+    _ReportWindow();
 
     if (!_Ensure(device, source))
     {

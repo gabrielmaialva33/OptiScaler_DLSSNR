@@ -44,7 +44,14 @@ signatures = [
 ]
 wait_source = (root / 'OptiScaler/with_dx12/with_dx12.cpp').read_text()
 waiter = function('HRESULT WaitForBridgeFence(', wait_source)
-unit = (here / 'fakes.h').read_text() + waiter + '\n'.join(map(function, signatures)) + (here / 'cases.cpp').read_text()
+# What the bridge is built for, and whether a host rides along: the production predicates, verbatim.
+predicates = 'namespace Dx11wDx12\n{\n' + ''.join(map(function, [
+    'bool WantedForFrameGeneration()',
+    'bool WantedForNeuralRendering()',
+    'bool WantedIdleForNeuralRendering()',
+])) + '} // namespace Dx11wDx12\n'
+unit = ((here / 'fakes.h').read_text() + waiter + predicates + '\n'.join(map(function, signatures)) +
+        (here / 'cases.cpp').read_text())
 with tempfile.TemporaryDirectory(prefix='optiscaler-bridge-lifetime-') as directory:
     cpp = Path(directory) / 'bridge.cpp'
     binary = Path(directory) / 'bridge'

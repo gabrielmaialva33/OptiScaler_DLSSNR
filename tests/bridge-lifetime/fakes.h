@@ -122,8 +122,16 @@ struct ID3D12CommandAllocator : Ref
         return resetResult;
     }
 };
+struct D3D12_RESOURCE_DESC
+{
+    UINT64 Width = 0;
+    UINT Height = 0;
+    DXGI_FORMAT Format = 0;
+};
 struct ID3D12Resource : Ref
 {
+    D3D12_RESOURCE_DESC desc {};
+    D3D12_RESOURCE_DESC GetDesc() const { return desc; }
 };
 struct ID3D12GraphicsCommandList : ID3D12CommandList
 {
@@ -217,8 +225,31 @@ enum class SwapchainInteropApi
     None,
     Dx11wDx12
 };
+// Production's order, so a value the predicates compare against means the same thing here.
+enum class FGInput
+{
+    NoFG,
+    Upscaler,
+    DLSSG,
+    NvngxFG,
+    FSRFG,
+    FSRFG30,
+    XeFG,
+    Synthesized,
+};
+enum class FGOutput
+{
+    NoFG,
+    FSRFG,
+    DLSSG,
+    XeFG,
+    Reprojection
+};
 struct State
 {
+    FGInput activeFgInput = FGInput::NoFG;
+    FGOutput activeFgOutput = FGOutput::NoFG;
+    bool nrPresentHostActive = false;
     void* currentSwapchain = nullptr;
     void* currentWrappedSwapchain = nullptr;
     Swapchain* currentRealSwapchain = nullptr;
@@ -236,12 +267,20 @@ struct State
         return state;
     }
 };
+template <typename T> struct ConfigValue
+{
+    T value {};
+    T value_or_default() const { return value; }
+};
 struct Config
 {
     struct
     {
         bool value_or_default() { return false; }
     } FGEnabled;
+    // The two keys the bridge's neural predicates read, at production's defaults.
+    ConfigValue<bool> DlssNrEnabled { false };
+    ConfigValue<uint32_t> DlssNrHookMethod { 1 };
     static Config* Instance()
     {
         static Config config;
@@ -312,6 +351,42 @@ struct PresentHost
 };
 } // namespace DlssNr
 
+// The synthesized FG input, reduced to what the bridge owes it: its one-time clear rides the copy list
+// and is confirmed or abandoned with that list, and its pair is freed only behind a proved drain.
+struct SynthInputsDx11wDx12
+{
+    unsigned records = 0, confirms = 0, abandons = 0, releases = 0;
+    UINT64 lastWidth = 0;
+    UINT lastHeight = 0;
+    bool recordingOutstanding = false;
+
+    bool RecordInit(void* device, ID3D12GraphicsCommandList* cmdList, UINT width, UINT height, DXGI_FORMAT)
+    {
+        assert(device != nullptr && cmdList != nullptr);
+        assert(!recordingOutstanding && "a second RecordInit before the last one was resolved");
+        ++records;
+        lastWidth = width;
+        lastHeight = height;
+        recordingOutstanding = true;
+        return true;
+    }
+    void ConfirmExecuted()
+    {
+        ++confirms;
+        recordingOutstanding = false;
+    }
+    void AbandonRecording()
+    {
+        ++abandons;
+        recordingOutstanding = false;
+    }
+    void Release()
+    {
+        ++releases;
+        recordingOutstanding = false;
+    }
+};
+
 class Dx11wDx12SC
 {
   public:
@@ -364,6 +439,7 @@ class Dx11wDx12SC
     UINT _currentFakeIndex = 0;
     Dx11wDx12SC* _nextLive = nullptr;
     std::unique_ptr<DlssNr::PresentHost> _nrHost;
+    std::unique_ptr<SynthInputsDx11wDx12> _synthInputs;
     inline static Dx11wDx12SC* _live = nullptr;
     Dx11wDx12SC* _nextRetired = nullptr;
     inline static Dx11wDx12SC* _retired = nullptr;

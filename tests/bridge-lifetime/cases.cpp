@@ -386,6 +386,79 @@ void presentQueueCases()
         f.fg.queue = nullptr;
         assert(f.sc->_PresentQueueForFrame() == nullptr);
     }
+
+    // The same, with the neural pass hosted alongside synthesized FG. Still an FG bridge, still in
+    // trouble: the host is no licence to fall back.
+    {
+        Fixture f;
+        f.fg.queue = nullptr;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        assert(f.sc->_PresentQueueForFrame() == nullptr);
+    }
+
+    // And with a queue, FG's queue carries the frame whether or not a host rides along.
+    {
+        Fixture f;
+        f.fg.queue = &fgQueue;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        assert(f.sc->_PresentQueueForFrame() == &fgQueue);
+    }
+}
+
+void predicateCases()
+{
+    auto& state = State::Instance();
+    auto& cfg = *Config::Instance();
+    const auto set = [&](bool nrEnabled, uint32_t hookMethod, FGInput input, FGOutput output)
+    {
+        state = {};
+        cfg = {};
+        cfg.DlssNrEnabled.value = nrEnabled;
+        cfg.DlssNrHookMethod.value = hookMethod;
+        state.activeFgInput = input;
+        state.activeFgOutput = output;
+    };
+
+    // Everything at its default: no bridge.
+    set(false, 1, FGInput::NoFG, FGOutput::NoFG);
+    assert(!Dx11wDx12::WantedForFrameGeneration() && !Dx11wDx12::WantedForNeuralRendering());
+    assert(!Dx11wDx12::WantedIdleForNeuralRendering());
+
+    // The neural pass alone, at present: the bridge exists for it.
+    set(true, 2, FGInput::NoFG, FGOutput::NoFG);
+    assert(!Dx11wDx12::WantedForFrameGeneration() && Dx11wDx12::WantedForNeuralRendering());
+
+    // Frame generation fed by an upscaler: the pass has its own route after that upscaler, and a
+    // second one in the bridge would be a second writer on the frame.
+    set(true, 2, FGInput::Upscaler, FGOutput::FSRFG);
+    assert(Dx11wDx12::WantedForFrameGeneration() && !Dx11wDx12::WantedForNeuralRendering());
+    assert(!Dx11wDx12::WantedIdleForNeuralRendering());
+
+    // Synthesized FG has no upscaler: the pass rides the same bridge, once per base frame.
+    set(true, 2, FGInput::Synthesized, FGOutput::FSRFG);
+    assert(Dx11wDx12::WantedForFrameGeneration() && Dx11wDx12::WantedForNeuralRendering());
+    assert(!Dx11wDx12::WantedIdleForNeuralRendering());
+
+    // Not at present, so not in the bridge either.
+    set(true, 1, FGInput::Synthesized, FGOutput::FSRFG);
+    assert(Dx11wDx12::WantedForFrameGeneration() && !Dx11wDx12::WantedForNeuralRendering());
+    assert(!Dx11wDx12::WantedIdleForNeuralRendering());
+
+    // Off at creation, at present, under synthesized FG: an idle host, so the toggle has a route that
+    // is not the wrapped FFX swapchain.
+    set(false, 2, FGInput::Synthesized, FGOutput::FSRFG);
+    assert(!Dx11wDx12::WantedForNeuralRendering() && Dx11wDx12::WantedIdleForNeuralRendering());
+
+    // No FG output means no FG bridge, and an idle host has nothing to ride along with.
+    set(false, 2, FGInput::Synthesized, FGOutput::NoFG);
+    assert(!Dx11wDx12::WantedForFrameGeneration() && !Dx11wDx12::WantedIdleForNeuralRendering());
+
+    // An upscaler-fed FG bridge never keeps one.
+    set(false, 2, FGInput::Upscaler, FGOutput::FSRFG);
+    assert(!Dx11wDx12::WantedIdleForNeuralRendering());
+
+    state = {};
+    cfg = {};
 }
 
 void neuralHostCases()
@@ -462,6 +535,118 @@ void neuralHostCases()
     }
 }
 
+void synthInputCases()
+{
+    // The ordinary frame: the clear is recorded at the presenter's backbuffer size and confirmed with
+    // the list that carried it.
+    {
+        Fixture f;
+        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        auto* synth = f.sc->_synthInputs.get();
+        f.presenter.buffer.desc = { 3440, 1440, 24 };
+        f.sc->_hasInteropWork = true;
+        assert(f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(synth->records == 1 && synth->confirms == 1 && synth->abandons == 0);
+        assert(synth->lastWidth == 3440 && synth->lastHeight == 1440);
+        assert(!synth->recordingOutstanding);
+        assert(f.list.copiedFrom == f.sc->_openedDx11BackBuffers[0]);
+    }
+
+    // The list could not be closed: the clear never ran and must stay owed.
+    {
+        Fixture f;
+        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        auto* synth = f.sc->_synthInputs.get();
+        f.sc->_hasInteropWork = true;
+        f.list.closeResult = E_FAIL;
+        assert(!f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(synth->records == 1 && synth->abandons == 1 && synth->confirms == 0);
+    }
+
+    // A resize frees the pair, and only once the drain in front of it has been proved.
+    {
+        Fixture f;
+        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        auto* synth = f.sc->_synthInputs.get();
+        f.sc->_hasInteropWork = true;
+        f.sc->_copyAllocatorFenceValues[0] = 5;
+        f.sc->_lastInteropCopyFenceValue = 5;
+        f.copyFence.completed = 5;
+        f.presentQueue.completeSignals = false;
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+        assert(synth->releases == 0);
+        f.presentQueue.signaled[0]->completed = 1;
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == S_OK);
+        assert(synth->releases == 1);
+    }
+
+    // Teardown frees it behind the same drain as the rest of the interop.
+    {
+        Fixture f;
+        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        auto* synth = f.sc->_synthInputs.get();
+        f.sc->_ReleaseInteropObjects();
+        assert(synth->releases == 1);
+    }
+}
+
+void coexistenceCases()
+{
+    // The neural pass and synthesized FG on one copy: the pass records first, the presenter receives
+    // its output rather than the game's frame, and both are confirmed with the list that carried them.
+    {
+        Fixture f;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        auto* host = f.sc->_nrHost.get();
+        auto* synth = f.sc->_synthInputs.get();
+        f.presenter.buffer.desc = { 3440, 1440, 24 };
+        f.sc->_hasInteropWork = true;
+        assert(f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(host->records == 1 && host->confirms == 1 && host->abandons == 0);
+        assert(synth->records == 1 && synth->confirms == 1 && synth->abandons == 0);
+        assert(f.list.copiedFrom == &host->composed && f.list.copiedTo == &f.presenter.buffer);
+        assert(!host->recordingOutstanding && !synth->recordingOutstanding);
+    }
+
+    // An idle host (the pass off) declines, and the frame FG interpolates is the game's own.
+    {
+        Fixture f;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        f.sc->_nrHost->recordSucceeds = false;
+        f.sc->_hasInteropWork = true;
+        assert(f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(f.list.copiedFrom == f.sc->_openedDx11BackBuffers[0]);
+        assert(f.sc->_synthInputs->confirms == 1);
+    }
+
+    // The list could not be closed: neither the pass nor the clear ran, and each is told so.
+    {
+        Fixture f;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        auto* host = f.sc->_nrHost.get();
+        auto* synth = f.sc->_synthInputs.get();
+        f.sc->_hasInteropWork = true;
+        f.list.closeResult = E_FAIL;
+        assert(!f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(host->abandons == 1 && host->confirms == 0);
+        assert(synth->abandons == 1 && synth->confirms == 0);
+    }
+
+    // Teardown frees both behind the one drain.
+    {
+        Fixture f;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        auto* host = f.sc->_nrHost.get();
+        auto* synth = f.sc->_synthInputs.get();
+        f.sc->_ReleaseInteropObjects();
+        assert(host->releases == 1 && synth->releases == 1);
+    }
+}
+
 int main()
 {
     waitCases();
@@ -475,6 +660,10 @@ int main()
     retirementRecoveryCase();
     presentQueueCases();
     neuralHostCases();
+    synthInputCases();
+    coexistenceCases();
+    predicateCases();
     assert(Dx11wDx12SC::_retired == nullptr);
-    std::cout << "bridge lifetime: production wait, copy, resize, release, retirement and neural host cases passed\n";
+    std::cout << "bridge lifetime: production wait, copy, resize, release, retirement, neural host, synthesized input, "
+                 "coexistence and predicate cases passed\n";
 }

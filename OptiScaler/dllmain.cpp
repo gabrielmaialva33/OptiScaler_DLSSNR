@@ -2047,8 +2047,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         CheckWorkingMode();
         CheckMemoryForProxies();
 
-        // OptiFG & Overlay Checks
-        if ((Config::Instance()->FGInput.value_or_default() == FGInput::Upscaler) &&
+        // OptiFG & Overlay Checks. The synthesized input presents through the same FG swapchain.
+        if ((Config::Instance()->FGInput.value_or_default() == FGInput::Upscaler ||
+             Config::Instance()->FGInput.value_or_default() == FGInput::Synthesized) &&
             !Config::Instance()->DisableOverlays.has_value())
             Config::Instance()->DisableOverlays.set_volatile_value(true);
 

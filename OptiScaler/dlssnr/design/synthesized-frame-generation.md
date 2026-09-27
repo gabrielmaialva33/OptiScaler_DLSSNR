@@ -1,6 +1,7 @@
 # Frame generation for titles that give no motion
 
-Status: **design, nothing built.** Written 2026-09-27 against `944aff56`. The code this plans lives
+Status: **steps 1 and 2 built and measured on branch `synth-fg`** (`90990bba`, `d954692d`; see
+[Step 1, measured](#step-1-measured) and [Step 2, measured](#step-2-measured)). Written 2026-09-27 against `944aff56`. The code this plans lives
 outside the NR module (see [Where the code goes](#where-the-code-goes)); the note sits here because
 it builds on the present host and on [synthesized-motion.md](synthesized-motion.md).
 
@@ -210,6 +211,81 @@ is admitted, and the input is recorded at `FG_Hooks.cpp:1215`, before `fg->Prese
    - If the shader cores are the limit, try NVIDIA OFA as the motion source.
    - Measure pacing on a fixed-refresh display: VRR stays off on this workstation by decision, and is
      not to be changed for this.
+
+## Step 1, measured
+
+Divinity: Original Sin 2, 2026-09-27. Setup:
+- **Hardware and build:** RTX 4090 at 3440x1440, GE-Proton11-7, build `90990bba` (20260927_180727).
+- **Ini:** `FGInput=synthesized`, `FGOutput=fsrfg`, NR off at launch and switched on with F7 part of
+  the way through.
+
+**Log:**
+- FSR-FG created its context.
+- The bridge fed a 3440x1440 zero motion field (`R16G16_FLOAT`) and a constant depth (`R32_FLOAT`,
+  inverted); the backbuffer was `R10G10B10A2`.
+- About 5,950 dispatches, every one with `numGeneratedFrames: 1`.
+- Not one `Depth or Velocity is not ready`, and no errors.
+
+**Rate:**
+- The game ran 60 base frames per second throughout; that is its own limiter.
+- With FG, 120 frames per second were presented.
+- Switching FG off in the menu (18:13:22 to 18:13:25) dropped it to 60 at once, and back to 120 on.
+- The base rate stayed at 60 either way, so the limiter hides FG's cost. **Cost is not measured
+  here.**
+
+**Image:** judged by the player, comparing FG on and off in the menu, on slow and fast pans:
+nothing looked abnormal, with no doubled edges and no smeared interface. No capture was taken, so
+this is one person's eye at a 60 fps base, not a measurement of error.
+
+**What it settles.**
+- For Divinity at 60 base, FSR's own optical flow, with zero game vectors and flat depth, is enough.
+- So in this title FG does not need our estimator. The estimator's first job goes back to NR, for
+  Generation Zero's ghosts, and to faster-camera titles.
+- The HUD mask (step 4) waits until a title actually shows the interface smearing.
+
+**What it does not settle:**
+- a fast first-person camera;
+- a low base rate, such as the 3060 with NR on;
+- cost;
+- pacing beyond counts per second.
+
+**Seen on the way: NR and FG already ran together, by the unplanned route.**
+- The player pressed F7 mid-session, and the present pass came up through the wrapped swapchain
+  (`first pass on the backbuffer (3440x1440, swapchain hook)`).
+- It ran at 3440x1440, scale 1.00. The ini's `WorkingScale=2.0` is clamped to native for a
+  zero-guide caller.
+- It counted presented frames, generated ones included: about 200 per 2 s window against 120 base
+  frames. This is the double run "With NR on" predicted from the code.
+- The status line's `0 renders` does not mean the model never ran. That counter counts the game's
+  own render frames (`CaptureTemporal`, upscaler evaluates), and a title with no upscaler has none.
+  The line only takes its `active` form when passes were recorded.
+- The player judged NR plus FG good too. On the 4090 the doubled model cost fit under the 60 fps
+  cap. On a 3060, where the model costs 18 ms, it cannot.
+- So step 2 does not make NR and FG work together; they already do. What it does is put the model
+  where it runs once per base frame (the bridge host, before FG), instead of on every presented
+  frame after it.
+
+## Step 2, measured
+
+Same setup, build `d954692d` (20260927_182832), NR on at launch (`HookMethod=2`).
+
+- **Once per base frame.** The bridge logged that it runs the pass once per base frame, before
+  synthesized FG. The new host line read `the model ran on 120 of the 120 base frames … 2.0 s`
+  window after window: 60 model runs per second at the 60 fps cap, against about 100 in step 1.
+- **The duplicate route is closed.** Not one `swapchain hook` pass and no process-wide `DLSS-NR
+  status` line all session: nothing ran on FFX's swapchain.
+- **FG ran as in step 1.** MangoHud showed 120, and nothing reported `not ready`.
+- **Size.** The model tried 2x (6880x2880) from the ini's `WorkingScale=2.0`, was refused on zero
+  guides as before, and ran at native.
+- **F7** switched the pass off (`the pass is disabled`) and back on mid-session.
+- **Startup noise.** `Frame count jumped too much` warnings appear over the first ten frames only,
+  while the FSR-FG context comes up.
+
+**Order from here:**
+1. ~~Step 2: move NR to once per base frame, before FG.~~ Done, above.
+2. The D3D12 present path (step 5), for PCSX2.
+3. Rafael's 3060 (step 6).
+4. The estimator (step 3) and the HUD mask (step 4), when a title needs them.
 
 ## Open questions
 

@@ -37,6 +37,7 @@ enum class FGInput : uint32_t
     FSRFG,
     FSRFG30,
     XeFG,
+    Synthesized, // Presented image only, for titles that call no upscaler
 
     ForceXeLL, // Do not expose this option
 };
