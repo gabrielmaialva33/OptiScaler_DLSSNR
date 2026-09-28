@@ -222,17 +222,17 @@ before committing C++, because nothing local enforces it and it had drifted by 5
 
 ### Tests
 
-`tests/README.md` is the index; read it before adding or changing a suite. Twenty-one directories under
+`tests/README.md` is the index; read it before adding or changing a suite. Twenty-three directories under
 `tests/`, each self-contained with its own `run.py` and README, registered in `tests/suites.toml`.
 
 ```bash
-python3 tests/run_all.py            # host tier, the default; 18 suites, ~55 s
+python3 tests/run_all.py            # host tier, the default; 19 suites, ~55 s
 python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
 python3 tests/run_all.py --tier all # adds the four wine suites
 python3 tests/<name>/run.py         # one suite, unchanged
 ```
 
-Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the fifteen
+Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the sixteen
 `nr-*` suites plus `bridge-lifetime`, `vulkan-query-readiness` and `mfg-pattern`. One of them,
 `nr-invariants`, is the `DEVELOPMENT.md` §4 mechanical guard (config round-trip for every `DlssNr`
 key, struct equals cbuffer, precompiled headers equal the committed bytecode, retired identifiers);
@@ -417,6 +417,14 @@ rebuild, no temporal accumulator).
   calls go through `nvngx.dll_dlssnr.dll` (`dlssnr/forwarder/`, built by `dlssnr_forwarder.vcxproj`
   into `x64/<Config>/a/`, also buildable standalone with CMake). It must not tail-call the snippet;
   results go through a `volatile` local so the forwarder's frame stays on the stack.
+- **`[DlssNr] ModelLoader=direct`** (default `forwarder`) makes the same D3D12 calls from OptiScaler.dll
+  (`DlssNr_DirectRuntime`, wilsjo2's technique), answering the caller check through the model's own
+  `GetModuleFileNameW/A` import slots. Vulkan and the D3D11 probe keep the forwarder.
+  `tests/nr-model-loader` holds its parameter writes to the forwarder's.
+- **NVIDIA 616.64+ loaders route feature 18 themselves**, this machine's wine `_nvngx.dll` included
+  (32.0.16.1691, shipped with Linux 615.71.09). Only `UseProxy` takes that route, and it refuses the
+  known-faulting model (310.8.0.0 and older). The first build logs `DLSS-NR NGX:` lines with the
+  loader, its build, the route and the model. See `dlssnr/design/ngx-driver-616.md`.
 - **The present-time pass had never shipped.** `RunPresentPass` (wrapped swapchain and FG
   present hooks) sat behind `#ifdef DLSS_NEURAL_RENDERING`, a macro no file, project or script ever
   defined, so LTCG dropped it and every string it owned from every build: `HookMethod=2` on a D3D12

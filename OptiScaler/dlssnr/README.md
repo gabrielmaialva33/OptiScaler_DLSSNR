@@ -63,6 +63,9 @@ experiment.
 | `DlssNr_WorkingScale.h/.cpp` | what `WorkingScale=auto` resolves to on the GPU the pass runs on; `design/working-scale-auto.md` |
 | `DlssNr_Proxy.h/.cpp` | the experiment in reaching the model through the driver core instead of the forwarder; see `FORWARDER_INVESTIGATION.md` |
 | `forwarder/` | the caller-gate shim, built by `dlssnr_forwarder.vcxproj` into the release layout |
+| `DlssNr_DirectRuntime.h/.cpp` | `ModelLoader=direct`: the forwarder's D3D12 calls made from OptiScaler.dll, passing the caller check through the model's own `GetModuleFileNameW/A` imports (wilsjo2's technique); `FORWARDER_INVESTIGATION.md` |
+| `DlssNr_NgxInfo.h/.cpp` | the `DLSS-NR NGX:` line at the first build (loader, its build, whether it routes feature 18 itself, the model) and the 616.64 pairing check; `design/ngx-driver-616.md` |
+| `DlssNr_PeScan.h` | header-only byte scans both of those act on: the model's caller-path import slots, the loader's feature-18 table; tested by `tests/nr-model-loader` |
 | `shaders/dlssnr/DlssNr_Dx12.h/.cpp` | the pass: forwarder loading, feature lifetime, the evaluate path, encode/resolve orchestration, capture |
 | `shaders/dlssnr/DlssNr_Common.h` | the constant buffer, shared by the host and the shader |
 | `shaders/dlssnr/precompile/dlssnr.hlsl` | **the live shader**: encode (scale and sRGB-encode with a soft knee), area downsample, resolve (RenoDX's two-branch composition, OkLab hue correction, AP1 clamp, the guard) |

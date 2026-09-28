@@ -245,6 +245,22 @@ template <> struct EnumConfig<ReprojectionFill>
     };
 };
 
+// How the DLSS-NR model is reached on the D3D12 route ([DlssNr] ModelLoader). See
+// dlssnr/DlssNr_DirectRuntime.h.
+enum class NrModelLoader : uint32_t
+{
+    Forwarder, // nvngx.dll_dlssnr.dll makes the calls
+    Direct,    // OptiScaler makes them, answering the model's caller check itself
+};
+
+template <> struct EnumConfig<NrModelLoader>
+{
+    static constexpr auto default_value = NrModelLoader::Forwarder;
+
+    static constexpr std::pair<NrModelLoader, std::string_view> mapping[] = { { NrModelLoader::Forwarder, "forwarder" },
+                                                                              { NrModelLoader::Direct, "direct" } };
+};
+
 class Config
 {
   public:
@@ -450,6 +466,14 @@ class Config
     //
     // Off until it is shown to produce the same picture. If it does, the forwarder can go.
     CustomOptional<bool> DlssNrUseProxy { false };
+
+    // Which module makes the calls into the model on the D3D12 route (after-upscale pass, present pass,
+    // D3D11 bridge host). "forwarder" is nvngx.dll_dlssnr.dll, as it has always been. "direct" makes
+    // them from OptiScaler itself and satisfies the model's caller check by answering its own
+    // GetModuleFileName imports (wilsjo2's technique), so the forwarder DLL is not needed for that
+    // route. Native Vulkan and the D3D11 probe keep the forwarder either way. Forwarder by default
+    // until direct has been measured in games. See dlssnr/DlssNr_DirectRuntime.h.
+    CustomOptional<NrModelLoader> DlssNrModelLoader { NrModelLoader::Forwarder };
 
     // Look for the exposure the game computed but never handed to the upscaler.
     //

@@ -1678,6 +1678,15 @@
     <ClInclude Include="dlssnr\DlssNr_ModelLog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_NgxInfo.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_DirectRuntime.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_PeScan.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="dlssnr\DlssNr_Chain.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1694,6 +1703,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="dlssnr\DlssNr_ModelLog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dlssnr\DlssNr_NgxInfo.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dlssnr\DlssNr_DirectRuntime.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="dlssnr\DlssNr_ZeroGuides.cpp">

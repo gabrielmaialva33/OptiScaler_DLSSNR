@@ -10,6 +10,8 @@
 #include <dlssnr/DlssNr_Consumers.h>
 #include <dlssnr/DlssNr_Submission.h>
 #include <dlssnr/DlssNr_ModelLog.h>
+#include <dlssnr/DlssNr_DirectRuntime.h>
+#include <dlssnr/DlssNr_NgxInfo.h>
 #include <dxgi1_4.h>
 
 #include "DlssNr_Dx12.h"
@@ -245,6 +247,9 @@ using PFN_NrProbeFloat = void(__cdecl*)(void*, const char*, float, int);
 struct NrState
 {
     HMODULE forwarder = nullptr;
+    // [DlssNr] ModelLoader=direct: the function pointers below point into DlssNr_DirectRuntime rather
+    // than into the forwarder, and forwarder stays null.
+    bool directRuntime = false;
     PFN_NrCreate create = nullptr;
     PFN_NrEvaluate evaluate = nullptr;
     PFN_NrRelease release = nullptr;
@@ -648,11 +653,42 @@ float WhitePointForMean(float meanLuma)
 
 std::filesystem::path g_dllDir;
 
+// [DlssNr] ModelLoader=direct: the same entry points, made from this module. See DlssNr_DirectRuntime.h.
+bool EnsureDirectRuntime()
+{
+    namespace Direct = DlssNr::DirectRuntime;
+
+    g_nr.queryRatio = &Direct::QueryScalingRatio;
+    g_nr.lastRatioStage = Direct::LastRatioStage();
+    g_nr.create = &Direct::Create;
+    g_nr.evaluate = &Direct::Evaluate;
+    g_nr.release = &Direct::Release;
+    g_nr.setExtras = &Direct::SetExtras;
+    g_nr.setFloatSlot = &Direct::SetFloatSlot;
+    g_nr.probeFloat = &Direct::ProbeFloat;
+    g_nr.lastInit = Direct::LastInit();
+    g_nr.lastCreate = Direct::LastCreate();
+    g_nr.faultState = &Direct::FaultState;
+    g_nr.directRuntime = true;
+
+    LOG_INFO("DLSS-NR: model loader is direct -- OptiScaler calls nvngx_dlssnr.dll itself on the D3D12 route, no "
+             "nvngx.dll_dlssnr.dll needed there (native Vulkan and the D3D11 probe still use it)");
+
+    DlssNr::Consumers::WarnIfCompeting();
+    return true;
+}
+
 // Loads the forwarder that owns the calls into the snippet.
 bool EnsureForwarder()
 {
+    if (g_nr.directRuntime)
+        return g_nr.create != nullptr;
+
     if (g_nr.forwarder != nullptr)
         return g_nr.create != nullptr;
+
+    if (Config::Instance()->DlssNrModelLoader.value_or_default() == NrModelLoader::Direct)
+        return EnsureDirectRuntime();
 
     if (g_dllDir.empty())
         g_dllDir = Util::DllPath().remove_filename();
@@ -2783,6 +2819,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             return false;
         }
 
+        // Which driver, loader and model this is -- the first thing a report needs and, before this,
+        // the one thing no log said. See dlssnr/design/ngx-driver-616.md.
+        DlssNr::NgxInfo::Describe(*snippet);
+
         // Before the build, so the model's own account of it ("Created feature ...") is in the log.
         DlssNr::ModelLog::Install(*snippet);
 
@@ -2819,6 +2859,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         {
             g_nr.failed = true;
             g_nr.reason = "the model would not initialise";
+            // The direct loader can refuse before init, when the model's imports are not the ones it adapts.
+            if (g_nr.directRuntime && DlssNr::DirectRuntime::LoadError() != nullptr)
+                g_nr.reason = DlssNr::DirectRuntime::LoadError();
             const auto initResult = (unsigned int) (g_nr.lastInit != nullptr ? *g_nr.lastInit : 0);
             const auto createResult = (unsigned int) (g_nr.lastCreate != nullptr ? *g_nr.lastCreate : 0);
 
@@ -5606,6 +5649,13 @@ void ProbeD3D11(void* d3d11Device)
 
     if (!EnsureForwarder())
         return;
+
+    // The probe's entry points exist only in the forwarder. ModelLoader=direct does not load it.
+    if (g_nr.forwarder == nullptr)
+    {
+        LOG_INFO("DLSS-NR D3D11: the probe needs the forwarder, and ModelLoader=direct does not load it");
+        return;
+    }
 
     auto probe = (int (*)(const wchar_t*)) GetProcAddress(g_nr.forwarder, "dlssnr_d3d11_probe");
     auto init = (int (*)(const wchar_t*, const wchar_t*, void*, int, int*, int*)) GetProcAddress(g_nr.forwarder,

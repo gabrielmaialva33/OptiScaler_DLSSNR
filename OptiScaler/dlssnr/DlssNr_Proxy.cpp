@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "DlssNr_Proxy.h"
+#include "DlssNr_NgxInfo.h"
 
 #include <Config.h>
 #include <Logger.h>
@@ -216,6 +217,21 @@ unsigned int Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D1
             LOG_INFO("DLSS-NR (proxy): re-init at SDK 0x15 returned 0x{:X} (idempotent -- this does "
                      "not change the app id or SDK version the core is running with)",
                      (unsigned int) initResult);
+        }
+
+        // From NVIDIA 616.64 this call no longer answers "no NR here" (0xBAD0000B): the loader routes
+        // feature 18 into nvngx_dlssnr.dll itself, and with model 310.8.0.0 that route faults inside
+        // D3D12 (dlss5-bridge, RTX 5090). Refused before the create rather than caught after it: the
+        // fault lands in D3D12 on the game's thread, beyond any guard this path has.
+        // dlssnr/design/ngx-driver-616.md.
+        if (const auto model = DlssNr::NgxInfo::FindModel();
+            model.has_value() && DlssNr::NgxInfo::LoaderRouteKnownToFault(*model))
+        {
+            g_proxy.failed = true;
+            LOG_ERROR("DLSS-NR (proxy): refused -- this driver's NGX loader creates feature 18 itself and the model "
+                      "beside the game is one that route was measured faulting with. Set UseProxy=false; the "
+                      "forwarder and ModelLoader=direct call the model themselves and are not affected");
+            return 0;
         }
 
         DiscoverFloatSlot(g_proxy.params);
