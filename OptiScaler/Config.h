@@ -297,6 +297,14 @@ class Config
     // Present hosts with no game guides: estimate motion from the frames themselves and hand it to the
     // model instead of zero motion (synthesized-motion.md). Experimental. Default false.
     CustomOptional<bool> DlssNrSynthMotion { false };
+    // Below the frame's size (WorkingScale < 1): resample depth and motion to the model's working size
+    // instead of handing it frame-size guides for a smaller colour (reduced-scale-guides.md). Needs the
+    // guide resample's bytecode; without it the frame-size guides stay. Default true.
+    CustomOptional<bool> DlssNrMatchGuides { true };
+    // Express the game's motion-vector scale in pixels of the motion texture the model is handed,
+    // measured against the size the vectors come in (render size for low-resolution vectors).
+    // false restores working / frame, which shrank every low-resolution vector below 100%. Default true.
+    CustomOptional<bool> DlssNrRenderMotionScale { true };
     // Present hook: wait for GPU completion before flip. Default true.
     CustomOptional<bool> DlssNrPresentSync { true };
     CustomOptional<uint32_t> DlssNrPreset { 0 };

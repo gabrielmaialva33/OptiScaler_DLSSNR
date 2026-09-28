@@ -11,6 +11,7 @@
 #include <dlssnr/DlssNr_WorkingScale.h>
 
 #include <shaders/dlssnr/DlssNr_Vk.h>
+#include <shaders/dlssnr/DlssNr_GuideMatch.h>
 #include <shaders/output_scaling/OS_Vk.h>
 
 #include <algorithm>
@@ -1270,15 +1271,54 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
     Transition(cmdBuffer, g_vk.output, VK_IMAGE_LAYOUT_GENERAL);
 
-    const float mvToWorkX = width != 0 ? (float) workWidth / (float) width : 1.0f;
-    const float mvToWorkY = height != 0 ? (float) workHeight / (float) height : 1.0f;
+    // The model reads its motion-vector scale in pixels of the motion texture it is handed, and the
+    // game's scale is in pixels of the size its vectors are measured in -- the render size for
+    // low-resolution vectors (reduced-scale-guides.md, fix 2; jlrouzies-fr's v0.8.92 of wilsjo2's fork).
+    // working / frame shrank every such vector below 100%. Fix 1, the guides resampled to the working
+    // size, exists only on the D3D12 path so far: this path has no Vulkan resample shader yet, so below
+    // native it still hands the model frame-size guides for a smaller colour, and says so once.
+    const bool renderMotionScale = cfg.DlssNrRenderMotionScale.value_or_default();
+    const float modelMvScaleX = renderMotionScale
+                                    ? DlssNr::GuideMatch::ModelMotionScale(mvScaleX, motionWidth, wantedMotionWidth)
+                                    : DlssNr::GuideMatch::LegacyMotionScale(mvScaleX, workWidth, width);
+    const float modelMvScaleY = renderMotionScale
+                                    ? DlssNr::GuideMatch::ModelMotionScale(mvScaleY, motionHeight, wantedMotionHeight)
+                                    : DlssNr::GuideMatch::LegacyMotionScale(mvScaleY, workHeight, height);
+
+    {
+        static float saidScale[2] = { -1.0f, -1.0f };
+        static bool saidUnmatched = false;
+        const bool unmatched =
+            DlssNr::GuideMatch::Wanted(cfg.DlssNrMatchGuides.value_or_default(), true, workWidth, workHeight,
+                                       guideWidth, guideHeight, motionWidth, motionHeight);
+
+        if (saidScale[0] != modelMvScaleX || saidScale[1] != modelMvScaleY)
+        {
+            saidScale[0] = modelMvScaleX;
+            saidScale[1] = modelMvScaleY;
+            LOG_INFO("DLSS-NR Vulkan model motion scale {:.1f} x {:.1f}: game scale {:.1f} x {:.1f} measured against "
+                     "{}x{} ({}), motion texture {}x{} (the game's region), model {}x{}{}",
+                     modelMvScaleX, modelMvScaleY, mvScaleX, mvScaleY, wantedMotionWidth, wantedMotionHeight,
+                     lowResolutionMotion ? "render size, low-resolution vectors" : "output size", motionWidth,
+                     motionHeight, workWidth, workHeight,
+                     renderMotionScale ? "" : " -- legacy working/frame conversion");
+        }
+
+        if (unmatched && !saidUnmatched)
+        {
+            saidUnmatched = true;
+            LOG_INFO("DLSS-NR Vulkan guides: larger than the {}x{} model and not resampled (no Vulkan resample yet); "
+                     "the model gets the frame-size guides",
+                     workWidth, workHeight);
+        }
+    }
     const int evaluated = g_vk.evaluate(
         (void*) cmdBuffer, g_vk.feature, g_vk.capabilityParams, &modelInput->ngx, depth, motion, &g_vk.output.ngx,
         workWidth, workHeight, guideWidth, guideHeight, motionWidth, motionHeight, depthBaseX, depthBaseY, motionBaseX,
         motionBaseY, depthInverted ? 1 : 0, g_vk.reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
         (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
         cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
-        cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, mvScaleX * mvToWorkX, mvScaleY * mvToWorkY);
+        cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, modelMvScaleX, modelMvScaleY);
 
     g_vk.reset = false;
     g_vk.frames++;

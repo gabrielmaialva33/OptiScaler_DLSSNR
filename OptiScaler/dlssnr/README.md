@@ -68,6 +68,7 @@ experiment.
 | `shaders/dlssnr/precompile/dlssnr.hlsl` | **the live shader**: encode (scale and sRGB-encode with a soft knee), area downsample, resolve (RenoDX's two-branch composition, OkLab hue correction, AP1 clamp, the guard) |
 | `shaders/dlssnr/precompile/DlssNr_Shader.h` | that shader compiled, as bytes |
 | `shaders/dlssnr/DlssNr_Stabilizer_Dx12.h/.cpp`, `precompile/dlssnr_stabilizer.hlsl` | the output stabilizer, off by default; `design/output-stabilizer.md` |
+| `shaders/dlssnr/DlssNr_GuideMatch.h`, `DlssNr_GuideMatch_Dx12.h/.cpp`, `precompile/dlssnr_guides.hlsl` | below the frame's size: depth and motion point-resampled to the model's working size, and the motion-vector scale for the texture handed over; the bytecode header is optional (`__has_include`); `design/reduced-scale-guides.md` |
 
 ### Editing the shader
 
