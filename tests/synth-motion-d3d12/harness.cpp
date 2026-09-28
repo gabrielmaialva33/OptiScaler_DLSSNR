@@ -23,6 +23,7 @@
 
 #include "SynthMotion_Dx12.h"
 #include "SynthMotionNvofa_Dx12.h"
+#include "SynthOverlay_Dx12.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -632,6 +633,106 @@ std::vector<Score> ScoreFrame(const Sequence& s, int t, const Field& f)
 }
 
 // ---------------------------------------------------------------------------------------------
+// Synthesized FG's HUD mask (SynthMotion::Overlay_Dx12), run on the same frames as the estimator. It is
+// judged against the overlay the harness drew: a mask pixel is its depth (1.0 near, 0.0 far), as FSR-FG is
+// handed it.
+//  - A marked pixel is right when it is an overlay pixel, and "grown" when it is within 1 px of one: the
+//    rule grows its protection by 1 px over glyph edges on purpose. Anything further out is scenery marked.
+//  - Recall is per element, over all its pixels. The rule marks interface only where the scene moves on
+//    every side of it within 24 px and the pixel has contrast (hud-protection.md): a large flat panel is
+//    not marked, and neither is an element's 1 px dark outline, whose 3x3 core reaches the scene. Reported
+//    per element; run.py judges floors on the long hud_* sequences.
+//  - The depth must be exactly 0 or 1 and agree with the mask; the layer must carry the frame's own rgb
+//    and the mask as alpha, byte for byte (an RGBA8 frame gives an RGBA8 layer).
+// ---------------------------------------------------------------------------------------------
+struct HudScore
+{
+    size_t marked = 0;         // depth 1
+    size_t markedOverlay = 0;  // of those, overlay pixels
+    size_t markedGrown = 0;    // of those, within 1 px of an overlay pixel (overlay pixels included)
+    size_t overlayPixels[4] {};  // per OverlayElement
+    size_t overlayMarked[4] {};  // per OverlayElement
+    size_t depthNotBinary = 0;   // neither 0 nor 1
+    size_t depthMaskMismatch = 0;
+    size_t layerMismatch = 0;
+    bool layerChecked = false;
+};
+
+HudScore ScoreHud(const Sequence& s, const std::vector<float>& depth, const std::vector<uint8_t>& mask,
+                  const std::vector<uint8_t>& layer, const uint8_t* colour, UINT colourPitch)
+{
+    HudScore h {};
+    const int W = (int) s.width, H = (int) s.height;
+    std::vector<uint8_t> element((size_t) W * H, kElementNone);
+
+    if (s.kind == Kind::Overlay)
+    {
+        for (int y = 0; y < H; ++y)
+        {
+            for (int x = 0; x < W; ++x)
+            {
+                uint8_t rgba[4];
+                element[(size_t) y * W + x] = OverlayPixel(x, y, rgba);
+            }
+        }
+    }
+
+    auto isOverlay = [&](int x, int y)
+    { return x >= 0 && y >= 0 && x < W && y < H && element[(size_t) y * W + x] != kElementNone; };
+
+    h.layerChecked = !layer.empty();
+    for (int y = 0; y < H; ++y)
+    {
+        for (int x = 0; x < W; ++x)
+        {
+            const size_t i = (size_t) y * W + x;
+            const float d = depth[i];
+            const uint8_t m = mask[i];
+            const uint8_t e = element[i];
+
+            if (d != 0.0f && d != 1.0f)
+                ++h.depthNotBinary;
+            // The shader tests the float mask against 0.5; the stored byte rounds it, so 127 and 128 are both
+            // consistent with either answer.
+            if ((d == 1.0f && m < 127) || (d == 0.0f && m > 128))
+                ++h.depthMaskMismatch;
+
+            if (e != kElementNone)
+            {
+                ++h.overlayPixels[e];
+                if (d == 1.0f)
+                    ++h.overlayMarked[e];
+            }
+
+            if (d == 1.0f)
+            {
+                ++h.marked;
+                if (e != kElementNone)
+                    ++h.markedOverlay;
+
+                bool grown = false;
+                for (int oy = -1; oy <= 1 && !grown; ++oy)
+                {
+                    for (int ox = -1; ox <= 1 && !grown; ++ox)
+                        grown = isOverlay(x + ox, y + oy);
+                }
+                if (grown)
+                    ++h.markedGrown;
+            }
+
+            if (h.layerChecked)
+            {
+                const uint8_t* want = colour + (size_t) y * colourPitch + (size_t) x * 4;
+                const uint8_t* got = layer.data() + i * 4;
+                if (got[0] != want[0] || got[1] != want[1] || got[2] != want[2] || got[3] != m)
+                    ++h.layerMismatch;
+            }
+        }
+    }
+    return h;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Device plumbing.
 // ---------------------------------------------------------------------------------------------
 struct Gpu
@@ -662,11 +763,12 @@ struct Gpu
         if (event == nullptr)
             Fail("create fence event");
 
+        // 0-1 around the estimator, 2-3 around the HUD mask and its layer.
         D3D12_QUERY_HEAP_DESC qh {};
         qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-        qh.Count = 2;
+        qh.Count = 4;
         Hr(device->CreateQueryHeap(&qh, IID_PPV_ARGS(&timestamps)), "create timestamp heap");
-        timestampReadback = Buffer(16, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+        timestampReadback = Buffer(32, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
         Hr(queue->GetTimestampFrequency(&frequency), "timestamp frequency");
     }
 
@@ -744,6 +846,9 @@ struct FrameResult
     UINT fieldW, fieldH;
     int fieldFormat;
     std::vector<Score> scores;
+    double hudGpuMs;
+    bool hudScored;
+    HudScore hud;
 };
 
 void WriteSequence(const Sequence& s, const std::vector<FrameResult>& frames, bool first)
@@ -769,7 +874,22 @@ void WriteSequence(const Sequence& s, const std::vector<FrameResult>& frames, bo
                          j ? ", " : "", sc.region, sc.gx, sc.gy, sc.pixels, sc.epeMean, sc.within1, sc.overHalf, sc.medianX,
                          sc.medianY);
         }
-        std::fprintf(g_report, "]}");
+        std::fprintf(g_report, "], \"hud_gpu_ms\": %.6f", f.hudGpuMs);
+        if (f.hudScored)
+        {
+            const auto& h = f.hud;
+            std::fprintf(g_report,
+                         ", \"hud\": {\"marked\": %zu, \"marked_overlay\": %zu, \"marked_grown\": %zu, "
+                         "\"overlay_pixels\": {\"crosshair\": %zu, \"panel\": %zu, \"text\": %zu}, "
+                         "\"overlay_marked\": {\"crosshair\": %zu, \"panel\": %zu, \"text\": %zu}, "
+                         "\"depth_not_binary\": %zu, \"depth_mask_mismatch\": %zu, \"layer_checked\": %s, "
+                         "\"layer_mismatch\": %zu}",
+                         h.marked, h.markedOverlay, h.markedGrown, h.overlayPixels[kElementCrosshair],
+                         h.overlayPixels[kElementPanel], h.overlayPixels[kElementText], h.overlayMarked[kElementCrosshair],
+                         h.overlayMarked[kElementPanel], h.overlayMarked[kElementText], h.depthNotBinary,
+                         h.depthMaskMismatch, h.layerChecked ? "true" : "false", h.layerMismatch);
+        }
+        std::fprintf(g_report, "}");
     }
     std::fprintf(g_report, "\n  ]}");
     std::fflush(g_report);
@@ -808,8 +928,58 @@ struct Estimator
 // ---------------------------------------------------------------------------------------------
 // One sequence end to end.
 // ---------------------------------------------------------------------------------------------
-std::vector<FrameResult> RunSequence(Gpu& gpu, Estimator& estimator, const Sequence& s)
+// One texture read back after the frame: placed-footprint copy into a readback buffer sized for it.
+struct TextureReadback
 {
+    ComPtr<ID3D12Resource> buffer;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
+    D3D12_RESOURCE_DESC desc {};
+    UINT64 bytes = 0;
+
+    // Records the copy of `texture`, which rests in NON_PIXEL_SHADER_RESOURCE.
+    void Record(Gpu& gpu, ID3D12GraphicsCommandList* list, ID3D12Resource* texture)
+    {
+        const auto d = texture->GetDesc();
+        if (buffer == nullptr || d.Width != desc.Width || d.Height != desc.Height || d.Format != desc.Format)
+        {
+            desc = d;
+            gpu.device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+            buffer = gpu.Buffer(bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+        }
+        Transition(list, texture, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION src {};
+        src.pResource = texture;
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION dst {};
+        dst.pResource = buffer.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = footprint;
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        Transition(list, texture, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    // Rows packed tightly, bytesPerPixel each.
+    std::vector<uint8_t> Read(UINT bytesPerPixel)
+    {
+        std::vector<uint8_t> out((size_t) desc.Width * desc.Height * bytesPerPixel);
+        uint8_t* data = nullptr;
+        const D3D12_RANGE range { 0, (SIZE_T) bytes };
+        Hr(buffer->Map(0, &range, reinterpret_cast<void**>(&data)), "map texture readback");
+        for (UINT y = 0; y < desc.Height; ++y)
+            std::memcpy(out.data() + (size_t) y * desc.Width * bytesPerPixel,
+                        data + footprint.Offset + (size_t) y * footprint.Footprint.RowPitch,
+                        (size_t) desc.Width * bytesPerPixel);
+        const D3D12_RANGE none { 0, 0 };
+        buffer->Unmap(0, &none);
+        return out;
+    }
+};
+
+std::vector<FrameResult> RunSequence(Gpu& gpu, Estimator& estimator, SynthMotion::Overlay_Dx12& overlay,
+                                     const Sequence& s)
+{
+    TextureReadback depthReadback, maskReadback, layerReadback;
+
     // The colour source: RGBA8 UNORM, what a present-time host hands the estimator after a
     // backbuffer copy. Rewritten from an upload buffer every frame.
     D3D12_HEAP_PROPERTIES heap {};
@@ -866,9 +1036,28 @@ std::vector<FrameResult> RunSequence(Gpu& gpu, Estimator& estimator, const Seque
         list->EndQuery(gpu.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
         fr.recorded = estimator.Record(gpu.device.Get(), list, colour.Get(), colourState, t == 0);
         list->EndQuery(gpu.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
-        list->ResolveQueryData(gpu.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, gpu.timestampReadback.Get(), 0);
+
+        // Synthesized FG's HUD mask on the same frame and list, and its layer from the same frame (the harness
+        // has no separate presented frame), in the order the D3D11 bridge records them.
+        list->EndQuery(gpu.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2);
+        if (!overlay.Record(gpu.device.Get(), list, colour.Get(), colourState, t == 0))
+            Fail("HUD mask Record returned false");
+        const bool hudPending = overlay.Pending();
+        const bool layerRecorded = hudPending && overlay.RecordLayer(list, colour.Get(), colourState);
+        if (hudPending && !layerRecorded)
+            Fail("HUD layer RecordLayer returned false");
+        list->EndQuery(gpu.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 3);
+
+        list->ResolveQueryData(gpu.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 4, gpu.timestampReadback.Get(), 0);
         if (!fr.recorded)
             Fail("Record returned false");
+
+        if (hudPending && !s.timingOnly)
+        {
+            depthReadback.Record(gpu, list, overlay.Depth());
+            maskReadback.Record(gpu, list, overlay.Mask());
+            layerReadback.Record(gpu, list, overlay.Layer());
+        }
         fr.ready = estimator.Ready();
         fr.sceneCutAfterRecord = estimator.SceneCut();
 
@@ -900,6 +1089,7 @@ std::vector<FrameResult> RunSequence(Gpu& gpu, Estimator& estimator, const Seque
             // Recorded, closed, never executed: the estimator must not count this frame.
             gpu.CloseWithoutExecuting();
             estimator.AbandonRecording();
+            overlay.AbandonRecording();
             fr.abandoned = true;
             results.push_back(fr);
             // The colour texture's transitions were recorded but never ran.
@@ -909,14 +1099,28 @@ std::vector<FrameResult> RunSequence(Gpu& gpu, Estimator& estimator, const Seque
 
         gpu.ExecuteAndWait();
         estimator.ConfirmExecuted();
+        overlay.ConfirmExecuted();
         fr.sceneCutAfterConfirm = estimator.SceneCut();
 
         uint64_t* ts = nullptr;
-        const D3D12_RANGE tsRange { 0, 16 };
+        const D3D12_RANGE tsRange { 0, 32 };
         Hr(gpu.timestampReadback->Map(0, &tsRange, reinterpret_cast<void**>(&ts)), "map timestamps");
         fr.gpuMs = ts[1] > ts[0] ? (double) (ts[1] - ts[0]) * 1000.0 / (double) gpu.frequency : 0.0;
+        fr.hudGpuMs = ts[3] > ts[2] ? (double) (ts[3] - ts[2]) * 1000.0 / (double) gpu.frequency : 0.0;
         const D3D12_RANGE none { 0, 0 };
         gpu.timestampReadback->Unmap(0, &none);
+
+        if (hudPending && !s.timingOnly)
+        {
+            const auto depthBytes = depthReadback.Read(4);
+            std::vector<float> depth(depthBytes.size() / 4);
+            std::memcpy(depth.data(), depthBytes.data(), depthBytes.size());
+            if (layerReadback.desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
+                Fail("an RGBA8 frame did not give an RGBA8 UI layer");
+            fr.hud = ScoreHud(s, depth, maskReadback.Read(1), layerReadback.Read(4), uploadPtr + up.Offset,
+                              up.Footprint.RowPitch);
+            fr.hudScored = true;
+        }
 
         if (motion != nullptr && !s.timingOnly)
         {
@@ -962,7 +1166,8 @@ std::vector<FrameResult> RunSequence(Gpu& gpu, Estimator& estimator, const Seque
             // (nvofa) is not scored on the one pair that spans the cut: there is no true motion there.
             const int described = t - estimator.Lag();
             const bool spansCut = s.kind == Kind::Cut && described == kCutFrame && estimator.Lag() > 0;
-            if (described > 0 && !spansCut)
+            const bool hudOnly = std::strncmp(s.name, "hud_", 4) == 0; // the HUD mask's sequences
+            if (described > 0 && !spansCut && !hudOnly)
                 fr.scores = ScoreFrame(s, described, field);
         }
 
@@ -975,14 +1180,22 @@ std::vector<FrameResult> RunSequence(Gpu& gpu, Estimator& estimator, const Seque
                           sc.gy);
             line += buf;
         }
+        if (fr.hudScored)
+        {
+            char buf[200];
+            std::snprintf(buf, sizeof(buf), " hud: marked %zu (overlay %zu, within 1 px %zu) gpu %.3f ms", fr.hud.marked,
+                          fr.hud.markedOverlay, fr.hud.markedGrown, fr.hudGpuMs);
+            line += buf;
+        }
         Log("%-12s t=%d ready=%d cut=%d/%d gpu=%.3f ms%s", s.name, t, fr.ready ? 1 : 0, fr.sceneCutAfterRecord ? 1 : 0,
             fr.sceneCutAfterConfirm ? 1 : 0, fr.gpuMs, line.c_str());
         results.push_back(fr);
     }
 
     upload->Unmap(0, nullptr);
-    // Everything above was waited on; the estimator's resources are idle and may be released.
+    // Everything above was waited on; the estimator's and the mask's resources are idle and may be released.
     estimator.Release();
+    overlay.Release();
     return results;
 }
 } // namespace
@@ -1013,6 +1226,10 @@ int main(int argc, char** argv)
         { "pan_+48y", Kind::Pan, 1280, 720, 0, 48, 14 },
         { "overlay_+8x", Kind::Overlay, 1280, 720, 8, 0, 14 },
         { "overlay_+8+8", Kind::Overlay, 1280, 720, 8, 8, 14 },
+        // The same overlay, long enough for the HUD mask's steady state (its entry streak is 8 frames, and the
+        // protection builds up as the scene moves past each element). The estimator is not scored on these.
+        { "hud_+8x", Kind::Overlay, 1280, 720, 8, 0, 40 },
+        { "hud_+3+2", Kind::Overlay, 1280, 720, 3, 2, 40 },
         { "object", Kind::Object, 1280, 720, 8, 3, 14 },
         { "static", Kind::Static, 1280, 720, 0, 0, 14 },
         { "cut", Kind::Cut, 1280, 720, 4, 0, 18 },
@@ -1023,6 +1240,7 @@ int main(int argc, char** argv)
 
     SynthMotion::Estimator_Dx12 ffx;
     SynthMotion::NvofaEstimator_Dx12 engine;
+    SynthMotion::Overlay_Dx12 overlay;
     Estimator estimator;
     estimator.ffx = &ffx;
     estimator.nvofa = nvofa ? &engine : nullptr;
@@ -1037,7 +1255,7 @@ int main(int argc, char** argv)
     bool first = true;
     for (const auto& s : sequences)
     {
-        const auto results = RunSequence(gpu, estimator, s);
+        const auto results = RunSequence(gpu, estimator, overlay, s);
         frames += (int) results.size();
         WriteSequence(s, results, first);
         first = false;

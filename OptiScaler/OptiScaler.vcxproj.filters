@@ -38,6 +38,9 @@
     <ClInclude Include="shaders\synth_motion\SynthMotionNvofa_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="shaders\synth_motion\SynthOverlay_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\nvofa\nvOpticalFlowCommon.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -78,6 +81,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_NvofaExpand_Shader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\synth_motion\precompile\SynthOverlay_Detect_Shader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\synth_motion\precompile\SynthOverlay_Layer_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Config.h">
@@ -980,6 +989,9 @@
     <ClInclude Include="inputs\FG\Upscaler_Inputs_Dx11wDx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="inputs\FG\Synth_Hud.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="inputs\FG\Synth_Inputs.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1055,6 +1067,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="shaders\synth_motion\SynthMotionNvofa_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="shaders\synth_motion\SynthOverlay_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Config.cpp">

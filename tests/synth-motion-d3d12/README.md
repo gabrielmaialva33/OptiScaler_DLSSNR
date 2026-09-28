@@ -67,6 +67,28 @@ floating text) apart. Under `--source nvofa` the overlay is reported, not judged
 per-pixel choice. Measured before and after the change: "Static overlays", "Measured" in the design
 note.
 
+## Synthesized FG's HUD mask
+
+Every frame of every sequence also runs `SynthMotion::Overlay_Dx12` (`shaders/synth_motion/SynthOverlay_Dx12.*`,
+the HUD mask of "The HUD: near depth and a UI layer" in `synthesized-frame-generation.md`), on the same
+list, right after the estimator and on the same frame, then its UI layer from that frame. Its depth, mask
+and layer are read back and scored; timestamps 2 and 3 bracket it.
+
+- **Exact, everywhere:** the depth is 0 or 1 and agrees with the mask, and the layer is the frame's own
+  rgb with the mask as alpha, byte for byte (an RGBA8 frame gives an RGBA8 layer).
+- **No scenery:** on the pans, the moving object, static, cut and abandon, not one pixel is marked.
+- **Precision, on `overlay_*` and `hud_*`, from t=10** (the rule's 8-frame entry streak starts at t=1): at
+  least 99% of the marked pixels are overlay pixels or within 1 px of one.
+- **Recall, on `hud_+8x` and `hud_+3+2`**, the same overlay over 40 frames, estimator not scored: the mean
+  share of the crosshair's pixels marked from t=30 at least 10%, and of the floating text's at least 15%.
+  These are floors under what was measured on 2026-09-28 (34%/39% at 8 px a frame, 21%/30% at (3, 2)).
+  About half of each element is its 1 px dark outline, which the rule never marks, and the protection
+  builds up as the scene moves past. The panel's recall is reported only: its flat interior never sees
+  motion on four sides.
+- **GPU time** of the mask plus its layer on the timing sequences, reported.
+
+None of this runs FSR, so it says the mask is right on synthetic frames, not what FSR-FG does with it.
+
 ## `--source nvofa`
 
 `--source nvofa` runs the same binary and sequences through `SynthMotion::NvofaEstimator_Dx12`, the

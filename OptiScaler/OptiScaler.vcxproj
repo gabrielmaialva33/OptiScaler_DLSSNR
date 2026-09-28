@@ -343,6 +343,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="inputs\FG\Streamline_Inputs_Sl1_Dx12.h" />
     <ClInclude Include="include\device_info\device_info.hpp" />
     <ClInclude Include="inputs\FG\Upscaler_Inputs_Dx11wDx12.h" />
+    <ClInclude Include="inputs\FG\Synth_Hud.h" />
     <ClInclude Include="inputs\FG\Synth_Inputs.h" />
     <ClInclude Include="inputs\FG\Synth_MotionStats.h" />
     <ClInclude Include="inputs\FG\Synth_Policy.h" />
@@ -444,6 +445,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\synth_motion\SynthMotion_Dx12.h" />
     <ClInclude Include="shaders\synth_motion\SynthMotion_Handoff.h" />
     <ClInclude Include="shaders\synth_motion\SynthMotionNvofa_Dx12.h" />
+    <ClInclude Include="shaders\synth_motion\SynthOverlay_Dx12.h" />
     <ClInclude Include="include\nvofa\nvOpticalFlowCommon.h" />
     <ClInclude Include="include\nvofa\nvOpticalFlowD3D12.h" />
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ClearFloat_Shader.h" />
@@ -458,6 +460,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_Search_Shader.h" />
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_NvofaPrep_Shader.h" />
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_NvofaExpand_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthOverlay_Detect_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthOverlay_Layer_Shader.h" />
     <ClInclude Include="dlssnr\DlssNrFeature_Vk.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_PShader.h" />
@@ -885,6 +889,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="shaders\dlssnr\DlssNr_GuideMatch_Dx12.cpp" />
     <ClCompile Include="shaders\synth_motion\SynthMotion_Dx12.cpp" />
     <ClCompile Include="shaders\synth_motion\SynthMotionNvofa_Dx12.cpp" />
+    <ClCompile Include="shaders\synth_motion\SynthOverlay_Dx12.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNrFeature_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ExposureScan.cpp" />

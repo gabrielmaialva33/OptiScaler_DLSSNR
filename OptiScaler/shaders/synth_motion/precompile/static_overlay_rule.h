@@ -1,7 +1,13 @@
-// The per-pixel rule of the static-overlay mask, shared by dlssnr_uimask.hlsl and the host test
-// tests/nr-uimask-rule, so the test runs the shader's own decision rather than a copy of it. Plain
-// C/HLSL subset: no templates, no references, no texture types. dlssnr/design/hud-protection.md has the
-// reasoning, including why each gate exists.
+// The per-pixel rule of the static-overlay mask: a pixel that stays the same while the scene around it
+// moves is interface. Two passes run it, DLSS-NR's UI protection (shaders/dlssnr/precompile/dlssnr_uimask.hlsl)
+// and synthesized frame generation's HUD mask (synth_overlay_detect.hlsl beside this file), and so does the
+// host test tests/nr-uimask-rule, so the test runs the shaders' own decision rather than a copy of it. It
+// lives here, outside the DLSS-NR module, because frame generation must not depend on that module.
+// The names (UiMaskParams, UiMaskPixel, UM_*) are the ones it had in the NR module: renaming them could
+// change DLSS-NR's committed bytecode, which the move must leave byte-identical.
+// Plain C/HLSL subset: no templates, no references, no texture types. dlssnr/design/hud-protection.md has
+// the reasoning, including why each gate exists; synthesized-frame-generation.md, "The HUD: near depth and
+// a UI layer", has why frame generation uses it.
 //
 // The includer defines, before including this file:
 //   UM_FN            function qualifier (nothing in HLSL, `inline` in C++)
@@ -11,10 +17,19 @@
 //   UM_CHANGE(x, y)  |this frame's luma - last frame's| at (x, y), clamped
 //   UM_PROT(x, y)    last frame's protection at (x, y), clamped, 0..1
 //   UM_STREAK(x, y)  last frame's candidate streak at (x, y), clamped, whole frames
-// and saturate/min/max/abs for floats.
+// and saturate/min/max/abs for floats. Name the macros' parameters anything but x and y: a function-like
+// macro substitutes every matching token, a swizzle included, so `Load(int2(x, y)).x` called with `x + sx`
+// reads `.x + sx` (synth_overlay_detect.hlsl has the story).
+//
+// It may also define, before including this file:
+//   UM_CORE_RADIUS   the still core's radius in pixels (default 2, the 5x5 DLSS-NR's pass uses)
 
-#ifndef DLSSNR_UIMASK_RULE_H
-#define DLSSNR_UIMASK_RULE_H
+#ifndef SYNTH_STATIC_OVERLAY_RULE_H
+#define SYNTH_STATIC_OVERLAY_RULE_H
+
+#ifndef UM_CORE_RADIUS
+#define UM_CORE_RADIUS 2
+#endif
 
 struct UiMaskParams
 {
@@ -52,13 +67,13 @@ UM_FN void UiMaskPixel(int x, int y, bool valid, UiMaskParams P, UM_OUT(float) p
     const float cur = UM_LUMA(x, y);
     const float own = UM_CHANGE(x, y);
 
-    // A still core: nothing within 2 px changed. Interface over a moving scene keeps its own pixels still
-    // around a glyph's inner edges (fill against outline); scenery beside a moving silhouette does not,
-    // because the silhouette is inside that core.
+    // A still core: nothing within UM_CORE_RADIUS (2) px changed. Interface over a moving scene keeps its own
+    // pixels still around a glyph's inner edges (fill against outline); scenery beside a moving silhouette does
+    // not, because the silhouette is inside that core.
     bool coreStill = true;
-    UM_UNROLL for (int cy = -2; cy <= 2; ++cy)
+    UM_UNROLL for (int cy = -UM_CORE_RADIUS; cy <= UM_CORE_RADIUS; ++cy)
     {
-        UM_UNROLL for (int cx = -2; cx <= 2; ++cx)
+        UM_UNROLL for (int cx = -UM_CORE_RADIUS; cx <= UM_CORE_RADIUS; ++cx)
             coreStill = coreStill && UM_CHANGE(x + cx, y + cy) < P.coreEps;
     }
 

@@ -408,6 +408,21 @@ bool FSRFG_Dx12::Dispatch()
         }
     }
 
+    // The synthesized input's HUD layer ([FrameGen] SynthesizedHudLayer, inputs/FG/Synth_Inputs.cpp) is FFX's own
+    // UI resource: its swapchain composes it over every frame it presents. Double buffered, so FFX copies it at
+    // its Present and the next base frame may overwrite ours. Every other input keeps the empty registration.
+    // dlssnr/design/synthesized-frame-generation.md, "The HUD: near depth and a UI layer".
+    if (state.activeFgInput == FGInput::Synthesized)
+    {
+        auto ui = GetResource(FG_ResourceType::UIColor, fIndex);
+
+        if (ui && IsResourceReady(FG_ResourceType::UIColor, fIndex))
+        {
+            uiDesc.uiResource = ffxApiGetResourceDX12(ui->GetResource(), GetFfxApiState(ui->state));
+            uiDesc.flags = FFX_FRAMEGENERATION_UI_COMPOSITION_FLAG_ENABLE_INTERNAL_UI_DOUBLE_BUFFERING;
+        }
+    }
+
     FfxApiProxy::D3D12_Configure(&_swapChainContext, &uiDesc.header);
 
     if (fgConfig.HUDLessColor.resource != nullptr)
@@ -1941,7 +1956,10 @@ bool FSRFG_Dx12::Present()
 {
     auto fIndex = GetIndexWillBeDispatched();
 
-    if (Config::Instance()->FGDrawUIOverFG.value_or_default())
+    // Not the synthesized input's UI layer: FFX composes that one itself (Dispatch), and drawing it into the
+    // backbuffer here would blend the frame with itself.
+    if (Config::Instance()->FGDrawUIOverFG.value_or_default() &&
+        State::Instance().activeFgInput != FGInput::Synthesized)
     {
         auto ui = GetResource(FG_ResourceType::UIColor, fIndex);
         if (ui)

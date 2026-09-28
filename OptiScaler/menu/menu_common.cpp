@@ -3575,9 +3575,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             ImGui::Spacing();
         }
 
-        // The synthesized input's own settings. All four are read every base frame, so they apply at once
-        // (synthesized-frame-generation.md, "Motion into FG, and emulator behaviour"). Both fast-motion
-        // thresholds are measured on the motion field, so they do nothing without synthesized motion.
+        // The synthesized input's own settings. All of them are read every base frame, so they apply at once
+        // (synthesized-frame-generation.md, "Motion into FG, and emulator behaviour" and "The HUD"). Both
+        // fast-motion thresholds and the HUD mask work on the motion field, so they do nothing without
+        // synthesized motion.
         if (state.activeFgInput == FGInput::Synthesized)
         {
             ImGui::Spacing();
@@ -3617,6 +3618,30 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                 config->FGSynthesizedMinFps = minFps;
             ShowHelpMarker("Stops generating frames while the base frame rate is below this,\n"
                            "and resumes once it recovers. 0 is off");
+
+            // The HUD (synthesized-frame-generation.md, "The HUD: near depth and a UI layer"). Near depth changes
+            // nothing without a motion field, so it is disabled without one, like the fast-motion threshold.
+            ImGui::BeginDisabled(!synthMotion);
+            bool hudDepth = config->FGSynthesizedHudDepth.value_or_default();
+            if (ImGui::Checkbox("HUD depth", &hudDepth))
+                config->FGSynthesizedHudDepth = hudDepth;
+            ShowHelpMarker("Detects the HUD (pixels that stay still while the scene around\n"
+                           "them moves) and hands it to FSR FG as near depth, so the scene\n"
+                           "beside it is not blended with it and its own motion is kept.\n"
+                           "Needs Synthesized motion");
+            ImGui::EndDisabled();
+
+            ImGui::SameLine(0.0f, 16.0f);
+
+            ImGui::BeginDisabled(config->FGDisableUI.value_or_default());
+            bool hudLayer = config->FGSynthesizedHudLayer.value_or_default();
+            if (ImGui::Checkbox("HUD layer", &hudLayer))
+                config->FGSynthesizedHudLayer = hudLayer;
+            ShowHelpMarker("Experimental. Composes the detected HUD over generated frames\n"
+                           "from the real frame, through FSR FG's own UI layer, so it is\n"
+                           "never warped; real frames are unchanged. Off while \"Disable UI\n"
+                           "texture\" is on");
+            ImGui::EndDisabled();
 
             ImGui::PopItemWidth();
         }
