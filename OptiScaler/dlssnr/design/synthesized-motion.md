@@ -1,5 +1,13 @@
 # Synthesized motion vectors for the no-upscaler NR path
 
+Update 2026-09-28 (branch `synth-motion-pixel-refine`): **static overlays keep zero motion.** Generation
+Zero's crosshair and HUD smeared under synthesized FG because every pixel of an 8x8 block got the
+block's vector. The expand pass now chooses, per pixel, between that vector and zero by which one
+reconstructs the pixel's neighbourhood from the previous frame. Always on, no key. In the GPU harness
+it takes the smeared share of a static crosshair from 52% and 78% to 0.2% and 0.7%, for 0.01-0.04 ms
+on the RTX 4090. Design and numbers:
+[Static overlays: a per-pixel choice in the expand](#static-overlays-a-per-pixel-choice-in-the-expand).
+
 Update 2026-09-28: **a second motion source**, NVIDIA's Optical Flow Accelerator, behind
 `[DlssNr] SynthMotionSource=auto|ffx|nvofa` (auto = ffx). Code is in; its two shaders are written but
 not compiled, so until `precompile/build.sh` runs the source reports itself unavailable and the guide
@@ -333,6 +341,212 @@ build. Both print `SYNTH-MOTION PASS` over 12 scored sequences, with the sign cu
    D3D11 bridge, frame generation estimates its own. When frame generation publishes first (native
    D3D12), DLSS-NR takes that same-frame FidelityFX field rather than build the engine, so there
    `SynthMotionSource` only matters when frame generation's `SynthesizedMotion` is off.
+
+## Static overlays: a per-pixel choice in the expand
+
+Status 2026-09-28: implemented, and **passing the GPU harness** on the RTX 4090 under Proton (see
+"Measured", below). Not yet run in a game or on native Windows.
+
+### The report
+
+Generation Zero on Rafael's RTX 3060, native Windows: first person, fast camera, D3D11, no upscaler.
+It runs on the D3D11 bridge with synthesized FG, that is FSR 3.1 FG fed by this estimator's field
+(`FGInput=synthesized`), shared with DLSS-NR through the handoff. When the camera moves, the crosshair
+and the HUD smear. Switching DLSS-NR off does not change it, so it is frame generation, and the motion
+field it is given.
+
+### Why the field is wrong there
+
+FidelityFX's flow is one vector per 8x8 block at level 0, and the expand pass (ours) spreads it
+bilinearly over the block's pixels. A crosshair arm is 1-3 px wide. It covers a small part of the
+block it sits in, the rest of that block is the moving world, and the search matches the block by the
+world. So the arm's static pixels are handed the camera's vector, and FSR-FG displaces them along it
+in the generated frame. HUD text and panel edges fare the same wherever a block straddles them, and
+the bilinear blend carries a partial vector up to one block further, into pixels of blocks that matched
+correctly.
+
+The block cannot be made smaller: 8x8 is what FidelityFX's search is built and tuned for. The fix
+belongs where the field becomes per-pixel, in the expand.
+
+### The rule
+
+For each colour pixel `p`, with `v` the bilinear block vector the pass computes today and
+`d = round(v)`, halves rounded away from zero:
+
+- `S0`: the weighted sum of absolute differences over the 3x3 around `p` between the current luma
+  and the previous luma at the same positions (the zero hypothesis).
+- `Sv`: the same, against the previous luma displaced by `d` (the block's hypothesis; the field's
+  convention, `prev = cur + mv`).
+- The weights are 1-2-1 by 1-2-1 (sum 16). The luma is 8-bit, 0-255.
+- **Write zero when `2 * S0 + 64 < Sv`**, otherwise `v`, unchanged.
+
+In mean terms, zero must leave less than half the error `v` leaves, and be at least 4 levels better on
+average. Nothing is tested, and `v` is written, when:
+
+- `d` is zero: the two hypotheses are the same. Rounding halves away from zero keeps this to
+  vectors under half a pixel. HLSL's `round()` is half to even, so with it a pixel one blend step
+  from a zero block, at `(-0.5, -0.5)`, rounded to `d = 0` and was never tested; the harness found
+  that on the first run;
+- `p + d` falls outside the frame: the previous frame has nothing to compare, which is the content
+  entering at the border;
+- the field is zeroed anyway (`gZero`: reset, warm-up).
+
+### Why this margin
+
+A tie keeps `v`. The rule has to hold a moving scene still nowhere, and the cases where `S0` and `Sv`
+come out close are the ones where the pair cannot tell:
+
+- **A flat region**, such as a sky, a wall or a HUD panel's fill: both hypotheses reconstruct it.
+- **A line along the direction of motion**: the horizontal arm of a crosshair under a horizontal pan,
+  for example. Displaced along itself, it reads the same (the aperture problem). So `v` stays there,
+  and it is harmless for interpolation, which reads the same overlay at the displaced position.
+- **Noise and dithering**: they raise both sums alike.
+
+The ratio covers these. The 4-level floor covers the case where both sums are near zero and the
+ratio alone would flip on a single level.
+
+The other direction: zero wins only where the previous frame, at the same place, already shows what
+the current frame shows. So a pixel wrongly held still is, by construction, one whose content barely
+changed there, and interpolating it as static costs little. A truly moving textured pixel reads as a
+random mismatch under zero, as large as a wrong `v`'s, and keeps `v`.
+
+Why the weights are centre-heavy: for a pixel on a 1 px vertical line under a horizontal pan, the line
+is half the window's weight and the background the other half. That gives `S0 = 8 * d_bg`, the
+background's own frame-to-frame difference, and `Sv = 8 * c`, the line's contrast against the
+background it lands on. Zero wins when `c > 2 * d_bg + 8`. A plain 3x3 box would give the line only
+3 of 9 taps and need `c > 4 * d_bg + 12`. A 2 px line needs only `c > 0.67 * d_bg + 5.3`.
+
+### Inputs, bindings, formats
+
+- **Luma.** The level-0 luma of both frames is already there, full resolution `R8_UINT`: `_luma[parity][0]`
+  is the current frame, written by the prepare pass earlier in the same list, and `_luma[parity ^ 1][0]`
+  is the previous one.
+- **Bindings.** They go into the expand's existing UAV table as `u2` and `u3`, read as
+  `RWTexture2D<uint>`, the same way FidelityFX's search and scale passes read them. The table is
+  per parity, like theirs, so which texture is current is fixed per table.
+- **What does not change.** The root signature, the constants (still eight root dwords, no CBV), the
+  descriptor count, every other pass's bytecode, and the output format and state.
+- **Luma encoding.** It is FFX's, `uint(Y * 255)` of the saturated colour (Rec.709 weights, transfer
+  function 0), so levels are gamma-encoded for an SDR swapchain.
+
+### Cost
+
+- **The work.** Each 8x8 group loads the 10x10 luma of both frames into groupshared memory, 2 loads
+  per thread, and the undisplaced taps come from there. The 9 displaced taps stay texture loads,
+  since they differ per pixel. A pixel whose rounded vector is zero skips the scoring.
+- **The worst case** is a uniform pan, where every pixel is tested. The harness's timing sequences
+  are such pans.
+- **Measured** on the RTX 4090 with clocks locked at 2100/10501 MHz, as the median of the whole
+  estimator's `Record` against the same harness without the change. Before: four runs, 0.310-0.316 ms
+  at 1080p and 0.591-0.612 ms at 3440x1440. After: two runs, 0.328 ms at 1080p and 0.629-0.631 ms at
+  3440x1440.
+- **So the choice adds 0.01-0.02 ms at 1080p and 0.02-0.04 ms at 3440x1440.** Run-to-run spread is
+  about 0.02 ms here, so the 3440x1440 figure is not finer than that. An RTX 3060 has roughly a third
+  of this card's shader throughput, so expect about three times as much there (*estimate*).
+- **The version without the groupshared tile,** 27 texture loads per pixel, added 0.045-0.06 ms and
+  0.10-0.13 ms, for bit-identical output. It is not kept.
+
+### What it cannot fix
+
+- **A semi-transparent HUD over moving content.** The pixel is part overlay and part world, so
+  neither hypothesis reconstructs it. `v` stays, and it smears as before.
+- **A thin, low-contrast overlay on busy background.** A 1 px line needs a contrast above about twice
+  the background's own frame-to-frame difference, plus 8 levels.
+- **Flat and motion-aligned overlay pixels keep `v`** (see the margin). They are not smeared by it.
+- **The background uncovered from behind a static overlay.** This is a band as wide as the motion, on
+  the overlay's trailing side. It has no correspondence in the previous frame, and it may read zero
+  where the previous frame happens to match at the same place.
+- **Mixed motions within a block.** The choice is `v` or zero only. At the edge of a moving object over
+  a *moving* background, the blended vector matches neither motion, and this rule cannot pick one of
+  the neighbouring block vectors. A candidate set (the four block vectors, their blend and zero, the
+  lowest cost winning) would cover that. It is not needed for the report, and would change the field
+  at every motion boundary, so it is left as a separate step.
+- **The NVOFA source** is not refined:
+  - its luma is at most 540 lines, where a 2 px crosshair at 1440p is under 1 px and blurred into the
+    background;
+  - that luma belongs to the pair one frame older than the field's consumer;
+  - it rests in COMMON between queues.
+  Frame generation never takes an NVOFA field anyway: `Synth_Inputs` owns a FidelityFX estimator, and
+  DLSS-NR publishes to the handoff only when it has no NVOFA engine (risk 6 above). So the report's
+  path is fully covered.
+
+The HUD mask planned in [synthesized-frame-generation.md](synthesized-frame-generation.md) ("The HUD",
+step 4) is the other half of the problem. It composites the interface over generated frames, and it
+is not replaced by this. This change only stops the field from asking FSR to move what is static.
+DLSS-NR reads the same field, so the model's history of the HUD stops being reprojected along the
+camera too.
+
+### Test
+
+`tests/synth-motion-d3d12` gains two overlay sequences. The same static overlay is drawn over a
+background that pans (+8, 0) px per frame in one, and (+8, +8) in the other.
+
+- **The overlay.** A crosshair (2 px arms, a 1 px dark outline, a centre gap), a HUD panel (opaque
+  fill, a 2 px border, two rows of glyph-like 5x7 bitmaps at 2x), and outlined glyphs drawn straight
+  over the scene.
+- **Overlay pixels are scored against zero.** Reported: mean `|v|` and the fraction with `|v| > 0.5`
+  px.
+- **Ambiguous overlay pixels are judged apart.** An overlay pixel whose 3x3 in the current frame is
+  exactly reproduced by the previous frame displaced by the camera's motion (flat fill, lines along
+  the motion) cannot be told from moving content by any estimator working on the pair. The judged
+  set leaves those out. The full set is reported too.
+- **Smeared overlay pixels are judged.** A pixel is smeared when it carries more than 0.5 px *and*
+  its own displacement reads another colour than the overlay's: what an interpolator drags. At most
+  2% of all overlay pixels, and 5% of each element's, may be smeared. The mean `|v|` of the clear
+  (not ambiguous) overlay pixels must be under 0.5 px.
+- **Background pixels are scored against the pan.** A band around each overlay element (the
+  disocclusion and the block blend) and the usual border band are left out.
+- **It must fail on the code before this change and pass after it.** Every existing sequence must
+  keep its EPE or improve it.
+
+**Why the smeared criterion replaced the first one.** The first judged criterion was "at most 5% of
+the clear overlay pixels with `|v| > 0.5`". After the change, 4.9% (+8x) and 8.5% (+8+8) of them
+still carried a vector. A diagnostic listed them:
+
+- **Harmless.** 281 of 388 (+8x) and 602 of 1119 (+8+8) were reproduced exactly by their *own*
+  vector. That vector was a blend across an element's edge, from -0.5 to about -5 px, not the
+  camera's -8 px, and it displaced a stroke or the panel's fill along itself. The pair cannot object
+  to such a vector, and an interpolator reads the same overlay through it. The ambiguity test only
+  knew the camera's motion, so it had called those pixels clear.
+- **Real.** Many of the rest sat at `(-0.5, -0.5)`, which `round()` sent to no test at all. That is
+  now fixed in the rule above.
+- **The remainder** were outline pixels on a horizontal edge under a horizontal pan. Their window
+  holds moving background in both hypotheses, so it is a tie, and the pixel itself reads the same
+  outline either way.
+
+So the judged quantity is now what makes the overlay visibly move. The share with `|v| > 0.5` stays
+in the report.
+
+**`--source nvofa`** runs the same sequences; its overlay is reported, not judged, since that source
+has no per-pixel choice (above).
+
+### Measured (2026-09-28)
+
+RTX 4090 under Proton, clocks locked, 1280x720, frames 6-13 of each sequence (past FFX's warm-up).
+"Smeared" is a share of the element's pixels; "clear |v|" is the mean over the clear overlay pixels.
+
+| | Before | After |
+|---|---|---|
+| `overlay_+8x`: smeared, crosshair / text / panel / all | 52.0% / 32.5% / 2.2% / 6.0% | 0.2% / 0.1% / 0.0% / 0.0% |
+| `overlay_+8x`: clear \|v\|, and share > 0.5 px | 0.849 px, 22.9% | 0.131 px, 4.8% |
+| `overlay_+8x`: all overlay pixels > 0.5 px | 22.2% | 14.2% (the rest: ambiguous, or moved along themselves) |
+| `overlay_+8+8`: smeared, crosshair / text / panel / all | 78.4% / 52.5% / 6.6% / 12.3% | 0.7% / 0.2% / 0.3% / 0.3% |
+| `overlay_+8+8`: clear \|v\|, and share > 0.5 px | 1.181 px, 27.6% | 0.218 px, 6.1% |
+| Background away from the overlay, EPE (both) | 0.000 px | 0.000 px |
+| Band within 24 px of an element, EPE, +8x / +8+8 | 0.945 / 1.464 px | 1.151 / 1.774 px |
+| Pans (8), static, object, abandon, EPE | 0.000 px | 0.000 px |
+| Cut (steady frames), EPE; `SceneCut()` | 0.800 px; raised at t=11 | 0.800 px; raised at t=11 |
+
+- **The band got worse**, and it is the limit named above. Its share over 0.5 px moved only from 24.2%
+  to 24.9% (+8x) and from 30.9% to 31.2% (+8+8). What rose is the size of those errors: background
+  pixels next to an element, including the background uncovered from behind it, that had a partial
+  vector now read zero where the previous frame at the same place matched better.
+- **NVOFA, for comparison** (unrefined): it smears 71.7% (+8x) and 93.3% (+8+8) of the crosshair.
+  Everything else there passes as before.
+
+Not tested here: FSR-FG's response to the field, and a real game. Generation Zero on Rafael's PC is
+the check, along with a native Windows run of the new binding (two more `R8_UINT` UAVs in the expand's
+table, the same format and access FidelityFX's search already uses there).
 
 ## 1. The problem, stated as narrowly as it actually is
 

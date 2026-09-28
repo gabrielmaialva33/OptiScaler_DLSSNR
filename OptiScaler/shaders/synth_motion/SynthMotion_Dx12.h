@@ -42,7 +42,8 @@ class Estimator_Dx12
 
     // R16G16_FLOAT at the colour's extent: .rg = displacement from the current frame to the previous one,
     // in colour pixels, +x right, +y down (the DLSS/FSR convention: prev = cur + mv). Zero where no
-    // motion was found and on the first frame after a reset. Left in
+    // motion was found, on the first frame after a reset, and on a pixel the previous frame reproduces
+    // clearly better standing still than moved by its 8x8 block's vector (a static overlay). Left in
     // D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE. Null until a large enough frame was recorded.
     ID3D12Resource* Motion() const { return _motion; }
 
