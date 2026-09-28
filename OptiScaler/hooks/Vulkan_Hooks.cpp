@@ -498,6 +498,20 @@ PFN_vkVoidFunction hkvkGetDeviceProcAddr(VkDevice device, const char* pName)
 
 void VulkanHooks::Hook(HMODULE vulkan1)
 {
+    // [Vulkan] SkipHooks or the marker (dllmain.cpp, ResolveVulkanHookPolicy): none of the bundle is
+    // installed, at startup or when the loader hook sees vulkan-1.dll again later.
+    if (State::Instance().vulkanHooksSkipped)
+    {
+        static bool reported = false;
+        if (!reported)
+        {
+            reported = true;
+            LOG_WARN("Skipping vulkan-1.dll hooks, as [Vulkan] SkipHooks or the marker asks");
+        }
+
+        return;
+    }
+
     if (vulkanModule == nullptr)
         vulkanModule = vulkan1;
 

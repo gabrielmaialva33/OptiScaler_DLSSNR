@@ -801,7 +801,7 @@ class Config
     // vulkanwdx12
     CustomOptional<bool> VulkanUseCopyForInputs { false };
     CustomOptional<bool> VulkanUseCopyForOutput { false };
-    CustomOptional<bool> VulkanSkipHooks { false };
+    CustomOptional<bool> VulkanSkipHooks { false }; // [Vulkan] SkipHooks: no vulkan-1.dll hooks at all
 
     // NVAPI Override
     CustomOptional<bool> DisableFlipMetering { false };

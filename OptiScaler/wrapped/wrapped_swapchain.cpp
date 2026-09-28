@@ -469,12 +469,10 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         LOG_DEBUG("Final SyncInterval: {}", SyncInterval);
     }
 
-    // DXVK check, it's here because of upscaler time calculations
-    //
-    // D3D11 only. vkd3d-proton sets usesDxvk as well, and a D3D12 title returning here leaves
-    // MenuOverlayVk as the only ImGui backend: it submits on a queue of its own into the present path
-    // Streamline owns, which removes the device. Falling through reaches MenuOverlayDx::Present, which
-    // draws on the game's queue.
+    // Keep the DXVK D3D11 Vulkan path after upscaler time calculations.
+    // DXGI also reports DXVK for D3D12/vkd3d, which must reach the DirectX overlay below.
+    // Linux fork: with the vulkan-1.dll hooks skipped there is no Vulkan overlay, so D3D11 falls
+    // through to MenuOverlayDx as well.
     if (IdentifyGpu::getPrimaryGpu().usesDxvk && isD3D11 && !State::Instance().vulkanHooksSkipped)
     {
         if (pPresentParameters == nullptr)
@@ -488,16 +486,8 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         }
         else if (presentResult == DXGI_ERROR_DEVICE_REMOVED)
         {
-            if (isD3D11)
-            {
-                if (State::Instance().currentD3D11Device != nullptr)
-                    Util::GetDeviceRemovedReason(State::Instance().currentD3D11Device);
-            }
-            else
-            {
-                if (State::Instance().currentD3D12Device != nullptr)
-                    Util::GetDeviceRemovedReason(State::Instance().currentD3D12Device);
-            }
+            if (State::Instance().currentD3D11Device != nullptr)
+                Util::GetDeviceRemovedReason(State::Instance().currentD3D11Device);
         }
         else
         {

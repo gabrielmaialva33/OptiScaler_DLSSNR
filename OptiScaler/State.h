@@ -324,7 +324,8 @@ class State
     bool vulkanCreatingSC = false;
     bool creatingD3DDevice = false;
     bool vulkanSkipHooks = false;
-    bool vulkanHooksSkipped = false; // Linux: Vulkan hooks disabled via marker file, use D3D overlay path
+    bool vulkanHooksSkipped = false; // [Vulkan] SkipHooks or the Linux marker file: no vulkan-1.dll hooks,
+                                     // the menu uses the D3D overlay path (dllmain ResolveVulkanHookPolicy)
 
     // A D3D11-to-D3D12 bridge is carrying the neural pass because this title has no upscaler.
     //
