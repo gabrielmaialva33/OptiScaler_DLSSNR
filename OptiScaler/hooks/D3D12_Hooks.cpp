@@ -1541,7 +1541,10 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
         // if (Config::Instance()->UESpoofIntelAtomics64.value_or_default())
         //     UnhookDevice();
 
-        if (State::Instance().gameQuirks & GameQuirk::CreateSLOnThe2ndDevice)
+        // Not on the D3D11-to-D3D12 bridge, where InitWithD3D12 binds the bridge's device and a later one must
+        // not take Streamline from it (the DX11 executable is witcher3.exe too)
+        if ((State::Instance().gameQuirks & GameQuirk::CreateSLOnThe2ndDevice) &&
+            State::Instance().currentD3D11Device == nullptr)
         {
             static void* lastDevice = nullptr;
 

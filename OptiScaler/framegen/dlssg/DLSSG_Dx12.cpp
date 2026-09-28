@@ -49,6 +49,15 @@ bool DLSSG_Dx12::CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQue
         }
     }
 
+    // Streamline may be up with none of DLSS-G's entry points bound (its device never set, or neither the
+    // interposer nor the bundled plugin answered). Refuse before a swapchain exists, instead of calling through
+    // null below and in Dispatch.
+    if (StreamlineProxy::DLSSGGetState() == nullptr || StreamlineProxy::DLSSGSetOptions() == nullptr)
+    {
+        LOG_ERROR("Streamline bound no DLSS-G entry points; not creating the DLSS-G swapchain");
+        return false;
+    }
+
     _width = desc->BufferDesc.Width;
     _height = desc->BufferDesc.Height;
 
@@ -138,6 +147,15 @@ bool DLSSG_Dx12::CreateSwapchain1Internal(IDXGIFactory* factory, ID3D12CommandQu
         {
             return false;
         }
+    }
+
+    // Streamline may be up with none of DLSS-G's entry points bound (its device never set, or neither the
+    // interposer nor the bundled plugin answered). Refuse before a swapchain exists, instead of calling through
+    // null below and in Dispatch.
+    if (StreamlineProxy::DLSSGGetState() == nullptr || StreamlineProxy::DLSSGSetOptions() == nullptr)
+    {
+        LOG_ERROR("Streamline bound no DLSS-G entry points; not creating the DLSS-G swapchain");
+        return false;
     }
 
     _width = desc->Width;

@@ -518,7 +518,11 @@ class StreamlineProxy
             // The bundled plugins are no longer opened here. Binding now happens inside
             // SetD3DDeviceAndBind, which is the earliest point slGetFeatureFunction is legal, and
             // falls back to these same hooks if the interposer answers nothing.
-            if (State::Instance().gameQuirks & GameQuirk::CreateSLOnThe2ndDevice)
+            // Not for a D3D11 game on the D3D11-to-D3D12 bridge: the bridge's device is its only one, so no second
+            // device would ever bind. witcher3.exe names the DX11 executable too (currentD3D11Device is recorded
+            // before the bridge creates this device, and only for a D3D11 swapchain).
+            if ((State::Instance().gameQuirks & GameQuirk::CreateSLOnThe2ndDevice) &&
+                State::Instance().currentD3D11Device == nullptr)
             {
                 // slSetD3DDevice moved to hkD3D12CreateDevice, which calls SetD3DDevice() -- the
                 // accessor now hands out SetD3DDeviceAndBind, so that path binds too.
