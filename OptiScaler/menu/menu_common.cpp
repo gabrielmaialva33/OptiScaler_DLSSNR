@@ -3320,7 +3320,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             "Can be used with any FG Output\n\nRequires enabling FSR-FG in game settings\nSupports HUDless out of the box" },
         { FGInput::XeFG, "XeFG" },
         { FGInput::Synthesized, "Synthesized",
-            "Experimental, for games with no upscaler\n\nNo motion vectors needed, uses only the presented image\nD3D11 and D3D12 games, FSR FG output only" }
+            "Experimental, for games with no upscaler\n\nNo motion vectors needed, uses only the presented image\nD3D11 and D3D12 games, FSR FG or DLSSG output\n\nDLSSG needs an RTX 40 or newer, the Streamline files\nand the None (Real DLSSG) Nvngx replacement" }
     };
 
     // clang-format on
@@ -3587,8 +3587,9 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             bool synthMotion = config->FGSynthesizedMotion.value_or_default();
             if (ImGui::Checkbox(Localization::Label("Synthesized motion"), &synthMotion))
                 config->FGSynthesizedMotion = synthMotion;
-            ShowHelpMarker(Localization::Tr("Hands FSR FG a motion field estimated from the presented frames\n"
-                                            "instead of zero motion; the same estimate DLSS-NR uses when both are on"));
+            ShowHelpMarker(Localization::Tr("Hands frame generation a motion field estimated from the presented\n"
+                                            "frames instead of zero motion; the same estimate DLSS-NR uses when\n"
+                                            "both are on"));
 
             ImGui::BeginDisabled(!synthMotion);
             // Stored as a share, 0..1; shown as a percentage.
@@ -3609,9 +3610,9 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                                    fastMotion <= 0.0f ? Localization::Tr("Off") : "%.0f px"))
                 config->FGSynthesizedFastMotion = fastMotion;
             ShowHelpMarker(Localization::Tr("Repeats frames whenever the median motion exceeds this many pixels per\n"
-                                            "base frame, however coherent, like AMD's Fast Motion Response. Every\n"
-                                            "repeat restarts FSR's own optical flow for several frames, so keep it\n"
-                                            "above normal camera speed. 0 is no cap"));
+                                            "base frame, however coherent, like AMD's Fast Motion Response. With\n"
+                                            "FSR FG, every repeat restarts its optical flow for several frames, so\n"
+                                            "keep it above normal camera speed. 0 is no cap"));
             ImGui::EndDisabled();
 
             float minFps = config->FGSynthesizedMinFps.value_or_default();
@@ -3629,21 +3630,22 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             if (ImGui::Checkbox(Localization::Label("HUD depth"), &hudDepth))
                 config->FGSynthesizedHudDepth = hudDepth;
             ShowHelpMarker(Localization::Tr("Detects the HUD (pixels that stay still while the scene around\n"
-                                            "them moves) and hands it to FSR FG as near depth, so the scene\n"
-                                            "beside it is not blended with it and its own motion is kept.\n"
+                                            "them moves) and hands it to frame generation as near depth, so the\n"
+                                            "scene beside it is not blended with it and its own motion is kept.\n"
                                             "Needs Synthesized motion"));
             ImGui::EndDisabled();
 
             ImGui::SameLine(0.0f, 16.0f);
 
-            ImGui::BeginDisabled(config->FGDisableUI.value_or_default());
+            // Only FFX composes the layer; DLSS-G would be handed it and do nothing with it (Synth_Hud.h).
+            ImGui::BeginDisabled(config->FGDisableUI.value_or_default() || state.activeFgOutput != FGOutput::FSRFG);
             bool hudLayer = config->FGSynthesizedHudLayer.value_or_default();
             if (ImGui::Checkbox(Localization::Label("HUD layer"), &hudLayer))
                 config->FGSynthesizedHudLayer = hudLayer;
-            ShowHelpMarker(Localization::Tr("Experimental. Composes the detected HUD over generated frames\n"
-                                            "from the real frame, through FSR FG's own UI layer, so it is\n"
-                                            "never warped; real frames are unchanged. Off while \"Disable UI\n"
-                                            "texture\" is on"));
+            ShowHelpMarker(Localization::Tr("Experimental, FSR FG output only. Composes the detected HUD over\n"
+                                            "generated frames from the real frame, through FSR FG's own UI layer,\n"
+                                            "so it is never warped; real frames are unchanged. Off while \"Disable\n"
+                                            "UI texture\" is on"));
             ImGui::EndDisabled();
 
             ImGui::PopItemWidth();

@@ -1083,7 +1083,8 @@ the question is only what DLSS-G does with each.
   - Neither site applies the quirk when the game's own device is D3D11. The signal is
     `State::currentD3D11Device`: every bridge creation site records it before `WithDx12` creates the D3D12
     device (`hooks/DxgiFactory_Hooks.cpp:560`, `:962`; `DxgiFactory_WrappedCalls.cpp:234`, `:627`).
-  - Only a swapchain made on a D3D11 device sets it, so the DX12 executable is untouched.
+  - Only a swapchain made on a D3D11 device sets it, so the DX12 executable, which presents with D3D12, keeps
+    the quirk.
   - Independently, the DLSS-G swapchain creation refuses when Streamline bound no DLSS-G entry point, before
     a swapchain exists. A failed bind then leaves the bridge on its plain presenter, or a D3D12 game on its
     own swapchain, instead of faulting. On the quirk's own title that path already faulted; it now refuses.
@@ -1117,6 +1118,30 @@ On this workstation's 4090, `FGInput=synthesized`, `FGOutput=dlssg`, `FGNvngxRep
   bound through the active interposer`, or its fallback line, before `Max supported interpolations`. Under
   the quirk that line would not appear until a second D3D12 device, which the bridge never creates.
 - PCSX2 on D3D12, for NR's once-per-base-frame count under DLSS-G.
+
+### Built (2026-09-28)
+
+On `synth-fg-dlssg`, not yet compiled or run by the author of this section; host tests only.
+- **Admission.** `CheckForFGStatus` lets `FGOutput::DLSSG` through for this input, and its toast and log name
+  both outputs. `Dx11wDx12::WantedForFrameGeneration` builds the bridge for it.
+- **The output.** `DLSSG_Dx12::EvaluateState` activates for `Synthesized`, and `Present` skips the
+  `FGDrawUIOverFG` draw for it, both as in FSR-FG.
+- **Failing closed.** Both `CreateSwapchain*Internal` refuse when `DLSSGGetState` or `DLSSGSetOptions` is
+  null, right after Streamline's initialisation and before the swapchain is made. The check sits there, not
+  at the `DLSSGGetState` call itself: skipping only that call would create the swapchain and then fault on
+  `DLSSGSetOptions` in the first `Dispatch`.
+- **The HUD plan.** `PlanSynthHud(..., layerComposed)`, fed `activeFgOutput == FSRFG` by `HudPlan()`. Under
+  DLSS-G the layer is never planned, recorded or fed, and a layer asked for alone records no mask. The menu
+  disables "HUD layer" under any output but FSR FG. The log lines that named FSR-FG name `fg->Name()`.
+- **The quirk.** Both `CreateSLOnThe2ndDevice` sites also require `currentD3D11Device == nullptr`, one
+  condition each. A DX12 title that made a D3D11 swapchain before its first D3D12 device would lose the quirk
+  too; The Witcher 3's DX12 executable is not known to, and nobody has checked.
+- **Tests.** `bridge-lifetime`: the synthesized input with DLSSG builds the FG bridge, with the pass when NR is
+  at present and an idle host when it is off there, and Reprojection is refused. Restoring the old predicate
+  fails them. `fg-synth-policy`: the layer only with a composing output, near depth the same under either, over
+  all 32 combinations.
+- **Text.** The menu's input tooltip and three help texts, their pt-BR entries, the `[FrameGen]` comments in
+  `OptiScaler.ini`, and `Config.md`.
 
 ## Open questions
 

@@ -566,7 +566,7 @@ NVIDIA drivers from 616.64 the driver's own NGX loader creates feature 18 itself
 Every other FG input needs the depth and motion vectors a game hands to its upscaler. The
 experimental `synthesized` input is for games that call no upscaler at all: it generates from
 the presented image alone. It works in D3D12 games and in D3D11 games, which OptiScaler carries
-over a D3D12 bridge, and only with the FSR FG output. Design and status:
+over a D3D12 bridge, with the FSR FG output or the DLSSG output. Design and status:
 [synthesized-frame-generation.md](OptiScaler/dlssnr/design/synthesized-frame-generation.md).
 The full `[FrameGen]` section is in the distributed [OptiScaler.ini](OptiScaler.ini).
 
@@ -576,18 +576,37 @@ The full `[FrameGen]` section is in the distributed [OptiScaler.ini](OptiScaler.
 Enabled=true
 
 ; synthesized - Experimental. For games that call no upscaler: generates from the presented image
-; alone, no motion vectors or depth needed. D3D11 and D3D12 games, FSR FG output only.
+; alone, no motion vectors or depth needed. D3D11 and D3D12 games, FSR FG or DLSSG output.
 FGInput=synthesized
 
 ; fsrfg - requires amd_fidelityfx_dx12.dll OR amd_fidelityfx_loader_dx12.dll + amd_fidelityfx_framegeneration_dx12.dll
 FGOutput=fsrfg
 ```
 
+DLSSG takes the same input on an RTX 40 or newer. It needs NVIDIA's Streamline DLLs and
+`nvngx_dlssg.dll` in the `OptiScaler/streamline` folder, which OptiScaler does not ship, and the
+real DLSSG rather than the default replacement:
+
+```ini
+[FrameGen]
+; dlssg - requires streamline dlls inside 'OptiScaler/streamline' folder + nvngx_dlssg.dll
+FGOutput=dlssg
+
+; None - real DLSSG. The default (auto) is Nukems, an FSR 3 replacement this input is not tested with
+FGNvngxReplacement=None
+```
+
+If Streamline reports that the GPU has no DLSSG while `FGNvngxReplacement=None`, OptiScaler writes
+`FGNvngxReplacement=Nukems` into the ini, says so in a message box and closes the game; on such a
+GPU use `FGOutput=fsrfg`. With DLSSG, `SynthesizedHudLayer` does nothing (DLSSG does not compose
+it), and whether `SynthesizedFastMotion` and `SynthesizedIncoherence` repeat frames there has not
+been measured.
+
 Four optional keys refine it, all off by default:
 
 ```ini
 [FrameGen]
-; Hands FSR FG the synthesized motion field (an optical-flow estimate of the presented frames)
+; Hands FG the synthesized motion field (an optical-flow estimate of the presented frames)
 ; instead of zero motion vectors. When [DlssNr] SynthMotion is on too, the field is computed once.
 ; true or false - Default (auto) is false
 SynthesizedMotion=true
@@ -600,8 +619,8 @@ SynthesizedMotion=true
 SynthesizedIncoherence=0.25
 
 ; Needs SynthesizedMotion. Hard cap: repeats frames while the median motion exceeds this many pixels
-; per base frame, however coherent (like AMD's Fast Motion Response). Every repeat restarts FSR's own
-; optical flow for several frames, so keep it well above normal camera speed.
+; per base frame, however coherent (like AMD's Fast Motion Response). With FSR FG every repeat restarts
+; its optical flow for several frames, so keep it well above normal camera speed.
 ; float value, pixels - Default (auto) is 0, no cap
 SynthesizedFastMotion=64
 
@@ -616,13 +635,14 @@ Design: "The HUD: near depth and a UI layer" in the note above.
 
 ```ini
 [FrameGen]
-; Needs SynthesizedMotion. Hands FSR FG the detected HUD as near depth, so the scene beside it is not
+; Needs SynthesizedMotion. Hands FG the detected HUD as near depth, so the scene beside it is not
 ; blended with it in generated frames and its own zero motion is kept.
 ; true or false - Default (auto) is true
 SynthesizedHudDepth=true
 
-; Experimental. Composes the detected HUD over generated frames from the real frame, through FSR FG's own
-; UI layer, so it is never warped; real frames are unchanged. Refused when DisableUI=true.
+; Experimental, FSR FG output only. Composes the detected HUD over generated frames from the real frame,
+; through FSR FG's own UI layer, so it is never warped; real frames are unchanged. Refused when
+; DisableUI=true.
 ; true or false - Default (auto) is false
 SynthesizedHudLayer=true
 ```
