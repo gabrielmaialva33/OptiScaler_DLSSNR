@@ -50,16 +50,11 @@ repo), which adds Linux/Proton overlay patches on top.
   the machine. Production changes and anything unproven go on a branch and merge to
   `dlss-neural-rendering` once they are measured; committing straight to the default branch
   publishes the tip of a public repository that other projects reference.
-  **On 2026-09-27 the same unidentified actor did more than push.**
-  - At 19:31:41 the reflog shows `checkout: moving from merge-optiscaler-20260927 to
-    dlss-neural-rendering`, then a fast-forward of the default branch to that scratch branch's
-    untested merge commit.
-  - At 19:32 the scratch branches `merge-optiscaler-20260927` and `synth-fg` were deleted.
-  - At 18:39 a `reset: moving to HEAD` discarded another session's uncommitted edit.
-  - No agent of this session was running at those moments, and no other Claude session had this
-    repository as its cwd.
-  - So a scratch branch is not a guarantee either. Keep what matters committed, and check
-    `git reflog --date=iso` before assuming the default branch is where you left it.
+  **The user also operates this repository by hand, alongside Claude sessions.** The 2026-09-27
+  reflog entries that looked like automation were the user's own git work: the fast-forward of
+  `dlss-neural-rendering` to `merge-optiscaler-20260927` at 19:31, the deletion of that branch and
+  `synth-fg`, and a `reset: moving to HEAD` at 18:39. So before assuming the default branch is where
+  you left it, check `git reflog --date=iso`, and do not read an unexpected branch move as a fault.
 - **Never commit** `OptiScaler/resource_build_date.h`, `OptiScaler/resource_build_commit.h`, `x64/`,
   or `.winx/`. All are gitignored.
 - **The tree layout is upstream's, and stays that way.** The usual C++ advice (Pitchfork, the
