@@ -20,6 +20,7 @@ namespace
 // A gap this long between two estimates means the frame the estimator last saw is not the previous
 // one (FG paused, the key toggled, DLSS-NR supplied the field meanwhile). Well above any frame time.
 constexpr long long kMotionStaleMs = 250;
+constexpr long long kFastSummaryMs = 10000;
 
 // R16G16_FLOAT, and every fourth pixel of a sampled row is enough for a median.
 constexpr UINT kSampleBytesPerPixel = 4;
@@ -895,6 +896,33 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
     }
 
     const auto action = _policy.Decide();
+
+    // How often the fast-motion response repeated a frame, summarised every 10 s while it did, so the
+    // threshold can be tuned from the log as well as by eye (the menu's "Fast motion repeat").
+    {
+        const long long now = NowMs();
+        ++_fastWindowFrames;
+        if (action == SynthFgPolicy::Action::Reset && _policy.Fast())
+            ++_fastRepeats;
+
+        if (_fastWindowStartMs == 0)
+        {
+            _fastWindowStartMs = now;
+        }
+        else if (now - _fastWindowStartMs >= kFastSummaryMs)
+        {
+            if (_fastRepeats > 0)
+            {
+                LOG_INFO("synthesized FG input: fast motion repeated {} of the last {} base frames ({:.0f} px "
+                         "threshold)",
+                         _fastRepeats, _fastWindowFrames, cfg.FGSynthesizedFastMotion.value_or_default());
+            }
+
+            _fastRepeats = 0;
+            _fastWindowFrames = 0;
+            _fastWindowStartMs = now;
+        }
+    }
     ID3D12Resource* frameMotion = _frameMotion;
     const bool frameSceneCut = _frameSceneCut;
     _frameMotion = nullptr;

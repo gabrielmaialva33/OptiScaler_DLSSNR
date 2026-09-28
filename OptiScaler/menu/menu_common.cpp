@@ -3575,6 +3575,40 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             ImGui::Spacing();
         }
 
+        // The synthesized input's own settings. All three are read every base frame, so they apply at once
+        // (synthesized-frame-generation.md, "Motion into FG, and emulator behaviour"). The fast-motion
+        // threshold is measured on the motion field, so it does nothing without synthesized motion.
+        if (state.activeFgInput == FGInput::Synthesized)
+        {
+            ImGui::Spacing();
+            ImGui::PushItemWidth(220.0f * menuResScale);
+
+            bool synthMotion = config->FGSynthesizedMotion.value_or_default();
+            if (ImGui::Checkbox("Synthesized motion", &synthMotion))
+                config->FGSynthesizedMotion = synthMotion;
+            ShowHelpMarker("Hands FSR FG a motion field estimated from the presented frames\n"
+                           "instead of zero motion; the same estimate DLSS-NR uses when both are on");
+
+            ImGui::BeginDisabled(!synthMotion);
+            float fastMotion = config->FGSynthesizedFastMotion.value_or_default();
+            if (ImGui::SliderFloat("Fast motion repeat", &fastMotion, 0.0f, 64.0f,
+                                   fastMotion <= 0.0f ? "Off" : "%.0f px"))
+                config->FGSynthesizedFastMotion = fastMotion;
+            ShowHelpMarker("Repeats frames instead of interpolating them while the median motion\n"
+                           "exceeds this many pixels per base frame, like AMD's Fast Motion Response.\n"
+                           "Lower catches slower pans and hides more of the HUD dragging, at the cost\n"
+                           "of fewer generated frames. 0 is off");
+            ImGui::EndDisabled();
+
+            float minFps = config->FGSynthesizedMinFps.value_or_default();
+            if (ImGui::SliderFloat("Minimum base fps", &minFps, 0.0f, 60.0f, minFps <= 0.0f ? "Off" : "%.0f fps"))
+                config->FGSynthesizedMinFps = minFps;
+            ShowHelpMarker("Stops generating frames while the base frame rate is below this,\n"
+                           "and resumes once it recovers. 0 is off");
+
+            ImGui::PopItemWidth();
+        }
+
         const bool dlssgInputOrOutput =
             state.activeFgOutput == FGOutput::DLSSG || state.activeFgInput == FGInput::DLSSG;
 
