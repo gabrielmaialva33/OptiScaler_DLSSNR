@@ -1,7 +1,9 @@
 # nr-uimask-rule
 
-The per-pixel rule of DLSS-NR's HUD-protection mask, `OptiScaler/shaders/dlssnr/precompile/dlssnr_uimask_rule.h`,
-is the code the shader (`dlssnr_uimask.hlsl`) includes. This suite includes the same header in C++, with
+The per-pixel rule of DLSS-NR's HUD-protection mask, `OptiScaler/shaders/synth_motion/precompile/static_overlay_rule.h`,
+is the code the shader (`dlssnr_uimask.hlsl`) includes, and since 2026-09-28 synthesized frame generation's HUD
+mask (`synth_overlay_detect.hlsl`) too; it lived in `shaders/dlssnr/precompile/` as `dlssnr_uimask_rule.h`
+before that, with the same text. This suite includes the same header in C++, with
 the shader's texture loads replaced by array lookups that clamp the same way, and runs it over synthetic
 frame sequences exactly as the shader does: last frame's state in, next frame's state out.
 

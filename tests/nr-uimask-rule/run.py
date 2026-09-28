@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The static-overlay mask's per-pixel rule (shaders/dlssnr/precompile/dlssnr_uimask_rule.h), the code the
+"""The static-overlay mask's per-pixel rule (shaders/synth_motion/precompile/static_overlay_rule.h), the code the
 shader runs, over synthetic frame sequences, compiled under ASan/UBSan."""
 from pathlib import Path
 import subprocess

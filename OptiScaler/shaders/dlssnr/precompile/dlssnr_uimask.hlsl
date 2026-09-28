@@ -2,7 +2,9 @@
 // it moves is interface, and the model is told to leave it alone (DLSSNR.UIAlpha, with UICorrection on and
 // the model's own input as DLSSNR.Backbuffer). dlssnr/design/hud-protection.md is the reasoning; the idea is
 // afmf-linux's (MIT) static-overlay test, the gates and hysteresis are ours. The per-pixel rule lives in
-// dlssnr_uimask_rule.h, shared with the host test tests/nr-uimask-rule.
+// shaders/synth_motion/precompile/static_overlay_rule.h, shared with synthesized frame generation's HUD mask
+// and the host test tests/nr-uimask-rule; it moved there from this directory unchanged, and this shader's
+// bytecode did not change with it.
 //
 // Precompiled like dlssnr.hlsl: editing this or the rule alone changes nothing. From this directory:
 //   dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect dlssnr_uimask.hlsl -Fo DlssNr_UiMask_Shader.cso
@@ -57,7 +59,7 @@ float2 AccPrevAt(int2 p) { return gAccPrev.Load(int3(Clamped(p), 0)); }
 #define UM_CHANGE(x, y) ChangeAt(int2(x, y))
 #define UM_PROT(x, y) AccPrevAt(int2(x, y)).x
 #define UM_STREAK(x, y) AccPrevAt(int2(x, y)).y
-#include "dlssnr_uimask_rule.h"
+#include "../../synth_motion/precompile/static_overlay_rule.h"
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)

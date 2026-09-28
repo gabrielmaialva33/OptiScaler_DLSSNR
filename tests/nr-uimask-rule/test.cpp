@@ -1,4 +1,4 @@
-// The static-overlay mask's per-pixel rule (OptiScaler/shaders/dlssnr/precompile/dlssnr_uimask_rule.h),
+// The static-overlay mask's per-pixel rule (OptiScaler/shaders/synth_motion/precompile/static_overlay_rule.h),
 // the exact code the shader runs, over synthetic frame sequences. The shader's own loads become array
 // lookups with the same clamping; everything else is the production header.
 #include <algorithm>
@@ -36,7 +36,7 @@ float Streak(int x, int y) { return g_streak[Index(x, y)]; }
 #define UM_CHANGE(x, y) Change(x, y)
 #define UM_PROT(x, y) Prot(x, y)
 #define UM_STREAK(x, y) Streak(x, y)
-#include <shaders/dlssnr/precompile/dlssnr_uimask_rule.h>
+#include <shaders/synth_motion/precompile/static_overlay_rule.h>
 
 namespace
 {

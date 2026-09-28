@@ -110,7 +110,9 @@ estimator and the guide resample were ruled out: the rim was as strong with both
 "A falsely protected pixel shows the game's own pixel" holds, but NR shifts tone globally, so a raw
 pixel among NR pixels is a visible seam. False positives have to be rare, not merely harmless.
 
-**The rule now** (`precompile/dlssnr_uimask_rule.h`, shared with the host test `nr-uimask-rule`):
+**The rule now** (`precompile/dlssnr_uimask_rule.h`, shared with the host test `nr-uimask-rule`; since
+2026-09-28 it is `shaders/synth_motion/precompile/static_overlay_rule.h`, unchanged, shared with
+synthesized frame generation's HUD mask as well):
 
 1. **Still pixel:** `own < StaticEps` (0.008), as before.
 2. **Still core:** every pixel within 2 px (the 5x5) also changed less than `CoreEps` (0.012).
