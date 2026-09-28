@@ -33,6 +33,11 @@ tier = "host"
 timeout = 300
 summary = "What the present host builds and when: tiny frames, resizes, the pass switched off."
 
+[nr-uimask-rule]
+tier = "host"
+timeout = 300
+summary = "The HUD-protection mask's per-pixel rule, the header the shader runs, over synthetic sequences: a glyph over a pan is protected, still scenery beside a moving silhouette is not."
+
 [nr-gpu-timing]
 tier = "host"
 timeout = 300

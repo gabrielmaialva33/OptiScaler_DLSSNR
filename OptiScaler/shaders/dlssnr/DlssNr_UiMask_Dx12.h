@@ -25,15 +25,15 @@ class DlssNr_UiMask_Dx12 : public Shader_Dx12
         uint32_t Width = 0;
         uint32_t Height = 0;
         uint32_t Valid = 0;
-        uint32_t Pad0 = 0;
+        uint32_t StreakMin = 0;
         float StaticEps = 0.0f;
         float MotionTau = 0.0f;
         float DetailMin = 0.0f;
         float Decay = 0.0f;
         float DropTau = 0.0f;
-        float Pad1 = 0.0f;
-        float Pad2 = 0.0f;
-        float Pad3 = 0.0f;
+        float CoreEps = 0.0f;
+        float SupportMin = 0.0f;
+        float SidesMin = 0.0f;
     };
 
     FrameDescriptorHeap _frameHeaps[DLSSNR_UIMASK_NUM_OF_HEAPS];
@@ -44,7 +44,7 @@ class DlssNr_UiMask_Dx12 : public Shader_Dx12
     // Last frame's and this frame's, swapped every dispatch, so no pixel reads a neighbour another thread
     // is writing. All rest in NON_PIXEL_SHADER_RESOURCE between dispatches.
     ID3D12Resource* _luma[2] = {};
-    ID3D12Resource* _acc[2] = {};
+    ID3D12Resource* _acc[2] = {};    // R16G16_FLOAT: .x protection, .y consecutive candidate frames
     ID3D12Resource* _mask = nullptr; // what the model reads; rests in NON_PIXEL_SHADER_RESOURCE
     int _current = 0;
     bool _valid = false;

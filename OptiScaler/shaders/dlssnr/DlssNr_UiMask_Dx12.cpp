@@ -15,12 +15,16 @@ void Transition(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource, D3
 
 // The detector's thresholds, in the luma of the model's proxy (0..1, paper-white relative). Fixed rather
 // than configurable: one quantity, one control, and the control is the key itself. hud-protection.md has
-// what each one does.
+// what each one does, and why the second set exists (the rim a moving silhouette left on still scenery).
 constexpr float kStaticEps = 0.008f; // about two steps of an 8-bit frame: still
-constexpr float kMotionTau = 0.02f;  // the surroundings moved
-constexpr float kDetailMin = 0.08f;  // a hard edge, as glyphs and HUD lines have
+constexpr float kCoreEps = 0.012f;   // the same for every pixel within 2 px, with a little room for noise
+constexpr float kMotionTau = 0.02f;  // a side's sample moved
+constexpr float kDetailMin = 0.15f;  // a hard edge, as glyphs and HUD lines have; sand grains mostly don't
 constexpr float kDecay = 0.985f;     // about a second and a half at 60 fps
 constexpr float kDropTau = 0.2f;     // the pixel itself changed completely
+constexpr uint32_t kStreakMin = 8;   // frames in a row as a candidate before a new pixel is protected
+constexpr float kSupportMin = 3.0f;  // protected neighbours in the 5x5 for a pixel to be exported
+constexpr float kSidesMin = 4.0f;    // right, left, down and up must all see the scene move
 } // namespace
 
 ID3D12Resource* DlssNr_UiMask_Dx12::CreateTexture(ID3D12Device* device, DXGI_FORMAT format, const wchar_t* name)
@@ -110,8 +114,8 @@ DlssNr_UiMask_Dx12::DlssNr_UiMask_Dx12(std::string InName, ID3D12Device* InDevic
 
     _luma[0] = CreateTexture(InDevice, DXGI_FORMAT_R16_FLOAT, L"DLSS-NR UI mask luma A");
     _luma[1] = CreateTexture(InDevice, DXGI_FORMAT_R16_FLOAT, L"DLSS-NR UI mask luma B");
-    _acc[0] = CreateTexture(InDevice, DXGI_FORMAT_R16_FLOAT, L"DLSS-NR UI mask protection A");
-    _acc[1] = CreateTexture(InDevice, DXGI_FORMAT_R16_FLOAT, L"DLSS-NR UI mask protection B");
+    _acc[0] = CreateTexture(InDevice, DXGI_FORMAT_R16G16_FLOAT, L"DLSS-NR UI mask state A");
+    _acc[1] = CreateTexture(InDevice, DXGI_FORMAT_R16G16_FLOAT, L"DLSS-NR UI mask state B");
     _mask = CreateTexture(InDevice, DXGI_FORMAT_R8G8B8A8_UNORM, L"DLSS-NR UI mask");
 
     if (_luma[0] == nullptr || _luma[1] == nullptr || _acc[0] == nullptr || _acc[1] == nullptr || _mask == nullptr)
@@ -185,11 +189,15 @@ ID3D12Resource* DlssNr_UiMask_Dx12::Dispatch(ID3D12GraphicsCommandList* InCmdLis
     constants.Width = _width;
     constants.Height = _height;
     constants.Valid = _valid ? 1u : 0u;
+    constants.StreakMin = kStreakMin;
     constants.StaticEps = kStaticEps;
     constants.MotionTau = kMotionTau;
     constants.DetailMin = kDetailMin;
     constants.Decay = kDecay;
     constants.DropTau = kDropTau;
+    constants.CoreEps = kCoreEps;
+    constants.SupportMin = kSupportMin;
+    constants.SidesMin = kSidesMin;
     memcpy(_mappedConstants[slot], &constants, sizeof(constants));
 
     ID3D12DescriptorHeap* heaps[] = { heap.GetHeapCSU() };

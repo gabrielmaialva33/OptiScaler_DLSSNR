@@ -91,6 +91,65 @@ stabilizer.
 the same as NR off, not a corrupted one. A HUD pixel that is never detected (static scene, HUD never
 seen against motion) gets NR, as today.
 
+### The first slice left a rim, and the rule was tightened (2026-09-28)
+
+**Seen.** PCSX2, God Hand from a save state, WorkingScale 0.5. With `UiProtection=true` a bright,
+dotted golden outline ran round the character's coat against the sand. With it false, everything else
+equal, the edges were clean (A/B from the same state, `scratchpad/iso2/grid12.png`). The motion
+estimator and the guide resample were ruled out: the rim was as strong with both off.
+
+**Why.**
+- The sand beside the swaying coat passed every gate: it was still, the coat moved inside its rings,
+  and grains of sand had contrast above 0.08.
+- The 1 px growth and the 1.5 s decay then held it.
+- A protected pixel shows the raw frame, and the raw frame is brighter than the NR output: mean luma
+  99 against 84 in the 09-27 A/B. So the false positives read as a light line.
+- The dots were the contrast gate passing only some grains, in a mask built at 418 px and stretched
+  to 836.
+
+"A falsely protected pixel shows the game's own pixel" holds, but NR shifts tone globally, so a raw
+pixel among NR pixels is a visible seam. False positives have to be rare, not merely harmless.
+
+**The rule now** (`precompile/dlssnr_uimask_rule.h`, shared with the host test `nr-uimask-rule`):
+
+1. **Still pixel:** `own < StaticEps` (0.008), as before.
+2. **Still core:** every pixel within 2 px (the 5x5) also changed less than `CoreEps` (0.012).
+   - A glyph's inner edges pass: the fill against its outline, where the whole 5x5 is interface.
+   - Scenery hugging a moving silhouette fails, because the silhouette is inside the core.
+3. **Moving on every side:** the four axis directions (right, left, down, up) each have a sample at 6,
+   14 or 24 px that changed by more than `MotionTau` (0.02), and all four must (`SidesMin` 4).
+   - Axis only: from a pixel beside a tall silhouette, a diagonal lands on the silhouette.
+   - A scene panning behind an overlay moves on every side. Scenery beside something that moves sees
+     it on one side, two at a corner, three in a concave gap.
+4. **Detail:** `detail > DetailMin`, raised to 0.15. Glyph edges clear it easily; most sand grains
+   don't.
+5. **Entry hysteresis:** a pixel must be a candidate for `StreakMin` (8) frames in a row before it is
+   protected. An already protected pixel re-arms at once, so a pause in the scene's motion does not
+   restart it. Exit is as before: decay 0.985, and dropped at once when its own change exceeds
+   `DropTau`.
+6. **Export needs support:** the exported mask (last frame's protection grown 1 px) is kept only where
+   last frame's 5x5 holds at least `SupportMin` (3) protected pixels. An isolated grain that passed
+   every gate is dropped; a glyph's edge, a line of them, is kept.
+
+State per pixel: the accumulation pair became R16G16_FLOAT, with `.x` the protection and `.y` the
+candidate streak in whole frames. Still two ping-ponged textures, as before.
+
+**What it costs in recall.**
+- Interface is protected only while the scene moves on every side of it, and for about 1.5 s after.
+- Large solid HUD shapes are protected at their inner, outlined edges only; their outer edge sees
+  motion on one side.
+- The model does little to a flat HUD interior anyway.
+
+**Tested on the host** (`tests/nr-uimask-rule`), running the header the shader runs:
+- A glyph over a 3 px/frame pan: nothing protected before the streak, then 103 inner-edge pixels, and
+  0 outside the glyph plus its growth.
+- Grainy sand beside a coat swaying ±3 px: 4872 protected sand pixels under the first slice's
+  thresholds, 0 under the new rule.
+- Sand between two swaying legs under a swaying coat: 0.
+- A glyph that vanishes: every pixel that changed past `DropTau` is unprotected on that frame.
+
+It has not been re-run in PCSX2 yet.
+
 ## Wiring
 
 In the shared evaluate (`DlssNr_Dx12.cpp`), which both present routes reach with
@@ -133,3 +192,5 @@ capture the HUD.
   targets rebuilt, so it is left for the next slice.
 - Vulkan.
 - The ControlMask disagreement with kibblerz's findings.
+- Building the mask at the frame's size, or testing stillness on the full-size source. The mask is at
+  the working size and stretched by the resolve; at 50% a protected edge is 2 px wide on screen.
