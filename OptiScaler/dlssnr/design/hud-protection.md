@@ -194,3 +194,11 @@ capture the HUD.
 - The ControlMask disagreement with kibblerz's findings.
 - Building the mask at the frame's size, or testing stillness on the full-size source. The mask is at
   the working size and stretched by the resolve; at 50% a protected edge is 2 px wide on screen.
+
+## Verified in PCSX2, 2026-09-28
+
+Build `4fa5912b`, God Hand from the save state, WorkingScale 0.5, synthesized motion on (NR and FG).
+- **Before the tightened rule** (`c95ad19c`): with UiProtection on, a bright golden rim outlined the
+  coat against the sand. With it off, the edges were clean.
+- **After:** the rim is gone. On the coat and sand, UiProtection on and off look alike.
+- **Not yet measured:** HUD recall in a moving scene.
