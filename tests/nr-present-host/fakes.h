@@ -243,15 +243,19 @@ struct DlssNrFrameInfo
 namespace DlssNr
 {
 
+// Every reset the host asked of the estimator, one entry per Record.
+inline std::vector<bool> g_motionResets;
+
 // Synthesized motion (DlssNrFeature_Dx12.h). Off by default in these cases: the host must build nothing
 // for it and hand the pass exactly what it did before.
 class SynthMotionGuide
 {
   public:
-    ID3D12Resource* Record(ID3D12Device*, ID3D12GraphicsCommandList*, ID3D12Resource*, D3D12_RESOURCE_STATES, bool,
-                           DlssNrFrameInfo&, const char*, ID3D12CommandQueue* = nullptr)
+    ID3D12Resource* Record(ID3D12Device*, ID3D12GraphicsCommandList*, ID3D12Resource*, D3D12_RESOURCE_STATES,
+                           bool reset, DlssNrFrameInfo&, const char*, ID3D12CommandQueue* = nullptr)
     {
         ++records;
+        g_motionResets.push_back(reset);
         return nullptr;
     }
     void AfterPass(ID3D12GraphicsCommandList*) {}
@@ -301,6 +305,7 @@ struct Creation
 inline std::vector<Creation> g_creations;
 inline uint32_t g_modelWidth = 0, g_modelHeight = 0;
 inline unsigned g_passesRun = 0;
+inline bool g_refuseModel = false; // NGX refusing the feature: the pass declines every frame
 
 inline DlssNrFrameInfo PresentFrameDefaults(bool reset)
 {
@@ -325,6 +330,7 @@ inline bool EvaluateAtPresent(ID3D12GraphicsCommandList* list, ID3D12Resource* c
 {
     static const char* disabled = "the pass is disabled";
     static const char* tiny = "the frame or working size is below 64 pixels; the model is not built that small";
+    static const char* refused = "the model was refused";
     static const char* ran = "";
 
     assert(list != nullptr && colour != nullptr && depth != nullptr && motion != nullptr);
@@ -338,6 +344,11 @@ inline bool EvaluateAtPresent(ID3D12GraphicsCommandList* list, ID3D12Resource* c
     if (desc.Width < kDlssNrMinExtent || desc.Height < kDlssNrMinExtent)
     {
         *outReason = tiny;
+        return false;
+    }
+    if (g_refuseModel)
+    {
+        *outReason = refused;
         return false;
     }
     if (g_modelWidth != desc.Width || g_modelHeight != desc.Height)

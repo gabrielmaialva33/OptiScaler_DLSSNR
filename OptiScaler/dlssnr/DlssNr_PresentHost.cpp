@@ -102,6 +102,7 @@ void PresentHost::_ReleaseBuilt()
     _recorded = false;
     _recordedPass = false;
     _resetOwed = true;
+    _motionResetOwed = true;
 }
 
 ID3D12Resource* PresentHost::Output() const
@@ -168,6 +169,7 @@ bool PresentHost::_Ensure(ID3D12Device* device, ID3D12Resource* source)
 
     // A frame whose size or format just changed shares no history with the one before it.
     _resetOwed = true;
+    _motionResetOwed = true;
 
     LOG_INFO("DLSS-NR present host: {}x{} built", width, height);
     return true;
@@ -304,6 +306,7 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
 {
     _recorded = false;
     _recordedPass = false;
+    _motionRecorded = false;
 
     if (_failed || device == nullptr || cmdList == nullptr || source == nullptr)
         return false;
@@ -439,8 +442,9 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         if (_motion == nullptr)
             _motion = std::make_unique<SynthMotionGuide>();
 
-        if (auto* synthesized = _motion->Record(device, cmdList, _toWorking->Buffer(), _workingState, _resetOwed, frame,
-                                                "D3D11 bridge", queue))
+        _motionRecorded = true;
+        if (auto* synthesized = _motion->Record(device, cmdList, _toWorking->Buffer(), _workingState, _motionResetOwed,
+                                                frame, "D3D11 bridge", queue))
         {
             motion = synthesized;
         }
@@ -497,6 +501,11 @@ void PresentHost::ConfirmExecuted()
 
     if (_motion != nullptr)
         _motion->ConfirmExecuted();
+
+    // The estimator's recording on this list executed, and with it the reset it carried.
+    if (_motionRecorded)
+        _motionResetOwed = false;
+    _motionRecorded = false;
 
     if (_recordedPass)
     {

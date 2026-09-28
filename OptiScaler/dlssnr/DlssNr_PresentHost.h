@@ -126,6 +126,12 @@ class PresentHost
     bool _recorded = false;
     bool _recordedPass = false;
     bool _resetOwed = true;
+    // The motion estimator's own reset: owed after a rebuild, and paid by the first list that carried it
+    // and executed. Not _resetOwed, which stays owed until the model runs: while the model is refused or
+    // settling, the estimator still sees consecutive frames, and resetting it on each would keep it warming
+    // for as long -- and keep frame generation, which takes its field on the bridge, waiting.
+    bool _motionResetOwed = true;
+    bool _motionRecorded = false; // this frame's list carries an estimator recording
     bool _failed = false;
 };
 

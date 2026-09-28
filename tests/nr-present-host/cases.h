@@ -39,8 +39,11 @@ void Fresh(bool enabled = true)
     DlssNr::g_modelWidth = 0;
     DlssNr::g_modelHeight = 0;
     DlssNr::g_passesRun = 0;
+    DlssNr::g_motionResets.clear();
+    DlssNr::g_refuseModel = false;
     Config::Instance()->DlssNrEnabled.value = enabled;
     Config::Instance()->DlssNrZeroGuideReset.value = false;
+    Config::Instance()->DlssNrSynthMotion.value = false;
 }
 
 bool CreatedOnEmptyListAt(size_t index, uint32_t width, uint32_t height)
@@ -163,6 +166,31 @@ int main()
         assert(r.Frame());
         assert(DlssNr::g_creations.size() == 1 && CreatedOnEmptyListAt(0, 1920, 1080));
         CASE("and builds, with the model on its own list, the first frame the pass is on");
+    }
+
+    // --- synthesized motion while the model cannot run -----------------------------------------------
+    // Divinity, 2026-09-28: the host passed the model's reset to the estimator, and that reset stays
+    // owed until the model runs. While it was refused or settling, the estimator was reset every frame,
+    // never warmed, and frame generation -- which takes its field on the bridge -- built a second one.
+    {
+        Fresh();
+        Config::Instance()->DlssNrSynthMotion.value = true;
+        DlssNr::g_refuseModel = true;
+        Rig r;
+        r.Size(1920, 1080);
+        assert(!r.Frame() && !r.Frame() && !r.Frame());
+        assert((DlssNr::g_motionResets == std::vector<bool> { true, false, false }));
+        CASE("the model refused: the estimator is reset once after the build, not on every frame the model declines");
+
+        DlssNr::g_refuseModel = false;
+        assert(r.Frame());
+        assert(DlssNr::g_motionResets.size() == 4 && !DlssNr::g_motionResets.back());
+        CASE("and when the model starts running, the estimator carries on without a reset of its own");
+
+        r.Size(1280, 720);
+        assert(r.Frame());
+        assert(DlssNr::g_motionResets.size() == 5 && DlssNr::g_motionResets.back());
+        CASE("a resize owes the estimator its reset again");
     }
 
     assert(g_transferBuffersLive == 0);

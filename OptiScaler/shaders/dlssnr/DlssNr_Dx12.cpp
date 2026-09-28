@@ -5249,6 +5249,7 @@ ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCom
     // is next needed.
     if (SynthMotion::Handoff::Take(SynthMotion::Handoff::Owner::DlssNr, device, width, height, &shared))
     {
+        _peerWaitSinceMs = -1;
         motion = shared.motion;
         sceneCut = shared.sceneCut;
 
@@ -5260,10 +5261,40 @@ ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCom
                      route, width, height);
         }
     }
+    else if (SynthMotion::Handoff::WaitForPeer(
+                 _peerWaitSinceMs, _estimator != nullptr || _nvofa != nullptr,
+                 SynthMotion::Handoff::PeerWarming(SynthMotion::Handoff::Owner::DlssNr, device, width, height),
+                 NowMs()))
+    {
+        // Frame generation's estimator recorded this frame and is still warming up (native D3D12 at start-up:
+        // its feed runs before this pass). A second one would warm over the same frames and then sit idle
+        // once frame generation publishes, so nothing is recorded, and the caller keeps its zero guide --
+        // all a warming estimator would have given.
+        if (!_reportedPeerWait)
+        {
+            _reportedPeerWait = true;
+            LOG_INFO("DLSS-NR synthesized motion: frame generation's estimate is warming up on the {} route ({}x{}); "
+                     "waiting for it rather than running a second estimator",
+                     route, width, height);
+        }
+
+        return nullptr;
+    }
     else
     {
         if (_estimator == nullptr && _nvofa == nullptr)
         {
+            if (_peerWaitSinceMs >= 0)
+            {
+                LOG_INFO("DLSS-NR synthesized motion: stopped waiting for frame generation's estimate on the {} route "
+                         "after {} ms ({}); running our own",
+                         route, NowMs() - _peerWaitSinceMs,
+                         SynthMotion::Handoff::PeerWarming(SynthMotion::Handoff::Owner::DlssNr, device, width, height)
+                             ? "still warming"
+                             : "no longer announced");
+                _peerWaitSinceMs = -1;
+            }
+
             if (!_nvofaRefused && queue != nullptr && WantsNvofaMotion())
             {
                 _nvofa = std::make_unique<SynthMotion::NvofaEstimator_Dx12>();
@@ -5334,7 +5365,15 @@ ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCom
         }
 
         if (motion == nullptr)
+        {
+            // Warming up. Frame generation, when it runs after this on the same frame (the D3D11 bridge), waits
+            // for this estimator rather than build its own. Not for the optical-flow engine, whose fields are
+            // never published (below).
+            if (_nvofa == nullptr)
+                SynthMotion::Handoff::AnnounceWarming(SynthMotion::Handoff::Owner::DlssNr, device, width, height);
+
             return nullptr;
+        }
 
         // Frame generation, when it runs after this on the same frame (the D3D11 bridge), takes this field.
         // Only a field of this frame: the optical-flow engine's arrives one frame late, and the handoff
@@ -5434,6 +5473,8 @@ void SynthMotionGuide::AbandonRecording()
 
 void SynthMotionGuide::Release()
 {
+    SynthMotion::Handoff::WithdrawWarming(SynthMotion::Handoff::Owner::DlssNr);
+
     if (_estimator != nullptr)
     {
         SynthMotion::Handoff::Withdraw(_estimator->Motion());
@@ -5455,6 +5496,7 @@ void SynthMotionGuide::Release()
     _height = 0;
     _format = DXGI_FORMAT_UNKNOWN;
     _lastRecordMs = 0;
+    _peerWaitSinceMs = -1;
     _handedOutState = D3D12_RESOURCE_STATE_COMMON;
     _handedOutResource = nullptr;
     _recorded = false;

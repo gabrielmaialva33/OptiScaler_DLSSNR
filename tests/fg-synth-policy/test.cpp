@@ -66,6 +66,62 @@ static void handoffCases()
     std::puts("handoff cases passed");
 }
 
+static void warmingCases()
+{
+    ID3D12Device device {}, otherDevice {};
+
+    // D3D11 bridge at start-up: the neural host's estimator recorded but is warming; frame generation sees
+    // it in the same base frame, and the host never sees its own announcement.
+    Handoff::BeginBaseFrame();
+    Handoff::AnnounceWarming(Owner::DlssNr, &device, 3440, 1440);
+    assert(Handoff::PeerWarming(Owner::FrameGen, &device, 3440, 1440));
+    assert(!Handoff::PeerWarming(Owner::DlssNr, &device, 3440, 1440));
+
+    // Another device or extent is another picture; the next base frame needs a new announcement.
+    assert(!Handoff::PeerWarming(Owner::FrameGen, &otherDevice, 3440, 1440));
+    assert(!Handoff::PeerWarming(Owner::FrameGen, &device, 1920, 1080));
+    Handoff::BeginBaseFrame();
+    assert(!Handoff::PeerWarming(Owner::FrameGen, &device, 3440, 1440));
+
+    // Native D3D12: frame generation announces before the present pass.
+    Handoff::AnnounceWarming(Owner::FrameGen, &device, 1920, 1080);
+    assert(Handoff::PeerWarming(Owner::DlssNr, &device, 1920, 1080));
+
+    // Nothing is announced without an owner, a device or an extent.
+    Handoff::BeginBaseFrame();
+    Handoff::AnnounceWarming(Owner::None, &device, 64, 64);
+    Handoff::AnnounceWarming(Owner::DlssNr, nullptr, 64, 64);
+    Handoff::AnnounceWarming(Owner::DlssNr, &device, 0, 64);
+    assert(!Handoff::PeerWarming(Owner::FrameGen, &device, 64, 64));
+    assert(!Handoff::PeerWarming(Owner::FrameGen, nullptr, 64, 64));
+
+    // A released estimator withdraws its own announcement, not the other consumer's.
+    Handoff::BeginBaseFrame();
+    Handoff::AnnounceWarming(Owner::DlssNr, &device, 1920, 1080);
+    Handoff::WithdrawWarming(Owner::FrameGen);
+    assert(Handoff::PeerWarming(Owner::FrameGen, &device, 1920, 1080));
+    Handoff::WithdrawWarming(Owner::DlssNr);
+    assert(!Handoff::PeerWarming(Owner::FrameGen, &device, 1920, 1080));
+
+    // The wait: only with no estimator of one's own and a warming peer, and not past the bound.
+    long long since = -1;
+    assert(!Handoff::WaitForPeer(since, false, false, 1000) && since == -1);
+    assert(!Handoff::WaitForPeer(since, true, true, 1000) && since == -1);
+    assert(Handoff::WaitForPeer(since, false, true, 1000) && since == 1000);
+    assert(Handoff::WaitForPeer(since, false, true, 1000 + Handoff::kMaxPeerWaitMs));
+    assert(!Handoff::WaitForPeer(since, false, true, 1001 + Handoff::kMaxPeerWaitMs));
+
+    // A frame with no announcement ends the wait at once (the peer is gone, or never was); the clock is
+    // the consumer's to reset, so a later wait after a take starts over.
+    since = -1;
+    assert(Handoff::WaitForPeer(since, false, true, 5000));
+    assert(!Handoff::WaitForPeer(since, false, false, 5010));
+    since = -1;
+    assert(Handoff::WaitForPeer(since, false, true, 9000) && since == 9000);
+
+    std::puts("warming cases passed");
+}
+
 static void fastMotionCases()
 {
     SynthFgPolicy policy;
@@ -197,9 +253,10 @@ static void duplicateCases()
 int main()
 {
     handoffCases();
+    warmingCases();
     fastMotionCases();
     floorCases();
     duplicateCases();
-    std::puts("fg synth policy: handoff, fast-motion, floor and duplicate cases passed");
+    std::puts("fg synth policy: handoff, warming, fast-motion, floor and duplicate cases passed");
     return 0;
 }

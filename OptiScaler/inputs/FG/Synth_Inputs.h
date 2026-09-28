@@ -97,6 +97,9 @@ class SynthInputs
     // The estimator, used when DLSS-NR did not publish a field for this base frame.
     std::unique_ptr<SynthMotion::Estimator_Dx12> _estimator;
     long long _lastEstimateMs = 0;
+    // While DLSS-NR's estimator warms up and nothing of ours exists: when the wait began, -1 otherwise
+    // (SynthMotion::Handoff::WaitForPeer).
+    long long _peerWaitSinceMs = -1;
     bool _estimatorRecorded = false;
 
     // This base frame's field, owned by the estimator or by DLSS-NR; handed to FG instead of the zero
@@ -134,6 +137,7 @@ class SynthInputs
     SynthFgPolicy _policy;
     bool _reportedEstimator = false;
     bool _reportedTaken = false;
+    bool _reportedPeerWait = false;
     bool _reportedMotionFailure = false;
     bool _reportedSkip = false;
     bool _reportedMotionFed = false;

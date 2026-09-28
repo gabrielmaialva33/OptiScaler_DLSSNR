@@ -28,6 +28,10 @@ model's creation there, and the model ran on none of the frames that followed. T
 - Switched off, then resized: nothing is rebuilt and the model's one creation on the host's own list
   is not spent while off; switched back on, it is created there at the new size.
 - A host created while the pass is off stays empty until the pass is switched on.
+- With `SynthMotion` on and the model refused, the motion estimator is reset once after the build,
+  not on every frame the model has no history. It carries on without a reset when the model starts,
+  and a resize owes it the reset again. Otherwise it never warms up, and frame generation, which takes
+  its field on the bridge, builds a second estimator (Divinity, 2026-09-28).
 
 ## What this does not cover
 

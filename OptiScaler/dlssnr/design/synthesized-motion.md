@@ -307,6 +307,16 @@ build. Both print `SYNTH-MOTION PASS` over 12 scored sequences, with the sign cu
 
 ### Risks and open questions
 
+0. **A FidelityFX scene cut never reaches a consumer** (found in review, 2026-09-28; predates the
+   handoff).
+   - `Estimator_Dx12::Record` sets `_ready = !doReset && frameIndex > kWarmupFrames && !_sceneCut`
+     (`SynthMotion_Dx12.cpp`). So on the frame the cut is raised, `Ready()` is false.
+   - `SynthMotionGuide::Record` returns before its `if (sceneCut)` block when there is no field, so
+     DLSS-NR never sets `frame.Reset` from a cut.
+   - The FG input and the handoff publish only a `Ready()` field, so `Field::sceneCut` and FG's
+     `_frameSceneCut` are always false from this estimator.
+   - On a cut both consumers get zero motion for a warm-up, with no reset. Not yet fixed. The fix is
+     to read `SceneCut()` whether or not a field is ready, and pass it on as a reset.
 1. **Latency on a fast camera.** A frame-late field may bring back part of the ghosting that motion
    was meant to remove. Compare it with FidelityFX in Generation Zero, or Witcher 3 DX11.
 2. **Cuts.** One wrong frame, and the engine seeds the next pair from the vectors across the cut

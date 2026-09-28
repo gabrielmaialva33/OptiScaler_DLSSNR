@@ -15,6 +15,11 @@
 // - The other consumer takes it when the base frame, device and extent match. A consumer never takes
 // its own field back, which also covers a route with no transport, where the frame never advances.
 // - An owner withdraws its field before releasing the estimator behind it.
+// - A consumer whose estimator recorded this base frame but is still warming up (no real field yet)
+//   announces that instead. The other consumer, if it has no estimator of its own, waits for it --
+//   zero motion meanwhile, which is also all a second estimator would give over the same frames --
+//   rather than build one that would then sit idle once the first starts publishing. Bounded by
+//   kMaxPeerWaitMs.
 
 #include <cstdint>
 #include <mutex>
@@ -42,6 +47,16 @@ struct Field
 
 namespace detail
 {
+struct Warming
+{
+    bool announced = false;
+    uint64_t frame = 0;
+    Owner owner = Owner::None;
+    ID3D12Device* device = nullptr;
+    uint32_t width = 0;
+    uint32_t height = 0;
+};
+
 struct Slot
 {
     std::mutex mutex;
@@ -50,6 +65,7 @@ struct Slot
     bool published = false;
     ID3D12Device* device = nullptr;
     Field field {};
+    Warming warming {};
 };
 
 inline Slot& Get()
@@ -104,6 +120,64 @@ inline bool Take(Owner taker, ID3D12Device* device, uint32_t width, uint32_t hei
         *out = slot.field;
 
     return true;
+}
+
+// This base frame, this consumer's estimator is warming up: it recorded, and will publish once it has a
+// real field. Only a consumer that will publish may say so -- one whose fields never go into the slot
+// (DLSS-NR's optical-flow engine, a frame late) would be waited for in vain.
+inline void AnnounceWarming(Owner owner, ID3D12Device* device, uint32_t width, uint32_t height)
+{
+    if (owner == Owner::None || device == nullptr || width == 0 || height == 0)
+        return;
+
+    auto& slot = detail::Get();
+    std::lock_guard lock(slot.mutex);
+    slot.warming = detail::Warming { true, slot.baseFrame, owner, device, width, height };
+}
+
+// Whether another consumer announced a warm-up for this base frame, on this device, at this extent. Like
+// Take, never the asker's own announcement, and never one from an earlier base frame: on a route with no
+// transport the frame never advances, and there the asker is the only consumer anyway.
+inline bool PeerWarming(Owner asker, ID3D12Device* device, uint32_t width, uint32_t height)
+{
+    auto& slot = detail::Get();
+    std::lock_guard lock(slot.mutex);
+    const auto& warming = slot.warming;
+
+    return warming.announced && warming.frame == slot.baseFrame && warming.owner != asker && warming.device == device &&
+           warming.width == width && warming.height == height;
+}
+
+// When the estimator behind an announcement is released. An announcement only outlives its base frame
+// where the frame stops advancing (the transport gone), and nobody should wait there for an estimator
+// that no longer exists.
+inline void WithdrawWarming(Owner owner)
+{
+    auto& slot = detail::Get();
+    std::lock_guard lock(slot.mutex);
+
+    if (slot.warming.owner == owner)
+        slot.warming = detail::Warming {};
+}
+
+// Longer than a warm-up (five frames, slow ones at start-up included) plus DLSS-NR's 500 ms settle after
+// a resize, during which its host keeps resetting the estimator. A peer warm for longer is not waited for.
+inline constexpr long long kMaxPeerWaitMs = 1000;
+
+// A consumer that took nothing this base frame asks whether to record nothing and wait for a warming
+// peer, rather than build an estimator of its own. waitSinceMs is the consumer's own state: -1 when not
+// waiting, set here on the first frame of a wait, and put back to -1 by the consumer when it takes a
+// field or releases. A consumer that already has an estimator keeps using it, since it is warm or
+// warming already; a consumer whose wait ran out builds one, and then has one.
+inline bool WaitForPeer(long long& waitSinceMs, bool haveEstimator, bool peerWarming, long long nowMs)
+{
+    if (haveEstimator || !peerWarming)
+        return false;
+
+    if (waitSinceMs < 0)
+        waitSinceMs = nowMs;
+
+    return nowMs - waitSinceMs <= kMaxPeerWaitMs;
 }
 
 // Before the resource behind motion is released. Anything else published stays.

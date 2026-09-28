@@ -16,6 +16,13 @@ structs.
   - device, extent and base-frame mismatches;
   - `Withdraw` before an estimator is released;
   - refusing incomplete publications.
+- **The warm-up wait.** A consumer whose estimator is still warming announces it, and the other
+  consumer, with no estimator of its own, waits instead of building a second. The cases cover:
+  - `AnnounceWarming` / `PeerWarming` in both orders, never one's own, and only for this base frame,
+    device and extent;
+  - `WithdrawWarming` taking back only the releasing consumer's own announcement;
+  - `WaitForPeer` only with no estimator and a warming peer;
+  - its `kMaxPeerWaitMs` bound, and a frame with no announcement ending the wait.
 - **Fast-motion response.** The threshold and its 75% release, the two calm samples needed to leave,
   a spike resetting that count, switching it off mid-burst, and a scene cut repeating exactly one frame.
 - **The low-fps floor.** Skipping below it, the 15% resume hysteresis, a pause restarting the

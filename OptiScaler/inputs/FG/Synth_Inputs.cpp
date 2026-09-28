@@ -529,6 +529,7 @@ bool SynthInputs::_RecordMotionOn(ID3D12Device* device, ID3D12GraphicsCommandLis
     if (Take(Owner::FrameGen, device, width, height, &shared))
     {
         // DLSS-NR estimated this base frame already, on this device, at this extent.
+        _peerWaitSinceMs = -1;
         _frameMotion = shared.motion;
         _frameSceneCut = shared.sceneCut;
 
@@ -540,10 +541,35 @@ bool SynthInputs::_RecordMotionOn(ID3D12Device* device, ID3D12GraphicsCommandLis
                      width, height);
         }
     }
+    else if (WaitForPeer(_peerWaitSinceMs, _estimator != nullptr, PeerWarming(Owner::FrameGen, device, width, height),
+                         NowMs()))
+    {
+        // DLSS-NR's estimator recorded this frame and is still warming up (the D3D11 bridge at start-up). A
+        // second one would warm over the same frames and then sit idle once DLSS-NR publishes, so nothing is
+        // recorded: zero motion meanwhile, which is all a warming estimator would have given.
+        if (!_reportedPeerWait)
+        {
+            _reportedPeerWait = true;
+            LOG_INFO("synthesized FG input: DLSS-NR's motion estimate is warming up ({}x{}); waiting for it rather "
+                     "than running a second estimator",
+                     width, height);
+        }
+    }
     else
     {
         if (_estimator == nullptr)
+        {
+            if (_peerWaitSinceMs >= 0)
+            {
+                LOG_INFO("synthesized FG input: stopped waiting for DLSS-NR's motion estimate after {} ms ({}); "
+                         "running our own",
+                         NowMs() - _peerWaitSinceMs,
+                         PeerWarming(Owner::FrameGen, device, width, height) ? "still warming" : "no longer announced");
+                _peerWaitSinceMs = -1;
+            }
+
             _estimator = std::make_unique<SynthMotion::Estimator_Dx12>();
+        }
 
         const long long now = NowMs();
         const bool stale = _lastEstimateMs == 0 || now - _lastEstimateMs > kMotionStaleMs;
@@ -574,6 +600,12 @@ bool SynthInputs::_RecordMotionOn(ID3D12Device* device, ID3D12GraphicsCommandLis
             _frameMotion = _estimator->Motion();
             _frameSceneCut = _estimator->SceneCut();
             Publish(Owner::FrameGen, device, _frameMotion, width, height, _frameSceneCut);
+        }
+        else
+        {
+            // DLSS-NR's present pass runs after this on native D3D12: it waits for this field instead of
+            // building its own estimator.
+            AnnounceWarming(Owner::FrameGen, device, width, height);
         }
     }
 
@@ -782,6 +814,8 @@ void SynthInputs::_AbandonMotion()
 
 void SynthInputs::_ReleaseMotion()
 {
+    SynthMotion::Handoff::WithdrawWarming(SynthMotion::Handoff::Owner::FrameGen);
+
     if (_estimator != nullptr)
     {
         SynthMotion::Handoff::Withdraw(_estimator->Motion());
@@ -790,6 +824,7 @@ void SynthInputs::_ReleaseMotion()
     }
 
     _lastEstimateMs = 0;
+    _peerWaitSinceMs = -1;
     _estimatorRecorded = false;
     _frameMotion = nullptr;
     _frameSceneCut = false;

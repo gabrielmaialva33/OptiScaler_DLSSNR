@@ -178,6 +178,9 @@ class SynthMotionGuide
     uint32_t _height = 0;
     DXGI_FORMAT _format = DXGI_FORMAT_UNKNOWN;
     long long _lastRecordMs = 0;
+    // While frame generation's estimator warms up and nothing of ours exists: when the wait began, -1
+    // otherwise (SynthMotion::Handoff::WaitForPeer).
+    long long _peerWaitSinceMs = -1;
     D3D12_RESOURCE_STATES _handedOutState = D3D12_RESOURCE_STATE_COMMON;
     // The field handed to the pass: ours, or frame generation's taken through SynthMotion::Handoff.
     ID3D12Resource* _handedOutResource = nullptr;
@@ -187,6 +190,7 @@ class SynthMotionGuide
     bool _reportedUse = false;
     bool _reportedFailure = false;
     bool _reportedTaken = false;
+    bool _reportedPeerWait = false;
 };
 
 // The other place the model can run: before the upscaler, over the game's render-resolution colour.
