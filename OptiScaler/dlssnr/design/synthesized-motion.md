@@ -67,6 +67,30 @@ gate, and the reference precedents), the "Zero guidance, colour and history" sec
 (the resource this replaces, and the contract it already meets). This note is the third step those two
 defer: real motion, reconstructed from consecutive frames, with no game engine buffers.
 
+## Measured in PCSX2, 2026-09-27
+
+God Hand from a save state (`~/Games/pcsx2-nr-test/run-state.sh`), D3D12 present route, synthesized
+FG on, build `f8115054`, RTX 4090. Three runs from the same state with nobody touching the pad, so
+the emulator replays the same scene. About 650 captures of the 836x470 game area each; 300 scored.
+Metrics are taken on the pixels that are static in the run without NR: 21% of the image (ground,
+buildings, sky).
+
+| Run | Mean change between captures | High-frequency energy | Mean luma |
+|---|---|---|---|
+| `SynthMotion=true` | **0.20** | 8.36 | 83.8 |
+| `SynthMotion=false`, `ZeroGuideReset=true` (the previous default route) | 0.58 | 8.20 | 84.5 |
+| NR off | 0.24 | 8.77 | 99.1 |
+
+- **Shimmer.** Dropping the model's history every frame (zero guides with `ZeroGuideReset`) made the
+  static background shimmer about three times as much as the raw game. With synthesized motion the
+  model keeps its history, and the background is as stable as the raw game.
+- **Detail.** It keeps slightly more detail than the zero-guide route. The NR runs are darker and
+  more contrasted, so their high-frequency energy does not compare directly with the raw game's.
+- **History.** In a ten-minute session the model's history was dropped about 100 times: warm-ups
+  after resets and cuts, against thousands per minute before.
+- **Not settled.** Ghosting under a fast camera. This scene's camera barely moves. Divinity (D3D11
+  bridge) and Generation Zero are the tests for that.
+
 ## 1. The problem, stated as narrowly as it actually is
 
 The present-time host feeds the model `DlssNr::ZeroGuides` — one `R32_FLOAT` depth and one
