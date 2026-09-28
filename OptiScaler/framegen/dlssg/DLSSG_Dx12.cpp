@@ -655,7 +655,8 @@ void DLSSG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
             UpdateTarget();
         }
 
-        if (State::Instance().activeFgInput == FGInput::Upscaler && !IsPaused() && !IsActive())
+        const auto fgInput = State::Instance().activeFgInput;
+        if ((fgInput == FGInput::Upscaler || fgInput == FGInput::Synthesized) && !IsPaused() && !IsActive())
             Activate();
     }
     else
@@ -847,7 +848,9 @@ bool DLSSG_Dx12::Present()
     auto fIndex = GetIndexWillBeDispatched();
     LOG_DEBUG("fIndex: {}", fIndex);
 
-    if (Config::Instance()->FGDrawUIOverFG.value_or_default())
+    // Not for the synthesized input: it hands no UI texture to draw (its HUD layer is FSR-FG's only)
+    if (Config::Instance()->FGDrawUIOverFG.value_or_default() &&
+        State::Instance().activeFgInput != FGInput::Synthesized)
     {
         auto ui = GetResource(FG_ResourceType::UIColor, fIndex);
         if (ui && (ui->validity == FG_ResourceValidity::UntilPresent ||

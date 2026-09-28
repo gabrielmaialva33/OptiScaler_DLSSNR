@@ -1,12 +1,13 @@
 #pragma once
 
-// Which of synthesized frame generation's two HUD fixes run for a base frame, and what FSR-FG is handed.
+// Which of synthesized frame generation's two HUD fixes run for a base frame, and what FG is handed.
 // Pure logic with no D3D in it, so the host tests drive it directly (tests/fg-synth-policy). Design:
-// dlssnr/design/synthesized-frame-generation.md, "The HUD: near depth and a UI layer".
+// dlssnr/design/synthesized-frame-generation.md, "The HUD: near depth and a UI layer" and "DLSS-G output".
 //
 // - Fix A, [FrameGen] SynthesizedHudDepth: the HUD mask's depth (1.0, near, where the mask holds) instead of
-//   the constant zero depth.
+//   the constant zero depth. Any output takes it: it is only the depth FG is given.
 // - Fix B, [FrameGen] SynthesizedHudLayer: the frame with the mask as alpha, registered as FFX's UI resource.
+//   FSR-FG only: DLSS-G recomposes UI only with a HUD-less colour this input does not have.
 
 struct SynthHudPlan
 {
@@ -16,7 +17,8 @@ struct SynthHudPlan
 };
 
 // hudDepth, hudLayer: the two keys. motion: [FrameGen] SynthesizedMotion. disableUi: [FrameGen] DisableUI.
-inline SynthHudPlan PlanSynthHud(bool hudDepth, bool hudLayer, bool motion, bool disableUi)
+// layerComposed: the active output composes a registered UI layer over every frame it presents (FSR-FG).
+inline SynthHudPlan PlanSynthHud(bool hudDepth, bool hudLayer, bool motion, bool disableUi, bool layerComposed)
 {
     SynthHudPlan plan {};
 
@@ -24,8 +26,9 @@ inline SynthHudPlan PlanSynthHud(bool hudDepth, bool hudLayer, bool motion, bool
     // ties at zero anyway: near depth would change nothing, and the mask would be paid for nothing.
     plan.depth = hudDepth && motion;
 
-    // FSRFG_Dx12::SetResource refuses every UI resource under DisableUI; a layer nobody takes is waste.
-    plan.layer = hudLayer && !disableUi;
+    // FSRFG_Dx12::SetResource refuses every UI resource under DisableUI, and an output that does not compose
+    // the layer (DLSS-G) would take it and do nothing with it; either way a layer nobody uses is waste.
+    plan.layer = hudLayer && !disableUi && layerComposed;
 
     plan.detect = plan.depth || plan.layer;
     return plan;
@@ -33,7 +36,7 @@ inline SynthHudPlan PlanSynthHud(bool hudDepth, bool hudLayer, bool motion, bool
 
 struct SynthHudFeed
 {
-    bool maskDepth = false; // hand FSR the mask's depth; otherwise the constant zero depth
+    bool maskDepth = false; // hand FG the mask's depth; otherwise the constant zero depth
     bool layer = false;     // hand FSR the layer as its UI resource
 };
 

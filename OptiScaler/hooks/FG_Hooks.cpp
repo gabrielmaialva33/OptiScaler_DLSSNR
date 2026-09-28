@@ -66,14 +66,15 @@ static void FeedSynthD3D12(IDXGISwapChain* swapchain, IFGFeature_Dx12* fg)
         LOG_INFO("synthesized FG input on a native D3D12 swapchain, fed from the FG present hook");
     }
 
-    // The one-time clear goes on FG's queue, the one FSR-FG's prepare runs on, ahead of it.
+    // The one-time clear goes on FG's queue, ahead of the first read: FSR-FG's prepare runs on it, and DLSS-G
+    // reads the pair at present, after everything submitted there.
     if (!_synthD3D12->RecordInitOnQueue(queue, desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format))
         return;
 
     // With [FrameGen] SynthesizedMotion, the motion field from the frame the game just finished, on the same
-    // queue and ahead of FSR-FG's prepare. It is estimated here, before DLSS-NR's pass below, so NR takes
-    // this field instead of estimating again (SynthMotion::Handoff). The HUD mask goes on the same list, for
-    // the depth FSR-FG's prepare reads.
+    // queue and ahead of FG's read. It is estimated here, before DLSS-NR's pass below, so NR takes this field
+    // instead of estimating again (SynthMotion::Handoff). The HUD mask goes on the same list, for the depth FG
+    // reads.
     if (SynthInputs::FrameWanted())
     {
         IDXGISwapChain3* swapchain3 = nullptr;
@@ -181,14 +182,16 @@ static bool CheckForFGStatus()
     if (State::Instance().activeFgInput == FGInput::NoFG || State::Instance().activeFgInput == FGInput::NvngxFG)
         return false;
 
-    // The synthesized input feeds only FSR FG so far; any other output would be created and never fed
+    // The synthesized input feeds FSR FG and DLSS-G; XeFG is not wired to it, and Reprojection needs a hudless
+    // frame it never has (synthesized-frame-generation.md, "DLSS-G output")
     if (State::Instance().activeFgInput == FGInput::Synthesized &&
-        State::Instance().activeFgOutput != FGOutput::FSRFG && State::Instance().activeFgOutput != FGOutput::NoFG)
+        State::Instance().activeFgOutput != FGOutput::FSRFG && State::Instance().activeFgOutput != FGOutput::DLSSG &&
+        State::Instance().activeFgOutput != FGOutput::NoFG)
     {
         ImGui::InsertNotification(
-            { ImGuiToastType::Error, 20000, "Synthesized FG input\nworks with the FSR FG output only" });
+            { ImGuiToastType::Error, 20000, "Synthesized FG input\nworks with the FSR FG or DLSSG output only" });
 
-        LOG_WARN("Synthesized FG input supports only FGOutput=fsrfg for now, disabling FGOutput {}",
+        LOG_WARN("Synthesized FG input supports only FGOutput=fsrfg or dlssg, disabling FGOutput {}",
                  magic_enum::enum_name(State::Instance().activeFgOutput));
         Config::Instance()->FGOutput.set_volatile_value(FGOutput::NoFG);
         State::Instance().activeFgOutput = Config::Instance()->FGOutput.value_or_default();

@@ -42,17 +42,18 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
-  ownership and deferred release against scripted COM/Win32 fakes. No GPU coverage.
+  ownership and deferred release against scripted COM/Win32 fakes, and which FG input and output
+  the bridge is built for. No GPU coverage.
 - `vulkan-query-readiness` — production Vulkan upscaler timing, nonblocking
   readiness retry, error rejection and single consumption. No frame-identity
   or GPU synchronization coverage.
 - `mfg-pattern` — the real MFG byte signatures and scanner matcher against synthetic
   buffers. Runs no patcher and touches no DLL.
 - `fg-synth-policy` — synthesized FG's decisions (fast-motion response on incoherent motion
-  and its cap, low-fps floor, duplicate-present advice, which HUD fix runs), the motion statistics
-  they are made from, and the NR/FG motion handoff, from the production headers, plus a guard holding
-  the HUD mask's thresholds equal to DLSS-NR's. Pure logic on rows laid out as the readback lays them
-  out: no GPU, no FSR.
+  and its cap, low-fps floor, duplicate-present advice, which HUD fix runs for which output), the
+  motion statistics they are made from, and the NR/FG motion handoff, from the production headers,
+  plus a guard holding the HUD mask's thresholds equal to DLSS-NR's. Pure logic on rows laid out as
+  the readback lays them out: no GPU, no FSR, no DLSS-G.
 - `nr-before-upscale` — pre-upscale boundary functions against strict host fakes.
 - `nr-dispatch` — composition constants, descriptor slots and partial initialization cleanup.
 - `nr-gpu-timing` — portable timing validation, plus the duplicate-execution

@@ -185,3 +185,17 @@ Six mutations of the fix were each confirmed to fail a case:
 - the hidden swapchain not sized from the presenter;
 - `SetFullscreenState` owing nothing;
 - the game's raw flags handed to the presenter.
+
+## What the bridge is built for
+
+`predicateCases` runs the production `WantedForFrameGeneration`, `WantedForNeuralRendering` and
+`WantedIdleForNeuralRendering`, extracted verbatim by `run.py`, over the FG input and output and NR's
+state:
+
+- Nothing configured builds no bridge. NR alone at present (`HookMethod=2`) builds one for NR.
+- An upscaler-fed FG bridge never hosts the pass: the pass has its own route after that upscaler.
+- The synthesized input builds an FG bridge for the FSR FG and DLSSG outputs. The pass rides along
+  when NR is at present, and an idle host is kept when NR is off there. XeFG and Reprojection are refused
+  for it, so no bridge is built for them.
+- DLSSG was refused until 2026-09-28 (synthesized-frame-generation.md, "DLSS-G output"). Restoring that
+  refusal in the production predicate fails these cases.

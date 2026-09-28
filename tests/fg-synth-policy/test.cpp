@@ -582,19 +582,25 @@ static void duplicateCases()
     std::puts("duplicate cases passed");
 }
 
-// The HUD keys (Synth_Hud.h): which fix runs, and what FSR-FG is handed.
+// The HUD keys (Synth_Hud.h): which fix runs, and what FG is handed. The last argument says whether the output
+// composes the UI layer: FSR-FG does, DLSS-G does not (synthesized-frame-generation.md, "DLSS-G output").
 static void hudCases()
 {
+    constexpr bool kFsrFg = true;
+    constexpr bool kDlssG = false;
+
     // Defaults: near depth on, the layer off. Without synthesized motion nothing runs at all, so the input is
     // what it was before the keys existed.
+    for (bool composed : { kFsrFg, kDlssG })
     {
-        const auto plan = PlanSynthHud(true, false, false, false);
+        const auto plan = PlanSynthHud(true, false, false, false, composed);
         assert(!plan.depth && !plan.layer && !plan.detect);
     }
 
-    // With motion, near depth runs, and so does the mask it needs.
+    // With motion, near depth runs, and so does the mask it needs, whichever output takes it.
+    for (bool composed : { kFsrFg, kDlssG })
     {
-        const auto plan = PlanSynthHud(true, false, true, false);
+        const auto plan = PlanSynthHud(true, false, true, false, composed);
         assert(plan.depth && !plan.layer && plan.detect);
     }
 
@@ -602,33 +608,58 @@ static void hudCases()
     for (bool layer : { false, true })
     {
         for (bool disableUi : { false, true })
-            assert(!PlanSynthHud(true, layer, false, disableUi).depth);
+        {
+            for (bool composed : { kFsrFg, kDlssG })
+                assert(!PlanSynthHud(true, layer, false, disableUi, composed).depth);
+        }
     }
 
     // The layer does not need motion: it holds the HUD however the interpolator moved it.
     {
-        const auto plan = PlanSynthHud(false, true, false, false);
+        const auto plan = PlanSynthHud(false, true, false, false, kFsrFg);
         assert(!plan.depth && plan.layer && plan.detect);
     }
 
     // DisableUI refuses every UI resource, so the layer is not recorded for nobody; near depth is unaffected.
     {
-        const auto plan = PlanSynthHud(true, true, true, true);
+        const auto plan = PlanSynthHud(true, true, true, true, kFsrFg);
         assert(plan.depth && !plan.layer && plan.detect);
-        assert(!PlanSynthHud(false, true, true, true).detect);
+        assert(!PlanSynthHud(false, true, true, true, kFsrFg).detect);
     }
 
-    // The mask is recorded exactly when one of the fixes runs, over every combination.
-    for (int bits = 0; bits < 16; ++bits)
+    // An output that does not compose the layer (DLSS-G) never gets one: with the layer alone asked for, nothing
+    // is planned and the mask is not even recorded.
     {
-        const auto plan = PlanSynthHud(bits & 1, bits & 2, bits & 4, bits & 8);
+        const auto plan = PlanSynthHud(false, true, false, false, kDlssG);
+        assert(!plan.depth && !plan.layer && !plan.detect);
+        assert(!PlanSynthHud(false, true, true, false, kDlssG).detect);
+    }
+
+    // Both keys on under DLSS-G: near depth still runs, and the mask for it; only the layer is dropped.
+    {
+        const auto plan = PlanSynthHud(true, true, true, false, kDlssG);
+        assert(plan.depth && !plan.layer && plan.detect);
+    }
+
+    // Over every combination: the mask is recorded exactly when one of the fixes runs; near depth does not depend
+    // on the output; the layer runs only when asked for, not refused by DisableUI, and composed by the output.
+    for (int bits = 0; bits < 32; ++bits)
+    {
+        const bool hudDepth = bits & 1, hudLayer = bits & 2, motion = bits & 4, disableUi = bits & 8;
+        const bool composed = bits & 16;
+        const auto plan = PlanSynthHud(hudDepth, hudLayer, motion, disableUi, composed);
         assert(plan.detect == (plan.depth || plan.layer));
+        assert(plan.depth == (hudDepth && motion));
+        assert(plan.depth == PlanSynthHud(hudDepth, hudLayer, motion, disableUi, !composed).depth);
+        assert(plan.layer == (hudLayer && !disableUi && composed));
+        if (!composed)
+            assert(!plan.layer);
     }
 
     // Feed: the mask's depth only for a frame whose mask executed at the presenter's extent; otherwise the
     // constant depth, as before.
     {
-        const auto plan = PlanSynthHud(true, true, true, false);
+        const auto plan = PlanSynthHud(true, true, true, false, kFsrFg);
         auto feed = ChooseSynthHudFeed(plan, true, true);
         assert(feed.maskDepth && feed.layer);
 
@@ -641,9 +672,16 @@ static void hudCases()
         assert(feed.maskDepth && !feed.layer);
     }
 
-    // A fix that is off is never handed over, whatever the mask did.
+    // Under DLSS-G the feed carries the mask's depth and never a layer, even with one written.
     {
-        const auto feed = ChooseSynthHudFeed(PlanSynthHud(false, false, true, false), true, true);
+        const auto feed = ChooseSynthHudFeed(PlanSynthHud(true, true, true, false, kDlssG), true, true);
+        assert(feed.maskDepth && !feed.layer);
+    }
+
+    // A fix that is off is never handed over, whatever the mask did.
+    for (bool composed : { kFsrFg, kDlssG })
+    {
+        const auto feed = ChooseSynthHudFeed(PlanSynthHud(false, false, true, false, composed), true, true);
         assert(!feed.maskDepth && !feed.layer);
     }
 

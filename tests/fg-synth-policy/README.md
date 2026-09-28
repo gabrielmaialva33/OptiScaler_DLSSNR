@@ -68,15 +68,21 @@ thresholds, two passes.
 
 - **The HUD keys** (`Synth_Hud.h`). Near depth (`SynthesizedHudDepth`) never runs without synthesized
   motion, so its default of on leaves the input unchanged until motion is on; the layer
-  (`SynthesizedHudLayer`) runs without motion but not under `DisableUI`; the mask is recorded exactly when
-  one of them runs, over all sixteen combinations. For the feed: the mask's depth only for a frame whose
-  mask executed, and the layer not before it has been written once.
+  (`SynthesizedHudLayer`) runs without motion but not under `DisableUI`. For the feed: the mask's depth only
+  for a frame whose mask executed, and the layer not before it has been written once.
+  - **Which output.** `PlanSynthHud` also takes whether the output composes the layer: FSR-FG does, DLSS-G
+    does not (synthesized-frame-generation.md, "DLSS-G output"). Without a composing output the layer is
+    never planned, and a layer asked for alone records no mask at all. Near depth is the same under either
+    output, and DLSS-G's feed carries the mask's depth and never a layer.
+  - **All 32 combinations** of the five inputs: the mask is recorded exactly when one fix runs, near depth
+    equals `hudDepth && motion` whatever the output, and the layer equals
+    `hudLayer && !disableUi && layerComposed`.
 
 ## What it does not cover
 
 - The GPU side: the copy of the rows into the readback, the estimator, the HUD mask's pixels
-  (`tests/synth-motion-d3d12` runs those on a GPU), FSR-FG's reaction to Reset, depth or a UI layer, and
-  the bridge and D3D12 call sites (`tests/bridge-lifetime` covers the bridge's calls with fakes).
+  (`tests/synth-motion-d3d12` runs those on a GPU), FSR-FG's or DLSS-G's reaction to Reset, depth or a UI
+  layer, and the bridge and D3D12 call sites (`tests/bridge-lifetime` covers the bridge's calls with fakes).
 - Anything about image quality.
 - Whether the thresholds suit a real game. They are the design's estimates, to be tuned from the
   10 s summary in the log.

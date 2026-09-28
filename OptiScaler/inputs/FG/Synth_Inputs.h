@@ -46,6 +46,9 @@ class Overlay_Dx12;
 // UI layer, the presented frame with the mask as alpha, which FFX composes over every frame it presents; on
 // native D3D12 it is recorded late, after DLSS-NR's pass (RecordLayerOnQueue). Design:
 // synthesized-frame-generation.md, "The HUD: near depth and a UI layer".
+//
+// The output is FSR-FG or DLSS-G, fed through the same IFGFeature_Dx12 calls. DLSS-G takes everything but the UI
+// layer, which only FFX composes (Synth_Hud.h). Design: synthesized-frame-generation.md, "DLSS-G output".
 class SynthInputs
 {
   public:

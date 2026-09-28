@@ -28,10 +28,10 @@ namespace Dx11wDx12
 bool WantedForFrameGeneration()
 {
     const auto& state = State::Instance();
-    // The synthesized input feeds only FSR FG so far. With another output FG is refused later, and a
+    // The synthesized input feeds FSR FG and DLSS-G. With another output FG is refused later, and a
     // bridge built for it would copy every frame for nothing.
     if (state.activeFgInput == FGInput::Synthesized)
-        return state.activeFgOutput == FGOutput::FSRFG;
+        return state.activeFgOutput == FGOutput::FSRFG || state.activeFgOutput == FGOutput::DLSSG;
 
     return state.activeFgInput == FGInput::Upscaler && state.activeFgOutput != FGOutput::NoFG &&
            state.activeFgInput != FGInput::NvngxFG;

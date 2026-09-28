@@ -36,16 +36,19 @@ UINT AlignUp(UINT value, UINT alignment) { return (value + alignment - 1) / alig
 
 bool MotionWanted() { return Config::Instance()->FGSynthesizedMotion.value_or_default(); }
 
-// Read every base frame, so the menu's checkboxes apply at once.
+// Read every base frame, so the menu's checkboxes apply at once. Only FSR-FG composes the UI layer; DLSS-G gets
+// near depth alone (synthesized-frame-generation.md, "DLSS-G output").
 SynthHudPlan HudPlan()
 {
     const auto& cfg = *Config::Instance();
     return PlanSynthHud(cfg.FGSynthesizedHudDepth.value_or_default(), cfg.FGSynthesizedHudLayer.value_or_default(),
-                        cfg.FGSynthesizedMotion.value_or_default(), cfg.FGDisableUI.value_or_default());
+                        cfg.FGSynthesizedMotion.value_or_default(), cfg.FGDisableUI.value_or_default(),
+                        State::Instance().activeFgOutput == FGOutput::FSRFG);
 }
 
 // Where the pair rests between frames, and the state FG is told it arrives in. FSR-FG's prepare reads
-// both from compute; with FG_ResourceValidity::UntilPresent it uses them in place, without a copy.
+// both from compute; with FG_ResourceValidity::UntilPresent it uses them in place, without a copy, and DLSS-G
+// tags them eValidUntilPresent and reads them at present.
 constexpr D3D12_RESOURCE_STATES kRestState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
 // Cleared as render targets: ClearRenderTargetView needs one CPU descriptor in a heap that is not
@@ -591,8 +594,8 @@ bool SynthInputs::_RecordOverlayOn(ID3D12Device* device, ID3D12GraphicsCommandLi
         if (!_reportedOverlayFailure)
         {
             _reportedOverlayFailure = true;
-            LOG_WARN("synthesized FG input: the HUD mask did not record; FSR FG keeps the constant depth and no UI "
-                     "layer (reported once)");
+            LOG_WARN("synthesized FG input: the HUD mask did not record; frame generation keeps the constant depth "
+                     "and no UI layer (reported once)");
         }
 
         return false;
@@ -1119,7 +1122,8 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
     fg->SetMVScale(1.0f, 1.0f);
     fg->SetJitter(0.0f, 0.0f);
     // Reset repeats the frame instead of interpolating it (FSR's interpolation copies the back buffer on a
-    // reset): the history start of a size, a scene cut, and the fast-motion response.
+    // reset; what DLSS-G shows on one is not measured): the history start of a size, a scene cut, and the
+    // fast-motion response. DLSS-G ignores the interpolation rect.
     fg->SetReset((_resetOwed || frameSceneCut || action == SynthFgPolicy::Action::Reset) ? 1 : 0);
     fg->SetInterpolationRect(_width, _height);
 
@@ -1146,7 +1150,8 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
 
     // The HUD (Synth_Hud.h): the mask's depth instead of the constant one, and the UI layer, when this base
     // frame's mask executed at the presenter's extent. Both rest where the pair does and are valid until
-    // present: the depth is read by FSR-FG's prepare within this frame, the layer copied by FFX's Present.
+    // present: the depth is read by FSR-FG's prepare within this frame or by DLSS-G at present, the layer
+    // (FSR-FG only, HudPlan) copied by FFX's Present.
     const auto hudPlan = HudPlan();
     const bool maskFits =
         frameOverlay && _overlay != nullptr && _overlay->Width() == _width && _overlay->Height() == _height;
@@ -1183,9 +1188,9 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
     if (hud.maskDepth && !_reportedMaskDepth)
     {
         _reportedMaskDepth = true;
-        LOG_INFO("synthesized FG input: FSR-FG now gets the HUD mask as depth ({}x{}: 1.0, near, on the detected "
+        LOG_INFO("synthesized FG input: {} now gets the HUD mask as depth ({}x{}: 1.0, near, on the detected "
                  "interface, 0.0 elsewhere)",
-                 _width, _height);
+                 fg->Name(), _width, _height);
     }
 
     // FSRFG_Dx12::Dispatch registers it as FFX's UI resource, for this input only.
@@ -1229,9 +1234,9 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
     if (frameMotion != nullptr && !_reportedMotionFed)
     {
         _reportedMotionFed = true;
-        LOG_INFO("synthesized FG input: FSR-FG now gets the synthesized motion field ({}x{}, current to previous in "
+        LOG_INFO("synthesized FG input: {} now gets the synthesized motion field ({}x{}, current to previous in "
                  "pixels, motion vector scale 1 x 1)",
-                 _width, _height);
+                 fg->Name(), _width, _height);
     }
 }
 

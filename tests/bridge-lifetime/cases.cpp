@@ -461,8 +461,20 @@ void predicateCases()
     set(true, 2, FGInput::Synthesized, FGOutput::XeFG);
     assert(!Dx11wDx12::WantedForFrameGeneration());
     assert(Dx11wDx12::WantedForNeuralRendering());
+    set(true, 2, FGInput::Synthesized, FGOutput::Reprojection);
+    assert(!Dx11wDx12::WantedForFrameGeneration() && !Dx11wDx12::WantedIdleForNeuralRendering());
+
+    // DLSS-G is fed like FSR FG (synthesized-frame-generation.md, "DLSS-G output"): the bridge is built for it,
+    // with the pass once per base frame when NR is at present, and an idle host when NR is off there.
     set(false, 1, FGInput::Synthesized, FGOutput::DLSSG);
-    assert(!Dx11wDx12::WantedForFrameGeneration() && !Dx11wDx12::WantedForNeuralRendering());
+    assert(Dx11wDx12::WantedForFrameGeneration() && !Dx11wDx12::WantedForNeuralRendering());
+    assert(!Dx11wDx12::WantedIdleForNeuralRendering());
+    set(true, 2, FGInput::Synthesized, FGOutput::DLSSG);
+    assert(Dx11wDx12::WantedForFrameGeneration() && Dx11wDx12::WantedForNeuralRendering());
+    assert(!Dx11wDx12::WantedIdleForNeuralRendering());
+    set(false, 2, FGInput::Synthesized, FGOutput::DLSSG);
+    assert(Dx11wDx12::WantedForFrameGeneration() && !Dx11wDx12::WantedForNeuralRendering());
+    assert(Dx11wDx12::WantedIdleForNeuralRendering());
 
     // An upscaler-fed FG bridge never keeps one.
     set(false, 2, FGInput::Upscaler, FGOutput::FSRFG);
