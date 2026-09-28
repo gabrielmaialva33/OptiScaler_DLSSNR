@@ -6,6 +6,8 @@ Status: **steps 1 and 2 built and measured** (`90990bba`, `d954692d`; see
 [Step 5, measured](#step-5-measured). Written 2026-09-27 against `944aff56`. The code this plans lives
 outside the NR module (see [Where the code goes](#where-the-code-goes)); the note sits here because
 it builds on the present host and on [synthesized-motion.md](synthesized-motion.md).
+**The HUD (step 4)** is designed in [The HUD: near depth and a UI layer](#the-hud-near-depth-and-a-ui-layer)
+(2026-09-28, branch `fg-hud-depth-ui`), which also corrects what this note first planned for it.
 
 ## The problem
 
@@ -68,9 +70,11 @@ turning off below 10 fps base.
   and an optical-flow field and, per pixel, keeps whichever reconstructs the colour better. So zero
   game vectors should fall back to optical flow alone, minus depth-based disocclusion. That is
   inferred from AMD's documentation; nobody has published a test of it.
-- **The FSR-FG output, its pacing and its UI composition already work here.** `FSRFG_Dx12` owns the
-  FFX swapchain, pacing and inpainting. `FGDrawUIOverFG` plus `RUI_Dx12` composite a `UIColor`
-  resource over every presented frame (`FSRFG_Dx12.cpp:1659-1690`).
+- **The FSR-FG output and its pacing already work here.** `FSRFG_Dx12` owns the FFX swapchain, pacing
+  and inpainting. This bullet first said that `FGDrawUIOverFG` plus `RUI_Dx12` composite a `UIColor`
+  resource over every presented frame. They do not: they draw it into the backbuffer before FFX's
+  Present, into the frame FFX then interpolates. FFX's own UI composition was never used here. See
+  [Correction: FGDrawUIOverFG is not a UI layer](#correction-fgdrawuioverfg-is-not-a-ui-layer).
 - **The D3D11 bridge already makes an FG-capable presenter.** `Dx11wDx12SC` creates the FG swapchain
   through `FGHooks` on the bridge's D3D12 queue when FG is wanted (`hooks/DxgiFactory_Hooks.cpp:432`).
   DX11 titles that do call an upscaler use this today.
@@ -127,9 +131,10 @@ decides whether the result is usable there.
 
 - **The mask.** A pixel that is identical in both frames while its neighbourhood moves is treated as
   a static overlay. This is afmf-linux's rule, and it is how LS's "UI detection" is described.
-- **The composite.** The mask becomes the alpha of a `UIColor` texture cut from the current frame,
-  and the existing `FGDrawUIOverFG` path composites it over every generated frame. The interface is
-  then never warped, only held still, which is what it is doing anyway.
+- **The composite.** The mask becomes the alpha of a texture cut from the current frame, composited
+  over every generated frame. The interface is then never warped, only held still, which is what it
+  is doing anyway. As first written, this bullet sent it through `FGDrawUIOverFG`; that path cannot do
+  it, and the design that replaced it is [The HUD: near depth and a UI layer](#the-hud-near-depth-and-a-ui-layer).
 - **Not planned:** a real hudless capture on D3D11, by tracking the draws the interface is made of.
   That is upstream's DX11 Hudfix (`12ec9011`), which this fork declined in `512e168d`.
 
@@ -205,8 +210,9 @@ is admitted, and the input is recorded at `FG_Hooks.cpp:1215`, before `fg->Prese
    - Pin the field's units and y sign with a capture.
    - Feed FG, and compare against step 1 on the same pan.
    - Hand the field to NR's present host, which is where Generation Zero's ghosts go away.
-4. **The HUD mask**, into `UIColor` through `FGDrawUIOverFG`. Judged on Divinity's hotbar and
-   tooltips during a pan.
+4. **The HUD mask.** Judged on Divinity's hotbar and tooltips during a pan. First planned into
+   `UIColor` through `FGDrawUIOverFG`; built instead as near depth and an FFX UI layer, see
+   [The HUD: near depth and a UI layer](#the-hud-near-depth-and-a-ui-layer).
 5. **The D3D12 present path:** PCSX2, then a check that `SkipDuplicateFrames` and the identical-pair
    skip hold up at 30 and 60 fps.
 6. **Rafael's 3060.**
@@ -604,10 +610,211 @@ uneven cadence rather than smoothness.
 - A duplicate-presenting setup (PCSX2 with Skip Presenting Duplicate Frames off) logs the advice
   once.
 
+## The HUD: near depth and a UI layer
+
+Written 2026-09-28, before the code, on branch `fg-hud-depth-ui`. Two keys under `[FrameGen]`, read
+every base frame:
+- `SynthesizedHudDepth` (Fix A) is meant to default on, if the GPU harness shows the mask marks no
+  scenery. It acts only with `SynthesizedMotion`, which is itself off by default.
+- `SynthesizedHudLayer` (Fix B) defaults off until it has been seen in a game.
+
+With both off, or without synthesized motion and with the layer off, the input is byte-for-byte what it
+was.
+
+Sources below are FSR 3.1.6's frame interpolation in the tree,
+`external/FidelityFX-SDK-v2/Kits/FidelityFX/framegeneration/fsr3/`. `fi/` stands for its
+`include/gpu/frameinterpolation/`, and `dx12/` for its swapchain.
+
+### What goes wrong at the HUD, read from FSR's code
+
+Our depth is a constant: `SynthInputs` clears an R32_FLOAT to 0 once and sets `InvertedDepth`. The HUD's
+own vectors are already zero wherever the expand's per-pixel choice finds them
+([synthesized-motion.md](synthesized-motion.md), "Static overlays"). With synthesized motion on, two
+things still go wrong around the interface, and both come from the flat depth.
+
+- **Every pixel is a 50/50 blend of its two samples.**
+  - FSR marks a sample occluded only where the interpolated pixel's depth lies behind the depth found
+    at that sample by more than a separation margin (`fi/ffx_frameinterpolation_disocclusion_mask.h:65-116`).
+    Flat depth never gives that, so the mask is (1, 1) everywhere.
+  - `computeInterpolatedColor` then blends the previous-frame and current-frame samples at t = 0.5
+    (`fi/ffx_frameinterpolation.h:100-123`).
+  - A background pixel beside a HUD element samples the previous frame at `q + v/2` and the current one
+    at `q - v/2`, with `v` its current-to-previous vector. When one of those lands on the element, which
+    sits in the same place in both frames, the element's colour comes in at half weight.
+  - So each side of an element gets a band half as wide as the frame-to-frame motion: the ~24 px band
+    beside the HUD at 48 px of motion per base frame.
+- **HUD pixels lose vector collisions.**
+  - Every current pixel scatters its half vector to where it lands at t = 0.5. Each destination keeps the
+    maximum of a packed key: 10 bits of depth priority, then 5 bits of colour agreement, then the raw
+    float16 bits of the vector. X and Y are separate atomics (`fi/ffx_frameinterpolation_common.h:218-229`,
+    `:266-272`; `fi/ffx_frameinterpolation_callbacks_hlsl.h:667-671`;
+    `fi/ffx_frameinterpolation_game_motion_vector_field.h:26-76`).
+  - Flat depth ties the first 10 bits everywhere. A HUD pixel and a background pixel with a correct
+    vector both score full colour agreement. So the vector bits decide, and any non-zero vector
+    scattered onto a HUD pixel beats the HUD's own zero.
+  - The HUD pixel is then interpolated along the camera's vector: the smear the per-pixel zero was
+    meant to stop, brought back at the scatter.
+
+### Fix A: the HUD is near
+
+`[FrameGen] SynthesizedHudDepth`. The depth handed to FSR is written every base frame: 1.0 (the near
+plane, inverted) where the static-overlay mask is at least 0.5, and 0.0 everywhere else.
+
+- **Collisions.** Priority comes from view-space depth (`getPriorityFactorFromViewSpaceDepth`,
+  `fi/ffx_frameinterpolation_game_motion_vector_field.h:26-33`). With the config's near 0.1 and far
+  100000, depth 1 scores about 700 of 1023 and depth 0 about 22. A HUD pixel then keeps its own zero
+  vector whatever else lands on it.
+- **Disocclusion.** Take a band pixel at depth 0 whose sample lands on the HUD, at depth 1, in one of
+  the frames. Its depth is far behind that sample, so that side is marked occluded.
+  - The pixel is then taken from the other frame only (t = 0 or 1, `fi/ffx_frameinterpolation.h:118-122`).
+  - A disoccluded pixel also prefers the game vectors over FSR's own optical flow: `fDisoccludedFactor`
+    lifts `fGame_Sim` to 1 (`:123`, `:159`).
+- **Camera values do not matter.** Near and far only turn device depth into view depth
+  (`internal/ffx_frameinterpolation.cpp:815-850`, which also ignores their order). A step from 0 to 1
+  spans the whole range whatever they are, and FOV only scales the separation margin, which this step
+  exceeds by orders of magnitude.
+- **It needs synthesized motion.** With zero game vectors, both samples sit on the pixel itself, so no
+  side is ever occluded, and every vector ties at zero anyway. So the key does nothing, and costs nothing,
+  without `SynthesizedMotion`.
+- FSR's own optical-flow field does not read depth (`fi/ffx_frameinterpolation_optical_flow_vector_field.h`).
+
+### Fix B: a UI layer FFX composes
+
+`[FrameGen] SynthesizedHudLayer`.
+
+- **What FFX composes.** FFX's swapchain composites a registered UI resource over every frame it
+  presents, generated and real: `lerp(backbuffer, ui.rgb, ui.a)`
+  (`internal/shaders/FrameInterpolationSwapchainUiComposition.hlsl:31-40`). That is the default present
+  callback, which is the one in use whenever OptiScaler installs none; it installs one only for
+  reprojection, which needs a hudless frame this input never has.
+- **What we register.** An RGBA16F layer: rgb is the frame as it will be presented, alpha is the mask.
+- **In generated frames,** the masked pixels are exactly the newer base frame's, whatever the
+  interpolator did there. The HUD is held, never warped or ghosted.
+- **In real frames,** `lerp(x, x, a) = x`. The frame is unchanged: RGBA16F holds an 8- or 10-bit UNORM
+  value to within a quarter of a step, which rounds back to the same value, and scRGB exactly.
+- **What it does not fix: the band.** Band pixels are background, not masked, so the layer leaves them
+  to the interpolator. The band is Fix A's job. B makes the interface itself exact; A keeps the
+  interpolation around it honest.
+- **Double buffering.** `FFX_FRAMEGENERATION_UI_COMPOSITION_FLAG_ENABLE_INTERNAL_UI_DOUBLE_BUFFERING`
+  makes the swapchain copy the layer on the game queue inside its own Present (`dx12/FrameInterpolationSwapchainDX12.cpp:2179-2181`,
+  `copyUiResource`). The presenter thread composes from that copy, so the next base frame can
+  overwrite ours.
+  - The copy consumes the registration (`currentUiSurface.resource = nullptr`), so it is renewed at
+    every dispatch.
+  - A present with none drops the internal copy (`verifyUiDuplicateResource`). That makes switching the
+    key off clean.
+- **Format.** The composition reads the layer through a view of its own format (`convertFormatSrv`), so
+  it need not match the swapchain.
+- **Which frame the colour comes from.**
+  - *Bridge:* the frame copied into the presenter, which is DLSS-NR's output when the host ran. It is
+    recorded on the copy list.
+  - *Native D3D12:* DLSS-NR's present pass edits the backbuffer in place after `fg->Present()`. So the
+    layer is recorded after that pass, just before `o_FGSCPresent`, on FG's queue. The mask was recorded
+    earlier, before FSR's prepare. Taking the colour early instead would put the pre-NR pixels into
+    real frames too.
+- **Wiring.** The layer goes in as `UIColor` through `SetResource`, as with every FG input.
+  - `FSRFG_Dx12::Dispatch` registers it as FFX's UI resource only for `FGInput::Synthesized`. Every
+    other input keeps today's empty registration.
+  - `FGDrawUIOverFG` skips it for this input.
+  - `[FrameGen] DisableUI` refuses it like any UI.
+
+### Correction: FGDrawUIOverFG is not a UI layer
+
+This note said twice that `FGDrawUIOverFG` and `RUI_Dx12` composite a `UIColor` over every presented
+frame, and planned step 4 through them.
+- **What they do.** `FSRFG_Dx12::Present` draws `UIColor` into the backbuffer, on the swapchain list,
+  before FFX's Present. That is the frame FFX interpolates from.
+- **Who that is for.** A title that hands a hudless frame and a separate UI texture: FFX interpolates
+  the hudless and puts the interface back from the difference.
+- **Why it does nothing here.** With no hudless frame, drawing the interface into the backbuffer changes
+  nothing about how it is interpolated.
+- **What does work.** FFX's own UI registration (`uiDesc` in `FSRFG_Dx12::Dispatch`). Until this
+  change it was always registered empty.
+
+### The mask
+
+- **Which detector.** DLSS-NR's static-overlay rule ([hud-protection.md](hud-protection.md)), not the
+  expand's per-pixel zero choice.
+  - The rule: a still 5x5 core; motion on all four axis sides at 6, 14 or 24 px; contrast at least 0.15;
+    an 8-frame entry streak; a 1.5 s decay; dropped on its own change above 0.2; exported only with at
+    least 3 protected pixels in the 5x5; grown by 1 px.
+  - Why not the expand's choice: it fires on any pixel the previous frame reproduces better standing
+    still. That includes band pixels (uncovered background that happens to match in place) and blocks of
+    mixed motion ([synthesized-motion.md](synthesized-motion.md), "What it cannot fix"). Marking those
+    near would pin moving scenery.
+- **Where it lives.**
+  - The per-pixel rule, `shaders/dlssnr/precompile/dlssnr_uimask_rule.h`, moves to
+    `shaders/synth_motion/precompile/static_overlay_rule.h`, with the same text.
+  - NR's shader includes it from there. Its bytecode is recompiled and must be byte-identical to the
+    committed one, which makes the move checked, not assumed.
+  - FG gets its own pass, `SynthMotion::Overlay_Dx12` (`shaders/synth_motion/SynthOverlay_Dx12.*`), with
+    NR's thresholds. It runs at display size on the game's frame, on the list the synthesized feed
+    already records on: the bridge's copy list, or on native D3D12 the motion list executed on FG's
+    queue. Either way it lands before FSR's prepare reads depth.
+  - So FG depends on nothing in the NR module, and the NR module stays removable as one block.
+- **Not shared with NR at run time.** NR's mask is computed at the working size, on the model's proxy
+  input, and only with `UiProtection` on. FG needs it at display size, on the game's frame, every frame.
+  A handoff like `SynthMotion::Handoff` would only pay when both run at scale 1 with `UiProtection` on.
+  Left for later.
+- **History.** Like the estimator's, it advances only when the list that carried it executed. A gap of
+  more than 250 ms between recordings starts the history over.
+
+### Risks
+
+- **A false positive cuts a hole.**
+  - A pixel wrongly marked is near (A), and with the layer it is shown from the base frame (B).
+  - An object that crosses it in a generated frame loses the collision there (A), or is cut to its
+    base-frame position (B).
+  - The rule's gates exist to make false positives rare: the still core, all four sides moving, and the
+    streak. That is what took the sand rim away in PCSX2 (hud-protection.md).
+  - A marked pixel whose own value jumps by more than 0.2 is released on that very frame. An object close
+    in luma to what it covers is not, until the 1.5 s decay.
+- **Recall is partial.**
+  - Large solid HUD shapes are marked only at their outlined inner edges (hud-protection.md, "What it
+    costs in recall"). Their outer edge sees motion on one side only.
+  - So the band beside the outer edge of a large solid panel stays. Crosshairs, glyphs and thin lines
+    are what this covers.
+  - Interface over a still scene is never marked, and then has nothing to protect it from.
+- **Old FFX runtimes.** The double-buffering flag is in the API header this tree builds against
+  (`external/FidelityFX-SDK/ffx-api/include/ffx_api/ffx_framegeneration.h:58`). A runtime that ignores it
+  would compose from our layer at present time, while the next base frame may be writing it. That gives
+  a torn HUD in one frame, not a fault. Which version Rafael copied in is not recorded ("Measured on
+  native Windows", above); the log line `FfxApi Dx12 FG version` says, and it goes into his test notes.
+- **Proton is not a D3D12 validator** (CLAUDE.md). So, by the D3D12 rules rather than by what ran here:
+  - UAV stores only to R32_FLOAT, R8_UNORM, R16_FLOAT, R16G16_FLOAT and R16G16B16A16_FLOAT, all of which
+    every D3D12 device supports.
+  - The previous frame's state is read through SRVs, never through typed UAV loads; beyond the R32
+    formats those are optional.
+  - No constant buffer: root constants.
+  - Every resource is created in the state it rests in, and returned to it.
+
+### Tests
+
+- `nr-uimask-rule` runs unchanged against the moved header.
+- `fg-synth-policy` covers which key does what: A only with motion, B refused by `DisableUI`, and which
+  depth FSR is handed.
+- `synth-motion-d3d12` runs the FG pass on the harness's own frames, on a real device.
+  - On `overlay_*`: depth 1 on overlay pixels and 0 on background. Precision and recall are reported,
+    per element.
+  - On the pans, the moving object and the static sequence: no pixel marked.
+  - The layer's alpha equals the mask, and its rgb equals the frame.
+  - None of this runs FSR, so none of it says what FSR does with the result.
+
+### What needs a game
+
+Rafael's RTX 3060, native Windows, with `[FrameGen] DebugView`. FFX's debug grid shows the
+game-vector field's depth priority (top middle) and the disocclusion mask (bottom left)
+(`fi/ffx_frameinterpolation_debug_view.h:160-167`).
+- With A on and synthesized motion, the crosshair and HUD text should read as high priority.
+- The strip beside them should read as disoccluded while the camera pans.
+- Then, with A and B off and on, on the same pan: the crosshair, HUD text and the band beside them.
+- Also the cost of the pass next to the model.
+
 ## Open questions
 
 - How FSR's interpolator behaves with flat depth: its disocclusion and inpainting assume real depth.
-  Step 1 shows it.
+  Step 1 shows it. Read from its code on 2026-09-28: flat depth disables disocclusion, see
+  [The HUD: near depth and a UI layer](#the-hud-near-depth-and-a-ui-layer).
 - The units and sign FSR expects from our field, pinned by capture, not asserted. A flipped sign
   reads as "synthesis made it worse".
 - Whether 8x8 blocks are fine enough for text-heavy scenes, or the HUD mask has to carry them.
