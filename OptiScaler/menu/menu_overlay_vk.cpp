@@ -179,18 +179,24 @@ static bool EnsureCrossFamilyObjects(uint32_t presentFamily)
 // A queue-family ownership transfer of one swapchain image, in PRESENT_SRC layout on both sides. The
 // same barrier is recorded twice, as the release on the source family's queue and the acquire on the
 // destination's; the stage and access masks say what each side did or will do with the image.
+//
+// A CONCURRENT image has no owner to hand over, and without synchronization2 its barriers must name no
+// family (VUID-VkImageMemoryBarrier-None-09053). There each half is a plain barrier on its own queue
+// and the semaphore chain orders the queues.
 static void RecordFamilyTransfer(VkCommandBuffer cb, VkImage image, uint32_t srcFamily, uint32_t dstFamily,
                                  VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage,
                                  VkAccessFlags dstAccess)
 {
+    const bool concurrent = _scSharingMode == VK_SHARING_MODE_CONCURRENT;
+
     VkImageMemoryBarrier barrier = {};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.srcAccessMask = srcAccess;
     barrier.dstAccessMask = dstAccess;
     barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    barrier.srcQueueFamilyIndex = srcFamily;
-    barrier.dstQueueFamilyIndex = dstFamily;
+    barrier.srcQueueFamilyIndex = concurrent ? VK_QUEUE_FAMILY_IGNORED : srcFamily;
+    barrier.dstQueueFamilyIndex = concurrent ? VK_QUEUE_FAMILY_IGNORED : dstFamily;
     barrier.image = image;
     barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
 
