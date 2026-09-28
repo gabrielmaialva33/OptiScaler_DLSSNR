@@ -116,3 +116,15 @@ subrect queries from absent/failed ones, suppresses unchanged contracts and warn
 before-upscale model dimensions provide no spatial reduction, without asserting DLAA.
 The fake composition and controlled submission-admission result remain host boundaries;
 these additions do not simulate real queue execution or NGX behavior.
+
+The 61st is wilsjo2's padded input (their `docs/PADDED-PRESR.md`): 2558x1439 drawn at the origin
+of a 2560x1440 allocation. The scratch comes out at the drawn size, the upscaler is handed it, and
+everything is restored afterwards. A second unit, `guide_match_cases.cpp`, compiles
+`DlssNr_GuideMatch.h` directly. It pins the reduced-scale guide rules
+(`OptiScaler/dlssnr/design/reduced-scale-guides.md`) with the numbers of the cases they were written
+for, which cover both stages:
+- when depth and motion are resampled to the working size;
+- the model's motion scale against the legacy working / frame conversion;
+- the point-sample mapping the resample shader repeats.
+
+Like the rest of this suite, it does not execute the shader.

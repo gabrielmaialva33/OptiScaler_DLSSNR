@@ -38,6 +38,8 @@
 #include "../output_scaling/OS_Dx12.h"
 #include "DlssNr_Stabilizer_Dx12.h"
 #include "DlssNr_UiMask_Dx12.h"
+#include "DlssNr_GuideMatch.h"
+#include "DlssNr_GuideMatch_Dx12.h"
 
 namespace
 {
@@ -417,6 +419,13 @@ struct NrState
     // The constant-depth probe's surface. Separate from depthClone on purpose: it is defined by
     // never having been written, and sharing a surface with a mode that writes would destroy that.
     ID3D12Resource* depthConstant = nullptr;
+
+    // Depth and motion at the model's working size, below the frame's (reduced-scale-guides.md). Sized
+    // with the output, parked with it, and resting in UNORDERED_ACCESS between frames. guideMatch is the
+    // pass that fills them, built on first use and only when its bytecode is in the build.
+    ID3D12Resource* depthMatched = nullptr;
+    ID3D12Resource* motionMatched = nullptr;
+    DlssNr_GuideMatch_Dx12* guideMatch = nullptr;
 
     unsigned int width = 0;
     unsigned int height = 0;
@@ -2716,6 +2725,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ParkNrResource(g_nr.colorSmall);
             ParkNrResource(g_nr.outputNative);
             ParkNrResource(g_nr.passPing);
+            ParkNrResource(g_nr.depthMatched);
+            ParkNrResource(g_nr.motionMatched);
         }
     }
 
@@ -3355,12 +3366,136 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return false;
     }
 
-    // The vectors were scaled to full-frame pixels; the image the model reprojects is the working size.
-    const float mvToWorkX = width != 0 ? (float) workWidth / (float) width : 1.0f;
-    const float mvToWorkY = height != 0 ? (float) workHeight / (float) height : 1.0f;
-    const float guideMvScaleXToWork = g_nr.guideMvScaleX * mvToWorkX;
-    const float guideMvScaleYToWork = g_nr.guideMvScaleY * mvToWorkY;
+    // What the model is handed as guides, and the motion-vector scale that goes with them
+    // (reduced-scale-guides.md; both faults and both fixes are jlrouzies-fr's, v0.8.92 of wilsjo2's fork).
+    //
+    // Below the frame's size the colour shrinks to the working size. The guides used to stay at the
+    // frame's, and the model does not resample a guide larger than its input: each pixel's depth and
+    // motion described some other place and the history never lined up. So they are point-resampled to
+    // the working size when either is larger than it, and handed over as a full zero-origin region.
+    //
+    // The scale used to be the game's times working / frame. The model reads it in pixels of the motion
+    // texture it is handed, and the game's scale is in pixels of the size its vectors are measured in --
+    // the render size for low-resolution vectors -- so that shrank every such vector below 100% whether
+    // or not the guides matched. It is now the game's scale re-expressed for the texture handed over.
+    ID3D12Resource* depthForModel = depthIn;
+    ID3D12Resource* motionForModel = motionIn;
+    unsigned int modelDepthWidth = guideWidth;
+    unsigned int modelDepthHeight = guideHeight;
+    unsigned int modelDepthBaseX = depthBaseX;
+    unsigned int modelDepthBaseY = depthBaseY;
+    unsigned int modelMotionWidth = motionWidth;
+    unsigned int modelMotionHeight = motionHeight;
+    unsigned int modelMotionBaseX = motionBaseX;
+    unsigned int modelMotionBaseY = motionBaseY;
+    bool guidesMatched = false;
+
+    if (DlssNr::GuideMatch::Wanted(cfg.DlssNrMatchGuides.value_or_default(), DlssNr_GuideMatch_Dx12::Available(),
+                                   workWidth, workHeight, guideWidth, guideHeight, motionWidth, motionHeight))
+    {
+        if (g_nr.guideMatch == nullptr)
+            g_nr.guideMatch = new DlssNr_GuideMatch_Dx12("DLSS-NR guide match", device);
+
+        if (g_nr.depthMatched == nullptr)
+            g_nr.depthMatched = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, workWidth, workHeight);
+
+        // 32-bit float: vectors in pixels reach the thousands, where 16-bit float has lost the sub-pixel.
+        if (g_nr.motionMatched == nullptr)
+            g_nr.motionMatched = CreateScratch(device, DXGI_FORMAT_R32G32_FLOAT, workWidth, workHeight);
+
+        if (g_nr.guideMatch->IsInit() && g_nr.depthMatched != nullptr && g_nr.motionMatched != nullptr &&
+            g_nr.guideMatch->Dispatch(cmdList, depthIn, motionIn, depthBaseX, depthBaseY, guideWidth, guideHeight,
+                                      motionBaseX, motionBaseY, motionWidth, motionHeight, g_nr.depthMatched,
+                                      g_nr.motionMatched, workWidth, workHeight))
+        {
+            Barrier(cmdList, g_nr.depthMatched, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            Barrier(cmdList, g_nr.motionMatched, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+            depthForModel = g_nr.depthMatched;
+            motionForModel = g_nr.motionMatched;
+            modelDepthWidth = modelMotionWidth = workWidth;
+            modelDepthHeight = modelMotionHeight = workHeight;
+            modelDepthBaseX = modelDepthBaseY = modelMotionBaseX = modelMotionBaseY = 0;
+            guidesMatched = true;
+        }
+        else
+        {
+            static bool warned = false;
+            if (!warned)
+            {
+                warned = true;
+                LOG_WARN("DLSS-NR guides: the working-size resample could not run; the model keeps the frame-size "
+                         "guides this frame");
+            }
+        }
+    }
+
+    RestoreResourceState depthMatchedRead { cmdList, guidesMatched ? g_nr.depthMatched : nullptr,
+                                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS };
+    RestoreResourceState motionMatchedRead { cmdList, guidesMatched ? g_nr.motionMatched : nullptr,
+                                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS };
+
+    // The size the game's scale is measured against: the render size for low-resolution vectors (the
+    // depth region is the render region), the frame's otherwise.
+    const unsigned int motionReferenceWidth =
+        DlssNr::GuideMatch::MotionReference(frame.MotionVectorsLowResolution, guideWidth, width);
+    const unsigned int motionReferenceHeight =
+        DlssNr::GuideMatch::MotionReference(frame.MotionVectorsLowResolution, guideHeight, height);
+
+    const bool renderMotionScale = cfg.DlssNrRenderMotionScale.value_or_default();
+    const float guideMvScaleXToWork =
+        renderMotionScale
+            ? DlssNr::GuideMatch::ModelMotionScale(g_nr.guideMvScaleX, modelMotionWidth, motionReferenceWidth)
+            : DlssNr::GuideMatch::LegacyMotionScale(g_nr.guideMvScaleX, workWidth, width);
+    const float guideMvScaleYToWork =
+        renderMotionScale
+            ? DlssNr::GuideMatch::ModelMotionScale(g_nr.guideMvScaleY, modelMotionHeight, motionReferenceHeight)
+            : DlssNr::GuideMatch::LegacyMotionScale(g_nr.guideMvScaleY, workHeight, height);
     const int guideDepthInverted = g_nr.guideDepthInverted ? 1 : 0;
+
+    // Said once per change: which guides the model got, and the scale it was given for them.
+    {
+        static bool saidMatched = false;
+        static unsigned int saidShape[4] = { ~0u, ~0u, ~0u, ~0u };
+        static float saidScale[2] = { -1.0f, -1.0f };
+        const unsigned int shapeNow[4] = { modelMotionWidth, modelMotionHeight, workWidth, workHeight };
+
+        if (saidMatched != guidesMatched ||
+            !std::equal(std::begin(shapeNow), std::end(shapeNow), std::begin(saidShape)) ||
+            saidScale[0] != guideMvScaleXToWork || saidScale[1] != guideMvScaleYToWork)
+        {
+            saidMatched = guidesMatched;
+            std::copy(std::begin(shapeNow), std::end(shapeNow), std::begin(saidShape));
+            saidScale[0] = guideMvScaleXToWork;
+            saidScale[1] = guideMvScaleYToWork;
+
+            if (guidesMatched)
+                LOG_INFO("DLSS-NR guides matched to the working size: depth and motion {}x{} for a {}x{} model (the "
+                         "frame's guides are {}x{} and {}x{})",
+                         workWidth, workHeight, workWidth, workHeight, guideWidth, guideHeight, motionWidth,
+                         motionHeight);
+            else if (DlssNr::GuideMatch::Wanted(cfg.DlssNrMatchGuides.value_or_default(), true, workWidth, workHeight,
+                                                guideWidth, guideHeight, motionWidth, motionHeight))
+                LOG_INFO("DLSS-NR guides: larger than the {}x{} model and not resampled ({}); the model gets the "
+                         "frame-size guides",
+                         workWidth, workHeight,
+                         DlssNr_GuideMatch_Dx12::Available() ? "the resample did not run"
+                                                             : "this build has no guide resample shader");
+
+            LOG_INFO("DLSS-NR model motion scale {:.1f} x {:.1f}: game scale {:.1f} x {:.1f} measured against {}x{} "
+                     "({}), motion texture {}x{} ({}), model {}x{}{}",
+                     guideMvScaleXToWork, guideMvScaleYToWork, g_nr.guideMvScaleX, g_nr.guideMvScaleY,
+                     motionReferenceWidth, motionReferenceHeight,
+                     frame.MotionVectorsLowResolution ? "render size, low-resolution vectors" : "output size",
+                     modelMotionWidth, modelMotionHeight,
+                     guidesMatched ? "matched to the working size" : "the game's region", workWidth, workHeight,
+                     renderMotionScale ? "" : " -- legacy working/frame conversion");
+        }
+    }
     const bool isLogFrame = g_frames % 120 == 0;
 
     // On a present source the model is also handed the back buffer -- and it reads it in its own working
@@ -3406,9 +3541,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (useProxy)
     {
         const unsigned int proxyResult =
-            DlssNr::Proxy::Run(cmdList, device, modelInput, depthIn, motionIn, g_nr.output, workWidth, workHeight,
-                               guideWidth, guideHeight, motionWidth, motionHeight, depthBaseX, depthBaseY, motionBaseX,
-                               motionBaseY, guideDepthInverted, g_nr.reset, guideMvScaleXToWork, guideMvScaleYToWork);
+            DlssNr::Proxy::Run(cmdList, device, modelInput, depthForModel, motionForModel, g_nr.output, workWidth,
+                               workHeight, modelDepthWidth, modelDepthHeight, modelMotionWidth, modelMotionHeight,
+                               modelDepthBaseX, modelDepthBaseY, modelMotionBaseX, modelMotionBaseY, guideDepthInverted,
+                               g_nr.reset, guideMvScaleXToWork, guideMvScaleYToWork);
 
         if (coverage != nullptr)
             coverage->ModelResult(proxyResult, workWidth, workHeight);
@@ -3433,11 +3569,12 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const auto firstCpuStart =
         chainEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
     int result;
-    result = g_nr.evaluate(cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output,
-                           workWidth, workHeight, guideWidth, guideHeight, motionWidth, motionHeight, depthBaseX,
-                           depthBaseY, motionBaseX, motionBaseY, guideDepthInverted, g_nr.reset ? 1 : 0,
-                           intensityForChain, styleForChain, localStructureForChain, localToneForChain,
-                           skinStructureForChain, autoMaskForChain ? 1 : 0, guideMvScaleXToWork, guideMvScaleYToWork);
+    result = g_nr.evaluate(cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthForModel, motionForModel,
+                           g_nr.output, workWidth, workHeight, modelDepthWidth, modelDepthHeight, modelMotionWidth,
+                           modelMotionHeight, modelDepthBaseX, modelDepthBaseY, modelMotionBaseX, modelMotionBaseY,
+                           guideDepthInverted, g_nr.reset ? 1 : 0, intensityForChain, styleForChain,
+                           localStructureForChain, localToneForChain, skinStructureForChain, autoMaskForChain ? 1 : 0,
+                           guideMvScaleXToWork, guideMvScaleYToWork);
 
     timing.ModelEnd();
 
@@ -3469,12 +3606,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
             const auto startCpu = std::chrono::steady_clock::now();
             timing.ModelBegin();
-            const int extraResult = g_nr.evaluate(
-                cmdList, g_nr.passFeature[i], g_nr.capabilityParams, input, depthIn, motionIn, answer, workWidth,
-                workHeight, guideWidth, guideHeight, motionWidth, motionHeight, depthBaseX, depthBaseY, motionBaseX,
-                motionBaseY, guideDepthInverted, (g_nr.reset || g_nr.passReset[i]) ? 1 : 0, settings.Intensity,
-                (int) settings.Style, settings.LocalStructure, settings.LocalTone, settings.SkinStructure,
-                settings.AutoMask ? 1 : 0, guideMvScaleXToWork, guideMvScaleYToWork);
+            const int extraResult =
+                g_nr.evaluate(cmdList, g_nr.passFeature[i], g_nr.capabilityParams, input, depthForModel, motionForModel,
+                              answer, workWidth, workHeight, modelDepthWidth, modelDepthHeight, modelMotionWidth,
+                              modelMotionHeight, modelDepthBaseX, modelDepthBaseY, modelMotionBaseX, modelMotionBaseY,
+                              guideDepthInverted, (g_nr.reset || g_nr.passReset[i]) ? 1 : 0, settings.Intensity,
+                              (int) settings.Style, settings.LocalStructure, settings.LocalTone, settings.SkinStructure,
+                              settings.AutoMask ? 1 : 0, guideMvScaleXToWork, guideMvScaleYToWork);
             timing.ModelEnd();
             const double cpuMs =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startCpu).count();
@@ -5975,6 +6113,24 @@ void Shutdown()
     {
         delete g_nr.superUp;
         g_nr.superUp = nullptr;
+    }
+
+    if (g_nr.depthMatched != nullptr)
+    {
+        g_nr.depthMatched->Release();
+        g_nr.depthMatched = nullptr;
+    }
+
+    if (g_nr.motionMatched != nullptr)
+    {
+        g_nr.motionMatched->Release();
+        g_nr.motionMatched = nullptr;
+    }
+
+    if (g_nr.guideMatch != nullptr)
+    {
+        delete g_nr.guideMatch;
+        g_nr.guideMatch = nullptr;
     }
 
     if (g_nr.superDown != nullptr)

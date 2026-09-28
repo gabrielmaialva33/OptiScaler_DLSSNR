@@ -149,3 +149,37 @@ See `tests/nr-before-upscale/README.md` for log fields and A/B acceptance criter
 - Local game quality/performance, D3D12 bridges, RR fallback and FG interleaving still
   need real integration validation. The existing Vulkan overlay harness covers none
   of the NR module. Existing post-upscale PR #23 audit findings remain open.
+
+## 2026-09-27: against wilsjo2's pre-SR
+
+wilsjo2's [OptiScaler-DLSSNR-PreSR-Multipass](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass)
+(GPL-3.0) was read at `1bd39091`. It has the same placement ("Apply before Super Resolution") and is
+the fork people credit with it. What this tree has, what was measured, and what is missing:
+
+- **Exists: `Stage=1`, D3D12, including the D3D11 and Vulkan bridges.** It declines typeless, sRGB,
+  MSAA, arrays, a non-zero colour origin and Ray Reconstruction, and waits for 500 ms of stable
+  extent. wilsjo2 declines the same layouts.
+- **Measured:** Cyberpunk 2077 on an RTX 4090. Model cost fell from 7.03 to 3.85 ms median (-45%)
+  ([stage-before-upscale-measured.md](stage-before-upscale-measured.md)). That was at
+  `WorkingScale=1`, the one scale the guide fault below cannot touch.
+- **Padded input** (their `docs/PADDED-PRESR.md`: an origin-zero picture inside a larger
+  allocation). It already works here, by another route. The scratch is sized to the render subrect,
+  and the upscaler reads it with the subrect it was given. Nothing is copied back, because the
+  game's texture is never written; the parameter is swapped. Their 2558x1439-in-2560x1440 case is now
+  a boundary case in `tests/nr-before-upscale/cases.h`.
+- **Multipass** exists here as the pass chain (`Passes`, the `DLSS-NR chain:` line) at both stages.
+- **Taken: the guides below 100%.** jlrouzies-fr's v0.8.92 of their fork found that the reduced path
+  handed the model a working-size colour with frame-size depth and motion, plus a motion scale for
+  the wrong texture. This tree had the same shape at both stages; see
+  [reduced-scale-guides.md](reduced-scale-guides.md).
+  - At `Stage=1` below 100%, the render-size guides are larger than the model, so fix 1 applies.
+  - Fix 2 is a no-op there once the guides match, because the render-size colour is the vectors'
+    reference size.
+- **Not taken:**
+  - Their deferred mode (`docs/DEFERRED-NR-DLSS.md`): NR's difference encoded into a carrier and
+    enlarged by a second, private DLSS SR feature. It needs a second DLSS runtime instance and history,
+    and by their own account DLSS may smooth or destabilize the biased carrier.
+  - Their "finished picture" placement after frame generation. Our present-time pass is the nearest
+    thing here.
+- **Missing:** a non-zero colour origin; native Vulkan before the upscaler; the guide resample on
+  Vulkan; the guide shader's bytecode; any measurement below 100% at either stage.

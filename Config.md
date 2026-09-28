@@ -437,6 +437,18 @@ SynthMotion=auto
 ; the game draws its interface.
 ; true or false - Default (auto) is false
 UiProtection=auto
+; Model resolution below 100% (WorkingScale < 1): resample the game's depth and motion vectors to the
+; model's working size, so the guides and the colour it reprojects agree pixel for pixel. Off hands the
+; model frame-size guides for a smaller colour, which flickers and keeps "settling" after the camera
+; stops. Needs the guide resample shader in the build; the log says once which guides the model got.
+; true or false - Default (auto) is true
+MatchGuides=auto
+
+; The motion-vector scale the model is given, in pixels of the motion texture it is handed and measured
+; against the size the game's vectors come in (the render size for low-resolution vectors). Off restores
+; the older working / frame conversion, which shrank every low-resolution vector below 100%. For A/B.
+; true or false - Default (auto) is true
+RenderMotionScale=auto
 
 ; D3D12, HookMethod 0 or 2 only: wait for the pass's backbuffer write-back to finish on the GPU before
 ; the flip, so the frame that reaches the screen (and frame generation) is the finished one. No effect

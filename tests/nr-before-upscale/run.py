@@ -33,3 +33,11 @@ subprocess.run(['g++', '-std=c++20', '-g', '-O1', '-fno-omit-frame-pointer',
                 '-I' + str(ROOT), '-I' + str(HERE), str(OUT / 'boundary.cpp'),
                 '-o', str(OUT / 'boundary')], check=True)
 subprocess.run([str(OUT / 'boundary')], check=True)
+
+# The reduced-scale guide rules both stages share (design/reduced-scale-guides.md): pure functions of
+# sizes and flags, compiled straight from the production header.
+subprocess.run(['g++', '-std=c++20', '-g', '-O1', '-fno-omit-frame-pointer',
+                '-fsanitize=address,undefined', '-Wall', '-Wextra', '-Werror',
+                '-I' + str(ROOT / 'OptiScaler'), str(HERE / 'guide_match_cases.cpp'),
+                '-o', str(OUT / 'guide_match')], check=True)
+subprocess.run([str(OUT / 'guide_match')], check=True)

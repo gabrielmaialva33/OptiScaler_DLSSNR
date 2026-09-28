@@ -104,6 +104,16 @@ int main()
       auto scratch = f.params.typed["Color"];
       { ScopedPreUpscale nested(&f.cmd, &f.params, true); assert(!nested.Swapped() && !nested.Declined()); }
       assert(f.params.typed["Color"] == scratch && DlssNr_Dx12::calls == 1); ++checks; }
+    // wilsjo2's padded input (docs/PADDED-PRESR.md in their fork): an origin-zero picture drawn into a
+    // larger allocation. The copy is the drawn size, and the upscaler reads it with the subrect it was
+    // already given, so nothing is copied back into the game's texture.
+    { Fixture f; f.color.desc.Width = 2560; f.color.desc.Height = 1440;
+      f.params.numbers = {{"Width", 2558}, {"Height", 1439}};
+      g_preExtent.Reset();
+      g_preExtent.Observe(2558, 1439, steady_clock::now() - milliseconds(501), f.color.desc.Format);
+      { ScopedPreUpscale p(&f.cmd, &f.params, true); assert(p.Swapped());
+        assert(g_pre.width == 2558 && g_pre.height == 1439 && f.params.typed["Color"] == g_pre.scratch); }
+      assert(f.device.allocations == 1); f.Restored(); ++checks; }
     for (unsigned invalid = 0; invalid < 11; ++invalid)
     {
         Fixture f;
