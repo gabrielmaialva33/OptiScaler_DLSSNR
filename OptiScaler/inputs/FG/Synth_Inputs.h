@@ -142,6 +142,11 @@ class SynthInputs
     bool _reportedSkip = false;
     bool _reportedMotionFed = false;
 
+    // Fast-motion repeats in the current 10 s summary window (Feed).
+    long long _fastWindowStartMs = 0;
+    uint32_t _fastWindowFrames = 0;
+    uint32_t _fastRepeats = 0;
+
     ID3D12Resource* _velocity = nullptr;
     ID3D12Resource* _depth = nullptr;
     ID3D12DescriptorHeap* _rtvHeap = nullptr;
