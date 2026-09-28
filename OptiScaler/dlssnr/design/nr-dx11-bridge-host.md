@@ -608,3 +608,22 @@ Before any run:
    - model lines continue.
    - Any `the presenter was in exclusive fullscreen; taken back to a window` warning means DXGI had
      put the presenter into fullscreen itself. It must be followed by presents that succeed.
+
+### The frame-generation presenter had the same fault (`9f6a8afc`, same day)
+
+- **Symptom.** Generation Zero with synthesized FG (`FGInput=synthesized`, `FGOutput=fsrfg`) on Rafael's
+  RTX 3060, build `13f10d60`. It logged `LocalPresent Original present result: 887A0001` on every
+  present from the first frame: 15273 of them in three and a half minutes. Underneath, the model and FG
+  ran on every base frame and nothing reached the screen.
+- **Cause.** The fix above only reached the plain presenter. FSR-FG's swapchain was still created from the
+  game's exclusive-fullscreen description, and `_EmulatesFullscreen` handed it the game's
+  `SetFullscreenState`. On that machine the display is on an RX 570 and exclusive fullscreen is not
+  available to the render adapter at all.
+- **Fix.** Both presenters are created windowed at all four creation sites. The `ForHwnd` ones no longer
+  pass the game's fullscreen description to FG. `_EmulatesFullscreen` covers every presenter the bridge
+  owns, and `bridge-lifetime` has an FG-presenter case that the old predicate fails.
+- **Verified** on his PC at 13:33. The log read `presenter created windowed, fullscreen emulated`, then
+  the model on 1174 of 1174 base frames in 46 s, FG fed with the shared motion field, and 0 `887A0001`.
+  One `WaitForUIAllocator ... waitResult 102` appeared at FG activation and did not recur.
+- **Left open:** the user saw the crosshair and HUD smear under FG when the camera moves; NR off makes no
+  difference. See `synthesized-motion.md` for the per-pixel refinement that addresses it.
