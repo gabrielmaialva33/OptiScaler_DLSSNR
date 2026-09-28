@@ -169,6 +169,11 @@ The cases:
 - **Presenter fullscreen behind the wrapper.** DXGI's own Alt+Enter handling put the presenter into
   fullscreen. It is taken back to a window, the emulation starts, and the presenter is resized.
   The output reference is returned.
+- **Frame generation's presenter.** FSR-FG's swapchain, not the plain interop one, is emulated too.
+  The game's `SetFullscreenState(TRUE)` and `(FALSE)` never reach it, it stays windowed, and the
+  emulation enters and leaves the borderless window. Before this, it was handed the call and created
+  from the game's fullscreen description, and Generation Zero with synthesized FG refused every Present
+  with 887A0001 (Rafael, 2026-09-28). The old `_EmulatesFullscreen` fails this case.
 - **At creation.** The hidden swapchain follows the presenter only when the two differ and the
   presenter can be read.
 

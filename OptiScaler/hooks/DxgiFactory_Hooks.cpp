@@ -597,6 +597,16 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
                     if (SUCCEEDED(realScResult) && PrepareDx12InteropDesc(fgDesc, tearingSupported))
                     {
+                        // Windowed, whatever the game asked, for frame generation's presenter and the plain one
+                        // alike: the game's exclusive fullscreen is emulated as a borderless window
+                        // (Dx11wDx12SC::SetFullscreenState). A plain presenter created in fullscreen refused Present
+                        // once the emulation took it back to a window; FSR-FG's refused every Present from the start
+                        // (Generation Zero, 2026-09-28, both).
+                        if (!fgDesc.Windowed)
+                            LOG_INFO("Dx11wDx12 game asked for exclusive fullscreen; presenter created windowed, "
+                                     "fullscreen emulated");
+                        fgDesc.Windowed = TRUE;
+
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
                             fgScResult = FGHooks::CreateSwapChain(realFactory, dx12Queue, &fgDesc, &fgSwapChain);
@@ -609,15 +619,6 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
                             LOG_WARN("Dx11wDx12 FG swapchain creation failed: {:X}; creating plain DX12 swapchain",
                                      (UINT) fgScResult);
-
-                            // Windowed, whatever the game asked: its exclusive fullscreen is emulated on a plain
-                            // presenter (Dx11wDx12SC::SetFullscreenState), and one created in fullscreen refuses
-                            // Present, once the emulation takes it back to a window, until it is resized
-                            // (Generation Zero, 2026-09-28).
-                            if (!fgDesc.Windowed)
-                                LOG_INFO("Dx11wDx12 game asked for exclusive fullscreen; plain presenter created "
-                                         "windowed, fullscreen emulated");
-                            fgDesc.Windowed = TRUE;
 
                             ScopedSkipParentWrapping skipParentWrapping {};
                             fgScResult = o_CreateSwapChain(realFactory, dx12Queue, &fgDesc, &fgSwapChain);
@@ -996,12 +997,19 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
                     if (realScResult == S_OK && PrepareDx12InteropDesc1(fgDesc, tearingSupported))
                     {
+                        // Windowed, whatever the game asked, for frame generation's presenter and the plain one
+                        // alike: the game's exclusive fullscreen is emulated as a borderless window
+                        // (Dx11wDx12SC::SetFullscreenState). A plain presenter created in fullscreen refused Present
+                        // once the emulation took it back to a window; FSR-FG's refused every Present from the start
+                        // (Generation Zero, 2026-09-28, both).
+                        if (pFullscreenDesc != nullptr && !localFullscreenDesc.Windowed)
+                            LOG_INFO("Dx11wDx12 game asked for exclusive fullscreen; presenter created windowed, "
+                                     "fullscreen emulated");
+
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
-                            fgScResult = FGHooks::CreateSwapChainForHwnd(
-                                realFactory, dx12Queue, hWnd, &fgDesc,
-                                pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr, pRestrictToOutput,
-                                &fgSwapChain1);
+                            fgScResult = FGHooks::CreateSwapChainForHwnd(realFactory, dx12Queue, hWnd, &fgDesc, nullptr,
+                                                                         pRestrictToOutput, &fgSwapChain1);
 
                             fgSwapChainIsRealFG = fgScResult == S_OK && fgSwapChain1 != nullptr;
                         }
@@ -1012,14 +1020,6 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
                             LOG_WARN("Dx11wDx12 FG swapchain creation failed: {:X}; creating plain DX12 swapchain",
                                      (UINT) fgScResult);
-
-                            // Windowed, whatever the game asked: its exclusive fullscreen is emulated on a plain
-                            // presenter (Dx11wDx12SC::SetFullscreenState), and one created in fullscreen refuses
-                            // Present, once the emulation takes it back to a window, until it is resized
-                            // (Generation Zero, 2026-09-28).
-                            if (pFullscreenDesc != nullptr && !localFullscreenDesc.Windowed)
-                                LOG_INFO("Dx11wDx12 game asked for exclusive fullscreen; plain presenter created "
-                                         "windowed, fullscreen emulated");
 
                             ScopedSkipParentWrapping skipParentWrapping {};
                             fgScResult = o_CreateSwapChainForHwnd(realFactory, dx12Queue, hWnd, &fgDesc, nullptr,

@@ -788,7 +788,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
             LOG_ERROR("fg Present failed: {:X} (sync interval {}, flags {:X}, presenter fullscreen {}, game "
                       "fullscreen {}, plain presenter {}); reported once, every failure below",
                       (UINT) result, SyncInterval, Flags, presenterFullscreen != FALSE, _emulatedFullscreen,
-                      _EmulatesFullscreen());
+                      FGHooks::IsDx12InteropPresentSC(_fgSwapChain));
 
             // The removed device is the bridge's own D3D12 one, not the game's: the game only learns of it
             // through this Present, asks its D3D11 device why, and gets S_OK (Divinity's dialog on Rafael's
@@ -813,10 +813,12 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 // the neural pass ran and nothing reached the screen. On that machine exclusive fullscreen is not
 // available to the render adapter at all (887A0022 from the game's own swapchain in Divinity).
 //
-// So, for the plain presenter only, fullscreen is emulated the way FGXeFGForceBorderless does it for
-// XeFG: the presenter stays windowed, the window becomes a borderless popup over the target output,
-// and the game is told it is fullscreen. A real frame-generation presenter keeps its own path
-// (FGHooks::hkSetFullscreenState), untouched.
+// So fullscreen is emulated the way FGXeFGForceBorderless does it for XeFG: the presenter stays
+// windowed, the window becomes a borderless popup over the target output, and the game is told it is
+// fullscreen. That holds for a frame-generation presenter too. It used to keep its own path
+// (FGHooks::hkSetFullscreenState) and be created from the game's fullscreen description; FSR-FG's
+// swapchain then refused every Present from the first frame on the same machine (Generation Zero with
+// synthesized FG, 2026-09-28).
 // Style and placement for the emulated fullscreen, applied without ever blocking the caller.
 //
 // SetWindowLongPtr and SetWindowPos send messages synchronously to the thread that owns the window.
@@ -841,10 +843,11 @@ static void ApplyWindowPlacement(HWND hwnd, LONG_PTR style, LONG_PTR exStyle, HW
         std::thread(apply).detach();
 }
 
-bool Dx11wDx12SC::_EmulatesFullscreen() const
-{
-    return _fgSwapChain != nullptr && FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
-}
+// Every presenter this bridge owns, frame generation's as well as the plain one, is created windowed and
+// has the game's exclusive fullscreen emulated. Limiting this to the plain presenter left FSR-FG's swapchain
+// created in exclusive fullscreen and handed the game's SetFullscreenState, and it refused every Present
+// with 887A0001 (Generation Zero with synthesized FG on Rafael's RTX 3060, 2026-09-28).
+bool Dx11wDx12SC::_EmulatesFullscreen() const { return _fgSwapChain != nullptr; }
 
 void Dx11wDx12SC::_EnterBorderless(IDXGIOutput* target)
 {
@@ -984,7 +987,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetFullscreenState(BOOL Fullscreen, IDXGI
     LOG_DEBUG("Dx11wDx12SC SetFullscreenState: {}, target: {:X}, caller: {}", Fullscreen, (size_t) pTarget,
               Util::WhoIsTheCaller(_ReturnAddress()));
 
-    // See _EmulatesFullscreen: the plain presenter is kept windowed and the game's fullscreen emulated.
+    // See _EmulatesFullscreen: the presenter, plain or frame generation's, is kept windowed and the game's
+    // fullscreen emulated.
     if (_EmulatesFullscreen())
     {
         BOOL presenterFullscreen = FALSE;

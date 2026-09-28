@@ -835,6 +835,20 @@ void fullscreenCases()
         assert(f.presenter.resizes == 2 && logWarnings == warnings + 1);
     }
 
+    // Frame generation's presenter (FSR-FG's swapchain, not the plain interop one) is emulated too: the
+    // game's SetFullscreenState never reaches it, it stays windowed, and the game is told it is fullscreen.
+    // Handing it the call left Generation Zero refusing every Present with 887A0001 (2026-09-28).
+    {
+        FGHooks::interopPresenter = false;
+        Fixture f;
+        assert(f.sc->_EmulatesFullscreen());
+        assert(f.sc->SetFullscreenState(TRUE, nullptr) == S_OK);
+        assert(!f.presenter.fullscreen && f.sc->borderlessEntries == 1 && f.sc->_emulatedFullscreen);
+        assert(f.sc->SetFullscreenState(FALSE, nullptr) == S_OK);
+        assert(!f.presenter.fullscreen && f.sc->borderlessExits == 1 && !f.sc->_emulatedFullscreen);
+        FGHooks::interopPresenter = true;
+    }
+
     // DXGI put the presenter into exclusive fullscreen behind the wrapper (its own Alt+Enter): taken back
     // to a window, the game's fullscreen emulated, then resized; the output reference is returned.
     {
