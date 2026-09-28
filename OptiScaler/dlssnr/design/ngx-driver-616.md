@@ -118,6 +118,15 @@ Use Crimson Desert (after-upscale) or PCSX2 (present pass) with `LogLevel=2`, NR
    release and create again.
 3. **`ModelLoader=direct` on Divinity** (the D3D11 bridge host) for the same lines. On DOOM Eternal
    (Vulkan) the forwarder must still be loaded and used: direct is D3D12 only.
+   - **Done 2026-09-28, build `16dff6de`, RTX 4090.** `nvngx.dll_dlssnr.dll` was moved out of
+     `DefEd/bin` for the run. The log read `model loader is direct` and `2 caller-path import slot(s)
+     of the model adapted (0 already)`, with no `create failed` and no fault.
+   - Over about three minutes the present host reported `the model ran on 148 of the 148 base frames`
+     per 2 s, and alike. The model time was 6.68 ms median over 232 samples at 3440x1440, with
+     0.19 ms outside it.
+   - The user saw nothing wrong with the picture. The run also had synthesized frame generation on,
+     sharing NR's motion field.
+   - The F7 off/on and Style-rebuild checks of item 2 were not exercised here.
 4. **`UseProxy=true`** with the forwarder present. With 310.8.2.0 there is no refusal, so this is the
    re-measurement of the core route on a loader that has it. Either `DLSS-NR (proxy)` builds a feature,
    in which case the forwarder question has a third answer, or it logs the failing code. Copy

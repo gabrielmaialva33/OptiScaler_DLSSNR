@@ -485,6 +485,24 @@ module) is one slot per process.
   `Dispatch` on the game queue, so nothing reads a taken field after its frame.
 - **Without a transport** (NR on a plain swapchain, no FG), nobody advances the token. The
   publisher check stops a consumer from taking its own field back.
+- **Measured on the D3D11 bridge**: Divinity: Original Sin 2, 2026-09-28, build `16dff6de`,
+  3440x1440, `[DlssNr] SynthMotion=true` and `[FrameGen] SynthesizedMotion=true`.
+  - The log reads `DLSS-NR synthesized motion: first field handed to the model on the D3D11 bridge
+    route`.
+  - Then `synthesized FG input: motion taken from DLSS-NR's estimate of the frame (3440x1440), no
+    second estimate`.
+  - The model ran on every base frame handed to it (148 of 148 per 2 s), and the user saw nothing
+    wrong.
+- **Known waste: both estimators allocate at start.** The log shows two `synthesized motion:
+  3440x1440 allocated` lines, 140 ms apart, and FG's `runs its own motion estimate`, all before the
+  first take 260 ms later.
+  - The cause: NR publishes only once its estimator is `Ready()`, after the warm-up
+    (`SynthMotionGuide::Record`). On those frames FG's `Take` fails, so it builds its own
+    (`SynthInputs::_RecordMotionOn`).
+  - FG's own estimator is still warming on those same frames, so it buys nothing. It then sits idle,
+    about 34 MB at this size.
+  - The likely fix is for a warming publisher to announce itself, so the taker waits instead of
+    building. It is harmless, and not yet fixed.
 
 ### What FSR 3.1 cannot do
 

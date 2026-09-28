@@ -99,8 +99,9 @@ buildings, sky).
 
 ## Motion sources: FidelityFX and NVOFA
 
-Status 2026-09-28: implemented, not built (the NVOFA shaders are uncompiled), not run on a GPU, not
-measured. Everything below marked *estimate* is one.
+Status 2026-09-28: implemented, shaders compiled (`a9f67bb5`), and **passing the GPU harness** on
+the RTX 4090 under Proton (see Test, below). Not yet run in a game. Everything below marked *estimate*
+is one.
 
 ### Why a second source
 
@@ -255,11 +256,11 @@ writes `R16G16_FLOAT` at the colour extent:
 - **`ffx` and `auto`** construct the FidelityFX estimator and call it exactly as before: same calls,
   same arguments, so its GPU work is unchanged.
 
-### Shaders (written, not compiled)
+### Shaders
 
-`__has_include` guards the two headers. Until they are generated, `SynthMotionNvofa_Dx12.cpp` compiles
-to "unavailable" and `nvofa` falls back. After running `precompile/build.sh` (the same flags as the
-FidelityFX passes), add the two `_Shader.h` files to the `.vcxproj` `ClInclude` list.
+`__has_include` guards the two headers, which are in the tree since `a9f67bb5` and listed in the
+`.vcxproj`. A build without them compiles `SynthMotionNvofa_Dx12.cpp` to "unavailable", and `nvofa`
+falls back. To regenerate them (the same flags as the FidelityFX passes):
 
 ```
 cd OptiScaler/shaders/synth_motion/precompile
@@ -282,6 +283,27 @@ vkd3d-proton with the Proton's own `nvofapi64.dll` beside the harness:
 - **The abandon's two-step frame** is t=10.
 - **SKIP, not FAIL,** when the shaders are not generated, no Proton ships the DLL, or the engine refuses
   the device.
+
+**Measured 2026-09-28**, RTX 4090 with clocks locked at 2100/10501 MHz, both sources on the same
+build. Both print `SYNTH-MOTION PASS` over 12 scored sequences, with the sign current to previous and
++y down.
+
+| | NVOFA | FidelityFX |
+|---|---|---|
+| Field age | one frame late | same frame |
+| EPE, pans and static | 0.010-0.135 px, 100% under 1 px | 0.000 px, 100% under 1 px |
+| Object on a still background | obj 0.132 / bg 0.011 px | obj 0.000 / bg 0.000 px |
+| Cut | not detected, by contract; 0.008 px on the first clean pair after it | raised at t=11, 3 frames late |
+| Shader time, 1080p (median) | 0.038 ms | 0.324 ms |
+| Shader time, 3440x1440 (median) | 0.084 ms | 0.590 ms |
+
+- **The EPE is scored against each source's own target:** NVOFA against the truth of `t - 1`,
+  FidelityFX against `t`. The synthetic pans are integer shifts, which block matching finds exactly;
+  that is why FidelityFX reads 0.000. It is not evidence about real content.
+- **The shader time is ours alone:** for NVOFA it is the prep and the expand. The engine's own time
+  runs off the shader cores and is not in the number. The cost estimate above ("well under 0.1 ms")
+  held.
+- **The one-frame lag is the price.** On a fast camera it is untested, and that is risk 1 below.
 
 ### Risks and open questions
 
