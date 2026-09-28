@@ -37,8 +37,9 @@ class PresentHost
     // here writes it.
     //
     // False means this frame gets no neural pass -- the model is off, still building, already failed,
-    // or something here could not be built. It is not an error for the caller: the frame still has to
-    // be shown, and Output() answers null so the caller transfers the source as it always did.
+    // the frame is smaller than the model is ever built for, or something here could not be built.
+    // It is not an error for the caller: the frame still has to be shown, and Output() answers null so
+    // the caller transfers the source as it always did.
     bool Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
                 D3D12_RESOURCE_STATES sourceState, ID3D12CommandQueue* queue);
 

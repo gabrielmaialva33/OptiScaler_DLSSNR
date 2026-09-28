@@ -66,6 +66,8 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-multipass` — portable multi-pass chain helpers.
 - `nr-pass-config` — the pass-settings codec and the four-point Config round trip
   for the master keys.
+- `nr-present-host` — what the production present host builds and when: a frame too small
+  for the model, a resize, the pass switched off, and on which list the model is created.
 - `nr-shutdown` — the private NGX core shutdown adapter and its public calling contract.
 - `nr-submission` — the command-list submission lifetime model that gates
   resource release.

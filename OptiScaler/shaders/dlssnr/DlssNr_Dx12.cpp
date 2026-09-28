@@ -4188,15 +4188,18 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     if (g_nr.failed || swapchain == nullptr || queue == nullptr)
         return;
 
-    // Synthesized frame generation on the D3D11 bridge: the pass belongs to the bridge's own host, once
-    // per base frame, before FG interpolates. What reaches this entry there is FFX's inner swapchain,
-    // wrapped because FFX creates it through the hooked factory, and it presents every frame, generated
-    // ones included; running here too put the model on each of them, after FG
-    // (synthesized-frame-generation.md, step 1 measured). Nothing is counted or noted as live either,
-    // since none of these presents were this route's to enhance. A bridge fed by an upscaler keeps the
-    // route it had.
-    if (!fgHook && State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 &&
-        State::Instance().activeFgInput == FGInput::Synthesized)
+    // Synthesized frame generation: the pass belongs to the base frame, once, before FG interpolates --
+    // in the bridge's own host on the D3D11 bridge, and in the FG present hook (fgHook) on a native D3D12
+    // swapchain. What reaches this entry instead is a wrapped swapchain of FFX's, and FFX presents every
+    // frame, generated ones included; running here too put the model on each of them, after FG
+    // (synthesized-frame-generation.md, step 1 measured). On native D3D12 the g_lastFgFlip stand-down
+    // below would catch this only once the FG hook had recorded a pass; this holds from the first flip.
+    // Nothing is counted or noted as live either, so the status line counts base frames. Only while an
+    // FG swapchain exists: without one, this entry is the only route the pass has. A bridge or a
+    // swapchain fed by an upscaler keeps the route it had.
+    if (!fgHook && State::Instance().activeFgInput == FGInput::Synthesized &&
+        (State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 ||
+         State::Instance().currentFGSwapchain != nullptr))
     {
         return;
     }

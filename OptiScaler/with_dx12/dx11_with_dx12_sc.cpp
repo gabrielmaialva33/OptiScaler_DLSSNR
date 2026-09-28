@@ -74,6 +74,28 @@ bool WantedIdleForNeuralRendering()
 }
 
 bool Wanted() { return WantedForFrameGeneration() || WantedForNeuralRendering(); }
+
+void ResolveZeroExtent(HWND gameWindow, UINT& width, UINT& height)
+{
+    if ((width != 0 && height != 0) || gameWindow == nullptr)
+        return;
+
+    RECT client {};
+    if (!GetClientRect(gameWindow, &client))
+        return;
+
+    const UINT clientWidth = static_cast<UINT>(std::max<LONG>(client.right - client.left, 1));
+    const UINT clientHeight = static_cast<UINT>(std::max<LONG>(client.bottom - client.top, 1));
+
+    LOG_DEBUG("bridge extent {}x{} resolved against the game window to {}x{}", width, height,
+              width != 0 ? width : clientWidth, height != 0 ? height : clientHeight);
+
+    if (width == 0)
+        width = clientWidth;
+
+    if (height == 0)
+        height = clientHeight;
+}
 } // namespace Dx11wDx12
 
 static int scCount = 0;
@@ -246,7 +268,7 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
     // Same rule: read once. With no upscaler to feed frame generation, this bridge feeds it itself.
     if (synthesizedFg)
     {
-        _synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        _synthInputs = std::make_unique<SynthInputs>();
         LOG_INFO("bridge {} feeds frame generation synthesized inputs: no upscaler in this title", _id);
     }
 
@@ -926,6 +948,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) NewFormat, SwapChainFlags);
 
+    Dx11wDx12::ResolveZeroExtent(_handle, Width, Height);
+
     const bool skipFgResize = IsSame(_fgSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
@@ -1185,6 +1209,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
 {
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers1: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) Format, SwapChainFlags);
+
+    Dx11wDx12::ResolveZeroExtent(_handle, Width, Height);
 
     if (_real3 == nullptr)
         return ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);

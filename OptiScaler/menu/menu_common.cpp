@@ -3320,7 +3320,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             "Can be used with any FG Output\n\nRequires enabling FSR-FG in game settings\nSupports HUDless out of the box" },
         { FGInput::XeFG, "XeFG" },
         { FGInput::Synthesized, "Synthesized",
-            "Experimental, for games with no upscaler\n\nNo motion vectors needed, uses only the presented image\nFSR FG output only" }
+            "Experimental, for games with no upscaler\n\nNo motion vectors needed, uses only the presented image\nD3D11 and D3D12 games, FSR FG output only" }
     };
 
     // clang-format on
@@ -3352,11 +3352,8 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     // Synthesized input requirements
     auto constexpr synthesizedInputIndex = (uint32_t) FGInput::Synthesized;
-    // Fed only on the D3D11-to-D3D12 bridge so far. A bridged game's presenter reports DX12, so ask the
-    // bridge too.
-    inputOptions[synthesizedInputIndex].set_disabled(state.swapchainApi != API::DX11 &&
-                                                         state.swapchainInteropApi != SwapchainInteropApi::Dx11wDx12,
-                                                     "D3D11 games only for now");
+    // Fed on native D3D12 swapchains and on the D3D11-to-D3D12 bridge; the FSR FG output is D3D12 only.
+    inputOptions[synthesizedInputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
 
     // DLSSG inputs requirements
     auto constexpr dlssgInputIndex = (uint32_t) FGInput::DLSSG;

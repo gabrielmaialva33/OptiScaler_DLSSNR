@@ -574,6 +574,8 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
                 if (hiddenHwnd != nullptr && dx12Device != nullptr && dx12Queue != nullptr)
                 {
+                    Dx11wDx12::ResolveZeroExtent(localDesc.OutputWindow, localDesc.BufferDesc.Width,
+                                                 localDesc.BufferDesc.Height);
                     DXGI_SWAP_CHAIN_DESC realDesc = localDesc;
                     realDesc.OutputWindow = hiddenHwnd;
                     realDesc.Windowed = TRUE;
@@ -596,7 +598,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
                     {
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
-                            fgScResult = FGHooks::CreateSwapChain(realFactory, dx12Queue, &fgDesc, &fgSwapChain, true);
+                            fgScResult = FGHooks::CreateSwapChain(realFactory, dx12Queue, &fgDesc, &fgSwapChain);
                             fgSwapChainIsRealFG = SUCCEEDED(fgScResult) && fgSwapChain != nullptr;
                         }
 
@@ -963,6 +965,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
                 if (hiddenHwnd != nullptr && dx12Device != nullptr && dx12Queue != nullptr)
                 {
+                    Dx11wDx12::ResolveZeroExtent(hWnd, localDesc.Width, localDesc.Height);
                     DXGI_SWAP_CHAIN_DESC1 realDesc = localDesc;
                     IDXGISwapChain1* realDx11SwapChain1 = nullptr;
                     HRESULT realScResult = E_FAIL;
@@ -986,7 +989,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                             fgScResult = FGHooks::CreateSwapChainForHwnd(
                                 realFactory, dx12Queue, hWnd, &fgDesc,
                                 pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr, pRestrictToOutput,
-                                &fgSwapChain1, true);
+                                &fgSwapChain1);
 
                             fgSwapChainIsRealFG = fgScResult == S_OK && fgSwapChain1 != nullptr;
                         }

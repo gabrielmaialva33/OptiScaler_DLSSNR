@@ -595,3 +595,25 @@ class ScopedCreatingD3DDevice
     }
     ~ScopedCreatingD3DDevice() { State::Instance().creatingD3DDevice = previousState; }
 };
+
+// Resources OptiScaler's own backends create through the game's device: FFX contexts and swapchains
+// for frame generation and upscaling. Heuristics that watch the game's resource creation -- the
+// DLSS-NR exposure scan -- skip whatever is created inside one of these scopes, on this thread.
+class ScopedInternalResourceCreation
+{
+  public:
+    ScopedInternalResourceCreation() { ++Depth(); }
+    ~ScopedInternalResourceCreation() { --Depth(); }
+
+    ScopedInternalResourceCreation(const ScopedInternalResourceCreation&) = delete;
+    ScopedInternalResourceCreation& operator=(const ScopedInternalResourceCreation&) = delete;
+
+    static bool Active() { return Depth() > 0; }
+
+  private:
+    static int& Depth()
+    {
+        static thread_local int depth = 0;
+        return depth;
+    }
+};

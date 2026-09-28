@@ -227,17 +227,17 @@ before committing C++, because nothing local enforces it and it had drifted by 5
 
 ### Tests
 
-`tests/README.md` is the index; read it before adding or changing a suite. Twenty directories under
+`tests/README.md` is the index; read it before adding or changing a suite. Twenty-one directories under
 `tests/`, each self-contained with its own `run.py` and README, registered in `tests/suites.toml`.
 
 ```bash
-python3 tests/run_all.py            # host tier, the default; 17 suites, ~50 s
+python3 tests/run_all.py            # host tier, the default; 18 suites, ~55 s
 python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
 python3 tests/run_all.py --tier all # adds the three wine suites
 python3 tests/<name>/run.py         # one suite, unchanged
 ```
 
-Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the fourteen
+Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the fifteen
 `nr-*` suites plus `bridge-lifetime`, `vulkan-query-readiness` and `mfg-pattern`. One of them,
 `nr-invariants`, is the `DEVELOPMENT.md` §4 mechanical guard (config round-trip for every `DlssNr`
 key, struct equals cbuffer, precompiled headers equal the committed bytecode, retired identifiers);

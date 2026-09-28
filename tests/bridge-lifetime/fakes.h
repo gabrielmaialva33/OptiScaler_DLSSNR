@@ -15,6 +15,17 @@ using DWORD = uint32_t;
 using ULONG = unsigned;
 using LONG = int;
 using HWND = void*;
+struct RECT
+{
+    LONG left, top, right, bottom;
+};
+// The game window's client area, for DXGI's "0 means the window's size" on the bridge.
+inline RECT g_clientRect { 0, 0, 841, 1356 };
+inline bool GetClientRect(HWND, RECT* out)
+{
+    *out = g_clientRect;
+    return true;
+}
 using HANDLE = void*;
 using DXGI_FORMAT = int;
 constexpr DXGI_FORMAT DXGI_FORMAT_UNKNOWN = 0;
@@ -212,14 +223,19 @@ struct Swapchain : Ref
         buffer.AddRef();
         return S_OK;
     }
-    HRESULT ResizeBuffers(UINT, UINT, UINT, int, UINT)
+    UINT lastResizeWidth = 0, lastResizeHeight = 0;
+    HRESULT ResizeBuffers(UINT, UINT width, UINT height, int, UINT)
     {
         ++resizes;
+        lastResizeWidth = width;
+        lastResizeHeight = height;
         return resizeResult;
     }
-    HRESULT ResizeBuffers1(UINT, UINT, UINT, int, UINT, const UINT*, IUnknown* const*)
+    HRESULT ResizeBuffers1(UINT, UINT width, UINT height, int, UINT, const UINT*, IUnknown* const*)
     {
         ++resizes;
+        lastResizeWidth = width;
+        lastResizeHeight = height;
         return resizeResult;
     }
 };
@@ -397,7 +413,7 @@ struct PresentHost
 
 // The synthesized FG input, reduced to what the bridge owes it: its one-time clear rides the copy list
 // and is confirmed or abandoned with that list, and its pair is freed only behind a proved drain.
-struct SynthInputsDx11wDx12
+struct SynthInputs
 {
     unsigned records = 0, confirms = 0, abandons = 0, releases = 0;
     UINT64 lastWidth = 0;
@@ -483,7 +499,7 @@ class Dx11wDx12SC
     UINT _currentFakeIndex = 0;
     Dx11wDx12SC* _nextLive = nullptr;
     std::unique_ptr<DlssNr::PresentHost> _nrHost;
-    std::unique_ptr<SynthInputsDx11wDx12> _synthInputs;
+    std::unique_ptr<SynthInputs> _synthInputs;
     inline static Dx11wDx12SC* _live = nullptr;
     Dx11wDx12SC* _nextRetired = nullptr;
     inline static Dx11wDx12SC* _retired = nullptr;

@@ -23,6 +23,7 @@
 #include <detours/detours.h>
 
 #include <dlssnr/DlssNr.h>
+#include <inputs/FG/Synth_Inputs.h>
 
 #define XEFG_RESOURCE_REF_LIMIT 1
 
@@ -37,6 +38,53 @@ static HANDLE _semaphore = nullptr;
 #if (XEFG_RESOURCE_REF_LIMIT == 0)
 inline static std::vector<void*> oldBackBuffers;
 #endif
+
+// The synthesized FG input for a native D3D12 swapchain (the D3D11 bridge owns its own). FGHooks presents
+// through one FG swapchain at a time (State::currentFGSwapchain), so one instance follows it: fed in
+// FGPresent, freed after the queue-idle waits in ResizeBuffers and in the swapchain's final Release.
+// Never destroyed: a static destructor would release D3D12 objects at process exit, after the device.
+static SynthInputs* _synthD3D12 = nullptr;
+
+static bool SynthD3D12Wanted()
+{
+    const auto& state = State::Instance();
+    return state.activeFgInput == FGInput::Synthesized && state.swapchainInteropApi == SwapchainInteropApi::None;
+}
+
+static void FeedSynthD3D12(IDXGISwapChain* swapchain, IFGFeature_Dx12* fg)
+{
+    auto* queue = fg->GetCommandQueue();
+    DXGI_SWAP_CHAIN_DESC desc {};
+
+    if (queue == nullptr || swapchain->GetDesc(&desc) != S_OK)
+        return;
+
+    if (_synthD3D12 == nullptr)
+    {
+        _synthD3D12 = new SynthInputs();
+        LOG_INFO("synthesized FG input on a native D3D12 swapchain, fed from the FG present hook");
+    }
+
+    // The one-time clear goes on FG's queue, the one FSR-FG's prepare runs on, ahead of it.
+    if (!_synthD3D12->RecordInitOnQueue(queue, desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format))
+        return;
+
+    ID3D12Device* device = nullptr;
+
+    if (queue->GetDevice(IID_PPV_ARGS(&device)) == S_OK && device != nullptr)
+    {
+        _synthD3D12->Feed(fg, device);
+        device->Release();
+    }
+}
+
+// Only once the queue FG reads the pair on has been waited idle. The pair is reallocated at the next
+// present, at whatever size the swapchain has then.
+static void ReleaseSynthD3D12()
+{
+    if (_synthD3D12 != nullptr)
+        _synthD3D12->Release();
+}
 
 static bool WaitForQueueIdle(ID3D12CommandQueue* queue, ID3D12Fence* fence, HANDLE fenceEvent, UINT64& fenceValue)
 {
@@ -141,16 +189,8 @@ static bool CheckForFGStatus()
 }
 
 HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI_SWAP_CHAIN_DESC* pDesc,
-                                 IDXGISwapChain** ppSwapChain, bool forDx11Bridge)
+                                 IDXGISwapChain** ppSwapChain)
 {
-    // Nothing feeds the synthesized input on a native D3D12 swapchain yet (synthesized-frame-generation.md,
-    // step 5), so an FG swapchain there would replace the game's presenter and never generate a frame
-    if (State::Instance().activeFgInput == FGInput::Synthesized && !forDx11Bridge)
-    {
-        LOG_WARN("Synthesized FG input is fed only on the D3D11 bridge for now, not creating an FG swapchain");
-        return E_NOINTERFACE;
-    }
-
     if (!CheckForFGStatus())
     {
         LOG_WARN("Can't init FG Feature or invalid FGOutput setting!");
@@ -259,17 +299,8 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
 
 HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevice, HWND hWnd,
                                         DXGI_SWAP_CHAIN_DESC1* pDesc, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
-                                        IDXGIOutput* pRestrictToOutput, IDXGISwapChain1** ppSwapChain,
-                                        bool forDx11Bridge)
+                                        IDXGIOutput* pRestrictToOutput, IDXGISwapChain1** ppSwapChain)
 {
-    // Nothing feeds the synthesized input on a native D3D12 swapchain yet (synthesized-frame-generation.md,
-    // step 5), so an FG swapchain there would replace the game's presenter and never generate a frame
-    if (State::Instance().activeFgInput == FGInput::Synthesized && !forDx11Bridge)
-    {
-        LOG_WARN("Synthesized FG input is fed only on the D3D11 bridge for now, not creating an FG swapchain");
-        return E_NOINTERFACE;
-    }
-
     if (!CheckForFGStatus())
     {
         LOG_WARN("Can't init FG Feature or invalid FGOutput setting!");
@@ -676,6 +707,10 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
             WaitForQueueIdle(State::Instance().currentCommandQueue, resizeFence, resizeFenceEvent, resizeFenceValue);
 
         LOG_DEBUG("WaitForSingleObject result: {}", waitResult);
+
+        // Synthesized FG's pair is sized to the old buffers, and the queue is idle now
+        if (waitResult)
+            ReleaseSynthD3D12();
     }
 
     if (State::Instance().activeFgOutput == FGOutput::XeFG)
@@ -895,6 +930,10 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
             WaitForQueueIdle(State::Instance().currentCommandQueue, resizeFence, resizeFenceEvent, resizeFenceValue);
 
         LOG_DEBUG("WaitForSingleObject result: {}", waitResult);
+
+        // Synthesized FG's pair is sized to the old buffers, and the queue is idle now
+        if (waitResult)
+            ReleaseSynthD3D12();
     }
 
     if (State::Instance().activeFgOutput == FGOutput::XeFG)
@@ -1178,6 +1217,12 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
 #endif
     }
 
+    // Synthesized FG on a native D3D12 swapchain: no upscaler hands FG anything, so this does, once per
+    // base frame and before fg->Present() below dispatches it. The D3D11 bridge feeds its own before its
+    // presenter's Present; the interop check in SynthD3D12Wanted leaves that swapchain to it.
+    if (willPresent && state.currentFG != nullptr && SynthD3D12Wanted())
+        FeedSynthD3D12(This, state.currentFG);
+
     IFGFeature* fg = state.currentFG;
 
     // The readback Map/Unmaps a readback heap on the game's thread every present, for the
@@ -1321,9 +1366,20 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     // with it. It runs before the original present, which is where the SL interposer captures the
     // FG input, and before the wrapped swapchain's own hook on this same flip, which then stands
     // down for the base frame and keeps enhancing the cycle's generated frames.
-    if (willPresent && state.swapchainInteropApi == SwapchainInteropApi::None && state.currentCommandQueue != nullptr)
+    //
+    // On the game's queue, which the FG object kept when the FG swapchain was created -- not
+    // state.currentCommandQueue. FFX creates its real swapchain on a present queue of its own, through
+    // our factory hook, and that hook records it there; the pass then ran unsynchronised with the
+    // game's rendering and copied half-drawn frames (PCSX2 on D3D12 with synthesized FG: only the
+    // model's difference survived, over black).
+    auto* fgDx12 = state.currentFG;
+    ID3D12CommandQueue* nrQueue = (fgDx12 != nullptr && fgDx12->GetCommandQueue() != nullptr)
+                                      ? fgDx12->GetCommandQueue()
+                                      : state.currentCommandQueue;
+
+    if (willPresent && state.swapchainInteropApi == SwapchainInteropApi::None && nrQueue != nullptr)
     {
-        DlssNr::RunPresentPass((IDXGISwapChain3*) This, state.currentCommandQueue, true);
+        DlssNr::RunPresentPass((IDXGISwapChain3*) This, nrQueue, true);
 
 #ifdef DLSSNR_DEBUG
         static bool nrOrderingLogged = false;
@@ -1437,6 +1493,10 @@ ULONG FGHooks::hkFGRelease(IUnknown* This)
                                                          resizeFenceEvent, resizeFenceValue);
 
                 LOG_DEBUG("WaitForSingleObject result: {}", waitResult);
+
+                // Synthesized FG's pair goes with the swapchain it was fed for
+                if (waitResult)
+                    ReleaseSynthD3D12();
             }
 
             DXGI_SWAP_CHAIN_DESC scDesc {};

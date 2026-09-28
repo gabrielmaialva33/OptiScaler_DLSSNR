@@ -3,7 +3,7 @@
 #include "SysUtils.h"
 #include <Config.h>
 #include <dlssnr/DlssNr_PresentHost.h>
-#include <inputs/FG/Synth_Inputs_Dx11wDx12.h>
+#include <inputs/FG/Synth_Inputs.h>
 
 #include "dxgi1_6.h"
 #include "d3d11_4.h"
@@ -49,6 +49,11 @@ bool WantedIdleForNeuralRendering();
 
 // Either reason. What the factory sites ask.
 bool Wanted();
+
+// The real D3D11 swapchain lives on a hidden 1x1 window, so DXGI's "0 means the window's size" would
+// size it to that window instead of the game's. Every site that hands the game's extent to it resolves
+// a zero against the game's own window first. Leaves non-zero values and failures untouched.
+void ResolveZeroExtent(HWND gameWindow, UINT& width, UINT& height);
 } // namespace Dx11wDx12
 
 class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : public IDXGISwapChain4
@@ -219,7 +224,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     // Frame generation's depth and motion when nothing upstream provides them (FGInput::Synthesized).
     // Null unless that input was active and frame generation wanted at creation, read once for the
     // same reason as _nrHost.
-    std::unique_ptr<SynthInputsDx11wDx12> _synthInputs;
+    std::unique_ptr<SynthInputs> _synthInputs;
 
     // Intrusive retirement needs no allocation at the failure boundary. Deliberately no static
     // destructor: unproven live-device work stays quarantined until process exit.

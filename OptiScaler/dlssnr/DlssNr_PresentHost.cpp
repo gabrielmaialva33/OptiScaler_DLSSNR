@@ -291,15 +291,35 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     if (_failed || device == nullptr || cmdList == nullptr || source == nullptr)
         return false;
 
+    const auto sourceDesc = source->GetDesc();
+    const auto sourceWidth = static_cast<uint32_t>(sourceDesc.Width);
+    const auto sourceHeight = sourceDesc.Height;
+    const bool builtForSource = _toWorking != nullptr && _fromWorking != nullptr && _width == sourceWidth &&
+                                _height == sourceHeight &&
+                                _sourceFormat == static_cast<unsigned int>(sourceDesc.Format);
+
     // Build nothing while the pass is off. A bridge built for synthesized frame generation keeps a host
     // for the neural toggle even when DLSS-NR starts disabled, and that host must stay an empty object
     // -- no buffers, no guides, no model -- until the pass is switched on. Once built, a host that is
-    // switched off keeps what it has and goes on exactly as before: the pass itself declines, and asks
-    // for the reset the next frame needs.
-    if (!Config::Instance()->DlssNrEnabled.value_or_default() && _toWorking == nullptr && !_featureAttempted)
+    // switched off keeps what it has and goes on exactly as before at that size: the pass itself
+    // declines, and asks for the reset the next frame needs. At any other size it waits. Rebuilding
+    // there would reallocate for a pass that declines anyway, and would spend the model's one creation
+    // on this host's own list, leaving the frame's list to create it once the pass comes back.
+    if (!Config::Instance()->DlssNrEnabled.value_or_default() && !builtForSource)
         return false;
 
     _ReportWindow();
+
+    // A frame the model cannot be built for is declined before anything is spent on it. Swapchains pass
+    // through sizes like 1x1 while a window is created or resized (PCSX2 under the D3D11 bridge,
+    // 2026-09-27), and building for one of them cost everything this host had: its buffers at the size
+    // it was really running at, and the model's creation, attempted and refused. What was built stays,
+    // so a frame that returns to that size carries on with no rebuild at all.
+    if (sourceWidth < kDlssNrMinExtent || sourceHeight < kDlssNrMinExtent)
+    {
+        ReportFrameSkip("the frame is below 64 pixels; nothing is built for it and the model is not attempted");
+        return false;
+    }
 
     if (!_Ensure(device, source))
     {

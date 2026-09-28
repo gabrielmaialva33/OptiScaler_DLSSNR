@@ -1,7 +1,9 @@
 # Frame generation for titles that give no motion
 
-Status: **steps 1 and 2 built and measured on branch `synth-fg`** (`90990bba`, `d954692d`; see
-[Step 1, measured](#step-1-measured) and [Step 2, measured](#step-2-measured)). Written 2026-09-27 against `944aff56`. The code this plans lives
+Status: **steps 1 and 2 built and measured** (`90990bba`, `d954692d`; see
+[Step 1, measured](#step-1-measured) and [Step 2, measured](#step-2-measured)), merged in `54d900e7`.
+**Step 5 (native D3D12) built and measured** in PCSX2; see [Step 5, built](#step-5-built) and
+[Step 5, measured](#step-5-measured). Written 2026-09-27 against `944aff56`. The code this plans lives
 outside the NR module (see [Where the code goes](#where-the-code-goes)); the note sits here because
 it builds on the present host and on [synthesized-motion.md](synthesized-motion.md).
 
@@ -172,8 +174,9 @@ is admitted, and the input is recorded at `FG_Hooks.cpp:1215`, before `fg->Prese
   must not depend on the NR module, which stays removable as one block. The unbuilt skeleton in
   `shaders/dlssnr/motion/` is superseded, and [synthesized-motion.md](synthesized-motion.md) points
   here.
-- **The FG input:** `inputs/FG/Synth_Inputs_Dx11wDx12.{h,cpp}`, modelled on
-  `Upscaler_Inputs_Dx11wDx12.cpp:150-288`, with a D3D12 twin for the present path.
+- **The FG input:** `inputs/FG/Synth_Inputs.{h,cpp}` (first written as `Synth_Inputs_Dx11wDx12`),
+  modelled on `Upscaler_Inputs_Dx11wDx12.cpp:150-288`, shared by the bridge and the D3D12 present path
+  since step 5.
 - **Wiring:**
   - `FGInput::Synthesized` in `State.h`, before `ForceXeLL`, because the menu indexes by value.
   - The four-point config round trip for its string.
@@ -288,7 +291,7 @@ An adversarial review of steps 1 and 2 (after merge `54d900e7`) found no blocker
 - **Native D3D12.** The input was selectable there, and it got an FFX swapchain nothing ever feeds.
   `FGHooks::CreateSwapChain*` now refuse `Synthesized` unless the bridge is the caller
   (`forDx11Bridge`). The menu offers it only when the swapchain is DX11 or bridged, and the ini and
-  `Config.md` say "D3D11 games only for now". Step 5 lifts this.
+  `Config.md` say "D3D11 games only for now". Step 5 lifts this: see [Step 5, built](#step-5-built).
 - **Present queue.** Step 2 keyed the bridge's fallback to its own queue on "no FG object". A
   synthesized-FG bridge whose FFX context failed was then left with no queue, and so was an NR-only
   bridge with a stray FG object; both had worked before. The fallback is back to "a host exists".
@@ -303,9 +306,124 @@ when NR comes back.
 
 **Order from here:**
 1. ~~Step 2: move NR to once per base frame, before FG.~~ Done, above.
-2. The D3D12 present path (step 5), for PCSX2.
+2. The D3D12 present path (step 5), for PCSX2. Built, below; not yet measured.
 3. Rafael's 3060 (step 6).
 4. The estimator (step 3) and the HUD mask (step 4), when a title needs them.
+
+## Step 5, built
+
+Why: PCSX2 runs on D3D12 (`Renderer=15`) on both machines. Switching it to D3D11 puts it on the bridge,
+where steps 1 and 2 already work. A test on 2026-09-27 showed FG running that way. The user wants
+D3D12 itself.
+
+**One input, two owners.** `Synth_Inputs_Dx11wDx12` became `inputs/FG/Synth_Inputs.{h,cpp}`, class
+`SynthInputs`.
+- The bridge's use is unchanged. It records the one-time clear on its copy list, confirms or abandons
+  it with that list, and feeds before `_fgSwapChain->Present`.
+- For a caller with no list of its own, it adds `RecordInitOnQueue`. The class records the clear on
+  its own allocator and list, closes it, executes it on the queue given, and signals its own fence.
+  It confirms on a successful `Close` plus submission and abandons otherwise. The allocator is reset
+  only after that fence shows the last clear finished (a bounded 2 s wait, reached only on a resize).
+
+**The native D3D12 feed** is in `FGHooks::FGPresent`, right after the frame-time bookkeeping and before
+`fg->Present()` runs Dispatch.
+- *Condition:* `FGInput::Synthesized`, interop `None` (the bridge feeds its own), and an FG object.
+- *Size and format:* from the FG swapchain's `GetDesc`.
+- *Queue and device:* the queue is `fg->GetCommandQueue()`, which is FSR-FG's `_gameCommandQueue`.
+  FSRFG_Dx12 executes its UI list and its prepare list there (`Present`, then `Dispatch`), so the
+  clear, submitted on it first, is ordered ahead of the first read. The device is that queue's
+  device, the one FFX's context is made on.
+- *Owner:* a single file-static `SynthInputs` in `FG_Hooks.cpp`. FGHooks presents through one FG
+  swapchain at a time (`State::currentFGSwapchain`), so one instance follows it. It is heap-allocated
+  and never destroyed, because a static destructor would release D3D12 objects at process exit, after
+  the device.
+- *Release:* after the queue-idle wait in `hkResizeBuffers`/`hkResizeBuffers1` (only if the wait
+  succeeded), and after the wait in the FG swapchain's final `hkFGRelease`. The next present
+  reallocates at the new size. A resize whose wait failed leaves the old pair parked (`_retired`) until
+  a proved release.
+
+**Offering it on D3D12 again.**
+- The `forDx11Bridge` refusal is gone. `FGHooks::CreateSwapChain*` have their original signatures,
+  and the four bridge call sites are back to upstream's.
+- The menu disables Synthesized only on Vulkan.
+- The ini and `Config.md` say D3D11 and D3D12.
+
+**NR once per base frame on D3D12.**
+- On a native FG swapchain the game presents FFX's swapchain, whose `Present` is FGHooks' hook. That
+  runs `RunPresentPass(..., true)` on the base frame, before `o_FGSCPresent`. FFX's inner real
+  swapchain, made through the hooked factory, is wrapped, and it presents generated and real frames
+  alike.
+- The existing `g_lastFgFlip` rule already stood the wrapped entry down, but only once the FG hook
+  had recorded a pass.
+- The stand-down at the top of `RunPresentPass` now also covers native D3D12: `!fgHook`, Synthesized,
+  and either the bridge's interop or `currentFGSwapchain != nullptr`. It returns before counting, so
+  the status line counts base frames. Without an FG swapchain it does not fire, and the wrapped entry
+  stays the route.
+
+**Ordering, read from code.**
+1. FGPresent feeds the zero pair, then `fg->Present()` executes FSR's UI and prepare lists on the game
+   queue. Prepare reads only depth and motion.
+2. `RunPresentPass(true)` then records NR on the FG object's game queue (`currentFG->GetCommandQueue()`),
+   over FFX's replacement backbuffer, the buffer the game rendered into.
+3. `o_FGSCPresent` hands that buffer to FFX, whose optical flow and interpolation read it after
+   everything already submitted on the game queue, NR included.
+
+This section first said `state.currentCommandQueue`, reasoning that `DxgiFactory_Hooks` stores the
+game's queue there before `FGHooks::CreateSwapChain`. It does, but it stores again when FFX creates its
+real swapchain, on FFX's own present queue (`presentInfo.presentQueue`,
+`FrameInterpolationSwapchainDX12.cpp:1162`), through the same hooked factory. The pass then ran
+unsynchronised with the game's rendering. See [Step 5, measured](#step-5-measured).
+
+**To verify in-game** (PCSX2, `Renderer = 15`, `FGInput=synthesized`, `FGOutput=fsrfg`,
+`[FrameGen] Enabled=true`, NR on with HookMethod=2):
+- `synthesized FG input on a native D3D12 swapchain, fed from the FG present hook`, once;
+- `FSRFG_Dx12::CreateContext D3D12_CreateContext result: 0`;
+- `synthesized FG input feeding FSR-FG: WxH zero motion ...`, once;
+- DispatchCallback lines with `numGeneratedFrames: 1` at LogLevel 1;
+- `DLSS-NR status: present: active ... | N presents : 0 renders`, with N the base rate (about 60 per
+  2 s window for a 30 fps game with `SkipDuplicateFrames`), not the doubled presented rate;
+- `DLSS-NR present: first pass on the backbuffer (WxH, frame-generation hook)`, and never the
+  `swapchain hook` variant: that one would mean the wrapped entry ran the model.
+
+## Step 5, measured
+
+PCSX2 2.9.23 on the 4090 under Proton Experimental, God Hand, `Renderer=15`, `FGInput=synthesized`,
+`FGOutput=fsrfg`, `[DlssNr] Enabled=true HookMethod=2`, 2026-09-27. Built from the working tree on
+`synth-fg-d3d12` (build id `0dfb0287`), deliberately uncommitted until measured.
+
+**FG works on D3D12.** The log showed the native D3D12 feed and FSR-FG's context, and NR's first pass
+came in through the frame-generation hook. The GPU timing counters read 6,211 model evaluations for
+12,407 presents: one generated frame per base frame, and NR on base frames only. A window resize
+(Hyprland retiling, 836 to 1608 wide) recreated the FG context and rebuilt NR cleanly.
+
+**But the picture was wrong, and it took two fixes.**
+- Seen: every frame, real and generated, showed only the model's difference over black, like an edge
+  negative. With NR switched off (F7) the picture was right.
+- **Cause 1, the main one: the queue.** NR ran on `state.currentCommandQueue`, which by then held
+  FFX's present queue (see Ordering above), so it copied half-drawn frames.
+  - The same build with `FGInput=auto` (no FFX swapchain, NR through the swapchain hook on the game's
+    queue) was correct. With `[FrameGen] Enabled=false` but still `synthesized` it was wrong: the FFX
+    swapchain alone was enough.
+  - Fix: `FGPresent` passes `currentFG->GetCommandQueue()`, the queue FSR-FG's own lists run on.
+- **Cause 2: a false exposure.** In every FG session the DLSS-NR exposure scan adopted `candidate 1 --
+  buffer, 8 bytes`, a buffer FFX created during `D3D12_CreateContext`. Sessions without FG adopt
+  nothing.
+  - Fix: `ScopedInternalResourceCreation` (`State.h`) is set around `FfxApiProxy`'s
+    `D3D12_CreateContext`, `Configure` and `Dispatch`, and `ExposureScan::NoteResource` and `NoteUav`
+    skip anything created inside it.
+  - Afterwards, zero adoptions, but the picture was still wrong until the queue fix.
+- **After both fixes:** the title, loading and gameplay screens are correct, and the player confirmed
+  the picture.
+
+**Found on the D3D11 route too.** A D3D11 test first showed the model running on none of the frames
+handed to it.
+- The bridge's real D3D11 swapchain lives on a hidden 1x1 window, and PCSX2 calls
+  `ResizeBuffers(0, 0)`, meaning "the window's size". It got 1x1.
+- Fix: `Dx11wDx12::ResolveZeroExtent` resolves zeros against the game's window at both resize sites
+  and all four creation sites.
+- Separately, `PresentHost` no longer spends its single build and model attempt on a frame below 64
+  px (`tests/nr-present-host`).
+- The D3D11 route has not been re-run since these fixes.
 
 ## Open questions
 

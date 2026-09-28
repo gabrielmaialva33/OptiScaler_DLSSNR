@@ -1,5 +1,5 @@
 #include "pch.h"
-#include "Synth_Inputs_Dx11wDx12.h"
+#include "Synth_Inputs.h"
 
 #include "MathUtils.h"
 
@@ -70,9 +70,9 @@ template <typename T> void SafeRelease(T*& value)
 }
 } // namespace
 
-SynthInputsDx11wDx12::~SynthInputsDx11wDx12() { Release(); }
+SynthInputs::~SynthInputs() { Release(); }
 
-void SynthInputsDx11wDx12::_WarnOnce(const char* what)
+void SynthInputs::_WarnOnce(const char* what)
 {
     if (_warned)
         return;
@@ -82,7 +82,7 @@ void SynthInputsDx11wDx12::_WarnOnce(const char* what)
              _height);
 }
 
-bool SynthInputsDx11wDx12::_Allocate(ID3D12Device* device, UINT width, UINT height)
+bool SynthInputs::_Allocate(ID3D12Device* device, UINT width, UINT height)
 {
     _velocity = CreateTarget(device, width, height, DXGI_FORMAT_R16G16_FLOAT, L"SynthFG_Velocity");
     _depth = CreateTarget(device, width, height, DXGI_FORMAT_R32_FLOAT, L"SynthFG_Depth");
@@ -119,7 +119,7 @@ bool SynthInputsDx11wDx12::_Allocate(ID3D12Device* device, UINT width, UINT heig
     return true;
 }
 
-void SynthInputsDx11wDx12::_Retire()
+void SynthInputs::_Retire()
 {
     if (_velocity != nullptr)
         _retired.push_back(_velocity);
@@ -131,8 +131,8 @@ void SynthInputsDx11wDx12::_Retire()
     _depth = nullptr;
 }
 
-bool SynthInputsDx11wDx12::RecordInit(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, UINT width, UINT height,
-                                      DXGI_FORMAT displayFormat)
+bool SynthInputs::RecordInit(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, UINT width, UINT height,
+                             DXGI_FORMAT displayFormat)
 {
     if (device == nullptr || cmdList == nullptr || width == 0 || height == 0)
         return false;
@@ -181,7 +181,7 @@ bool SynthInputsDx11wDx12::RecordInit(ID3D12Device* device, ID3D12GraphicsComman
     return true;
 }
 
-void SynthInputsDx11wDx12::ConfirmExecuted()
+void SynthInputs::ConfirmExecuted()
 {
     if (!_clearRecorded)
         return;
@@ -192,9 +192,130 @@ void SynthInputsDx11wDx12::ConfirmExecuted()
 
 // The barrier out of the clear state never ran either, so the pair is still where the clear expects
 // it, and the next RecordInit records the same clear again.
-void SynthInputsDx11wDx12::AbandonRecording() { _clearRecorded = false; }
+void SynthInputs::AbandonRecording() { _clearRecorded = false; }
 
-void SynthInputsDx11wDx12::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
+bool SynthInputs::_EnsureOwnList(ID3D12Device* device)
+{
+    if (_ownList != nullptr)
+    {
+        // Built on another device. Release, which runs after the drain that ends a swapchain, is what
+        // clears these; a list still here for a different device has not been proved idle.
+        return _ownDevice == device;
+    }
+
+    if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&_ownAllocator))) ||
+        FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _ownAllocator, nullptr,
+                                         IID_PPV_ARGS(&_ownList))) ||
+        FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_ownFence))))
+    {
+        SafeRelease(_ownList);
+        SafeRelease(_ownAllocator);
+        SafeRelease(_ownFence);
+        return false;
+    }
+
+    _ownFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+
+    if (_ownFenceEvent == nullptr || FAILED(_ownList->Close()))
+    {
+        if (_ownFenceEvent != nullptr)
+            CloseHandle(_ownFenceEvent);
+
+        _ownFenceEvent = nullptr;
+        SafeRelease(_ownList);
+        SafeRelease(_ownAllocator);
+        SafeRelease(_ownFence);
+        return false;
+    }
+
+    // Identity only, for the check above: the list and the pair are released before the device can go.
+    _ownDevice = device;
+    _ownFenceValue = 0;
+    return true;
+}
+
+bool SynthInputs::RecordInitOnQueue(ID3D12CommandQueue* queue, UINT width, UINT height, DXGI_FORMAT displayFormat)
+{
+    if (queue == nullptr || width == 0 || height == 0)
+        return false;
+
+    // Every frame after the first: the pair is there at this size and its zeros have run.
+    if (_velocity != nullptr && !_clearOwed && _width == width && _height == height)
+    {
+        _displayFormat = displayFormat;
+        return true;
+    }
+
+    // A failed allocation is not retried every frame at the same size, and costs no list work either.
+    if (_velocity == nullptr && _allocFailed && _width == width && _height == height)
+        return false;
+
+    ID3D12Device* device = nullptr;
+    if (FAILED(queue->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
+        return false;
+
+    bool result = false;
+
+    do
+    {
+        if (!_EnsureOwnList(device))
+        {
+            _WarnOnce("could not create the list for the one-time clear");
+            break;
+        }
+
+        // The last clear must be finished before its allocator is reset. It is two clears; the wait is
+        // only ever reached on a resize, and a clear that never finishes leaves the list alone.
+        if (_ownFence->GetCompletedValue() < _ownFenceValue)
+        {
+            if (FAILED(_ownFence->SetEventOnCompletion(_ownFenceValue, _ownFenceEvent)) ||
+                WaitForSingleObject(_ownFenceEvent, 2000) != WAIT_OBJECT_0)
+            {
+                _WarnOnce("the previous one-time clear did not finish");
+                break;
+            }
+        }
+
+        if (FAILED(_ownAllocator->Reset()) || FAILED(_ownList->Reset(_ownAllocator, nullptr)))
+        {
+            _WarnOnce("could not reset the list for the one-time clear");
+            break;
+        }
+
+        if (!RecordInit(device, _ownList, width, height, displayFormat))
+        {
+            _ownList->Close();
+            break;
+        }
+
+        if (FAILED(_ownList->Close()))
+        {
+            AbandonRecording();
+            _WarnOnce("could not close the list for the one-time clear");
+            break;
+        }
+
+        if (_clearRecorded)
+        {
+            // FG's queue is where FSR-FG's prepare executes (FSRFG_Dx12::Present, then Dispatch), so a
+            // clear submitted on it here is ordered ahead of the first read of the pair.
+            ID3D12CommandList* lists[] = { _ownList };
+            queue->ExecuteCommandLists(1, lists);
+
+            if (FAILED(queue->Signal(_ownFence, ++_ownFenceValue)))
+                _WarnOnce("could not signal the one-time clear's fence");
+
+            ConfirmExecuted();
+        }
+
+        result = true;
+    } while (false);
+
+    device->Release();
+    return result;
+}
+
+void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
 {
     if (fg == nullptr || device == nullptr || _velocity == nullptr || _depth == nullptr || _clearOwed)
         return;
@@ -219,7 +340,7 @@ void SynthInputsDx11wDx12::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
     fg->EvaluateState(device, fgConstants);
 
     // No upscaler parameters to read them from, so the config values, with near and far swapped for
-    // inverted depth exactly as UpscalerInputsDx11wDx12 does, and its 60 degree fallback.
+    // inverted depth exactly as the upscaler inputs do, and its 60 degree fallback.
     const float cameraNear = cfg.FsrCameraFar.value_or_default();
     const float cameraFar = cfg.FsrCameraNear.value_or_default();
     float cameraVFov = GetRadiansFromDeg(60);
@@ -291,7 +412,7 @@ void SynthInputsDx11wDx12::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
     }
 }
 
-void SynthInputsDx11wDx12::Release()
+void SynthInputs::Release()
 {
     for (auto* resource : _retired)
     {
@@ -303,6 +424,19 @@ void SynthInputsDx11wDx12::Release()
     SafeRelease(_velocity);
     SafeRelease(_depth);
     SafeRelease(_rtvHeap);
+
+    SafeRelease(_ownList);
+    SafeRelease(_ownAllocator);
+    SafeRelease(_ownFence);
+
+    if (_ownFenceEvent != nullptr)
+    {
+        CloseHandle(_ownFenceEvent);
+        _ownFenceEvent = nullptr;
+    }
+
+    _ownDevice = nullptr;
+    _ownFenceValue = 0;
 
     _width = 0;
     _height = 0;

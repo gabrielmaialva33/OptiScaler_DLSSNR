@@ -337,6 +337,11 @@ void NoteResource(const D3D12_RESOURCE_DESC* desc, ID3D12Resource* resource)
     if (!Config::Instance()->DlssNrEnabled.value_or_default())
         return;
 
+    // Not the game's: FFX's own buffers (frame generation, upscaling) come through the same device. An
+    // 8-byte FSR-FG buffer was adopted as the exposure in PCSX2 on D3D12 and wrecked the picture.
+    if (ScopedInternalResourceCreation::Active())
+        return;
+
     if (desc == nullptr || resource == nullptr)
         return;
 
@@ -378,6 +383,11 @@ unsigned int Examined()
 
 void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc)
 {
+    // Views OptiScaler's own backends create (FFX frame generation and upscaling) describe resources
+    // that are not the game's, and are never an exposure. See NoteResource.
+    if (ScopedInternalResourceCreation::Active())
+        return;
+
     // Deliberately NOT gated on the scan setting, and that was a real bug rather than a nicety.
     //
     // An engine creates its eye adaptation view once, when it builds its render targets, which is

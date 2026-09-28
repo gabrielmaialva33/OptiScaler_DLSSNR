@@ -50,6 +50,7 @@ predicates = 'namespace Dx11wDx12\n{\n' + ''.join(map(function, [
     'bool WantedForFrameGeneration()',
     'bool WantedForNeuralRendering()',
     'bool WantedIdleForNeuralRendering()',
+    'void ResolveZeroExtent(HWND gameWindow,',
 ])) + '} // namespace Dx11wDx12\n'
 # Upstream's skip-resize test lives in the production file's anonymous namespace; verbatim here too.
 helpers = 'namespace\n{\n' + function('bool IsSame(IDXGISwapChain* swapchain,') + '} // namespace\n'

@@ -28,6 +28,11 @@ tier = "host"
 timeout = 300
 summary = "Zero depth/motion for a caller with no engine buffers, and the two-heap clear contract."
 
+[nr-present-host]
+tier = "host"
+timeout = 300
+summary = "What the present host builds and when: tiny frames, resizes, the pass switched off."
+
 [nr-gpu-timing]
 tier = "host"
 timeout = 300

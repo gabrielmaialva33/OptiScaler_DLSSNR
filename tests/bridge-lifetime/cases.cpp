@@ -549,7 +549,7 @@ void synthInputCases()
     // the list that carried it.
     {
         Fixture f;
-        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        f.sc->_synthInputs = std::make_unique<SynthInputs>();
         auto* synth = f.sc->_synthInputs.get();
         f.presenter.buffer.desc = { 3440, 1440, 24 };
         f.sc->_hasInteropWork = true;
@@ -563,7 +563,7 @@ void synthInputCases()
     // The list could not be closed: the clear never ran and must stay owed.
     {
         Fixture f;
-        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        f.sc->_synthInputs = std::make_unique<SynthInputs>();
         auto* synth = f.sc->_synthInputs.get();
         f.sc->_hasInteropWork = true;
         f.list.closeResult = E_FAIL;
@@ -574,7 +574,7 @@ void synthInputCases()
     // A resize frees the pair, and only once the drain in front of it has been proved.
     {
         Fixture f;
-        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        f.sc->_synthInputs = std::make_unique<SynthInputs>();
         auto* synth = f.sc->_synthInputs.get();
         f.sc->_hasInteropWork = true;
         f.sc->_copyAllocatorFenceValues[0] = 5;
@@ -594,7 +594,7 @@ void synthInputCases()
     {
         Fixture f;
         f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
-        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        f.sc->_synthInputs = std::make_unique<SynthInputs>();
         auto* host = f.sc->_nrHost.get();
         auto* synth = f.sc->_synthInputs.get();
         f.presenter.descResult = S_OK;
@@ -624,10 +624,26 @@ void synthInputCases()
         Dx11wDx12Sync::PresentResizeMutex().unlock();
     }
 
+    // DXGI's "0 means the window's size": the real D3D11 swapchain lives on a hidden 1x1 window, so a
+    // zero must be resolved against the game's window before either swapchain is resized (PCSX2 on
+    // D3D11 sends 0x0; before this the real swapchain became 1x1 and the host starved on it).
+    {
+        Fixture f;
+        g_clientRect = RECT { 0, 0, 841, 1356 };
+        assert(f.sc->ResizeBuffers(2, 0, 0, 0, 0) == S_OK);
+        assert(f.real.lastResizeWidth == 841 && f.real.lastResizeHeight == 1356);
+        assert(f.presenter.lastResizeWidth == 841 && f.presenter.lastResizeHeight == 1356);
+        // Explicit sizes pass through untouched, and so does a zero in only one axis' partner.
+        assert(f.sc->ResizeBuffers(2, 1280, 0, 0, 0) == S_OK);
+        assert(f.real.lastResizeWidth == 1280 && f.real.lastResizeHeight == 1356);
+        assert(f.sc->ResizeBuffers1(2, 0, 0, 0, 0, nullptr, nullptr) == S_OK);
+        assert(f.real.lastResizeWidth == 841 && f.real.lastResizeHeight == 1356);
+    }
+
     // Teardown frees it behind the same drain as the rest of the interop.
     {
         Fixture f;
-        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        f.sc->_synthInputs = std::make_unique<SynthInputs>();
         auto* synth = f.sc->_synthInputs.get();
         f.sc->_ReleaseInteropObjects();
         assert(synth->releases == 1);
@@ -641,7 +657,7 @@ void coexistenceCases()
     {
         Fixture f;
         f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
-        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        f.sc->_synthInputs = std::make_unique<SynthInputs>();
         auto* host = f.sc->_nrHost.get();
         auto* synth = f.sc->_synthInputs.get();
         f.presenter.buffer.desc = { 3440, 1440, 24 };
@@ -657,7 +673,7 @@ void coexistenceCases()
     {
         Fixture f;
         f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
-        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        f.sc->_synthInputs = std::make_unique<SynthInputs>();
         f.sc->_nrHost->recordSucceeds = false;
         f.sc->_hasInteropWork = true;
         assert(f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
@@ -669,7 +685,7 @@ void coexistenceCases()
     {
         Fixture f;
         f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
-        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        f.sc->_synthInputs = std::make_unique<SynthInputs>();
         auto* host = f.sc->_nrHost.get();
         auto* synth = f.sc->_synthInputs.get();
         f.sc->_hasInteropWork = true;
@@ -683,7 +699,7 @@ void coexistenceCases()
     {
         Fixture f;
         f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
-        f.sc->_synthInputs = std::make_unique<SynthInputsDx11wDx12>();
+        f.sc->_synthInputs = std::make_unique<SynthInputs>();
         auto* host = f.sc->_nrHost.get();
         auto* synth = f.sc->_synthInputs.get();
         f.sc->_ReleaseInteropObjects();

@@ -1182,6 +1182,8 @@ class FfxApiProxy
     static ffxReturnCode_t D3D12_CreateContext(ffxContext* context, ffxCreateContextDescHeader* desc,
                                                const ffxAllocationCallbacks* memCb)
     {
+        ScopedInternalResourceCreation internalResources {};
+
         auto type = GetType(desc->type);
         auto isFg = type == FFXStructType::FG || type == FFXStructType::SwapchainDX12;
 
@@ -1348,6 +1350,8 @@ class FfxApiProxy
 
     static ffxReturnCode_t D3D12_Configure(ffxContext* context, const ffxConfigureDescHeader* desc)
     {
+        ScopedInternalResourceCreation internalResources {};
+
         auto type = GetType(desc->type);
 
         if (type == FFXStructType::General && contextToType.contains(*context))
@@ -1426,6 +1430,8 @@ class FfxApiProxy
 
     static ffxReturnCode_t D3D12_Dispatch(ffxContext* context, const ffxDispatchDescHeader* desc)
     {
+        ScopedInternalResourceCreation internalResources {};
+
         auto type = GetType(desc->type);
         auto isFg = type == FFXStructType::FG || type == FFXStructType::SwapchainDX12;
 

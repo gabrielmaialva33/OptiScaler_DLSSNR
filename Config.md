@@ -517,8 +517,8 @@ experimental driver path and is not evidence of equivalence with the forwarder.
 ### Frame Generation without an upscaler
 Every other FG input needs the depth and motion vectors a game hands to its upscaler. The
 experimental `synthesized` input is for games that call no upscaler at all: it generates from
-the presented image alone. For now it works only in D3D11 games, which OptiScaler carries over a
-D3D12 bridge, and only with the FSR FG output. Design and status:
+the presented image alone. It works in D3D12 games and in D3D11 games, which OptiScaler carries
+over a D3D12 bridge, and only with the FSR FG output. Design and status:
 [synthesized-frame-generation.md](OptiScaler/dlssnr/design/synthesized-frame-generation.md).
 The full `[FrameGen]` section is in the distributed [OptiScaler.ini](OptiScaler.ini).
 
@@ -528,7 +528,7 @@ The full `[FrameGen]` section is in the distributed [OptiScaler.ini](OptiScaler.
 Enabled=true
 
 ; synthesized - Experimental. For games that call no upscaler: generates from the presented image
-; alone, no motion vectors or depth needed. D3D11 games and the FSR FG output only for now.
+; alone, no motion vectors or depth needed. D3D11 and D3D12 games, FSR FG output only.
 FGInput=synthesized
 
 ; fsrfg - requires amd_fidelityfx_dx12.dll OR amd_fidelityfx_loader_dx12.dll + amd_fidelityfx_framegeneration_dx12.dll
