@@ -33,6 +33,8 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="shaders\synth_motion\SynthMotion_Handoff.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="shaders\synth_motion\SynthMotionNvofa_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
