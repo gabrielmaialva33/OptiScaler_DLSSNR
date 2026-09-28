@@ -8,6 +8,8 @@ outside the NR module (see [Where the code goes](#where-the-code-goes)); the not
 it builds on the present host and on [synthesized-motion.md](synthesized-motion.md).
 **The HUD (step 4)** is designed in [The HUD: near depth and a UI layer](#the-hud-near-depth-and-a-ui-layer)
 (2026-09-28, branch `fg-hud-depth-ui`), which also corrects what this note first planned for it.
+**The DLSS-G output** (`FGOutput=dlssg` beside FSR-FG) is in [DLSS-G output](#dlss-g-output) (2026-09-28,
+branch `synth-fg-dlssg`): designed and written from code, not yet measured in a game.
 
 ## The problem
 
@@ -953,6 +955,168 @@ game-vector field's depth priority (top middle) and the disocclusion mask (botto
   marks fade over about 1.5 s. Neither is a fault.
 - **Configuration:** Generation Zero on the D3D11 bridge (`FGInput=synthesized`, `SynthesizedMotion=true`)
   is the title that showed the smear. Also PCSX2 on D3D12, for the late layer after DLSS-NR's pass.
+
+## DLSS-G output
+
+Written 2026-09-28, before the code, on branch `synth-fg-dlssg`, against `02c5d0f6`. Until now the input fed
+FSR-FG alone:
+- `CheckForFGStatus` refused every other output for it and switched FG off (`hooks/FG_Hooks.cpp:184-195`).
+- The bridge was not built for another output (`Dx11wDx12::WantedForFrameGeneration`,
+  `with_dx12/dx11_with_dx12_sc.cpp:31-34`).
+
+This lets `FGOutput=dlssg` take the same input on both transports. XeFG and Reprojection stay refused: nobody
+has read what XeFG does with this input, and Reprojection needs a hudless frame this input never has.
+
+Why bother, when FSR-FG already works: on an RTX 40 or newer, DLSS-G's interpolation is NVIDIA's own model,
+with multi-frame generation on an RTX 50. Whether it does better than FSR-FG from zero or synthesized vectors
+and flat depth is exactly what nobody knows yet; this makes the comparison possible on one install.
+
+Sources: `framegen/dlssg/DLSSG_Dx12.cpp` as it stands, and the Streamline headers the tree builds against,
+`external/streamline/`.
+
+### What carries over
+
+The input calls the same `IFGFeature_Dx12` methods whichever output is behind them (`SynthInputs::Feed`), so
+the question is only what DLSS-G does with each.
+
+- **The motion field needs no conversion.**
+  - `SetMVScale(1, 1)` becomes Streamline's `mvecScale` of (1/W, 1/H), with W and H the field's size
+    (`DLSSG_Dx12.cpp:535-536`). That is the scale that normalises pixel vectors to the [-1, 1] range
+    Streamline expects (`sl_consts.h:197`).
+  - No sign change. DLSS's vectors point from the current frame to the previous one, as FSR's do. The
+    upscaler input hands DLSS-G the same vectors it hands FSR-FG, through the same line, and that route is
+    upstream's, in use.
+  - So the estimator's contract holds as it is: R16G16_FLOAT, display pixels, current to previous. With
+    `SynthesizedMotion` off the field is zero, and none of this matters.
+- **Depth.** The constant zero, or with Fix A the HUD mask's 0 and 1. `InvertedDepth` becomes
+  `depthInverted = eTrue` (`:557`), so zero is still the far plane.
+- **Camera.** `SetCameraValues` gets the config's near and far, swapped for inverted depth, and the 60°
+  fallback.
+  - With no camera position, `Dispatch` builds a projection from FOV and aspect, and sets `clipToPrevClip`
+    and `prevClipToClip` to identity (`:474-515`), with `cameraMotionIncluded = eTrue`.
+  - That is what upstream's OptiFG hands DLSS-G for a game that is not Streamline's. All of the motion then
+    rests on the vectors, which is this input's premise anyway.
+- **Tags.** The pair goes in as `UntilPresent` with no command list.
+  - `SetResource` tags it `eValidUntilPresent` with that null list (`:1127-1151`). Streamline allows a null
+    list when every tag has that lifecycle (`sl_core_api.h:145`).
+  - The contract is that the resource does not change from the tag until the frame is presented
+    (`sl_core_types.h:376`). It holds, read from code. The pair is written only on lists that run before the
+    present: the bridge's copy list, or on native D3D12 the per-frame list executed on FG's queue before
+    `fg->Present()`. The next base frame's writes are recorded after this present returns, on the same queue.
+- **Reset** becomes `sl::Constants::reset` (`:552-555`), unless `[FrameGen] SkipReset`.
+- **Activation.** `DLSSG_Dx12::EvaluateState` activates only for `FGInput::Upscaler` (`:640`). It gets the
+  same `Synthesized` case FSR-FG's has (`framegen/ffx/FSRFG_Dx12.cpp:1559-1561`).
+- **NR once per base frame, unchanged.** The stand-down at the top of `RunPresentPass` keys on the input and
+  on the bridge or an FG swapchain existing, not on the output (`shaders/dlssnr/DlssNr_Dx12.cpp:4478-4483`).
+  If DLSS-G's inner swapchain reaches the wrapped entry, as FFX's does, it stands down the same way.
+- **Pacing and latency** are DLSS-G's own, as for OptiFG on a game that is not Streamline's. When the game
+  sends no Reflex markers, `FGPresent` sets the PCL present markers and calls Reflex's sleep itself
+  (`hooks/FG_Hooks.cpp:1349-1362`, `:1470-1479`). Multi-frame generation follows `[DLSSG]
+  InterpolationCount`: the count is the output's, not the input's. Not tried with this input.
+
+### What does not
+
+- **The HUD layer (Fix B).**
+  - FFX composes a registered UI resource over every frame it presents. DLSS-G tags a UI resource as
+    `kBufferTypeUIColorAndAlpha` (`DLSSG_Dx12.cpp:1115-1116`), but it recomposes the interface only with
+    `DLSSGOptions::enableUserInterfaceRecomposition` (`sl_dlss_g.h:114-116`), which OptiScaler never sets.
+  - Even then it interpolates a HUD-less colour and the UI separately. This input has no HUD-less colour.
+  - So with DLSS-G the layer is neither planned nor recorded: `PlanSynthHud` gets a `layerComposed`
+    argument, true only for FSR-FG. The menu disables the checkbox under any other output.
+  - Fix A still goes in, because it is only the depth DLSS-G is given. What DLSS-G makes of it is not
+    measured.
+- **`FGDrawUIOverFG`** draws `UIColor` into the backbuffer before DLSS-G's present (`DLSSG_Dx12::Present`,
+  `:832`). It is skipped for this input, as FSR-FG skips it (`FSRFG_Dx12.cpp:1960-1962`). With no layer fed
+  it would only warn `UI resource is nullptr` on every frame.
+- **`SetInterpolationRect`** is ignored: DLSS-G interpolates the whole swapchain.
+- **Reset, unmeasured.**
+  - On a reset FSR-FG copies the back buffer instead of interpolating, and the fast-motion response and the
+    coherence rule are built on that.
+  - Streamline documents `reset` only as "previous frame has no connection to the current one"
+    (`sl_consts.h:228`). What DLSS-G shows on such a frame has not been seen.
+  - So under DLSS-G, `SynthesizedFastMotion` and `SynthesizedIncoherence` send it, but whether they repeat
+    frames there is unverified. So is the first frame of a size and a scene cut.
+- **The low-fps floor.**
+  - Below `SynthesizedMinFps` the input stops feeding. After three presents `DLSSG_Dx12::Present`
+    deactivates (`:929-935`), which sends `eOff` (`:246-251`); feeding again sends `eOn`.
+  - Without `DLSSGFlags::eRetainResourcesWhenOff` (`sl_dlss_g.h:48`), DLSS-G may drop its resources on every
+    such transition and rebuild them. That is a stall, not a fault. See the follow-ups below.
+
+### Requirements
+
+- **Hardware.** Real DLSS-G needs an RTX 40 or newer. This workstation's 4090 has it. Rafael's RTX 3060
+  does not, and there the attempt ends as the Refusal bullet says.
+- **Files.** A `streamline` folder in OptiScaler's own folder: `<game>/OptiScaler/streamline/`, or
+  `<game>/streamline/` without that subfolder (`Config::MainDllPath`, `proxies/Streamline_Proxy.h:82-83`).
+  - It holds `sl.interposer.dll`, `sl.common.dll`, `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll` and
+    `nvngx_dlssg.dll`.
+  - We ship none of them: NVIDIA's licence. The user supplies them, as for the upscaler input with DLSS-G.
+  - Without the folder, `CheckForFGStatus` switches FG off with a toast (`FG_Hooks.cpp:220-230`).
+- **`FGNvngxReplacement=None`.**
+  - The key defaults to Nukem's (`Config.h:881`), and `auto` keeps that for the DLSS-G output
+    (`dllmain.cpp:1913-1919`).
+  - Nukem's replaces `nvngx_dlssg` with FSR3 behind the same Streamline calls. This input through that
+    replacement is neither designed nor tested here: on a card without DLSS-G, `FGOutput=fsrfg` is the
+    route.
+- **Refusal.** If Streamline says DLSS-G is not supported while the replacement is `None`,
+  `InitWithD3D12` does not fail quietly (`Streamline_Proxy.h:494-507`):
+  - it writes `FGNvngxReplacement=Nukems` into the ini;
+  - it shows a "No DLSSG Support" message box;
+  - and it exits the game with `exit(1)`.
+
+  That is upstream's behaviour for the upscaler input too. For this input it means one aborted launch on an
+  RTX 30, and an ini changed behind the user's back. Worth knowing before handing Rafael a build.
+
+### On the D3D11 bridge
+
+- **The Witcher 3's quirk matches the DX11 executable.**
+  - `CreateSLOnThe2ndDevice` is keyed on `witcher3.exe` (`misc/Quirks.h:398`). The DX12 executable in
+    `bin/x64_dx12/` and the DX11 one in `bin/x64/` share that name.
+  - Under the quirk, `InitWithD3D12` marks Streamline ready without setting its device
+    (`Streamline_Proxy.h:521-526`). The device is set when a second D3D12 device is created
+    (`hooks/D3D12_Hooks.cpp:1544-1558`); that is how the DX12 executable skips its throwaway first device.
+  - On the bridge the bridge's device is the only one. So Streamline never gets a device.
+  - Since `85bef821` the DLSS-G entry points are bound only when the device is set (`SetD3DDeviceAndBind`).
+    They stay null, and `CreateSwapchainInternal` calls `DLSSGGetState` through null at once (`:109`, `:196`).
+  - Worse, any later D3D12 device would be handed to Streamline in place of the bridge's.
+- **The fix:**
+  - Neither site applies the quirk when the game's own device is D3D11. The signal is
+    `State::currentD3D11Device`: every bridge creation site records it before `WithDx12` creates the D3D12
+    device (`hooks/DxgiFactory_Hooks.cpp:560`, `:962`; `DxgiFactory_WrappedCalls.cpp:234`, `:627`).
+  - Only a swapchain made on a D3D11 device sets it, so the DX12 executable is untouched.
+  - Independently, the DLSS-G swapchain creation refuses when Streamline bound no DLSS-G entry point, before
+    a swapchain exists. A failed bind then leaves the bridge on its plain presenter, or a D3D12 game on its
+    own swapchain, instead of faulting. On the quirk's own title that path already faulted; it now refuses.
+- **Divinity's prefix has no `nvapi64.dll`** (CLAUDE.md, "Titles with no upscaler"). Streamline's DLSS-G and
+  Reflex go through NVAPI, and fakenvapi is what OptiScaler substitutes. `slInit` or the support check may
+  then fail, and a failed support check takes the Refusal path above. The same `[Libraries] NvapiPath` fix
+  NR needs there is the first thing to set. Read from code, not tried.
+
+### Follow-ups, not done here
+
+- `DLSSGFlags::eRetainResourcesWhenOff` while the low-fps floor holds FG off, so resuming does not rebuild
+  DLSS-G's resources.
+- `motionVectorsDilated = eFalse` for this input. `Dispatch` calls any display-size field dilated
+  (`:562`), which the synthesized field is not: it is a block field, bilinear between 8x8 block centres.
+- A HUD-less synthetic frame, which would give DLSS-G's UI recomposition something to work with.
+- XeFG as an output for this input.
+
+### To verify in-game
+
+On this workstation's 4090, `FGInput=synthesized`, `FGOutput=dlssg`, `FGNvngxReplacement=None`, the
+`streamline` folder in place.
+- The log, once each:
+  - `synthesized FG input feeding DLSSG: WxH ...`;
+  - `Max supported interpolations: N` from the swapchain creation;
+  - no `bound no DLSS-G entry points`, and no `Depth or Velocity is not ready` after the first ten frames;
+  - `synthesized FG input: DLSSG now gets the synthesized motion field ...` with `SynthesizedMotion`.
+- MangoHud's rate doubling, as in step 1, and a pan compared with `FGOutput=fsrfg` on the same scene.
+- `SynthesizedFastMotion` set low, whipping the camera: whether DLSS-G repeats frames on a reset.
+- Divinity on the bridge (with `NvapiPath` set), then The Witcher 3 DX11 for the quirk. The start-up list
+  still names the quirk (`Quirk: Create SL on the 2nd device`); what must follow it is `Streamline features
+  bound through the active interposer`, or its fallback line, before `Max supported interpolations`. Under
+  the quirk that line would not appear until a second D3D12 device, which the bridge never creates.
+- PCSX2 on D3D12, for NR's once-per-base-frame count under DLSS-G.
 
 ## Open questions
 
