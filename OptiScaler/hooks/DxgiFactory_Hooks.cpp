@@ -574,9 +574,10 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
                 if (hiddenHwnd != nullptr && dx12Device != nullptr && dx12Queue != nullptr)
                 {
-                    Dx11wDx12::ResolveZeroExtent(localDesc.OutputWindow, localDesc.BufferDesc.Width,
-                                                 localDesc.BufferDesc.Height);
+                    // Only the hidden swapchain gets a resolved extent; see Dx11wDx12::ResolveZeroExtent.
                     DXGI_SWAP_CHAIN_DESC realDesc = localDesc;
+                    Dx11wDx12::ResolveZeroExtent(localDesc.OutputWindow, realDesc.BufferDesc.Width,
+                                                 realDesc.BufferDesc.Height);
                     realDesc.OutputWindow = hiddenHwnd;
                     realDesc.Windowed = TRUE;
 
@@ -609,6 +610,15 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
                             LOG_WARN("Dx11wDx12 FG swapchain creation failed: {:X}; creating plain DX12 swapchain",
                                      (UINT) fgScResult);
 
+                            // Windowed, whatever the game asked: its exclusive fullscreen is emulated on a plain
+                            // presenter (Dx11wDx12SC::SetFullscreenState), and one created in fullscreen refuses
+                            // Present, once the emulation takes it back to a window, until it is resized
+                            // (Generation Zero, 2026-09-28).
+                            if (!fgDesc.Windowed)
+                                LOG_INFO("Dx11wDx12 game asked for exclusive fullscreen; plain presenter created "
+                                         "windowed, fullscreen emulated");
+                            fgDesc.Windowed = TRUE;
+
                             ScopedSkipParentWrapping skipParentWrapping {};
                             fgScResult = o_CreateSwapChain(realFactory, dx12Queue, &fgDesc, &fgSwapChain);
                         }
@@ -619,7 +629,8 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
                     if (SUCCEEDED(realScResult) && realDx11SwapChain != nullptr && fgSwapChain4 != nullptr)
                     {
-                        State::Instance().currentSwapchainDesc = fgDesc;
+                        Dx11wDx12::MatchHiddenToPresenter(realDx11SwapChain, fgSwapChain4);
+                        fgSwapChain4->GetDesc(&State::Instance().currentSwapchainDesc);
                         State::Instance().currentRealSwapchain = realDx11SwapChain;
                         State::Instance().currentFGSwapchain = fgSwapChain4;
                         State::Instance().currentD3D11Device = device;
@@ -965,8 +976,9 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
                 if (hiddenHwnd != nullptr && dx12Device != nullptr && dx12Queue != nullptr)
                 {
-                    Dx11wDx12::ResolveZeroExtent(hWnd, localDesc.Width, localDesc.Height);
+                    // Only the hidden swapchain gets a resolved extent; see Dx11wDx12::ResolveZeroExtent.
                     DXGI_SWAP_CHAIN_DESC1 realDesc = localDesc;
+                    Dx11wDx12::ResolveZeroExtent(hWnd, realDesc.Width, realDesc.Height);
                     IDXGISwapChain1* realDx11SwapChain1 = nullptr;
                     HRESULT realScResult = E_FAIL;
                     {
@@ -1001,11 +1013,17 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                             LOG_WARN("Dx11wDx12 FG swapchain creation failed: {:X}; creating plain DX12 swapchain",
                                      (UINT) fgScResult);
 
+                            // Windowed, whatever the game asked: its exclusive fullscreen is emulated on a plain
+                            // presenter (Dx11wDx12SC::SetFullscreenState), and one created in fullscreen refuses
+                            // Present, once the emulation takes it back to a window, until it is resized
+                            // (Generation Zero, 2026-09-28).
+                            if (pFullscreenDesc != nullptr && !localFullscreenDesc.Windowed)
+                                LOG_INFO("Dx11wDx12 game asked for exclusive fullscreen; plain presenter created "
+                                         "windowed, fullscreen emulated");
+
                             ScopedSkipParentWrapping skipParentWrapping {};
-                            fgScResult =
-                                o_CreateSwapChainForHwnd(realFactory, dx12Queue, hWnd, &fgDesc,
-                                                         pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
-                                                         pRestrictToOutput, &fgSwapChain1);
+                            fgScResult = o_CreateSwapChainForHwnd(realFactory, dx12Queue, hWnd, &fgDesc, nullptr,
+                                                                  pRestrictToOutput, &fgSwapChain1);
                         }
 
                         if (fgScResult == S_OK && fgSwapChain1 != nullptr)
@@ -1014,6 +1032,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
                     if (realScResult == S_OK && realDx11SwapChain1 != nullptr && fgSwapChain4 != nullptr)
                     {
+                        Dx11wDx12::MatchHiddenToPresenter(realDx11SwapChain1, fgSwapChain4);
                         ((IDXGISwapChain*) fgSwapChain4)->GetDesc(&State::Instance().currentSwapchainDesc);
                         State::Instance().currentSwapchainDesc.OutputWindow = hWnd;
                         State::Instance().currentRealSwapchain = realDx11SwapChain1;

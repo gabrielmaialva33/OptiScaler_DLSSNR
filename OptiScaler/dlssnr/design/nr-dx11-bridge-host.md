@@ -486,3 +486,125 @@ shows it is needed -- and the case that would show it is a fast-camera title, no
    makes `Present` return `DXGI_ERROR_DEVICE_REMOVED` when no FG object exists (`:1087`, `:313`).
 4. A cold NGX capability init that does not depend on a game having called `NVSDK_NGX_D3D12_Init`
    (`State.h:219` holds only `NVNGX_ApplicationId = 1337`, an empty data path and a zeroed version).
+
+## Exclusive fullscreen on the plain presenter (2026-09-28)
+
+### What broke
+
+Generation Zero, on Rafael's RTX 3060 under Windows, builds efdec926 and 4fa5912b. It is a D3D11
+title with no upscaler; the bridge hosts NR with `HookMethod=2` and frame generation off, so the
+presenter is the plain D3D12 one.
+
+The log, `F:\dlss-kit\logs0928\GenerationZero.log`:
+
+- `09:00:17.152` — `Game is creating fullscreen swapchain`.
+- `09:00:20.406` — `_EnterBorderless ... exclusive fullscreen emulated as a borderless window,
+  1920x1080 at 0,0`. The game called `SetFullscreenState(TRUE)`.
+- `09:00:20.542` to `09:00:36` — 410 Present failures. The first one reads `fg Present failed: 887A0001
+  (sync interval 1, flags 0, presenter fullscreen false, game fullscreen true, plain presenter true)`.
+
+The model ran throughout, but nothing reached the screen.
+
+### Cause
+
+Three changes combined; none was wrong alone.
+
+1. **The presenter was created in fullscreen.** Upstream's `5ee53e38` ("Better description
+   adaptation", merged here in `7de75fc1`) dropped the `desc.Windowed = TRUE` that
+   `PrepareDx12InteropDesc` in `DxgiFactory_Hooks.cpp` used to force. From then on, a game that
+   creates its swapchain fullscreen got a presenter created fullscreen too. Rafael's working 09-26
+   build, `e345044b`, predates that merge.
+2. **Nothing resized it after the emulation took it back to a window.** A flip-model presenter
+   refuses every Present after that transition until it is resized. The emulation's
+   `SetFullscreenState` took it back to a window and never resized it.
+3. **Neither the recovery nor the game's own resize reached it.**
+   - The Present-time recovery ran only while the presenter was still fullscreen, and by then it
+     was not.
+   - The game's follow-up resize asked for the size the presenter already had. Upstream's
+     skip-resize (`IsSame`, `4c682650`) drops exactly that call.
+
+What is unproven: his log is at `LogLevel=2`, so it does not record the presenter's state at the
+call. This is the one path through the code that fits the log.
+
+### What changed
+
+1. **The plain presenter is always created windowed**, at all four creation sites. A presenter
+   from a real frame-generation swapchain keeps upstream's handling.
+2. **The emulation owes a resize.** When `SetFullscreenState` finds the presenter fullscreen, it
+   takes it back to a window and marks a resize owed. The next resize then reaches the presenter
+   even when `IsSame` would call it unchanged.
+3. **A refused Present gets one recovery per transition.** Any fullscreen or resize transition arms
+   `_RecoverPresenter`. On `DXGI_ERROR_INVALID_CALL`, it:
+   - resizes the presenter alone, at its own count, size, format and flags;
+   - runs behind the usual drain, after releasing the interop and overlay buffers;
+   - leaves the hidden swapchain alone, because the game holds its buffers mid-frame, which would
+     make that resize fail.
+
+   The attempt disarms itself, so it never loops, and it is logged once.
+4. **Resize order: presenter first.** The presenter gets the game's extent unchanged, zeros
+   included. The hidden swapchain then takes the presenter's `GetDesc1` size. At creation,
+   `MatchHiddenToPresenter` does the same.
+5. **Resize flags are made valid for the presenter.** The presenter's ResizeBuffers flags drop
+   `GDI_COMPATIBLE` and keep the presenter's own `ALLOW_TEARING` and
+   `FRAME_LATENCY_WAITABLE_OBJECT`. DXGI refuses a resize that changes those.
+
+Tests are in `tests/bridge-lifetime` (`fullscreenCases`). Six mutations of the fix each fail at
+least one case; the list is in that suite's README.
+
+### Local reproduction, for the lead
+
+Proton's D3D12 presenter is vkd3d-proton's, not Windows DXGI. The old build may therefore not fail
+here. If it doesn't, these runs prove only that the fix causes no regression; Rafael's next
+Generation Zero run is the proof of the fix.
+
+Before any run:
+
+- Check that nothing maps the target DLL: `grep -l <dll path> /proc/*/maps`.
+- Edit ini keys in place; never insert duplicates.
+
+**PCSX2, D3D11 through the plain presenter** (`~/Games/pcsx2-nr-test`):
+
+1. Settings.
+   - `inis/PCSX2.ini` uses CRLF line endings; keep them.
+   - In `[EmuCore/GS]`, set `Renderer = 3` (it was 15), and add one line
+     `FullscreenMode = 1920 x 1080 @ 60 Hz`. That key is absent now, and with it PCSX2 creates an
+     exclusive-fullscreen swapchain. `[UI] StartFullscreen = true` is already set.
+   - In `OptiScaler.ini`, set `[FrameGen] FGInput=nofg` (it was `synthesized`). A real FG
+     presenter bypasses the emulation.
+   - Also in `OptiScaler.ini`, set `[Log] LogLevel=1`.
+2. Run `./run.sh`. In the game, press Alt+Enter three or four times, a few seconds apart.
+3. Check `logs/emulog.txt`: `D3D11: Creating a 1920x1080 exclusive fullscreen swap chain` shows
+   that the creation path was exercised.
+4. Check `OptiScaler.log`:
+   - `Dx11wDx12 game asked for exclusive fullscreen; plain presenter created windowed, fullscreen
+     emulated`;
+   - `FGHooks::SetDx12InteropPresentSC` (the plain presenter) and
+     `bridge 1 hosts the neural pass`;
+   - on each toggle, `exclusive fullscreen emulated as a borderless window` or
+     `leaving emulated fullscreen, window restored`, or a new `Created Dx11wDx12SC HWND`;
+   - `Dx11wDx12SC ResizeBuffers results: fg 0, real 0 at WxH`, where WxH is the presenter's size,
+     not 1x1;
+   - `grep -c "fg Present failed" OptiScaler.log` gives 0;
+   - `DLSS-NR present host: the model ran on N of N base frames` keeps coming.
+5. Acceptable once per session: `the presenter refused Present after a fullscreen or resize
+   transition; resized once at its own size: 0`, with no `fg Present failed` after it. That line
+   means the recovery was needed and worked.
+6. Restore `Renderer = 15`, `FGInput=synthesized` and `LogLevel=2`, and remove the
+   `FullscreenMode` line.
+
+**Divinity: Original Sin 2** (`DefEd/bin/`, `winmm.dll`):
+
+1. Settings.
+   - Frame generation off in its `OptiScaler.ini` (`FGInput=nofg`), so the log shows
+     `creating plain DX12 swapchain` or `SetDx12InteropPresentSC`.
+   - `LogLevel=1`.
+   - `graphicSettings.lsx` currently has `Fullscreen=1` and `FakeFullscreenEnabled=0`.
+2. In Options → Video, switch between Fullscreen, Windowed and Borderless, applying each and
+   playing about ten seconds in each.
+3. Check the log:
+   - each Fullscreen apply logs `exclusive fullscreen emulated as a borderless window`, and each
+     exit logs `leaving emulated fullscreen, window restored`;
+   - `fg Present failed` count is 0;
+   - model lines continue.
+   - Any `the presenter was in exclusive fullscreen; taken back to a window` warning means DXGI had
+     put the presenter into fullscreen itself. It must be followed by presents that succeed.

@@ -426,6 +426,14 @@ handed to it.
   `ResizeBuffers(0, 0)`, meaning "the window's size". It got 1x1.
 - Fix: `Dx11wDx12::ResolveZeroExtent` resolves zeros against the game's window at both resize sites
   and all four creation sites.
+  - Revised 2026-09-28: only the hidden swapchain gets the resolved size. The presenter sits in the
+    game's window, so it gets the game's extent unchanged, zeros included, and is resized first. The
+    hidden swapchain is then sized from the presenter's `GetDesc1`. Before, both got one client-rect
+    sample, taken while a fullscreen emulation could still be moving the window from a helper thread.
+  - Why it was revised: Generation Zero broke on Rafael's machine the day after this shipped. The
+    extent change is hardening only; the cause is in
+    [nr-dx11-bridge-host.md](nr-dx11-bridge-host.md#exclusive-fullscreen-on-the-plain-presenter-2026-09-28).
+  - Tests: PCSX2's windowed 0x0 is still resolved (`tests/bridge-lifetime`, `fullscreenCases`).
 - Separately, `PresentHost` no longer spends its single build and model attempt on a frame below 64
   px (`tests/nr-present-host`).
 - The D3D11 route has not been re-run since these fixes.

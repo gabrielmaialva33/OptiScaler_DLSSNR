@@ -15,6 +15,8 @@ using DWORD = uint32_t;
 using ULONG = unsigned;
 using LONG = int;
 using HWND = void*;
+using BOOL = int;
+constexpr BOOL TRUE = 1, FALSE = 0;
 struct RECT
 {
     LONG left, top, right, bottom;
@@ -30,9 +32,12 @@ using HANDLE = void*;
 using DXGI_FORMAT = int;
 constexpr DXGI_FORMAT DXGI_FORMAT_UNKNOWN = 0;
 constexpr HRESULT S_OK = 0, E_FAIL = -1, E_UNEXPECTED = -2, E_INVALIDARG = -3;
-constexpr HRESULT DXGI_ERROR_DEVICE_REMOVED = -4, DXGI_ERROR_DEVICE_HUNG = -5;
+constexpr HRESULT DXGI_ERROR_DEVICE_REMOVED = -4, DXGI_ERROR_DEVICE_HUNG = -5, DXGI_ERROR_INVALID_CALL = -6;
 constexpr DWORD ERROR_TIMEOUT = 1460, WAIT_TIMEOUT = 258, WAIT_OBJECT_0 = 0, WAIT_FAILED = UINT32_MAX;
 constexpr UINT DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING = 2048, D3D12_FENCE_FLAG_NONE = 0;
+// DXGI's values, so a mask built from them means what it means in production.
+constexpr UINT DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH = 2, DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE = 4;
+constexpr UINT DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT = 64;
 constexpr int D3D12_RESOURCE_STATE_COMMON = 0, D3D12_RESOURCE_STATE_PRESENT = 1;
 constexpr int D3D12_RESOURCE_STATE_COPY_SOURCE = 2, D3D12_RESOURCE_STATE_COPY_DEST = 3;
 #define STDMETHODCALLTYPE
@@ -41,8 +46,11 @@ constexpr int D3D12_RESOURCE_STATE_COPY_SOURCE = 2, D3D12_RESOURCE_STATE_COPY_DE
 #define SUCCEEDED(r) ((r) >= 0)
 #define LOG_TRACE(...) ((void) 0)
 #define LOG_DEBUG(...) ((void) 0)
+#define LOG_INFO(...) ((void) 0)
 #define LOG_ERROR(...) ((void) 0)
-#define LOG_WARN(...) ((void) 0)
+// Counted, so a case can hold a message to "once".
+inline int logWarnings = 0;
+#define LOG_WARN(...) ((void) ++logWarnings)
 HRESULT HRESULT_FROM_WIN32(DWORD error) { return error ? -static_cast<HRESULT>(error) : S_OK; }
 ULONG InterlockedDecrement(LONG* value) { return --*value; }
 uint64_t clockMs = 0;
@@ -96,6 +104,8 @@ void SafeCloseHandle(HANDLE& value)
 struct IDXGIOutput : Ref
 {
 };
+// Which swapchain resized when, across all of them.
+inline int g_resizeClock = 0;
 struct ID3D12Fence : Ref
 {
     UINT64 completed = 0;
@@ -201,6 +211,12 @@ struct DXGI_SWAP_CHAIN_DESC
     } BufferDesc;
     UINT BufferCount = 0, Flags = 0;
 };
+struct DXGI_SWAP_CHAIN_DESC1
+{
+    UINT Width = 0, Height = 0;
+    DXGI_FORMAT Format = DXGI_FORMAT_UNKNOWN;
+    UINT BufferCount = 0, Flags = 0;
+};
 struct Swapchain : Ref
 {
     int resizes = 0;
@@ -216,6 +232,34 @@ struct Swapchain : Ref
             *out = desc;
         return descResult;
     }
+    HRESULT GetDesc1(DXGI_SWAP_CHAIN_DESC1* out)
+    {
+        if (SUCCEEDED(descResult))
+            *out = { desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format, desc.BufferCount,
+                     desc.Flags };
+        return descResult;
+    }
+    // Exclusive fullscreen as DXGI would report it for this swapchain, and the output it is on.
+    BOOL fullscreen = FALSE;
+    int fullscreenChanges = 0;
+    IDXGIOutput output;
+    HRESULT GetFullscreenState(BOOL* out, IDXGIOutput** target)
+    {
+        *out = fullscreen;
+        if (target != nullptr)
+        {
+            *target = fullscreen ? &output : nullptr;
+            if (*target != nullptr)
+                output.AddRef();
+        }
+        return S_OK;
+    }
+    HRESULT SetFullscreenState(BOOL value, IDXGIOutput*)
+    {
+        ++fullscreenChanges;
+        fullscreen = value;
+        return S_OK;
+    }
     UINT GetCurrentBackBufferIndex() { return 0; }
     HRESULT GetBuffer(UINT, ID3D12Resource** out)
     {
@@ -223,12 +267,28 @@ struct Swapchain : Ref
         buffer.AddRef();
         return S_OK;
     }
-    UINT lastResizeWidth = 0, lastResizeHeight = 0;
-    HRESULT ResizeBuffers(UINT, UINT width, UINT height, int, UINT)
+    UINT lastResizeWidth = 0, lastResizeHeight = 0, lastResizeFlags = 0;
+    int resizedAt = 0;
+    // DXGI resolves a zero against the swapchain's own window when it resizes: the game's client area
+    // unless a case gives this swapchain a window of another size -- the output, say, once a
+    // borderless placement has landed that the client rect sampled earlier did not see.
+    UINT windowWidth = 0, windowHeight = 0;
+    HRESULT ResizeBuffers(UINT count, UINT width, UINT height, int format, UINT flags)
     {
         ++resizes;
         lastResizeWidth = width;
         lastResizeHeight = height;
+        lastResizeFlags = flags;
+        resizedAt = ++g_resizeClock;
+        if (SUCCEEDED(resizeResult))
+        {
+            const RECT window = windowWidth != 0 ? RECT { 0, 0, (LONG) windowWidth, (LONG) windowHeight } : g_clientRect;
+            desc.BufferDesc.Width = width != 0 ? width : (UINT) (window.right - window.left);
+            desc.BufferDesc.Height = height != 0 ? height : (UINT) (window.bottom - window.top);
+            desc.BufferCount = count != 0 ? count : desc.BufferCount;
+            desc.BufferDesc.Format = format != DXGI_FORMAT_UNKNOWN ? format : desc.BufferDesc.Format;
+            desc.Flags = flags;
+        }
         return resizeResult;
     }
     HRESULT ResizeBuffers1(UINT, UINT width, UINT height, int, UINT, const UINT*, IUnknown* const*)
@@ -236,6 +296,7 @@ struct Swapchain : Ref
         ++resizes;
         lastResizeWidth = width;
         lastResizeHeight = height;
+        resizedAt = ++g_resizeClock;
         return resizeResult;
     }
 };
@@ -264,6 +325,7 @@ struct FG
     void UpdateTarget() { ++targetUpdates; }
 };
 using IDXGISwapChain = Swapchain;
+using IDXGISwapChain1 = Swapchain;
 // Upstream's present/resize barrier for XeFG on the bridge.
 namespace Dx11wDx12Sync
 {
@@ -320,6 +382,7 @@ struct State
     SwapchainInteropApi swapchainInteropApi = SwapchainInteropApi::Dx11wDx12;
     bool fgResetCapturedResources = false, fgOnlyUseCapturedResources = false, fgChanged = false;
     bool scChanged = false, SCAllowTearing = false;
+    bool realExclusiveFullscreen = false, SCExclusiveFullscreen = false;
     float screenWidth = 0, screenHeight = 0, lastMipBias = 0, lastMipBiasMax = 0;
     static State& Instance()
     {
@@ -350,6 +413,9 @@ struct Config
 namespace FGHooks
 {
 void ClearDx12InteropPresentSC(Swapchain*) {}
+// Whether the presenter is the plain D3D12 one, whose fullscreen the bridge emulates.
+inline bool interopPresenter = true;
+bool IsDx12InteropPresentSC(Swapchain*) { return interopPresenter; }
 } // namespace FGHooks
 namespace MenuOverlayDx
 {
@@ -477,6 +543,25 @@ class Dx11wDx12SC
     ULONG Release();
     HRESULT ResizeBuffers(UINT, UINT, UINT, DXGI_FORMAT, UINT);
     HRESULT ResizeBuffers1(UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, IUnknown* const*);
+    HRESULT SetFullscreenState(BOOL, IDXGIOutput*);
+    bool _EmulatesFullscreen() const;
+    HRESULT _RecoverPresenter();
+    HRESULT _ResizePresenterToMatch();
+    // The window side of the emulation needs Win32; what the bridge owes the presenter does not.
+    int borderlessEntries = 0, borderlessExits = 0;
+    bool _emulatedFullscreen = false;
+    void _EnterBorderless(IDXGIOutput*)
+    {
+        ++borderlessEntries;
+        _emulatedFullscreen = true;
+    }
+    void _LeaveBorderless()
+    {
+        ++borderlessExits;
+        _emulatedFullscreen = false;
+    }
+    bool _presenterResizeOwed = false, _presenterRecoveryArmed = false, _presenterRecoveryReported = false;
+    int _id = 1;
     HRESULT _WaitForCopyAllocator(UINT);
     HRESULT _WaitForCopyQueueIdle(DWORD);
     HRESULT _DrainForTeardown(DWORD);

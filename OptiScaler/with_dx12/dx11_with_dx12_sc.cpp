@@ -97,6 +97,54 @@ void ResolveZeroExtent(HWND gameWindow, UINT& width, UINT& height)
     if (height == 0)
         height = clientHeight;
 }
+
+bool PresenterExtent(IDXGISwapChain1* presenter, UINT& width, UINT& height)
+{
+    DXGI_SWAP_CHAIN_DESC1 desc {};
+    if (presenter == nullptr || FAILED(presenter->GetDesc1(&desc)) || desc.Width == 0 || desc.Height == 0)
+        return false;
+
+    width = desc.Width;
+    height = desc.Height;
+    return true;
+}
+
+UINT PresenterResizeFlags(IDXGISwapChain1* presenter, UINT gameFlags)
+{
+    // Fixed when a flip-model swapchain is created: ResizeBuffers refuses to add or remove either.
+    constexpr UINT fixedAtCreation =
+        DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+
+    // Stripped at creation (PrepareDx12InteropDesc), and invalid on a flip-model swapchain.
+    const UINT flags = gameFlags & ~DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
+
+    DXGI_SWAP_CHAIN_DESC1 desc {};
+    if (presenter == nullptr || FAILED(presenter->GetDesc1(&desc)))
+        return flags;
+
+    return (flags & ~fixedAtCreation) | (desc.Flags & fixedAtCreation);
+}
+
+void MatchHiddenToPresenter(IDXGISwapChain* hidden, IDXGISwapChain1* presenter)
+{
+    UINT width = 0;
+    UINT height = 0;
+    DXGI_SWAP_CHAIN_DESC hiddenDesc {};
+    if (hidden == nullptr || !PresenterExtent(presenter, width, height) || FAILED(hidden->GetDesc(&hiddenDesc)))
+        return;
+
+    if (hiddenDesc.BufferDesc.Width == width && hiddenDesc.BufferDesc.Height == height)
+        return;
+
+    const auto result = hidden->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, hiddenDesc.Flags);
+    if (FAILED(result))
+        LOG_WARN("bridge: the presenter took {}x{} and the hidden swapchain {}x{}; resizing the hidden one failed: "
+                 "{:X}",
+                 width, height, hiddenDesc.BufferDesc.Width, hiddenDesc.BufferDesc.Height, (UINT) result);
+    else
+        LOG_INFO("bridge: the presenter took {}x{} and the hidden swapchain {}x{}; the hidden one follows", width,
+                 height, hiddenDesc.BufferDesc.Width, hiddenDesc.BufferDesc.Height);
+}
 } // namespace Dx11wDx12
 
 static int scCount = 0;
@@ -721,16 +769,10 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (dx11HudfixPresent)
         Hudfix_Dx11::PresentEnd();
 
-    // DXGI can still put the presenter into exclusive fullscreen behind the wrapper -- its own
-    // Alt+Enter handling watches the window for the presenter's factory -- and a flip-model
-    // swapchain in fullscreen refuses every Present until a ResizeBuffers after the transition.
-    // Take it back to a window, keep the fullscreen the game believes in, and let this frame go.
-    if (result == DXGI_ERROR_INVALID_CALL && _EmulatesFullscreen())
-    {
-        const auto recovered = _RecoverPresenterFromFullscreen();
-        if (SUCCEEDED(recovered))
-            return S_OK;
-    }
+    // A flip-model presenter refuses every Present after a fullscreen transition until it is resized.
+    // One resize per transition, then this frame goes; see _RecoverPresenter.
+    if (result == DXGI_ERROR_INVALID_CALL && _EmulatesFullscreen() && SUCCEEDED(_RecoverPresenter()))
+        return S_OK;
 
     if (SUCCEEDED(result))
     {
@@ -843,33 +885,87 @@ void Dx11wDx12SC::_LeaveBorderless()
     _emulatedFullscreen = false;
 }
 
-HRESULT Dx11wDx12SC::_RecoverPresenterFromFullscreen()
+// What a refused Present gets, once per transition.
+//
+// Generation Zero on 2026-09-28 (Rafael's RTX 3060, build 4fa5912b): the game created its swapchain in
+// exclusive fullscreen, and the presenter was created from that description with Windowed=FALSE -- the
+// merge of upstream's 5ee53e38 (7de75fc1) had dropped the `Windowed = TRUE` PrepareDx12InteropDesc used
+// to force. The game then called SetFullscreenState(TRUE), the wrapper emulated it, and every Present
+// after it failed with 887A0001 while reporting "presenter fullscreen false". Taking a fullscreen
+// presenter back to a window owes it a ResizeBuffers, and nothing made one: SetFullscreenState did not,
+// the recovery this replaced asked only whether the presenter was still fullscreen, and a resize at the
+// current size is exactly what upstream's skip-resize (IsSame) drops. His log is at LogLevel=2, so it
+// cannot show the presenter's state at the call; this is the one path through this code that fits it.
+//
+// So: a presenter DXGI put into fullscreen behind the wrapper is taken back to a window first (that is a
+// transition of its own). Then, when a fullscreen or resize transition armed it, the presenter alone is
+// resized at the size it has. One attempt, disarmed before it is made, so a presenter that still refuses
+// costs a failed frame per frame as before and never a resize per frame; logged once.
+HRESULT Dx11wDx12SC::_RecoverPresenter()
 {
     BOOL presenterFullscreen = FALSE;
     IDXGIOutput* target = nullptr;
 
-    if (FAILED(_fgSwapChain->GetFullscreenState(&presenterFullscreen, &target)) || !presenterFullscreen)
+    // DXGI's own Alt+Enter handling watches the window for the presenter's factory, so it can still put
+    // the presenter into exclusive fullscreen behind the wrapper. Keep the fullscreen the game believes in.
+    if (SUCCEEDED(_fgSwapChain->GetFullscreenState(&presenterFullscreen, &target)) && presenterFullscreen)
     {
-        SafeRelease(target);
-        return E_FAIL;
+        LOG_WARN("Dx11wDx12SC {}: the presenter was put into exclusive fullscreen outside the wrapper; taking it "
+                 "back to a borderless window",
+                 _id);
+
+        _fgSwapChain->SetFullscreenState(FALSE, nullptr);
+        _EnterBorderless(target);
+        _presenterResizeOwed = true;
+        _presenterRecoveryArmed = true;
     }
-
-    LOG_WARN("Dx11wDx12SC {}: the presenter was put into exclusive fullscreen outside the wrapper; taking it back "
-             "to a borderless window",
-             _id);
-
-    _fgSwapChain->SetFullscreenState(FALSE, nullptr);
-    _EnterBorderless(target);
     SafeRelease(target);
 
-    // The transition back owes the flip-model presenter its ResizeBuffers too; through the wrapper,
-    // at the size it already has and with count and format left alone (the D3D11 side has its own),
-    // so the D3D11 swapchain and the interop buffers follow.
+    if (!_presenterRecoveryArmed)
+        return E_FAIL;
+
+    _presenterRecoveryArmed = false;
+    const auto result = _ResizePresenterToMatch();
+
+    if (!_presenterRecoveryReported)
+    {
+        _presenterRecoveryReported = true;
+        LOG_WARN("Dx11wDx12SC {}: the presenter refused Present after a fullscreen or resize transition; resized "
+                 "once at its own size: {:X}. Reported once; not retried before the next transition",
+                 _id, (UINT) result);
+    }
+    else
+    {
+        LOG_DEBUG("Dx11wDx12SC {}: presenter recovery after a transition: {:X}", _id, (UINT) result);
+    }
+
+    return result;
+}
+
+// The ResizeBuffers a flip-model presenter owes after a transition, made on the presenter alone: at the
+// count, size, format and flags it already has, so the hidden swapchain -- whose buffers the game holds
+// mid-frame, which would make its own ResizeBuffers fail -- still matches it and is left alone. Behind the
+// same drain as any resize, and with the same buffers released first.
+HRESULT Dx11wDx12SC::_ResizePresenterToMatch()
+{
     DXGI_SWAP_CHAIN_DESC1 desc {};
     if (FAILED(_fgSwapChain->GetDesc1(&desc)))
         return E_FAIL;
 
-    return ResizeBuffers(0, desc.Width, desc.Height, DXGI_FORMAT_UNKNOWN, _lastFlags);
+    const auto drainResult = _DrainForTeardown(5000);
+    if (FAILED(drainResult))
+        return drainResult;
+
+    if (_OwnsOverlay())
+        MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    _ResetTeardownDrain();
+    _ReleaseInteropBackBuffers();
+
+    const auto result = _fgSwapChain->ResizeBuffers(0, desc.Width, desc.Height, DXGI_FORMAT_UNKNOWN, desc.Flags);
+    if (SUCCEEDED(result))
+        _presenterResizeOwed = false;
+
+    return result;
 }
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetBuffer(UINT Buffer, REFIID riid, void** ppSurface)
@@ -887,7 +983,17 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetFullscreenState(BOOL Fullscreen, IDXGI
     {
         BOOL presenterFullscreen = FALSE;
         if (SUCCEEDED(_fgSwapChain->GetFullscreenState(&presenterFullscreen, nullptr)) && presenterFullscreen)
+        {
+            LOG_WARN("Dx11wDx12SC {}: the presenter was in exclusive fullscreen; taken back to a window, which owes "
+                     "it a ResizeBuffers",
+                     _id);
             _fgSwapChain->SetFullscreenState(FALSE, nullptr);
+            _presenterResizeOwed = true;
+        }
+
+        // A game's own resize usually follows, often at the size it already has; with a resize owed that
+        // one reaches the presenter. Whatever follows, a refused Present gets one resize (_RecoverPresenter).
+        _presenterRecoveryArmed = true;
 
         State::Instance().realExclusiveFullscreen = false;
         State::Instance().SCExclusiveFullscreen = Fullscreen != FALSE;
@@ -949,11 +1055,18 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) NewFormat, SwapChainFlags);
 
-    Dx11wDx12::ResolveZeroExtent(_handle, Width, Height);
+    // The presenter first, with the game's extent as given; the hidden swapchain after it, at the size the
+    // presenter took (see ResolveZeroExtent). The resolved extent is for comparing and for falling back.
+    UINT hiddenWidth = Width;
+    UINT hiddenHeight = Height;
+    Dx11wDx12::ResolveZeroExtent(_handle, hiddenWidth, hiddenHeight);
+    const UINT presenterFlags = Dx11wDx12::PresenterResizeFlags(_fgSwapChain, SwapChainFlags);
 
-    const bool skipFgResize = IsSame(_fgSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+    const bool skipFgResize = !_presenterResizeOwed &&
+                              IsSame(_fgSwapChain, BufferCount, hiddenWidth, hiddenHeight, NewFormat, presenterFlags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+    _presenterRecoveryArmed = true;
 
     std::unique_lock<std::shared_mutex> presentResizeLock(Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock);
     if (synchronizeXeFGPresent)
@@ -990,11 +1103,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     if (_synthInputs != nullptr)
         _synthInputs->Release();
 
-    HRESULT realResult = _real != nullptr ? _real->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags)
-                                          : DXGI_ERROR_DEVICE_REMOVED;
-
     HRESULT fgResult = DXGI_ERROR_DEVICE_REMOVED;
-    if (SUCCEEDED(realResult) && _fgSwapChain != nullptr)
+    if (_fgSwapChain != nullptr)
     {
         if (skipFgResize)
         {
@@ -1003,14 +1113,31 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         }
         else
         {
-            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
+            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, NewFormat, presenterFlags);
+            if (SUCCEEDED(fgResult))
+                _presenterResizeOwed = false;
         }
     }
 
-    if (SUCCEEDED(realResult))
-        _resizeIncomplete = FAILED(fgResult);
+    // A presenter that refused leaves both swapchains as they were, still agreeing, so the hidden one is
+    // not touched; the game has the error.
+    HRESULT realResult = fgResult;
+    if (SUCCEEDED(fgResult))
+    {
+        Dx11wDx12::PresenterExtent(_fgSwapChain, hiddenWidth, hiddenHeight);
+        realResult = _real != nullptr
+                         ? _real->ResizeBuffers(BufferCount, hiddenWidth, hiddenHeight, NewFormat, SwapChainFlags)
+                         : DXGI_ERROR_DEVICE_REMOVED;
+    }
 
-    LOG_DEBUG("Dx11wDx12SC ResizeBuffers results: real {:X}, fg {:X}", (UINT) realResult, (UINT) fgResult);
+    // They disagree only when the presenter took a new size and the hidden swapchain did not follow.
+    if (SUCCEEDED(realResult))
+        _resizeIncomplete = false;
+    else if (SUCCEEDED(fgResult) && !skipFgResize)
+        _resizeIncomplete = true;
+
+    LOG_DEBUG("Dx11wDx12SC ResizeBuffers results: fg {:X}, real {:X} at {}x{}", (UINT) fgResult, (UINT) realResult,
+              hiddenWidth, hiddenHeight);
 
     if (SUCCEEDED(realResult) && SUCCEEDED(fgResult))
     {
@@ -1028,8 +1155,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
 
         if (State::Instance().currentFeature == nullptr)
         {
-            State::Instance().screenWidth = static_cast<float>(Width);
-            State::Instance().screenHeight = static_cast<float>(Height);
+            State::Instance().screenWidth = static_cast<float>(hiddenWidth);
+            State::Instance().screenHeight = static_cast<float>(hiddenHeight);
             State::Instance().lastMipBias = 100.0f;
             State::Instance().lastMipBiasMax = -100.0f;
         }
@@ -1211,14 +1338,20 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers1: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) Format, SwapChainFlags);
 
-    Dx11wDx12::ResolveZeroExtent(_handle, Width, Height);
-
     if (_real3 == nullptr)
         return ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
 
-    const bool skipFgResize = IsSame(_fgSwapChain, BufferCount, Width, Height, Format, SwapChainFlags);
+    // The same order as ResizeBuffers: the presenter as given, then the hidden swapchain at its size.
+    UINT hiddenWidth = Width;
+    UINT hiddenHeight = Height;
+    Dx11wDx12::ResolveZeroExtent(_handle, hiddenWidth, hiddenHeight);
+    const UINT presenterFlags = Dx11wDx12::PresenterResizeFlags(_fgSwapChain, SwapChainFlags);
+
+    const bool skipFgResize =
+        !_presenterResizeOwed && IsSame(_fgSwapChain, BufferCount, hiddenWidth, hiddenHeight, Format, presenterFlags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+    _presenterRecoveryArmed = true;
 
     std::unique_lock<std::shared_mutex> presentResizeLock(Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock);
     if (synchronizeXeFGPresent)
@@ -1253,11 +1386,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     if (_synthInputs != nullptr)
         _synthInputs->Release();
 
-    HRESULT realResult =
-        _real3->ResizeBuffers1(BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, ppPresentQueue);
-
     HRESULT fgResult = DXGI_ERROR_DEVICE_REMOVED;
-    if (SUCCEEDED(realResult) && _fgSwapChain != nullptr)
+    if (_fgSwapChain != nullptr)
     {
         // The game's ppPresentQueue is not valid for the DX12 FG swapchain. Use ResizeBuffers for phase 1.
         if (skipFgResize)
@@ -1267,14 +1397,27 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         }
         else
         {
-            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
+            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, Format, presenterFlags);
+            if (SUCCEEDED(fgResult))
+                _presenterResizeOwed = false;
         }
     }
 
-    if (SUCCEEDED(realResult))
-        _resizeIncomplete = FAILED(fgResult);
+    HRESULT realResult = fgResult;
+    if (SUCCEEDED(fgResult))
+    {
+        Dx11wDx12::PresenterExtent(_fgSwapChain, hiddenWidth, hiddenHeight);
+        realResult = _real3->ResizeBuffers1(BufferCount, hiddenWidth, hiddenHeight, Format, SwapChainFlags,
+                                            pCreationNodeMask, ppPresentQueue);
+    }
 
-    LOG_DEBUG("Dx11wDx12SC ResizeBuffers1 results: real {:X}, fg {:X}", (UINT) realResult, (UINT) fgResult);
+    if (SUCCEEDED(realResult))
+        _resizeIncomplete = false;
+    else if (SUCCEEDED(fgResult) && !skipFgResize)
+        _resizeIncomplete = true;
+
+    LOG_DEBUG("Dx11wDx12SC ResizeBuffers1 results: fg {:X}, real {:X} at {}x{}", (UINT) fgResult, (UINT) realResult,
+              hiddenWidth, hiddenHeight);
 
     if (SUCCEEDED(realResult) && SUCCEEDED(fgResult))
     {

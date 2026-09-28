@@ -136,3 +136,47 @@ a pass that declined, a pass that recorded but produced nothing, a list that cou
 teardown, and a bridge with no host at all. Five mutations of the bridge were confirmed to fail them:
 never confirming execution, not telling the host about a dropped list, ignoring the host's output,
 showing that output on a frame the host declined, and leaking its textures at teardown.
+
+## Exclusive fullscreen and the presenter's extent
+
+`fullscreenCases` compiles the production `SetFullscreenState`, `_EmulatesFullscreen`,
+`_RecoverPresenter` and `_ResizePresenterToMatch`. It also compiles three helpers:
+`PresenterExtent`, `PresenterResizeFlags` and `MatchHiddenToPresenter`. The window half of the
+emulation (`_EnterBorderless` and `_LeaveBorderless`) needs Win32, so it is a counting stub. The
+fake swapchain resolves a zero against its own window when it resizes, the way DXGI does.
+`resizedAt` orders resizes across swapchains.
+
+The cases:
+
+- **Generation Zero, 2026-09-28.** The presenter is found fullscreen when the game asks for
+  fullscreen, so the wrapper takes it back to a window and marks a resize owed. The game then
+  resizes with zeros at the size the presenter already has, which `IsSame` would skip.
+  - The call reaches the presenter first, with the zeros.
+  - The hidden swapchain gets the size DXGI gave the presenter (1920x1080), not the client rect
+    the wrapper sampled (1280x720).
+  - Once the owed resize is paid, an unchanged resize is skipped again.
+- **PCSX2, windowed 0x0.** The zero is compared against the window, not against the presenter's own
+  size. The hidden swapchain gets the presenter's extent and never 1x1.
+- **Flags.** `GDI_COMPATIBLE` is dropped. `ALLOW_TEARING` and `FRAME_LATENCY_WAITABLE_OBJECT` follow
+  the presenter. The hidden swapchain keeps the game's flags.
+- **Present recovery.**
+  - Nothing happens without a transition since the last resize.
+  - After a transition, the presenter alone is resized, once, behind the drain, with its interop
+    buffers released first. The hidden swapchain is not resized, because the game holds its
+    buffers.
+  - The recovery is logged once and spent until the next transition.
+  - A recovery resize that itself fails costs one attempt and no further log lines.
+- **Presenter fullscreen behind the wrapper.** DXGI's own Alt+Enter handling put the presenter into
+  fullscreen. It is taken back to a window, the emulation starts, and the presenter is resized.
+  The output reference is returned.
+- **At creation.** The hidden swapchain follows the presenter only when the two differ and the
+  presenter can be read.
+
+Six mutations of the fix were each confirmed to fail a case:
+
+- an owed resize still skipped by `IsSame`;
+- a recovery that never disarms;
+- the presenter handed the resolved extent;
+- the hidden swapchain not sized from the presenter;
+- `SetFullscreenState` owing nothing;
+- the game's raw flags handed to the presenter.

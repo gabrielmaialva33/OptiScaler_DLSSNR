@@ -272,14 +272,17 @@ void drainCases()
 void partialResizeCase()
 {
     Fixture f;
+    // The presenter goes first. When it refuses, the hidden swapchain is left alone and the two still
+    // agree, so Present is not refused over it; the game has the error.
     f.presenter.resizeResult = E_FAIL;
     assert(f.sc->ResizeBuffers(3, 800, 600, 0, 0) == E_FAIL);
-    assert(f.sc->_resizeIncomplete && f.sc->refreshes == 0);
+    assert(f.real.resizes == 0 && !f.sc->_resizeIncomplete && f.sc->refreshes == 0);
+    // The presenter took the new size and the hidden one did not: they disagree until a resize succeeds.
+    f.presenter.resizeResult = S_OK;
     f.real.resizeResult = E_FAIL;
     assert(f.sc->ResizeBuffers(3, 800, 600, 0, 0) == E_FAIL);
-    assert(f.sc->_resizeIncomplete);
+    assert(f.sc->_resizeIncomplete && f.real.resizes == 1);
     f.real.resizeResult = S_OK;
-    f.presenter.resizeResult = S_OK;
     assert(f.sc->ResizeBuffers(3, 800, 600, 0, 0) == S_OK);
     assert(!f.sc->_resizeIncomplete && f.sc->refreshes == 1);
 }
@@ -632,19 +635,24 @@ void synthInputCases()
         Dx11wDx12Sync::PresentResizeMutex().unlock();
     }
 
-    // DXGI's "0 means the window's size": the real D3D11 swapchain lives on a hidden 1x1 window, so a
-    // zero must be resolved against the game's window before either swapchain is resized (PCSX2 on
-    // D3D11 sends 0x0; before this the real swapchain became 1x1 and the host starved on it).
+    // DXGI's "0 means the window's size". The real D3D11 swapchain lives on a hidden 1x1 window and must
+    // never be handed a zero (PCSX2 on D3D11 sends 0x0 while windowed; before the resolution the real
+    // swapchain became 1x1 and the host starved on it). The presenter sits in the game's window and is
+    // handed the zero as given, first; with no description to read back, the real one falls back to the
+    // game window's client area.
     {
         Fixture f;
         g_clientRect = RECT { 0, 0, 841, 1356 };
         assert(f.sc->ResizeBuffers(2, 0, 0, 0, 0) == S_OK);
+        assert(f.presenter.lastResizeWidth == 0 && f.presenter.lastResizeHeight == 0);
         assert(f.real.lastResizeWidth == 841 && f.real.lastResizeHeight == 1356);
-        assert(f.presenter.lastResizeWidth == 841 && f.presenter.lastResizeHeight == 1356);
+        assert(f.presenter.resizedAt < f.real.resizedAt);
         // Explicit sizes pass through untouched, and so does a zero in only one axis' partner.
         assert(f.sc->ResizeBuffers(2, 1280, 0, 0, 0) == S_OK);
+        assert(f.presenter.lastResizeWidth == 1280 && f.presenter.lastResizeHeight == 0);
         assert(f.real.lastResizeWidth == 1280 && f.real.lastResizeHeight == 1356);
         assert(f.sc->ResizeBuffers1(2, 0, 0, 0, 0, nullptr, nullptr) == S_OK);
+        assert(f.presenter.lastResizeWidth == 0 && f.presenter.lastResizeHeight == 0);
         assert(f.real.lastResizeWidth == 841 && f.real.lastResizeHeight == 1356);
     }
 
@@ -715,6 +723,156 @@ void coexistenceCases()
     }
 }
 
+void fullscreenCases()
+{
+    // Generation Zero, 2026-09-28: a presenter taken out of exclusive fullscreen owes a ResizeBuffers,
+    // and the game's own resize after SetFullscreenState asks for the size the presenter already has --
+    // the one upstream's IsSame skips. With the resize owed it reaches the presenter, first, with the
+    // game's zeros; DXGI sizes it against the window it sees then (the output, once the borderless
+    // placement has landed), and the hidden swapchain follows the presenter, not the client rect the
+    // wrapper could sample.
+    {
+        Fixture f;
+        g_clientRect = RECT { 0, 0, 1280, 720 };
+        f.presenter.descResult = S_OK;
+        f.presenter.desc.BufferCount = 2;
+        f.presenter.desc.BufferDesc.Width = 1280;
+        f.presenter.desc.BufferDesc.Height = 720;
+        f.presenter.fullscreen = TRUE;
+        assert(f.sc->SetFullscreenState(TRUE, nullptr) == S_OK);
+        assert(!f.presenter.fullscreen && f.presenter.fullscreenChanges == 1 && f.sc->borderlessEntries == 1);
+        assert(f.sc->_presenterResizeOwed && f.sc->_presenterRecoveryArmed);
+        assert(State::Instance().SCExclusiveFullscreen && !State::Instance().realExclusiveFullscreen);
+        f.presenter.windowWidth = 1920;
+        f.presenter.windowHeight = 1080;
+        assert(f.sc->ResizeBuffers(2, 0, 0, 0, 0) == S_OK);
+        assert(f.presenter.resizes == 1 && f.presenter.lastResizeWidth == 0 && f.presenter.lastResizeHeight == 0);
+        assert(f.real.lastResizeWidth == 1920 && f.real.lastResizeHeight == 1080);
+        assert(f.presenter.resizedAt < f.real.resizedAt);
+        assert(!f.sc->_presenterResizeOwed && !f.sc->_resizeIncomplete);
+        // Once paid, an unchanged resize is skipped again, as upstream wants, and the hidden swapchain is
+        // still sized from the presenter.
+        assert(f.sc->ResizeBuffers(2, 1920, 1080, 0, 0) == S_OK);
+        assert(f.presenter.resizes == 1 && f.real.resizes == 2 && f.real.lastResizeWidth == 1920);
+        // Leaving the emulated fullscreen is only a window change: nothing is owed.
+        assert(f.sc->SetFullscreenState(FALSE, nullptr) == S_OK);
+        assert(f.sc->borderlessExits == 1 && !f.sc->_presenterResizeOwed && f.presenter.fullscreenChanges == 1);
+    }
+
+    // PCSX2 windowed, D3D11: 0x0 on every window resize, with the presenter's description readable. The
+    // zero is compared against the window, not against the presenter's own size, so a changed window is
+    // never skipped as unchanged; the real swapchain gets the presenter's extent; and an unchanged 0x0
+    // leaves the presenter alone while the real one keeps the window's size, never the hidden 1x1.
+    {
+        Fixture f;
+        g_clientRect = RECT { 0, 0, 841, 1356 };
+        f.presenter.descResult = S_OK;
+        f.presenter.desc.BufferCount = 2;
+        f.presenter.desc.BufferDesc.Width = 800;
+        f.presenter.desc.BufferDesc.Height = 600;
+        assert(f.sc->ResizeBuffers(2, 0, 0, 0, 0) == S_OK);
+        assert(f.presenter.resizes == 1 && f.presenter.lastResizeWidth == 0 && f.presenter.lastResizeHeight == 0);
+        assert(f.real.lastResizeWidth == 841 && f.real.lastResizeHeight == 1356);
+        assert(f.sc->ResizeBuffers(2, 0, 0, 0, 0) == S_OK);
+        assert(f.presenter.resizes == 1 && f.real.resizes == 2);
+        assert(f.real.lastResizeWidth == 841 && f.real.lastResizeHeight == 1356);
+        assert(!f.sc->_resizeIncomplete);
+    }
+
+    // The game's flags as the presenter can take them: GDI_COMPATIBLE is invalid on flip model, and
+    // ALLOW_TEARING and FRAME_LATENCY_WAITABLE_OBJECT stay as the presenter was created -- a ResizeBuffers
+    // that changes either is refused. The hidden swapchain is the game's and gets the game's flags.
+    {
+        Fixture f;
+        f.presenter.descResult = S_OK;
+        f.presenter.desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        const UINT game = DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING |
+                          DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, game) == S_OK);
+        assert(f.presenter.lastResizeFlags ==
+               (DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT));
+        assert(f.real.lastResizeFlags == game);
+        // Unknown presenter: only what is invalid on flip model is dropped.
+        f.presenter.descResult = E_FAIL;
+        assert(Dx11wDx12::PresenterResizeFlags(&f.presenter, game) ==
+               (DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING | DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH));
+    }
+
+    // A refused Present (887A0001) after a transition: one resize of the presenter alone, at the size,
+    // count and flags it has, behind the drain; logged once; never a loop.
+    {
+        Fixture f;
+        f.presenter.descResult = S_OK;
+        f.presenter.desc.BufferCount = 2;
+        f.presenter.desc.BufferDesc.Width = 800;
+        f.presenter.desc.BufferDesc.Height = 600;
+        f.presenter.desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        const int warnings = logWarnings;
+        // No transition since the last resize: nothing to recover, nothing resized, nothing said.
+        assert(FAILED(f.sc->_RecoverPresenter()));
+        assert(f.presenter.resizes == 0 && logWarnings == warnings);
+        // The game's SetFullscreenState on the plain presenter is a transition.
+        assert(f.sc->SetFullscreenState(TRUE, nullptr) == S_OK);
+        assert(SUCCEEDED(f.sc->_RecoverPresenter()));
+        assert(f.presenter.resizes == 1 && f.presenter.lastResizeWidth == 800 && f.presenter.lastResizeHeight == 600);
+        assert(f.presenter.lastResizeFlags == DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+        // The game holds the hidden swapchain's buffers mid-frame; its resize would fail, so it is not made.
+        assert(f.real.resizes == 0);
+        // The interop buffers were let go before the presenter's were replaced.
+        assert(f.shadow.releases == 1 && f.sc->_openedDx11BackBuffers.empty());
+        assert(logWarnings == warnings + 1);
+        // The same refusal again: spent until the next transition.
+        assert(FAILED(f.sc->_RecoverPresenter()));
+        assert(f.presenter.resizes == 1);
+        // A game resize is a transition too (skipped as unchanged here, so the presenter is not resized by
+        // it). A presenter that refuses its recovery resize costs one attempt, and says nothing more.
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == S_OK);
+        assert(f.presenter.resizes == 1);
+        f.presenter.resizeResult = E_FAIL;
+        assert(f.sc->_RecoverPresenter() == E_FAIL);
+        assert(f.presenter.resizes == 2 && logWarnings == warnings + 1);
+        assert(FAILED(f.sc->_RecoverPresenter()));
+        assert(f.presenter.resizes == 2 && logWarnings == warnings + 1);
+    }
+
+    // DXGI put the presenter into exclusive fullscreen behind the wrapper (its own Alt+Enter): taken back
+    // to a window, the game's fullscreen emulated, then resized; the output reference is returned.
+    {
+        Fixture f;
+        f.presenter.descResult = S_OK;
+        f.presenter.desc.BufferCount = 2;
+        f.presenter.desc.BufferDesc.Width = 1920;
+        f.presenter.desc.BufferDesc.Height = 1080;
+        f.presenter.fullscreen = TRUE;
+        assert(SUCCEEDED(f.sc->_RecoverPresenter()));
+        assert(!f.presenter.fullscreen && f.sc->borderlessEntries == 1);
+        assert(f.presenter.resizes == 1 && f.presenter.lastResizeWidth == 1920 && !f.sc->_presenterResizeOwed);
+        assert(f.presenter.output.refs == 1 && f.real.resizes == 0);
+    }
+
+    // At creation: the hidden swapchain follows the presenter when DXGI sized the two apart, keeping its
+    // own flags, and is left alone when they agree or the presenter cannot be read.
+    {
+        Swapchain hidden, presenter;
+        hidden.descResult = S_OK;
+        presenter.descResult = S_OK;
+        hidden.desc.BufferDesc.Width = 841;
+        hidden.desc.BufferDesc.Height = 1356;
+        hidden.desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        presenter.desc.BufferDesc.Width = 1920;
+        presenter.desc.BufferDesc.Height = 1080;
+        Dx11wDx12::MatchHiddenToPresenter(&hidden, &presenter);
+        assert(hidden.resizes == 1 && hidden.lastResizeWidth == 1920 && hidden.lastResizeHeight == 1080);
+        assert(hidden.lastResizeFlags == DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+        Dx11wDx12::MatchHiddenToPresenter(&hidden, &presenter);
+        assert(hidden.resizes == 1);
+        presenter.descResult = E_FAIL;
+        presenter.desc.BufferDesc.Width = 640;
+        Dx11wDx12::MatchHiddenToPresenter(&hidden, &presenter);
+        assert(hidden.resizes == 1);
+    }
+}
+
 int main()
 {
     waitCases();
@@ -730,8 +888,9 @@ int main()
     neuralHostCases();
     synthInputCases();
     coexistenceCases();
+    fullscreenCases();
     predicateCases();
     assert(Dx11wDx12SC::_retired == nullptr);
     std::cout << "bridge lifetime: production wait, copy, resize, release, retirement, neural host, synthesized input, "
-                 "coexistence and predicate cases passed\n";
+                 "coexistence, fullscreen and predicate cases passed\n";
 }

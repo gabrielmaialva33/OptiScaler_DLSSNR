@@ -53,7 +53,27 @@ bool Wanted();
 // The real D3D11 swapchain lives on a hidden 1x1 window, so DXGI's "0 means the window's size" would
 // size it to that window instead of the game's. Every site that hands the game's extent to it resolves
 // a zero against the game's own window first. Leaves non-zero values and failures untouched.
+//
+// Only the hidden swapchain gets the resolved numbers. The presenter sits in the game's window and is
+// handed the game's extent as given, a zero included, so that DXGI -- the one that decides a flip-model
+// swapchain's size -- resolves it at the moment it resizes; the hidden one then follows whatever the
+// presenter took (PresenterExtent, MatchHiddenToPresenter). Resolving once and handing both the same
+// number sampled the window on our clock instead, which a fullscreen emulation may still be moving from
+// a helper thread (ApplyWindowPlacement).
 void ResolveZeroExtent(HWND gameWindow, UINT& width, UINT& height);
+
+// The presenter's current extent. The interop copy moves whole buffers from the hidden swapchain to the
+// presenter, so this is the size the hidden one must have. False, and nothing written, when unknown.
+bool PresenterExtent(IDXGISwapChain1* presenter, UINT& width, UINT& height);
+
+// The game's ResizeBuffers flags made acceptable to the presenter. GDI_COMPATIBLE was stripped when the
+// presenter was created and is invalid on flip model; ALLOW_TEARING and FRAME_LATENCY_WAITABLE_OBJECT
+// are fixed at creation, and ResizeBuffers refuses (DXGI_ERROR_INVALID_CALL) any call that changes them.
+UINT PresenterResizeFlags(IDXGISwapChain1* presenter, UINT gameFlags);
+
+// At creation, right after both swapchains exist and before the game holds a buffer of the hidden one:
+// resizes the hidden swapchain to the presenter's extent when the two differ.
+void MatchHiddenToPresenter(IDXGISwapChain* hidden, IDXGISwapChain1* presenter);
 } // namespace Dx11wDx12
 
 class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : public IDXGISwapChain4
@@ -143,7 +163,8 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     bool _EmulatesFullscreen() const;
     void _EnterBorderless(IDXGIOutput* target);
     void _LeaveBorderless();
-    HRESULT _RecoverPresenterFromFullscreen();
+    HRESULT _RecoverPresenter();
+    HRESULT _ResizePresenterToMatch();
 
     IDXGISwapChain* _real = nullptr;
     IDXGISwapChain1* _real1 = nullptr;
@@ -208,6 +229,14 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     LONG_PTR _savedExStyle = 0;
     RECT _savedRect {};
     bool _presentFailureReported = false;
+
+    // A flip-model presenter taken out of exclusive fullscreen refuses every Present until it is
+    // resized, even at the size it already has. Owed: the next resize must reach it, not be skipped
+    // as unchanged (upstream's IsSame). Armed: a fullscreen or resize transition happened, so one
+    // refused Present gets one resize of its own (_RecoverPresenter); disarmed by that attempt.
+    bool _presenterResizeOwed = false;
+    bool _presenterRecoveryArmed = false;
+    bool _presenterRecoveryReported = false;
     UINT64 _dx11DrainValue = 0;
     ID3D12Fence* _drainFences[2] {};
     bool _drainSignaled[2] {};

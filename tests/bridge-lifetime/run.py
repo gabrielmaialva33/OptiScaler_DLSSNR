@@ -34,6 +34,10 @@ signatures = [
     'void Dx11wDx12SC::_CollectRetired()',
     'HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(',
     'HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(',
+    'HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetFullscreenState(',
+    'bool Dx11wDx12SC::_EmulatesFullscreen()',
+    'HRESULT Dx11wDx12SC::_RecoverPresenter()',
+    'HRESULT Dx11wDx12SC::_ResizePresenterToMatch()',
     'HRESULT Dx11wDx12SC::_WaitForCopyAllocator(',
     'HRESULT Dx11wDx12SC::_WaitForCopyQueueIdle(',
     'HRESULT Dx11wDx12SC::_DrainForTeardown(',
@@ -51,6 +55,9 @@ predicates = 'namespace Dx11wDx12\n{\n' + ''.join(map(function, [
     'bool WantedForNeuralRendering()',
     'bool WantedIdleForNeuralRendering()',
     'void ResolveZeroExtent(HWND gameWindow,',
+    'bool PresenterExtent(IDXGISwapChain1* presenter,',
+    'UINT PresenterResizeFlags(IDXGISwapChain1* presenter,',
+    'void MatchHiddenToPresenter(IDXGISwapChain* hidden,',
 ])) + '} // namespace Dx11wDx12\n'
 # Upstream's skip-resize test lives in the production file's anonymous namespace; verbatim here too.
 helpers = 'namespace\n{\n' + function('bool IsSame(IDXGISwapChain* swapchain,') + '} // namespace\n'
