@@ -1,0 +1,74 @@
+NR model loader and NGX loader scan
+===================================
+
+Two pieces of OptiScaler's Neural Rendering module rest on other projects'
+work. Neither copies their source; both are rewritten against OptiScaler's own
+structures. The design is recorded in OptiScaler/dlssnr/FORWARDER_INVESTIGATION.md
+and OptiScaler/dlssnr/design/ngx-driver-616.md.
+
+
+1. The direct model loader ([DlssNr] ModelLoader=direct)
+--------------------------------------------------------
+
+Project:  OptiScaler-DLSSNR-PreSR-Multipass, by wilsjo2
+Source:   https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass
+          releases v0.8.1-nr-direct-runtime and v0.8.3,
+          branch codex/nr-direct-runtime, commit 47e134cb
+Licence:  GNU General Public License v3.0, the licence of OptiScaler itself
+
+What is derived from it: the technique by which OptiScaler.dll calls
+nvngx_dlssnr.dll without the nvngx.dll_dlssnr.dll forwarder. The model's
+GetModuleFileNameW and GetModuleFileNameA import slots are found by name in the
+loaded image, not by offset. They are pointed at an adapter that answers with an
+nvngx.dll path only for the calling OptiScaler module and only during a direct
+call, and that chains every other query to whatever the slot held before,
+loader and overlay wrappers included.
+
+Files: OptiScaler/dlssnr/DlssNr_DirectRuntime.h/.cpp and the import scan in
+OptiScaler/dlssnr/DlssNr_PeScan.h.
+
+
+2. The NGX loader's feature-18 route, and the model it faults with
+------------------------------------------------------------------
+
+Project:  dlss5-bridge, by NIGos
+Source:   https://github.com/NIGos/dlss5-bridge
+Licence:  MIT
+
+What is derived from it:
+
+  * The finding that NVIDIA's NGX loader (_nvngx.dll) from 32.0.16.1664 routes
+    NGX feature 18 into nvngx_dlssnr.dll itself, and that model 310.8.0.0
+    faults inside D3D12 on that route.
+  * The layout of the loader's 19-entry feature-id -> snippet-name table, and
+    the pattern that finds it (entry 1 "dlss", entry 11 "dlssg", entry 18
+    "dlssnr" or ""), from PatchNgxFeatureTable. OptiScaler only reads the
+    table, never writes it.
+  * The version predicate for a model known to fault on that route
+    (NrSnippetIsOlderThanLoader).
+
+Files: the table scan and ModelKnownToFaultOnLoaderRoute in
+OptiScaler/dlssnr/DlssNr_PeScan.h, used by OptiScaler/dlssnr/DlssNr_NgxInfo.cpp
+and OptiScaler/dlssnr/DlssNr_Proxy.cpp.
+
+MIT License
+
+Copyright (c) 2026 NIGos
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

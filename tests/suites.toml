@@ -127,3 +127,8 @@ summary = "Synthesized FG's policy (fast-motion response, low-fps floor, duplica
 tier = "host"
 timeout = 300
 summary = "The real MFG byte signatures and the real scanner matcher against synthetic cmp/mov buffers: each architecture signature matches its cmp-against-0x1b0 site and rejects a mov of the same immediate. Runs no patcher and touches no DLL."
+
+[nr-model-loader]
+tier = "host"
+timeout = 300
+summary = "The NR model loaders' byte-level decisions against synthetic PE64 images (the model's GetModuleFileNameW/A import slots, the NGX loader's feature-18 table), the 616.64 faulting-pairing predicate and driver numbering; the direct runtime held to the forwarder's parameter writes, model calls and fault filter; and, when present on the machine, the real wine _nvngx.dll and nvngx_dlssnr.dll. Runs no model and no NGX."

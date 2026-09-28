@@ -393,6 +393,9 @@ ApplyModel=auto
 ; true or false - Default (auto) is false
 UseProxy=auto
 
+; forwarder or direct - Default (auto) is forwarder
+ModelLoader=auto
+
 ; Where the pass runs. 0 Auto: on a D3D12 game's swapchain backbuffer once its upscaler has handed
 ; over depth and motion, on the upscaler's output until then. 1 Upscaled: in place, right after the
 ; game's upscaler writes its (linear, un-tonemapped) output. 2 Present: on the finished, tone-mapped
@@ -550,6 +553,14 @@ TagScale=auto
 
 Use the in-game NR panel to capture and edit scan anchors. `UseProxy` selects an
 experimental driver path and is not evidence of equivalence with the forwarder.
+
+`ModelLoader` chooses which module calls the model on the D3D12 route. `forwarder` (the default)
+keeps `nvngx.dll_dlssnr.dll`. `direct` calls it from OptiScaler itself and answers the model's
+caller check through the model's own `GetModuleFileName` imports, so that route needs no helper
+DLL; native Vulkan keeps the forwarder. See `OptiScaler/dlssnr/FORWARDER_INVESTIGATION.md`. On
+NVIDIA drivers from 616.64 the driver's own NGX loader creates feature 18 itself, and model
+310.8.0.0 faults on that route; `UseProxy` takes it and is refused for that pairing. See
+`OptiScaler/dlssnr/design/ngx-driver-616.md`.
 
 ### Frame Generation without an upscaler
 Every other FG input needs the depth and motion vectors a game hands to its upscaler. The

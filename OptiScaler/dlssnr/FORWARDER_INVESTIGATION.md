@@ -108,6 +108,70 @@ None of the above has been run in this tree. Before it replaces the forwarder:
   (`dlssnr_set_host_abi`, `dlssnr_abi_version`) and the caller gate that keeps a mismatched host from
   running. Dropping the DLL means finding a new home for that, or accepting its loss deliberately.
 
+## Resolution (2026-09-28): the direct loader, and the core route reopened
+
+### The direct loader is implemented: `[DlssNr] ModelLoader=direct`
+
+`DlssNr_DirectRuntime` does step 3 above from inside OptiScaler.dll, with no second DLL. The default
+stays `forwarder`, and the forwarder is unchanged.
+
+**Provenance.** The technique is **wilsjo2**'s (`OptiScaler-DLSSNR-PreSR-Multipass`, releases
+v0.8.1-nr-direct-runtime and v0.8.3, branch `codex/nr-direct-runtime` at `47e134cb`, GPL-3, the same
+licence as this tree). It covers finding the model's `GetModuleFileNameW` **and** `...A` import slots
+by name rather than by offset (`DlssNr_RuntimeImports.h`), and chaining whatever each slot already
+held, loader and overlay wrappers included, instead of demanding the pristine export (the v0.8.3
+change). It also covers answering only for the calling OptiScaler module and only during a direct
+call. Ours is a rewrite against our own structures: `DlssNr_PeScan.h` for the parse, and the
+forwarder's own call bodies. Attribution sits in both headers and in the commit.
+
+**How it differs from wilsjo2's runtime, and from the recipe above:**
+
+- **Explicit key, not a fallback.** wilsjo2 tries the driver first and falls back to direct after a
+  driver failure. Here the user picks one.
+- **The forwarder's calls, not Magpie's.** The application id stays `0x24480451` and the capability
+  block stays; the recipe's `0x0876232C` and null block are not used. Every parameter write, in
+  order, is the forwarder's, and so are the model calls, `FaultFilter` and `kFaulted`.
+  `tests/nr-model-loader` holds the two files to that.
+- **The alias is the forwarder's full path:** `<OptiScaler dir>\nvngx.dll_dlssnr.dll`, not
+  `L"nvngx.dll"`. The model sees what it saw through the forwarder, directory included.
+- **Scoped per thread.** A `thread_local` alias is set by `Guarded` for exactly the duration of the
+  call. Every other query, from the model on another thread or about another module, goes to the
+  previous target.
+- **Never restored.** The model is never unloaded, as with the forwarder. OptiScaler pins itself
+  (`GET_MODULE_HANDLE_EX_FLAG_PIN`) before adapting, so the slots cannot outlive the code they point
+  at. wilsjo2 restores the slots at teardown instead.
+- **Refuses rather than guesses.** An import table that does not parse, no caller-path slot, or two
+  slots of one API with different targets: logged, `loadFailed` sticks, the menu shows why, and
+  nothing is patched.
+- **D3D12 only:** the after-upscale pass, the D3D12 present pass and the D3D11 bridge host. Native
+  Vulkan and the native D3D11 probe keep the forwarder whatever the key says, as in wilsjo2's.
+
+**What "still ours to establish" became:**
+
+- *Under Wine/Proton:* still open in a game. The host test confirms that this machine's model
+  (310.8.2.0) has one W and one A slot that the parser finds, which is the precondition.
+- *Alongside the game's NGX:* answered by design. The slots answer for OptiScaler's module only, only
+  on a thread inside our call, and chain everything else. It still needs measuring.
+- *The ABI handshake:* not needed. The direct runtime and the host are one binary, so their argument
+  lists cannot drift apart; `dlssnr_set_host_abi` stays the forwarder's.
+
+### The core route is real again on current drivers
+
+The 2026-09-12 answer above ("Core has no NR implementation") was right about the loaders it
+described, and is **not** right about NVIDIA 32.0.16.1664 (616.64) and later. From that version the
+loader's feature table names `dlssnr` at entry 18, and the loader routes `CreateFeature(18)` into the
+model itself (NIGos/dlss5-bridge, MIT). This workstation's wine loader has been 32.0.16.1691 since the
+2026-09-11 driver update, and it routes. `UseProxy` was last measured on 2026-09-01 under 610.57.04.
+
+So the premise this document opened with, "let the core call the snippet", is live again. It has one
+known failure: model 310.8.0.0 on that route faults inside D3D12. `UseProxy` now refuses exactly that
+pairing before it creates anything, and allows 310.8.2.0 through. The details, the exposure of each
+route and the checks are in `design/ngx-driver-616.md`.
+
 ## How to reproduce
 Set `[DlssNr] UseProxy=true`. The path is off by default and does not fall back automatically, so a
-failure is visible rather than masked by the forwarder quietly doing the work.
+failure is visible rather than masked by the forwarder quietly doing the work. On a loader that
+routes feature 18 with a model at 310.8.0.0 or older, it refuses with a log line instead of trying.
+
+For the direct loader, set `[DlssNr] ModelLoader=direct`. Rename `nvngx.dll_dlssnr.dll` away from the
+game folder to prove it is not used on the D3D12 route.

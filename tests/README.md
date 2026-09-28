@@ -66,6 +66,10 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   session replay, and the four real report classifications/initializers extracted
   from the renderer, including manual configuration changes and reversals.
 - `nr-menu` — pass-menu control flow driven by scripted ImGui events.
+- `nr-model-loader` — what the model loaders decide from bytes: the model's caller-path import
+  slots (for `ModelLoader=direct`) and the NGX loader's feature-18 table (the 616.64 route), against
+  synthetic PE64 images and, when present, this machine's real `_nvngx.dll` and model; the 616.64
+  faulting-pairing predicate; and the direct runtime held to the forwarder's writes. Runs no model.
 - `nr-multipass` — portable multi-pass chain helpers.
 - `nr-pass-config` — the pass-settings codec and the four-point Config round trip
   for the master keys.

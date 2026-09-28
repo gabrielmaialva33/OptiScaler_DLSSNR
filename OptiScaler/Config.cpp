@@ -456,6 +456,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrStage.set_from_config(readUInt("DlssNr", "Stage"));
             DlssNrProxyProbe.set_from_config(readBool("DlssNr", "ProxyProbe"));
             DlssNrUseProxy.set_from_config(readBool("DlssNr", "UseProxy"));
+            DlssNrModelLoader.set_from_config(
+                readString("DlssNr", "ModelLoader", true).transform(CodeToEnum<NrModelLoader>));
             DlssNrScanExposure.set_from_config(readBool("DlssNr", "ScanExposure"));
             DlssNrWhitePointSource.set_from_config(readUInt("DlssNr", "WhitePointSource"));
 
@@ -1437,6 +1439,12 @@ bool Config::SaveIni()
         ini.SetValue("DlssNr", "ScanInverted", GetBoolValue(Instance()->DlssNrScanInverted.value_for_config()).c_str());
         ini.SetValue("DlssNr", "ScanMeter", GetBoolValue(Instance()->DlssNrScanMeter.value_for_config()).c_str());
         ini.SetValue("DlssNr", "UseProxy", GetBoolValue(Instance()->DlssNrUseProxy.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "ModelLoader",
+                     Instance()
+                         ->DlssNrModelLoader.value_for_config()
+                         .transform(EnumToCode<NrModelLoader>)
+                         .value_or("auto")
+                         .c_str());
         ini.SetValue("DlssNr", "ProxyProbe", GetBoolValue(Instance()->DlssNrProxyProbe.value_for_config()).c_str());
         // ScanExposure is a developer override with no menu control; persist it so a set ini keeps it.
         ini.SetValue("DlssNr", "ScanExposure", GetBoolValue(Instance()->DlssNrScanExposure.value_for_config()).c_str());
