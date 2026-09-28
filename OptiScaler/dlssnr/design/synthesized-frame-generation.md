@@ -558,7 +558,8 @@ the fallback this note keeps open.
 ### Fast-motion response
 
 `[FrameGen] SynthesizedFastMotion=<px>` (0, the default, is off). When the median motion magnitude
-exceeds that many display pixels per base frame, FG is fed with Reset.
+exceeds that many display pixels per base frame, FG is fed with Reset. Since 2026-09-28 this is the
+hard cap beside the coherence rule ("Coherence, not speed" below).
 - **What Reset does.** On a reset FSR's interpolation "copies the current back buffer and doesn't
   interpolate" (`ffx_frameinterpolation.h:174`). That is AMD AFMF's Fast Motion Response: repeat the
   frame instead of smearing it. FG stays active, so there is no pause and resume.
@@ -566,6 +567,77 @@ exceeds that many display pixels per base frame, FG is fed with Reset.
 - **The statistic.** 16 rows of the field are copied to a readback ring and read three confirmed
   frames later, the same rule as the estimator's `SceneCut()`. Motion is coherent over a few frames,
   so the lag costs the first two or three frames of a burst, not its body.
+
+#### Coherence, not speed (2026-09-28, before the code)
+
+**Measured.** Generation Zero, first person, about 27 fps base, `SynthesizedFastMotion=12`. It repeated
+20-81% of base frames while the camera moved (`fast motion repeated N of the last M base frames`), so
+interpolation was mostly off.
+
+**What a Reset costs**, read in `external/FidelityFX-SDK-v2/Kits/FidelityFX/framegeneration/fsr3/`.
+The cost goes well beyond the repeated frame:
+- The frame is copied, not interpolated (`include/gpu/frameinterpolation/ffx_frameinterpolation.h:174`).
+- The preparation passes are skipped (`internal/ffx_frameinterpolation.cpp:1155`, `:1211`).
+- FSR's own optical flow restarts at frame 0 (`internal/ffx_opticalflow.cpp:665`). It treats frames 0-5
+  as a scene change and stores zero vectors for them (`ffx_opticalflow_callbacks_hlsl.h:529-537`,
+  `ffx_opticalflow_compute_optical_flow_v5.h:216`).
+- For 10 frames after it, the interpolator takes the game vectors outright, with no arbitration
+  against its optical flow (`ffx_frameinterpolation.h:162-163`).
+
+So a burst of repeats keeps FSR in its degraded start-up state for as long as the burst lasts.
+
+**Why speed is the wrong trigger.** A uniform pan with accurate vectors interpolates correctly at any
+speed: every pixel moves by the same vector, and only the frame border is disoccluded. Interpolation
+fails where the vectors disagree locally: parallax, disocclusion, a thin foreground over a far
+background. The median magnitude cannot tell a fast pan from a fast strafe past trees.
+
+**The rule.**
+- **Statistics.** From the same 16 rows, sampled every 4 px, a pure function (`Synth_MotionStats.h`)
+  computes:
+  - the median and p90 of |v|;
+  - the per-component median vector;
+  - the median as a fraction of the width;
+  - the **incoherent share**. This is the share of horizontally neighbouring samples whose vectors
+    differ by more than max(2 px, 25% of the larger of the two).
+- **Repeat on incoherent motion.** When the incoherent share exceeds `[FrameGen]
+  SynthesizedIncoherence` and the median exceeds 1% of the width, the frame repeats.
+- **`SynthesizedFastMotion` becomes a hard cap on the median, whatever the coherence.** 0 means no cap.
+  The number means what it always meant, so an existing ini behaves exactly as before.
+- **`SynthesizedIncoherence` is a new key**, a fraction from 0 to 1. The default is 0, which is off.
+  With it at 0 the response is the old one to the byte (DEVELOPMENT.md invariant 1). That is why this
+  is a key and not a constant: always on, it would change every `SynthesizedMotion=true` setup and could
+  not be switched off. It also gives the threshold a live menu slider for tuning, because it has not
+  been measured yet. A suggested start is 0.25.
+- **Hysteresis, as before.** Each trigger holds until its levels fall below 75%: the incoherent share
+  and the 1% gate for one, the cap for the other. Two calm samples in a row end the response. A
+  threshold change clears the state, and the next sample decides afresh.
+
+**Why these numbers.**
+- **2 px floor.** A smaller disagreement moves content by at most 1 px at the midpoint frame. Below it
+  is estimator noise.
+- **25% relative.** The field is bilinear between 8x8 block centres. A smooth field (zoom, walking
+  forward) changes by a few percent over 4 px. A depth edge between two blocks appears as two steps,
+  each half the difference. For a foreground at 40 px over a background at 10 px, that is a step of
+  15 px against a 10 px threshold. Static HUD pixels are zero from the expand's per-pixel choice, and
+  only their edges count.
+- **1% of the width.** At the midpoint a wrong vector misplaces content by at most half the local
+  disagreement, which is bounded by the motion. Below 1% (19 px at 1920, 34 px at 3440) that halo is
+  small next to the ten degraded frames a Reset costs. It is a constant, to be revisited from the
+  logged p50.
+- **Horizontal pairs only.** The sampled rows are H/16 apart, 90 px at 1440. That is not local. Over
+  that distance a smooth field changes by more than 25% (the ground plane when walking forward) and
+  still interpolates fine. A depth edge crosses the sampled rows unless it runs exactly horizontal.
+- **0.25, the suggested start.** A coherent pan with a HUD scores a few percent (the overlay edges).
+  A strafe past tree trunks adds a few pairs per trunk per row. The share passes a quarter when the
+  field breaks up broadly: near foliage, or the estimator losing the match. This is an estimate, not
+  a measurement.
+
+**Logged.** The 10 s summary adds the window's mean and maximum of p50, p90 and the incoherent share.
+It is written while the response is configured and the window repeated a frame or saw a median above
+1% of the width.
+
+**Not done.** A Reset is whole-frame in FSR, so there is no regional repeat. The thresholds have not
+been measured in a game yet. Tests: `tests/fg-synth-policy`.
 
 ### Low-fps floor
 
