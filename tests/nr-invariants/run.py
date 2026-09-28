@@ -158,6 +158,31 @@ if len(failures) == before:
     print(f'PASS: {", ".join(header for _, header, _, _ in targets)} are byte-identical to '
           'create_header.py over the committed .cso and .spv')
 
+# The synthesized-motion estimator (shaders/synth_motion): every committed .cso there, FidelityFX-derived
+# and NVOFA alike, named <stem>.cso -> <stem>_Shader.h, array <stem>_cso, as its build.sh writes them.
+before = len(failures)
+synth_precompile = root / 'OptiScaler/shaders/synth_motion/precompile'
+synth_checked = []
+with tempfile.TemporaryDirectory() as scratch:
+    for binary in sorted(synth_precompile.glob('*.cso')):
+        stem = binary.stem
+        header = synth_precompile / f'{stem}_Shader.h'
+        if not header.exists():
+            fail(f'{binary.name} has no {header.name}: run shaders/synth_motion/precompile/build.sh')
+            continue
+        if not binary.read_bytes().startswith(b'DXBC'):
+            fail(f'{binary.name} does not start with its container magic DXBC')
+        regenerated = Path(scratch) / header.name
+        subprocess.run([sys.executable, str(create_header), str(binary), str(regenerated), f'{stem}_cso'],
+                       check=True, capture_output=True)
+        if regenerated.read_bytes() != header.read_bytes():
+            fail(f'{header.name} is not what create_header.py makes from {binary.name}: regenerate it')
+        synth_checked.append(header.name)
+
+if len(failures) == before:
+    print(f'PASS: {len(synth_checked)} synthesized-motion headers are byte-identical to create_header.py over the '
+          'committed .cso')
+
 # --- 4. Retired identifiers -------------------------------------------------------------------------
 
 before = len(failures)

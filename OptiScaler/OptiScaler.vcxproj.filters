@@ -74,6 +74,12 @@
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_Search_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_NvofaPrep_Shader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_NvofaExpand_Shader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="Config.h">
       <Filter>Config</Filter>
     </ClInclude>

@@ -455,6 +455,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ScdDivergence_Shader.h" />
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ScdHistogram_Shader.h" />
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_Search_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_NvofaPrep_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_NvofaExpand_Shader.h" />
     <ClInclude Include="dlssnr\DlssNrFeature_Vk.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_PShader.h" />
