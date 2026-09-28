@@ -40,3 +40,8 @@ build synth_motion_clear.hlsl               SynthMotion_ClearFloat         Synth
 # falls back to the FidelityFX estimator.
 build synth_motion_nvofa_prep.hlsl          SynthMotion_NvofaPrep          SynthMotion_NvofaPrep_cso
 build synth_motion_nvofa_expand.hlsl        SynthMotion_NvofaExpand        SynthMotion_NvofaExpand_cso
+
+# Synthesized frame generation's HUD mask and UI layer (SynthOverlay_Dx12.cpp). Ours; same flags. The mask
+# runs DLSS-NR's static-overlay rule, static_overlay_rule.h, which dlssnr_uimask.hlsl includes from here.
+build synth_overlay_detect.hlsl             SynthOverlay_Detect            SynthOverlay_Detect_cso
+build synth_overlay_layer.hlsl              SynthOverlay_Layer             SynthOverlay_Layer_cso

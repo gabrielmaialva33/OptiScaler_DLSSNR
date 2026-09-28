@@ -569,6 +569,31 @@ void synthInputCases()
         assert(synth->motionRecords == 1);
         assert(synth->lastMotionColour == f.sc->_openedDx11BackBuffers[0]);
         assert(synth->lastMotionColourState == D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+        // The HUD mask from the game's frame too, and with no neural host its UI layer from that same frame,
+        // which is what the presenter gets; both in the copy-source state, on the same list.
+        assert(synth->overlayRecords == 1);
+        assert(synth->lastOverlayColour == f.sc->_openedDx11BackBuffers[0]);
+        assert(synth->lastOverlayPresented == f.sc->_openedDx11BackBuffers[0]);
+        assert(synth->lastOverlayColourState == D3D12_RESOURCE_STATE_COPY_SOURCE);
+        assert(synth->lastOverlayPresentedState == D3D12_RESOURCE_STATE_COPY_SOURCE);
+    }
+
+    // With a neural host that ran, the mask still reads the game's frame, and the UI layer the host's output:
+    // the frame that goes on screen, so the layer composes back what real frames show.
+    {
+        Fixture f;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        f.sc->_synthInputs = std::make_unique<SynthInputs>();
+        auto* synth = f.sc->_synthInputs.get();
+        auto* host = f.sc->_nrHost.get();
+        f.sc->_hasInteropWork = true;
+        assert(f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(f.list.copiedFrom == &host->composed);
+        assert(synth->overlayRecords == 1);
+        assert(synth->lastOverlayColour == f.sc->_openedDx11BackBuffers[0]);
+        assert(synth->lastOverlayPresented == &host->composed);
+        assert(synth->lastOverlayPresentedState == D3D12_RESOURCE_STATE_COPY_SOURCE);
     }
 
     // The list could not be closed: the clear never ran and must stay owed.

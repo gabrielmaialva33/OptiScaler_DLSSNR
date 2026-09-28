@@ -612,10 +612,10 @@ uneven cadence rather than smoothness.
 
 ## The HUD: near depth and a UI layer
 
-Written 2026-09-28, before the code, on branch `fg-hud-depth-ui`. Two keys under `[FrameGen]`, read
-every base frame:
-- `SynthesizedHudDepth` (Fix A) is meant to default on, if the GPU harness shows the mask marks no
-  scenery. It acts only with `SynthesizedMotion`, which is itself off by default.
+Written 2026-09-28, before the code, on branch `fg-hud-depth-ui`; built the same day, see
+[Built and measured](#built-and-measured-2026-09-28). Two keys under `[FrameGen]`, read every base frame:
+- `SynthesizedHudDepth` (Fix A) defaults on: the GPU harness showed the mask marks no scenery. It acts
+  only with `SynthesizedMotion`, which is itself off by default.
 - `SynthesizedHudLayer` (Fix B) defaults off until it has been seen in a game.
 
 With both off, or without synthesized motion and with the layer off, the input is byte-for-byte what it
@@ -751,6 +751,16 @@ frame, and planned step 4 through them.
     NR's thresholds. It runs at display size on the game's frame, on the list the synthesized feed
     already records on: the bridge's copy list, or on native D3D12 the motion list executed on FG's
     queue. Either way it lands before FSR's prepare reads depth.
+  - *Added while building it:* FG's pass uses a **3x3 still core** where NR's uses 5x5. The core radius
+    became a knob of the shared rule (`UM_CORE_RADIUS`, default 2, so NR's bytecode is unchanged). A 5x5
+    core marks nothing of a 2 px crosshair arm or a 3 px stroke with a 1 px outline, because the moving
+    scene lies within 2 px of every pixel of them, and those are exactly what FG smears. The fixtures that
+    made the core necessary still mark nothing at 3x3: sand beside a swaying coat, and a concave gap.
+    `tests/fg-synth-policy` reruns them at FG's radius.
+  - *Found while building it:* the macros `dlssnr_uimask.hlsl` hands the rule substitute the swizzle
+    (`UM_PROT(x, y) ... .x`), so NR's committed mask is 1 on nearly every pixel. FG's shader names the
+    parameters `px, py`. NR's is left as it was, and the defect is written up in
+    [hud-protection.md](hud-protection.md#the-mask-macros-every-pixel-protected-found-2026-09-28-not-fixed).
   - So FG depends on nothing in the NR module, and the NR module stays removable as one block.
 - **Not shared with NR at run time.** NR's mask is computed at the working size, on the model's proxy
   input, and only with `UiProtection` on. FG needs it at display size, on the game's frame, every frame.
@@ -800,6 +810,46 @@ frame, and planned step 4 through them.
   - The layer's alpha equals the mask, and its rgb equals the frame.
   - None of this runs FSR, so none of it says what FSR does with the result.
 
+### Built and measured (2026-09-28)
+
+**Code.**
+- `SynthMotion::Overlay_Dx12`, with shaders `synth_overlay_detect.hlsl` and `synth_overlay_layer.hlsl`.
+- `Synth_Hud.h`: which fix runs and what is fed.
+- `SynthInputs::RecordOverlay` on the bridge.
+- `RecordFrameOnQueue` and `RecordLayerOnQueue` on native D3D12. The first is the old
+  `RecordMotionOnQueue`, which now carries the mask too; the second is called from `FGHooks::FGPresent`
+  after DLSS-NR's pass.
+- The UI registration in `FSRFG_Dx12::Dispatch`.
+- Two menu checkboxes under the synthesized input ("HUD depth", "HUD layer").
+
+**GPU harness** (`tests/synth-motion-d3d12`, RTX 4090 under vkd3d-proton, clocks unlocked). It runs the
+pass on every frame of every sequence and reads back its depth, mask and layer.
+- **No scenery marked.** Not one pixel on the eight pans, the moving object, the static sequence, the
+  cut or the abandon, on any frame.
+- **Precision** on the overlay sequences: 100.00% of the marked pixels are overlay pixels. None is even
+  the 1 px growth.
+- **Recall** over the last ten of 40 frames:
+
+  | pan per frame | crosshair | floating text | panel |
+  |---|---|---|---|
+  | 8 px | 32.0% | 33.5% | 0% |
+  | (3, 2) px | 18.1% | 26.9% | 0% |
+
+  - About half of each element's pixels are its 1 px dark outline. The rule never marks those, because
+    its 3x3 core reaches the scene.
+  - The rest builds up as the scene moves past: 6% of the crosshair at t=9, 16% at t=14, 34% at t=39
+    (8 px a frame).
+  - The panel's interior never sees motion on four sides.
+- **Exactness.** The depth is 0 or 1 everywhere and agrees with the mask. The layer is the frame's own rgb
+  with the mask as alpha, byte for byte, on every frame.
+- **Cost of the mask plus the layer:** 0.084 ms at 1920x1080 and 0.19 ms at 3440x1440. The estimator is
+  0.29 and 0.55 ms in the same run. An RTX 3060 has about a third of this card's shader throughput, so
+  expect about three times as much there (*estimate*).
+- **Memory at 3440x1440:** about 85 MB for the mask's state, depth and mask. The layer adds 20 MB (RGBA8)
+  or 40 MB (RGBA16F), and FFX keeps a copy of it of the same size.
+
+**Not measured:** anything FSR does with it. The harness does not run FSR.
+
 ### What needs a game
 
 Rafael's RTX 3060, native Windows, with `[FrameGen] DebugView`. FFX's debug grid shows the
@@ -809,6 +859,15 @@ game-vector field's depth priority (top middle) and the disocclusion mask (botto
 - The strip beside them should read as disoccluded while the camera pans.
 - Then, with A and B off and on, on the same pan: the crosshair, HUD text and the band beside them.
 - Also the cost of the pass next to the model.
+- **The log, once each:**
+  - `synthesized FG HUD mask: WxH allocated`;
+  - `synthesized FG input: FSR-FG now gets the HUD mask as depth`, with A;
+  - `synthesized FG HUD mask: UI layer WxH, format N` and `the HUD layer ... is FFX's UI resource`, with B;
+  - `FfxApi Dx12 FG version`, for which FFX runtime composed it.
+- **Also to watch:** a crosshair over a still scene is never marked, and a camera that stops lets the
+  marks fade over about 1.5 s. Neither is a fault.
+- **Configuration:** Generation Zero on the D3D11 bridge (`FGInput=synthesized`, `SynthesizedMotion=true`)
+  is the title that showed the smear. Also PCSX2 on D3D12, for the late layer after DLSS-NR's pass.
 
 ## Open questions
 

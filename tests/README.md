@@ -49,8 +49,9 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `mfg-pattern` — the real MFG byte signatures and scanner matcher against synthetic
   buffers. Runs no patcher and touches no DLL.
 - `fg-synth-policy` — synthesized FG's decisions (fast-motion response, low-fps floor,
-  duplicate-present advice) and the NR/FG motion handoff, from the production headers. Pure
-  logic: no GPU, no readback, no FSR.
+  duplicate-present advice, which HUD fix runs) and the NR/FG motion handoff, from the production
+  headers, plus a guard holding the HUD mask's thresholds equal to DLSS-NR's. Pure logic: no GPU, no
+  readback, no FSR.
 - `nr-before-upscale` — pre-upscale boundary functions against strict host fakes.
 - `nr-dispatch` — composition constants, descriptor slots and partial initialization cleanup.
 - `nr-gpu-timing` — portable timing validation, plus the duplicate-execution
@@ -94,7 +95,9 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `dlssnr-loopback` — drives the production NGX exports, NR composition, resolution changes
   and shutdown on a real GPU under Proton.
 - `synth-motion-d3d12` — the synthesized-motion estimator on a real D3D12 device: endpoint
-  error against known motion, the axis signs, scene cuts, abandon semantics and GPU time.
+  error against known motion, the axis signs, scene cuts, abandon semantics and GPU time; and
+  synthesized FG's HUD mask on the same frames (no scenery marked, precision and recall on the
+  overlay, its depth and UI layer exact).
   `--source nvofa` runs the NVIDIA Optical Flow source through the same sequences, and skips
   when `nvofapi64.dll` or its shaders are unavailable. No NGX, no game.
 - `vulkan-overlay` — builds a real DLL and drives real Vulkan to exercise overlay

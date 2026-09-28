@@ -602,6 +602,26 @@ SynthesizedFastMotion=24
 SynthesizedMinFps=20
 ```
 
+Two more keys handle the HUD, which a title with no upscaler never hands over separately. Both detect
+it from the frames: a pixel that stays still while the scene around it moves is taken for interface.
+Design: "The HUD: near depth and a UI layer" in the note above.
+
+```ini
+[FrameGen]
+; Needs SynthesizedMotion. Hands FSR FG the detected HUD as near depth, so the scene beside it is not
+; blended with it in generated frames and its own zero motion is kept.
+; true or false - Default (auto) is true
+SynthesizedHudDepth=true
+
+; Experimental. Composes the detected HUD over generated frames from the real frame, through FSR FG's own
+; UI layer, so it is never warped; real frames are unchanged. Refused when DisableUI=true.
+; true or false - Default (auto) is false
+SynthesizedHudLayer=true
+```
+
+A HUD over a still scene is never detected, and large solid panels are detected at their inner outlined
+edges only; crosshairs, text and thin lines are what these cover.
+
 FSR FG generates one frame per base frame; fractional multipliers aimed at a target rate are not
 available with it. An emulator that presents every frame twice cannot be smoothed by interpolation
 either: with `SynthesizedMotion` on, OptiScaler logs once when it sees that cadence, and the fix is

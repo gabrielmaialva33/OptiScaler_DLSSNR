@@ -84,6 +84,32 @@ NVOFA_SHADERS = ('SynthMotion_NvofaPrep_Shader.h', 'SynthMotion_NvofaExpand_Shad
 #   GPU time             covers the two shader passes on the list only; the engine runs on its own
 #                        queue and is not timed here
 # ------------------------------------------------------------------------------------------------
+#
+# Synthesized FG's HUD mask (SynthMotion::Overlay_Dx12), run on every frame beside the estimator, whatever
+# the source (synthesized-frame-generation.md, "The HUD: near depth and a UI layer"). Its depth is what is
+# judged, as FSR-FG is handed it: 1.0 near where the mask holds, 0.0 elsewhere.
+#   exact                on every scored frame of every sequence: the depth is exactly 0 or 1 and agrees
+#                        with the mask, and the UI layer is the frame's own rgb with the mask as alpha,
+#                        byte for byte
+#   no scenery           pans, the moving object, static, cut and abandon: not one pixel marked, on any
+#                        frame. A false positive is a hole cut in whatever crosses it in a generated frame
+#   precision            overlay_* and hud_*, from HUD_FROM: at least HUD_PRECISION of the marked pixels are
+#                        overlay pixels or within 1 px of one (the rule grows its protection by 1 px on purpose)
+#   recall               hud_* (the same overlay, 40 frames), mean over t >= HUD_STEADY: the share of each
+#                        element's pixels marked, at least HUD_MIN_RECALL for the crosshair and the floating
+#                        text, which are what the mask is for. About half of each is its 1 px dark outline,
+#                        which the rule never marks (its 3x3 core reaches the scene), and the protection builds
+#                        up as the scene moves past, so these are floors well under the 0.34/0.39 (8 px a
+#                        frame) and 0.21/0.30 (3, 2) measured on 2026-09-28. The panel is reported only: a
+#                        flat 208x76 panel is marked nowhere, its interior never sees motion on four sides
+#                        (hud-protection.md, "What it costs in recall"). overlay_* is too short for recall
+#   GPU time             of the mask plus its layer, reported, never judged
+# HUD_FROM: t=0 has no previous frame, the rule's 8-frame entry streak protects from t=8, and the export,
+# which reads last frame's protection, shows it from t=9; t=10 leaves one frame of margin.
+HUD_FROM = 10
+HUD_STEADY = 30
+HUD_PRECISION = 0.99
+HUD_MIN_RECALL = {'crosshair': 0.10, 'text': 0.15}
 PAN_SMALL = dict(epe=1.0, within=0.90)
 PAN_LARGE = dict(epe=2.0, within=0.80)
 STATIC = dict(epe=0.25, within=0.99)
@@ -427,6 +453,76 @@ def judge(report):
     return failures, rows, timing, extents, notes, overlays
 
 
+def judge_hud(report):
+    """Synthesized FG's HUD mask: exactness everywhere, no scenery marked, precision and recall on overlay_*."""
+    failures, summary = [], {'sequences': {}, 'timing': {}}
+
+    def check(cond, message):
+        if not cond:
+            failures.append(message)
+
+    scored_any = False
+    for s in report['sequences']:
+        frames = [f for f in s['frames'] if f.get('hud') and not f['abandoned']]
+        if s['timing_only']:
+            ms = sorted(f['hud_gpu_ms'] for f in s['frames'] if f['t'] >= SCORED_FROM and f.get('hud_gpu_ms', 0) > 0)
+            summary['timing'][s['name']] = {'width': s['width'], 'height': s['height'],
+                                            'median_ms': ms[len(ms) // 2] if ms else None,
+                                            'p90_ms': ms[int(len(ms) * 0.9)] if ms else None}
+            continue
+        check(len(frames) >= MIN_READY, f'{s["name"]}: HUD mask scored on only {len(frames)} frames')
+        scored_any = scored_any or bool(frames)
+        for f in frames:
+            h = f['hud']
+            check(h['depth_not_binary'] == 0, f'{s["name"]} t={f["t"]}: {h["depth_not_binary"]} depth values neither 0 nor 1')
+            check(h['depth_mask_mismatch'] == 0, f'{s["name"]} t={f["t"]}: depth disagrees with the mask at '
+                                                 f'{h["depth_mask_mismatch"]} pixels')
+            check(h['layer_checked'] and h['layer_mismatch'] == 0,
+                  f'{s["name"]} t={f["t"]}: UI layer differs from the frame and mask at {h["layer_mismatch"]} pixels')
+
+        is_hud = s['name'].startswith('hud_')
+        if not (is_hud or s['name'].startswith('overlay_')):
+            marked = [(f['t'], f['hud']['marked']) for f in frames if f['hud']['marked'] > 0]
+            check(not marked, f'{s["name"]}: scenery marked as HUD (t, pixels): {marked}')
+            summary['sequences'][s['name']] = {'marked_total': sum(f['hud']['marked'] for f in frames)}
+            continue
+
+        late = [f for f in frames if f['t'] >= HUD_FROM]
+        check(len(late) >= 2, f'{s["name"]}: only {len(late)} HUD frames from t={HUD_FROM}')
+        if not late:
+            continue
+        marked = sum(f['hud']['marked'] for f in late)
+        on_overlay = sum(f['hud']['marked_overlay'] for f in late)
+        grown = sum(f['hud']['marked_grown'] for f in late)
+        precision = grown / marked if marked else float('nan')
+        strict = on_overlay / marked if marked else float('nan')
+        check(marked == 0 or precision >= HUD_PRECISION,
+              f'{s["name"]}: HUD mask precision {precision:.4f} (within 1 px of the overlay) < {HUD_PRECISION}; '
+              f'{marked - grown} pixels of scenery marked over {len(late)} frames')
+
+        steady = [f for f in frames if f['t'] >= HUD_STEADY] if is_hud else late
+        recall = {}
+        for e in OVERLAY_ELEMENTS:
+            pixels = sum(f['hud']['overlay_pixels'][e] for f in steady)
+            recall[e] = sum(f['hud']['overlay_marked'][e] for f in steady) / pixels if pixels else float('nan')
+        pixels_all = sum(sum(f['hud']['overlay_pixels'].values()) for f in steady)
+        on_steady = sum(f['hud']['marked_overlay'] for f in steady)
+        recall_all = on_steady / pixels_all if pixels_all else float('nan')
+        if is_hud:
+            check(len(steady) >= 5, f'{s["name"]}: only {len(steady)} HUD frames from t={HUD_STEADY}')
+            check(marked > 0, f'{s["name"]}: the HUD mask marked nothing from t={HUD_FROM}')
+            for e, minimum in HUD_MIN_RECALL.items():
+                check(recall[e] >= minimum, f'{s["name"]}: HUD mask recall on the {e} {recall[e]:.3f} < {minimum} '
+                                            f'(mean over t>={HUD_STEADY})')
+        summary['sequences'][s['name']] = {
+            'frames': len(late), 'marked_per_frame': marked / len(late), 'precision_within_1px': precision,
+            'precision_on_overlay': strict, 'scenery_marked_total': marked - grown, 'recall': recall,
+            'recall_all': recall_all, 'recall_from': HUD_STEADY if is_hud else HUD_FROM, 'recall_judged': is_hud,
+        }
+    check(scored_any, 'ZERO COVERAGE: the HUD mask was never scored')
+    return failures, summary
+
+
 def execute(lock, source):
     manifest = json.loads((OUT / 'manifest.json').read_text())
     if manifest['sources'] != sources():
@@ -473,6 +569,8 @@ def report_judgement(manifest, source):
     if report.get('source', 'ffx') != source:
         raise RuntimeError(f'report is for source {report.get("source", "ffx")}, not {source}')
     failures, rows, timing, extents, notes, overlays = judge(report)
+    hud_failures, hud = judge_hud(report)
+    failures += hud_failures
     clock_path = OUT / artifact('clock.txt', source)
     locked = clock_path.exists() and clock_path.read_text().startswith('locked')
     clock = 'locked 2100/10501 MHz' if locked else 'UNLOCKED clocks (numbers indicative only)'
@@ -492,6 +590,19 @@ def report_judgement(manifest, source):
             for cls, (e, m, w, n) in overlay['classes'].items():
                 print(f'    {cls:<16} {e:7.3f} px  {m * 100:5.1f}% > 0.5  {w * 100:5.1f}% < 1  {n:>7} px')
     print(f'field extents (field WxH for colour WxH): {extents}')
+    print(f'\nsynthesized FG HUD mask (depth 1 = marked; precision from t={HUD_FROM}):')
+    for name, h in hud['sequences'].items():
+        if 'recall' in h:
+            print(f'  {name}: {h["marked_per_frame"]:.0f} px marked per frame, precision {h["precision_within_1px"] * 100:.2f}% '
+                  f'within 1 px of the overlay ({h["precision_on_overlay"] * 100:.1f}% on it), '
+                  f'{h["scenery_marked_total"]} scenery px over {h["frames"]} frames; recall from t={h["recall_from"]} '
+                  f'({"judged" if h["recall_judged"] else "reported"}) '
+                  + ', '.join(f'{e} {v * 100:.1f}%' for e, v in h['recall'].items())
+                  + f', all {h["recall_all"] * 100:.1f}%')
+        else:
+            print(f'  {name}: {h["marked_total"]} px marked over all frames')
+    for name, t in hud['timing'].items():
+        print(f'  timing {name}: {t["width"]}x{t["height"]} mask + layer median {t["median_ms"]} ms, p90 {t["p90_ms"]} ms ({clock})')
     for n in notes:
         print('note: ' + n)
 
@@ -499,8 +610,8 @@ def report_judgement(manifest, source):
     if source == 'nvofa':
         limits += ' GPU time excludes the optical-flow engine, which runs on its own queue.'
     result = {'status': 'PASS' if not failures else 'FAIL', 'source': source, 'failures': failures, 'notes': notes,
-              'clock': clock, 'timing': timing, 'overlay': overlays, 'extents': extents, 'manifest': manifest,
-              'limits': limits}
+              'clock': clock, 'timing': timing, 'overlay': overlays, 'hud': hud, 'extents': extents,
+              'manifest': manifest, 'limits': limits}
     (OUT / artifact('result.json', source)).write_text(json.dumps(result, indent=2) + '\n')
     if failures:
         print('\nSYNTH-MOTION FAIL:')

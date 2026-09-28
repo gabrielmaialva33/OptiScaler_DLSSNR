@@ -525,6 +525,27 @@ struct SynthInputs
         lastMotionColourState = colourState;
         return true;
     }
+
+    // The HUD mask rides the same list after the motion, from the game's frame; its UI layer from what is
+    // about to be copied to the presenter.
+    unsigned overlayRecords = 0;
+    ID3D12Resource* lastOverlayColour = nullptr;
+    ID3D12Resource* lastOverlayPresented = nullptr;
+    int lastOverlayColourState = -1;
+    int lastOverlayPresentedState = -1;
+    bool RecordOverlay(void* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, int colourState,
+                       ID3D12Resource* presented, int presentedState)
+    {
+        assert(device != nullptr && cmdList != nullptr && colour != nullptr && presented != nullptr);
+        assert(recordingOutstanding && "RecordOverlay is recorded after RecordInit, on the same list");
+        assert(motionRecords > 0 && "RecordOverlay comes after RecordMotion");
+        ++overlayRecords;
+        lastOverlayColour = colour;
+        lastOverlayColourState = colourState;
+        lastOverlayPresented = presented;
+        lastOverlayPresentedState = presentedState;
+        return true;
+    }
 };
 
 // SynthMotion::Handoff (shaders/synth_motion/SynthMotion_Handoff.h): only the base-frame boundary the

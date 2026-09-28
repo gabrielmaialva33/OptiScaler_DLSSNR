@@ -890,6 +890,10 @@ class Config
     CustomOptional<bool> FGSynthesizedMotion { false };
     CustomOptional<float> FGSynthesizedFastMotion { 0.0f };
     CustomOptional<float> FGSynthesizedMinFps { 0.0f };
+    // FGInput::Synthesized only: the HUD mask as near depth (acts only with FGSynthesizedMotion) and as an FFX UI
+    // layer. See synthesized-frame-generation.md, "The HUD: near depth and a UI layer".
+    CustomOptional<bool> FGSynthesizedHudDepth { true };
+    CustomOptional<bool> FGSynthesizedHudLayer { false };
     CustomOptional<int> FGAllowedFrameAhead { 1 };
     CustomOptional<bool> FGDepthValidNow { false };
     CustomOptional<bool> FGVelocityValidNow { false };

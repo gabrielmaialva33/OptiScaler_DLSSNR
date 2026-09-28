@@ -167,6 +167,36 @@ Where it differs from the table above:
 - **Until `build.sh` generates `SynthMotion_NvofaPrep_Shader.h` and `SynthMotion_NvofaExpand_Shader.h`,**
   the source compiles to "unavailable" (`__has_include`).
 
+## Synthesized FG's HUD mask (`Overlay_Dx12`)
+
+Not motion, but it lives here for the same reason as the estimator: frame generation uses it and must
+not depend on the DLSS-NR module. Design: "The HUD: near depth and a UI layer" in
+[synthesized-frame-generation.md](../../dlssnr/design/synthesized-frame-generation.md).
+
+- **The rule** is DLSS-NR's static-overlay rule, `precompile/static_overlay_rule.h`, moved here from
+  `shaders/dlssnr/precompile/` unchanged. DLSS-NR's own pass (`dlssnr_uimask.hlsl`) includes it from
+  here, and its bytecode did not change with the move. The host test `tests/nr-uimask-rule` runs the
+  same header. The thresholds are DLSS-NR's; `tests/fg-synth-policy` holds the two lists equal.
+- **A 3x3 still core** (`UM_CORE_RADIUS 1`), where DLSS-NR's pass keeps 5x5: a 5x5 core marks nothing of a
+  2 px crosshair arm or a 3 px outlined stroke. Its macros name their parameters `px, py`, never `x, y`:
+  a macro parameter named like a swizzle is substituted into it (hud-protection.md, "The mask macros").
+- **`synth_overlay_detect.hlsl`** runs the rule at the frame's extent. It writes the mask (`R8_UNORM`),
+  the depth FSR-FG is handed (`R32_FLOAT`: 1.0 where the mask is at least 0.5, 0.0 elsewhere), and
+  the rule's ping-ponged state (`R16_FLOAT` luma, `R16G16_FLOAT` protection and streak). A linear frame
+  (an sRGB view, a float format) is brought close to encoded with a 2.2 power first, because the
+  thresholds were tuned on an encoded image.
+- **`synth_overlay_layer.hlsl`** writes the UI layer: the presented frame's rgb, with the mask as alpha.
+  It is `RGBA8_UNORM` for an 8-bit UNORM frame and `RGBA16F` otherwise, so FFX's
+  `lerp(x, layer, a)` gives a real frame back unchanged.
+- **Bindings.** Its own root signature: three SRVs, four UAVs, sixteen root constants. The previous
+  frame's state is read through SRVs, never typed UAV loads. There is no constant buffer. Every
+  resource rests in `NON_PIXEL_SHADER_RESOURCE`, where it was created. Descriptors come from a ring of
+  16 records.
+- **History** follows the estimator's discipline. The state swaps only on `ConfirmExecuted()`, and
+  `AbandonRecording()` leaves it where it was. On an extent change the old objects are parked until
+  `Release()`.
+- **Minimum extent 64x64:** anything smaller records nothing.
+
 ## Rebuilding the shaders
 
 `precompile/build.sh` runs dxc through the msvc-wine prefix and regenerates the `*_Shader.h` headers. It

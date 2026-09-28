@@ -1855,6 +1855,11 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
         // already have published it), confirmed or abandoned with this list like the clear.
         _synthInputs->RecordMotion(_dx12Device, _copyCommandLists[copySlot], _openedDx11BackBuffers[copySlot],
                                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+        // With [FrameGen] SynthesizedHudDepth or SynthesizedHudLayer, the HUD mask from the game's frame, and the
+        // UI layer from what is about to be copied to the presenter (the host's output when it ran).
+        _synthInputs->RecordOverlay(_dx12Device, _copyCommandLists[copySlot], _openedDx11BackBuffers[copySlot],
+                                    D3D12_RESOURCE_STATE_COPY_SOURCE, transferSource, D3D12_RESOURCE_STATE_COPY_SOURCE);
     }
 
     _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, transferSource);

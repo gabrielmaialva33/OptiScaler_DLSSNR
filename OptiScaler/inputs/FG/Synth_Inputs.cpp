@@ -7,6 +7,7 @@
 #include <framegen/IFGFeature_Dx12.h>
 #include <shaders/synth_motion/SynthMotion_Dx12.h>
 #include <shaders/synth_motion/SynthMotion_Handoff.h>
+#include <shaders/synth_motion/SynthOverlay_Dx12.h>
 
 #include <algorithm>
 #include <chrono>
@@ -75,6 +76,14 @@ float HalfToFloat(uint16_t half)
 }
 
 bool MotionWanted() { return Config::Instance()->FGSynthesizedMotion.value_or_default(); }
+
+// Read every base frame, so the menu's checkboxes apply at once.
+SynthHudPlan HudPlan()
+{
+    const auto& cfg = *Config::Instance();
+    return PlanSynthHud(cfg.FGSynthesizedHudDepth.value_or_default(), cfg.FGSynthesizedHudLayer.value_or_default(),
+                        cfg.FGSynthesizedMotion.value_or_default(), cfg.FGDisableUI.value_or_default());
+}
 
 // Where the pair rests between frames, and the state FG is told it arrives in. FSR-FG's prepare reads
 // both from compute; with FG_ResourceValidity::UntilPresent it uses them in place, without a copy.
@@ -251,6 +260,7 @@ bool SynthInputs::RecordInit(ID3D12Device* device, ID3D12GraphicsCommandList* cm
 void SynthInputs::ConfirmExecuted()
 {
     _ConfirmMotion();
+    _ConfirmOverlay();
 
     if (!_clearRecorded)
         return;
@@ -264,8 +274,11 @@ void SynthInputs::ConfirmExecuted()
 void SynthInputs::AbandonRecording()
 {
     _AbandonMotion();
+    _AbandonOverlay();
     _clearRecorded = false;
 }
+
+bool SynthInputs::FrameWanted() { return MotionWanted() || HudPlan().detect; }
 
 bool SynthInputs::_EnsureOwnList(ID3D12Device* device)
 {
@@ -400,63 +413,56 @@ bool SynthInputs::RecordMotion(ID3D12Device* device, ID3D12GraphicsCommandList* 
     return _RecordMotionOn(device, cmdList, colour, colourState);
 }
 
-bool SynthInputs::_EnsureMotionLists(ID3D12Device* device)
+bool SynthInputs::_EnsureFrameLists(ID3D12Device* device)
 {
-    if (_motionFence != nullptr)
+    if (_frameFence != nullptr)
     {
         // Built on another device and not yet released after a drain: not proved idle, so not reused.
-        return _motionDevice == device;
+        return _frameDevice == device;
     }
 
-    bool ok = SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_motionFence)));
+    bool ok = SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_frameFence)));
 
-    for (UINT i = 0; ok && i < kMotionLists; ++i)
+    for (UINT i = 0; ok && i < kFrameLists; ++i)
     {
         ok = SUCCEEDED(
-                 device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&_motionAllocators[i]))) &&
-             SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _motionAllocators[i], nullptr,
-                                                 IID_PPV_ARGS(&_motionLists[i]))) &&
-             SUCCEEDED(_motionLists[i]->Close());
+                 device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&_frameAllocators[i]))) &&
+             SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _frameAllocators[i], nullptr,
+                                                 IID_PPV_ARGS(&_frameLists[i]))) &&
+             SUCCEEDED(_frameLists[i]->Close());
     }
 
     if (ok)
     {
-        _motionFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-        ok = _motionFenceEvent != nullptr;
+        _frameFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        ok = _frameFenceEvent != nullptr;
     }
 
     if (!ok)
     {
-        for (UINT i = 0; i < kMotionLists; ++i)
+        for (UINT i = 0; i < kFrameLists; ++i)
         {
-            SafeRelease(_motionLists[i]);
-            SafeRelease(_motionAllocators[i]);
+            SafeRelease(_frameLists[i]);
+            SafeRelease(_frameAllocators[i]);
         }
 
-        SafeRelease(_motionFence);
+        SafeRelease(_frameFence);
         return false;
     }
 
     // Identity only: everything here is released before the device can go.
-    _motionDevice = device;
-    _motionFenceValue = 0;
-    _motionSlot = 0;
+    _frameDevice = device;
+    _frameFenceValue = 0;
+    _frameSlot = 0;
 
-    for (auto& value : _motionFenceValues)
+    for (auto& value : _frameFenceValues)
         value = 0;
 
     return true;
 }
 
-bool SynthInputs::RecordMotionOnQueue(ID3D12CommandQueue* queue, ID3D12Resource* colour,
-                                      D3D12_RESOURCE_STATES colourState)
+template <typename Record> bool SynthInputs::_RunOnQueue(ID3D12CommandQueue* queue, Record&& record)
 {
-    _frameMotion = nullptr;
-    _frameSceneCut = false;
-
-    if (!MotionWanted() || queue == nullptr || colour == nullptr)
-        return true;
-
     ID3D12Device* device = nullptr;
     if (FAILED(queue->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
         return false;
@@ -465,56 +471,238 @@ bool SynthInputs::RecordMotionOnQueue(ID3D12CommandQueue* queue, ID3D12Resource*
 
     do
     {
-        if (!_EnsureMotionLists(device))
+        if (!_EnsureFrameLists(device))
         {
-            _WarnOnce("could not create the lists for the motion estimate");
+            _WarnOnce("could not create the lists for the per-frame recording");
             break;
         }
 
-        const UINT slot = _motionSlot;
+        const UINT slot = _frameSlot;
 
         // Normally long finished: the ring is three frames deep.
-        if (_motionFence->GetCompletedValue() < _motionFenceValues[slot])
+        if (_frameFence->GetCompletedValue() < _frameFenceValues[slot])
         {
-            if (FAILED(_motionFence->SetEventOnCompletion(_motionFenceValues[slot], _motionFenceEvent)) ||
-                WaitForSingleObject(_motionFenceEvent, 2000) != WAIT_OBJECT_0)
+            if (FAILED(_frameFence->SetEventOnCompletion(_frameFenceValues[slot], _frameFenceEvent)) ||
+                WaitForSingleObject(_frameFenceEvent, 2000) != WAIT_OBJECT_0)
             {
-                _WarnOnce("a motion estimate did not finish");
+                _WarnOnce("a per-frame recording did not finish");
                 break;
             }
         }
 
-        if (FAILED(_motionAllocators[slot]->Reset()) ||
-            FAILED(_motionLists[slot]->Reset(_motionAllocators[slot], nullptr)))
+        if (FAILED(_frameAllocators[slot]->Reset()) ||
+            FAILED(_frameLists[slot]->Reset(_frameAllocators[slot], nullptr)))
         {
-            _WarnOnce("could not reset the list for the motion estimate");
+            _WarnOnce("could not reset the list for the per-frame recording");
             break;
         }
 
-        const bool recorded = _RecordMotionOn(device, _motionLists[slot], colour, colourState);
+        const bool recorded = record(device, _frameLists[slot]);
 
-        if (FAILED(_motionLists[slot]->Close()) || !recorded)
+        if (FAILED(_frameLists[slot]->Close()) || !recorded)
         {
             _AbandonMotion();
+            _AbandonOverlay();
             break;
         }
 
-        // FG's queue: FSR-FG's prepare runs on it after this (fg->Present(), then Dispatch), and DLSS-NR's
-        // present pass after that, so both read the field once it exists.
-        ID3D12CommandList* lists[] = { _motionLists[slot] };
+        // FG's queue: FSR-FG's prepare runs on it after the frame's recording (fg->Present(), then Dispatch),
+        // DLSS-NR's present pass after that, then the layer's recording, then FFX's Present, which copies the
+        // layer on this same queue. So each reads what the one before it wrote.
+        ID3D12CommandList* lists[] = { _frameLists[slot] };
         queue->ExecuteCommandLists(1, lists);
 
-        _motionFenceValues[slot] = ++_motionFenceValue;
-        if (FAILED(queue->Signal(_motionFence, _motionFenceValues[slot])))
-            _WarnOnce("could not signal the motion estimate's fence");
+        _frameFenceValues[slot] = ++_frameFenceValue;
+        if (FAILED(queue->Signal(_frameFence, _frameFenceValues[slot])))
+            _WarnOnce("could not signal the per-frame recording's fence");
 
-        _motionSlot = (slot + 1) % kMotionLists;
+        _frameSlot = (slot + 1) % kFrameLists;
         _ConfirmMotion();
+        _ConfirmOverlay();
         result = true;
     } while (false);
 
     device->Release();
     return result;
+}
+
+bool SynthInputs::RecordFrameOnQueue(ID3D12CommandQueue* queue, ID3D12Resource* colour,
+                                     D3D12_RESOURCE_STATES colourState)
+{
+    _frameMotion = nullptr;
+    _frameSceneCut = false;
+    _frameOverlay = false;
+    _layerOwed = false;
+
+    if (!FrameWanted() || queue == nullptr || colour == nullptr)
+        return true;
+
+    return _RunOnQueue(queue,
+                       [&](ID3D12Device* device, ID3D12GraphicsCommandList* list)
+                       {
+                           // Independent parts: one that fails recorded nothing and is dropped alone, so a
+                           // broken estimator does not take the HUD mask with it, nor the other way round.
+                           bool any = false;
+
+                           if (MotionWanted())
+                           {
+                               if (_RecordMotionOn(device, list, colour, colourState))
+                                   any = true;
+                               else
+                                   _AbandonMotion();
+                           }
+
+                           if (_RecordOverlayOn(device, list, colour, colourState, nullptr, colourState))
+                               any = any || _overlayRecorded;
+                           else
+                               _AbandonOverlay();
+
+                           return any;
+                       });
+}
+
+bool SynthInputs::RecordLayerOnQueue(ID3D12CommandQueue* queue, ID3D12Resource* presented,
+                                     D3D12_RESOURCE_STATES presentedState)
+{
+    const bool owed = _layerOwed;
+    _layerOwed = false;
+
+    if (!owed || _overlay == nullptr || queue == nullptr || presented == nullptr)
+        return true;
+
+    return _RunOnQueue(queue,
+                       [&](ID3D12Device*, ID3D12GraphicsCommandList* list)
+                       {
+                           if (_overlay->RecordLayer(list, presented, presentedState))
+                           {
+                               _layerRecorded = true;
+                               return true;
+                           }
+
+                           if (!_reportedLayerFailure)
+                           {
+                               _reportedLayerFailure = true;
+                               LOG_WARN("synthesized FG input: the HUD layer did not record ({}x{}); FSR FG gets no "
+                                        "UI layer (reported once)",
+                                        _width, _height);
+                           }
+
+                           return false;
+                       });
+}
+
+bool SynthInputs::RecordOverlay(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
+                                D3D12_RESOURCE_STATES colourState, ID3D12Resource* presented,
+                                D3D12_RESOURCE_STATES presentedState)
+{
+    _frameOverlay = false;
+    _layerOwed = false;
+
+    if (device == nullptr || cmdList == nullptr || colour == nullptr)
+        return true;
+
+    if (!_RecordOverlayOn(device, cmdList, colour, colourState, presented != nullptr ? presented : colour,
+                          presented != nullptr ? presentedState : colourState))
+    {
+        _AbandonOverlay();
+        return false;
+    }
+
+    return true;
+}
+
+bool SynthInputs::_RecordOverlayOn(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
+                                   D3D12_RESOURCE_STATES colourState, ID3D12Resource* presented,
+                                   D3D12_RESOURCE_STATES presentedState)
+{
+    const auto plan = HudPlan();
+    if (!plan.detect)
+        return true;
+
+    if (_overlay == nullptr)
+        _overlay = std::make_unique<SynthMotion::Overlay_Dx12>();
+
+    // A gap this long means the mask's last frame is not the previous one: start its history over.
+    const long long now = NowMs();
+    const bool stale = _lastOverlayMs == 0 || now - _lastOverlayMs > kMotionStaleMs;
+    _lastOverlayMs = now;
+
+    if (!_overlay->Record(device, cmdList, colour, colourState, stale))
+    {
+        if (!_reportedOverlayFailure)
+        {
+            _reportedOverlayFailure = true;
+            LOG_WARN("synthesized FG input: the HUD mask did not record; FSR FG keeps the constant depth and no UI "
+                     "layer (reported once)");
+        }
+
+        return false;
+    }
+
+    // Too small a frame records nothing and is not an error.
+    _overlayRecorded = _overlay->Pending();
+    _overlayWantsLayer = plan.layer;
+
+    // The bridge has the frame that goes on screen now, on this list. Native D3D12 gets it only after
+    // DLSS-NR's pass, and records the layer then (RecordLayerOnQueue).
+    if (_overlayRecorded && plan.layer && presented != nullptr)
+    {
+        if (_overlay->RecordLayer(cmdList, presented, presentedState))
+        {
+            _layerRecorded = true;
+        }
+        else if (!_reportedLayerFailure)
+        {
+            _reportedLayerFailure = true;
+            LOG_WARN("synthesized FG input: the HUD layer did not record; FSR FG gets no UI layer (reported once)");
+        }
+    }
+
+    return true;
+}
+
+void SynthInputs::_ConfirmOverlay()
+{
+    if (_overlay == nullptr || (!_overlayRecorded && !_layerRecorded))
+        return;
+
+    _overlay->ConfirmExecuted();
+
+    if (_overlayRecorded)
+    {
+        _frameOverlay = true;
+        _layerOwed = _overlayWantsLayer && !_layerRecorded;
+    }
+
+    _overlayRecorded = false;
+    _layerRecorded = false;
+}
+
+void SynthInputs::_AbandonOverlay()
+{
+    if (_overlay != nullptr && (_overlayRecorded || _layerRecorded))
+        _overlay->AbandonRecording();
+
+    _overlayRecorded = false;
+    _layerRecorded = false;
+    _frameOverlay = false;
+    _layerOwed = false;
+}
+
+void SynthInputs::_ReleaseOverlay()
+{
+    if (_overlay != nullptr)
+    {
+        _overlay->Release();
+        _overlay.reset();
+    }
+
+    _lastOverlayMs = 0;
+    _overlayRecorded = false;
+    _layerRecorded = false;
+    _overlayWantsLayer = false;
+    _frameOverlay = false;
+    _layerOwed = false;
 }
 
 bool SynthInputs::_RecordMotionOn(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
@@ -830,24 +1018,24 @@ void SynthInputs::_ReleaseMotion()
     _frameMotion = nullptr;
     _frameSceneCut = false;
 
-    for (UINT i = 0; i < kMotionLists; ++i)
+    for (UINT i = 0; i < kFrameLists; ++i)
     {
-        SafeRelease(_motionLists[i]);
-        SafeRelease(_motionAllocators[i]);
-        _motionFenceValues[i] = 0;
+        SafeRelease(_frameLists[i]);
+        SafeRelease(_frameAllocators[i]);
+        _frameFenceValues[i] = 0;
     }
 
-    SafeRelease(_motionFence);
+    SafeRelease(_frameFence);
 
-    if (_motionFenceEvent != nullptr)
+    if (_frameFenceEvent != nullptr)
     {
-        CloseHandle(_motionFenceEvent);
-        _motionFenceEvent = nullptr;
+        CloseHandle(_frameFenceEvent);
+        _frameFenceEvent = nullptr;
     }
 
-    _motionDevice = nullptr;
-    _motionFenceValue = 0;
-    _motionSlot = 0;
+    _frameDevice = nullptr;
+    _frameFenceValue = 0;
+    _frameSlot = 0;
 
     if (_readback != nullptr)
     {
@@ -875,6 +1063,7 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
     {
         _frameMotion = nullptr;
         _frameSceneCut = false;
+        _frameOverlay = false;
         return;
     }
 
@@ -925,8 +1114,10 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
     }
     ID3D12Resource* frameMotion = _frameMotion;
     const bool frameSceneCut = _frameSceneCut;
+    const bool frameOverlay = _frameOverlay;
     _frameMotion = nullptr;
     _frameSceneCut = false;
+    _frameOverlay = false;
 
     // Only a field at the presenter's extent can stand in for the zero one.
     if (frameMotion != nullptr)
@@ -1011,6 +1202,14 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
     // 2026-09-28).
     ID3D12GraphicsCommandList* cmdList = nullptr;
 
+    // The HUD (Synth_Hud.h): the mask's depth instead of the constant one, and the UI layer, when this base
+    // frame's mask executed at the presenter's extent. Both rest where the pair does and are valid until
+    // present: the depth is read by FSR-FG's prepare within this frame, the layer copied by FFX's Present.
+    const auto hudPlan = HudPlan();
+    const bool maskFits =
+        frameOverlay && _overlay != nullptr && _overlay->Width() == _width && _overlay->Height() == _height;
+    const auto hud = ChooseSynthHudFeed(hudPlan, maskFits, maskFits && _overlay->LayerWritten());
+
     Dx12Resource velocity {};
     velocity.type = FG_ResourceType::Velocity;
     velocity.cmdList = cmdList;
@@ -1023,7 +1222,7 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
     Dx12Resource depth {};
     depth.type = FG_ResourceType::Depth;
     depth.cmdList = cmdList;
-    depth.resource = _depth;
+    depth.resource = hud.maskDepth ? _overlay->Depth() : _depth;
     depth.width = _width;
     depth.height = _height;
     depth.state = kRestState;
@@ -1038,6 +1237,44 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
     // History starts over once FG has actually taken the first pair of a size, not before: a paused
     // FG refuses resources, and a reset spent on a refused frame is a reset lost.
     _resetOwed = false;
+
+    if (hud.maskDepth && !_reportedMaskDepth)
+    {
+        _reportedMaskDepth = true;
+        LOG_INFO("synthesized FG input: FSR-FG now gets the HUD mask as depth ({}x{}: 1.0, near, on the detected "
+                 "interface, 0.0 elsewhere)",
+                 _width, _height);
+    }
+
+    // FSRFG_Dx12::Dispatch registers it as FFX's UI resource, for this input only.
+    if (hud.layer)
+    {
+        Dx12Resource layer {};
+        layer.type = FG_ResourceType::UIColor;
+        layer.cmdList = cmdList;
+        layer.resource = _overlay->Layer();
+        layer.width = _width;
+        layer.height = _height;
+        layer.state = kRestState;
+        layer.validity = FG_ResourceValidity::UntilPresent;
+
+        if (fg->SetResource(&layer))
+        {
+            if (!_reportedLayer)
+            {
+                _reportedLayer = true;
+                LOG_INFO("synthesized FG input: the HUD layer ({}x{}, format {}) is FFX's UI resource; it is "
+                         "composed over every presented frame",
+                         _width, _height, (UINT) _overlay->Layer()->GetDesc().Format);
+            }
+        }
+        else if (!_reportedLayerRefused)
+        {
+            _reportedLayerRefused = true;
+            LOG_WARN("synthesized FG input: {} refused the HUD layer (is [FrameGen] DisableUI on?), reported once",
+                     fg->Name());
+        }
+    }
 
     if (!_fedReported)
     {
@@ -1059,6 +1296,7 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
 void SynthInputs::Release()
 {
     _ReleaseMotion();
+    _ReleaseOverlay();
 
     for (auto* resource : _retired)
     {

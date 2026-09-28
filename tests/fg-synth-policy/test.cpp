@@ -3,6 +3,7 @@
 // compares pointers, and the policy only does arithmetic on numbers the FG input feeds it.
 #include <cassert>
 #include <cstdio>
+#include <initializer_list>
 
 struct ID3D12Device
 {
@@ -13,6 +14,7 @@ struct ID3D12Resource
     int id = 0;
 };
 
+#include "inputs/FG/Synth_Hud.h"
 #include "inputs/FG/Synth_Policy.h"
 #include "shaders/synth_motion/SynthMotion_Handoff.h"
 
@@ -268,6 +270,74 @@ static void duplicateCases()
     std::puts("duplicate cases passed");
 }
 
+// The HUD keys (Synth_Hud.h): which fix runs, and what FSR-FG is handed.
+static void hudCases()
+{
+    // Defaults: near depth on, the layer off. Without synthesized motion nothing runs at all, so the input is
+    // what it was before the keys existed.
+    {
+        const auto plan = PlanSynthHud(true, false, false, false);
+        assert(!plan.depth && !plan.layer && !plan.detect);
+    }
+
+    // With motion, near depth runs, and so does the mask it needs.
+    {
+        const auto plan = PlanSynthHud(true, false, true, false);
+        assert(plan.depth && !plan.layer && plan.detect);
+    }
+
+    // Near depth never runs without motion: zero game vectors make it a no-op that would still cost the mask.
+    for (bool layer : { false, true })
+    {
+        for (bool disableUi : { false, true })
+            assert(!PlanSynthHud(true, layer, false, disableUi).depth);
+    }
+
+    // The layer does not need motion: it holds the HUD however the interpolator moved it.
+    {
+        const auto plan = PlanSynthHud(false, true, false, false);
+        assert(!plan.depth && plan.layer && plan.detect);
+    }
+
+    // DisableUI refuses every UI resource, so the layer is not recorded for nobody; near depth is unaffected.
+    {
+        const auto plan = PlanSynthHud(true, true, true, true);
+        assert(plan.depth && !plan.layer && plan.detect);
+        assert(!PlanSynthHud(false, true, true, true).detect);
+    }
+
+    // The mask is recorded exactly when one of the fixes runs, over every combination.
+    for (int bits = 0; bits < 16; ++bits)
+    {
+        const auto plan = PlanSynthHud(bits & 1, bits & 2, bits & 4, bits & 8);
+        assert(plan.detect == (plan.depth || plan.layer));
+    }
+
+    // Feed: the mask's depth only for a frame whose mask executed at the presenter's extent; otherwise the
+    // constant depth, as before.
+    {
+        const auto plan = PlanSynthHud(true, true, true, false);
+        auto feed = ChooseSynthHudFeed(plan, true, true);
+        assert(feed.maskDepth && feed.layer);
+
+        feed = ChooseSynthHudFeed(plan, false, true);
+        assert(!feed.maskDepth && !feed.layer);
+
+        // A layer never written yet (native D3D12 writes it after this decision) is not handed to FFX: it would
+        // compose memory nothing wrote. The depth does not wait for it.
+        feed = ChooseSynthHudFeed(plan, true, false);
+        assert(feed.maskDepth && !feed.layer);
+    }
+
+    // A fix that is off is never handed over, whatever the mask did.
+    {
+        const auto feed = ChooseSynthHudFeed(PlanSynthHud(false, false, true, false), true, true);
+        assert(!feed.maskDepth && !feed.layer);
+    }
+
+    std::puts("hud cases passed");
+}
+
 int main()
 {
     handoffCases();
@@ -275,6 +345,7 @@ int main()
     fastMotionCases();
     floorCases();
     duplicateCases();
-    std::puts("fg synth policy: handoff, warming, fast-motion, floor and duplicate cases passed");
+    hudCases();
+    std::puts("fg synth policy: handoff, warming, fast-motion, floor, duplicate and hud cases passed");
     return 0;
 }

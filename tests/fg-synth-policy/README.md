@@ -2,9 +2,13 @@
 
 Run `python3 tests/fg-synth-policy/run.py` from the repository root. It builds `test.cpp` with g++
 C++20, `-Werror`, ASan and UBSan in a temporary directory and includes the production headers as
-they are: `OptiScaler/inputs/FG/Synth_Policy.h` and `OptiScaler/shaders/synth_motion/SynthMotion_Handoff.h`.
-Neither touches the GPU, so nothing is faked beyond two empty `ID3D12Device` / `ID3D12Resource`
-structs.
+they are: `OptiScaler/inputs/FG/Synth_Policy.h`, `OptiScaler/inputs/FG/Synth_Hud.h` and
+`OptiScaler/shaders/synth_motion/SynthMotion_Handoff.h`. None touches the GPU, so nothing is faked beyond
+two empty `ID3D12Device` / `ID3D12Resource` structs.
+
+Before compiling, `run.py` also holds the HUD mask's thresholds (`shaders/synth_motion/SynthOverlay_Dx12.cpp`)
+equal to DLSS-NR's (`shaders/dlssnr/DlssNr_UiMask_Dx12.cpp`), which they copy: one rule, one set of
+thresholds, two passes.
 
 ## What it exercises
 
@@ -35,9 +39,16 @@ structs.
   - a moving game with a rare identical frame;
   - identical frames in long runs.
 
+- **The HUD keys** (`Synth_Hud.h`). Near depth (`SynthesizedHudDepth`) never runs without synthesized
+  motion, so its default of on leaves the input unchanged until motion is on; the layer
+  (`SynthesizedHudLayer`) runs without motion but not under `DisableUI`; the mask is recorded exactly when
+  one of them runs, over all sixteen combinations. For the feed: the mask's depth only for a frame whose
+  mask executed, and the layer not before it has been written once.
+
 ## What it does not cover
 
-The readback of motion rows, the estimator, FSR-FG's reaction to Reset, the bridge and D3D12 call
-sites (`tests/bridge-lifetime` covers the bridge's calls with fakes), and anything about image
-quality. Design: `OptiScaler/dlssnr/design/synthesized-frame-generation.md`, "Motion into FG, and
-emulator behaviour".
+The readback of motion rows, the estimator, the HUD mask's pixels (`tests/synth-motion-d3d12` runs those
+on a GPU), FSR-FG's reaction to Reset, depth or a UI layer, the bridge and D3D12 call sites
+(`tests/bridge-lifetime` covers the bridge's calls with fakes), and anything about image quality. Design:
+`OptiScaler/dlssnr/design/synthesized-frame-generation.md`, "Motion into FG, and emulator behaviour" and
+"The HUD: near depth and a UI layer".

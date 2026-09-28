@@ -72,8 +72,9 @@ static void FeedSynthD3D12(IDXGISwapChain* swapchain, IFGFeature_Dx12* fg)
 
     // With [FrameGen] SynthesizedMotion, the motion field from the frame the game just finished, on the same
     // queue and ahead of FSR-FG's prepare. It is estimated here, before DLSS-NR's pass below, so NR takes
-    // this field instead of estimating again (SynthMotion::Handoff).
-    if (Config::Instance()->FGSynthesizedMotion.value_or_default())
+    // this field instead of estimating again (SynthMotion::Handoff). The HUD mask goes on the same list, for
+    // the depth FSR-FG's prepare reads.
+    if (SynthInputs::FrameWanted())
     {
         IDXGISwapChain3* swapchain3 = nullptr;
 
@@ -84,7 +85,7 @@ static void FeedSynthD3D12(IDXGISwapChain* swapchain, IFGFeature_Dx12* fg)
             if (swapchain3->GetBuffer(swapchain3->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&backbuffer)) == S_OK &&
                 backbuffer != nullptr)
             {
-                _synthD3D12->RecordMotionOnQueue(queue, backbuffer, D3D12_RESOURCE_STATE_PRESENT);
+                _synthD3D12->RecordFrameOnQueue(queue, backbuffer, D3D12_RESOURCE_STATE_PRESENT);
                 backbuffer->Release();
             }
 
@@ -98,6 +99,33 @@ static void FeedSynthD3D12(IDXGISwapChain* swapchain, IFGFeature_Dx12* fg)
     {
         _synthD3D12->Feed(fg, device);
         device->Release();
+    }
+}
+
+// With [FrameGen] SynthesizedHudLayer, the synthesized input's UI layer, cut from the backbuffer as it will be
+// shown: after DLSS-NR's present pass, which edits it in place, and before FFX's Present, which copies the layer
+// on this same queue. Records nothing unless this base frame's HUD mask asked for a layer.
+static void FinishSynthD3D12(IDXGISwapChain* swapchain, IFGFeature_Dx12* fg)
+{
+    auto* queue = fg->GetCommandQueue();
+
+    if (_synthD3D12 == nullptr || !_synthD3D12->LayerOwed() || queue == nullptr)
+        return;
+
+    IDXGISwapChain3* swapchain3 = nullptr;
+
+    if (swapchain->QueryInterface(IID_PPV_ARGS(&swapchain3)) == S_OK && swapchain3 != nullptr)
+    {
+        ID3D12Resource* backbuffer = nullptr;
+
+        if (swapchain3->GetBuffer(swapchain3->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&backbuffer)) == S_OK &&
+            backbuffer != nullptr)
+        {
+            _synthD3D12->RecordLayerOnQueue(queue, backbuffer, D3D12_RESOURCE_STATE_PRESENT);
+            backbuffer->Release();
+        }
+
+        swapchain3->Release();
     }
 }
 
@@ -1418,6 +1446,10 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         }
 #endif
     }
+
+    // Synthesized FG's UI layer: now that the pass above has left the backbuffer as it will be shown.
+    if (willPresent && state.currentFG != nullptr && SynthD3D12Wanted())
+        FinishSynthD3D12(This, state.currentFG);
 
     HRESULT result;
     if (pPresentParameters == nullptr)
