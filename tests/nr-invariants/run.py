@@ -140,6 +140,8 @@ targets = [
 # build itself fails on the missing header, which is the louder signal.
 if (precompile / 'DlssNr_UiMask_Shader.cso').exists():
     targets.append(('DlssNr_UiMask_Shader.cso', 'DlssNr_UiMask_Shader.h', 'DlssNr_UiMask_cso', b'DXBC'))
+if (precompile / 'DlssNr_Guides_Shader.cso').exists():
+    targets.append(('DlssNr_Guides_Shader.cso', 'DlssNr_Guides_Shader.h', 'DlssNr_Guides_cso', b'DXBC'))
 
 with tempfile.TemporaryDirectory() as scratch:
     for binary, header, array, magic in targets:

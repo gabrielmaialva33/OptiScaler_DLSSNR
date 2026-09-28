@@ -438,6 +438,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\dlssnr\precompile\DlssNr_Stabilizer_Shader.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_UiMask_Dx12.h" />
     <ClInclude Include="shaders\dlssnr\precompile\DlssNr_UiMask_Shader.h" />
+    <ClInclude Include="shaders\dlssnr\precompile\DlssNr_Guides_Shader.h" />
     <ClInclude Include="shaders\synth_motion\SynthMotion_Dx12.h" />
     <ClInclude Include="shaders\synth_motion\SynthMotion_Handoff.h" />
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ClearFloat_Shader.h" />
