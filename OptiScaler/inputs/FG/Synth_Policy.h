@@ -5,13 +5,20 @@
 // (tests/fg-synth-policy). Design: dlssnr/design/synthesized-frame-generation.md, "Motion into FG, and
 // emulator behaviour".
 //
-// - Fast-motion response: above a median motion magnitude, FG is fed with Reset, which makes FSR's
-//   interpolation copy the frame instead of interpolating (AMD AFMF's Fast Motion Response).
+// - Fast-motion response: FG is fed with Reset, which makes FSR's interpolation copy the frame instead
+//   of interpolating (AMD AFMF's Fast Motion Response), when
+//   - the motion is incoherent: more than a set share of neighbouring samples disagree while the median
+//     exceeds kLargeMotionOfWidth of the image (the rule; "Coherence, not speed" in the design note), or
+//   - the median exceeds a hard cap in pixels, however coherent.
+//   Each Reset also restarts FSR's own optical flow and its game-vector arbitration for about ten
+//   frames, so a uniform pan, which interpolates correctly at any speed, is left alone.
 // - Low-fps floor: below a base rate, FG is not fed at all.
 // - Duplicate presents: detected from all-zero motion samples interleaved with moving ones, reported
 //   once, never acted on (collapsing them would need a same-frame CPU wait on the GPU).
 //
 // Motion samples arrive a few frames late (read back from the GPU); the frame clock does not.
+
+#include "Synth_MotionStats.h"
 
 #include <cstdint>
 
@@ -25,18 +32,28 @@ class SynthFgPolicy
         Skip,     // do not feed FG this frame
     };
 
-    // 0 turns each off. fastMotionPx: median displacement, in display pixels per base frame, above
-    // which frames are repeated. minFps: base rate below which FG is not fed.
-    void Configure(float fastMotionPx, float minFps)
+    // 0 turns each off.
+    // - capPx: median displacement, in display pixels per base frame, above which frames are repeated
+    //   whatever the coherence ([FrameGen] SynthesizedFastMotion).
+    // - minFps: base rate below which FG is not fed ([FrameGen] SynthesizedMinFps).
+    // - incoherence: share of neighbouring samples that disagree, 0..1, above which frames are repeated
+    //   while the median exceeds kLargeMotionOfWidth ([FrameGen] SynthesizedIncoherence).
+    void Configure(float capPx, float minFps, float incoherence)
     {
-        if (fastMotionPx <= 0.0f)
+        // A response held under other thresholds is decided afresh by the next sample; one switched off
+        // stops at once.
+        if (capPx != _capPx || incoherence != _incoherence)
+        {
             _fast = false;
+            _calmSamples = 0;
+        }
 
         if (minFps <= 0.0f)
             _belowFloor = false;
 
-        _fastMotionPx = fastMotionPx;
+        _capPx = capPx;
         _minFps = minFps;
+        _incoherence = incoherence;
     }
 
     // One base frame presented, at nowMs on a monotonic clock.
@@ -69,21 +86,33 @@ class SynthFgPolicy
             _belowFloor = fps < _minFps;
     }
 
-    // One motion sample: the median displacement magnitude over the sampled rows, whether every
-    // sampled vector was exactly zero, and whether the estimator reported a scene cut.
-    void ObserveMotion(float medianPx, bool allZero, bool sceneCut)
+    // One motion sample: the statistics of the sampled rows (SynthMotionStats::Measure), and whether the
+    // estimator reported a scene cut.
+    void ObserveMotion(const SynthMotionStats::Stats& stats, bool sceneCut)
     {
         if (sceneCut)
             _cutPending = true;
 
-        if (_fastMotionPx > 0.0f)
+        const bool incoherenceOn = _incoherence > 0.0f;
+        const bool capOn = _capPx > 0.0f;
+
+        if (incoherenceOn || capOn)
         {
-            if (medianPx > _fastMotionPx)
+            // Each trigger holds until its levels fall below kFastRelease of the thresholds; two calm
+            // samples in a row, below every level held, end the response.
+            const bool incoherent =
+                incoherenceOn && stats.incoherent > _incoherence && stats.medianOfWidth > kLargeMotionOfWidth;
+            const bool overCap = capOn && stats.medianPx > _capPx;
+            const bool incoherenceCalm = !incoherenceOn || stats.incoherent < _incoherence * kFastRelease ||
+                                         stats.medianOfWidth < kLargeMotionOfWidth * kFastRelease;
+            const bool capCalm = !capOn || stats.medianPx < _capPx * kFastRelease;
+
+            if (incoherent || overCap)
             {
                 _fast = true;
                 _calmSamples = 0;
             }
-            else if (_fast && medianPx < _fastMotionPx * kFastRelease)
+            else if (_fast && incoherenceCalm && capCalm)
             {
                 if (++_calmSamples >= kCalmSamplesToRelease)
                     _fast = false;
@@ -94,7 +123,7 @@ class SynthFgPolicy
             }
         }
 
-        _ObserveCadence(allZero);
+        _ObserveCadence(stats.allZero);
     }
 
     // The decision for the frame about to be fed. A pending scene cut is spent here.
@@ -123,6 +152,7 @@ class SynthFgPolicy
     }
 
     bool Fast() const { return _fast; }
+    bool FastMotionConfigured() const { return _capPx > 0.0f || _incoherence > 0.0f; }
     bool BelowFloor() const { return _belowFloor; }
     double BaseFps() const { return _intervalMs > 0.0 ? 1000.0 / _intervalMs : 0.0; }
     uint32_t IdenticalInWindow() const { return _identical; }
@@ -132,6 +162,11 @@ class SynthFgPolicy
     static constexpr double kIntervalAlpha = 0.1;
     static constexpr float kFloorResume = 1.15f;
     static constexpr float kFastRelease = 0.75f;
+    // The incoherence rule's size gate: the median above 1% of the image width per base frame (19 px at
+    // 1920, 34 px at 3440). At the midpoint frame a wrong vector misplaces content by at most half the
+    // local disagreement, which the motion bounds; below this that halo costs less than the ten degraded
+    // frames a Reset starts in FSR. To be revisited from the logged p50.
+    static constexpr float kLargeMotionOfWidth = 0.01f;
     static constexpr uint32_t kCalmSamplesToRelease = 2;
     static constexpr uint32_t kWindow = 60;
     static constexpr uint32_t kMinIdentical = kWindow / 4;
@@ -168,8 +203,9 @@ class SynthFgPolicy
                             _alternations >= kMinAlternations;
     }
 
-    float _fastMotionPx = 0.0f;
+    float _capPx = 0.0f;
     float _minFps = 0.0f;
+    float _incoherence = 0.0f;
 
     double _lastFrameMs = 0.0;
     double _intervalMs = 0.0;

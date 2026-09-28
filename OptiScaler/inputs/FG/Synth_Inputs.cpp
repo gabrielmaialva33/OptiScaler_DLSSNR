@@ -10,8 +10,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
-#include <cstring>
 
 using namespace OptiMath;
 
@@ -22,9 +20,10 @@ namespace
 constexpr long long kMotionStaleMs = 250;
 constexpr long long kFastSummaryMs = 10000;
 
-// R16G16_FLOAT, and every fourth pixel of a sampled row is enough for a median.
+// R16G16_FLOAT, and every fourth pixel of a sampled row is enough for a median. Neighbouring samples,
+// 4 px apart, are also what the incoherent share compares (SynthMotionStats::Measure).
 constexpr UINT kSampleBytesPerPixel = 4;
-constexpr UINT kSampleStride = 4;
+constexpr UINT kSampleStride = SynthMotionStats::kStride;
 
 long long NowMs()
 {
@@ -33,46 +32,6 @@ long long NowMs()
 }
 
 UINT AlignUp(UINT value, UINT alignment) { return (value + alignment - 1) / alignment * alignment; }
-
-float HalfToFloat(uint16_t half)
-{
-    const uint32_t sign = (half & 0x8000u) << 16;
-    const uint32_t exponent = (half >> 10) & 0x1fu;
-    uint32_t mantissa = half & 0x3ffu;
-    uint32_t bits;
-
-    if (exponent == 0)
-    {
-        if (mantissa == 0)
-        {
-            bits = sign;
-        }
-        else
-        {
-            // Subnormal: normalise it.
-            int e = -1;
-            do
-            {
-                ++e;
-                mantissa <<= 1;
-            } while ((mantissa & 0x400u) == 0);
-
-            bits = sign | ((uint32_t) (127 - 15 - e) << 23) | ((mantissa & 0x3ffu) << 13);
-        }
-    }
-    else if (exponent == 0x1f)
-    {
-        bits = sign | 0x7f800000u | (mantissa << 13);
-    }
-    else
-    {
-        bits = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
-    }
-
-    float value;
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
-}
 
 bool MotionWanted() { return Config::Instance()->FGSynthesizedMotion.value_or_default(); }
 
@@ -738,43 +697,14 @@ void SynthInputs::_ReadSamples()
             return;
 
         _slotValid[due] = false;
-        _magnitudes.clear();
-        bool allZero = true;
 
         const uint8_t* base = _readbackData + (size_t) due * kSampleRows * _sampleRowPitch;
-
-        for (UINT i = 0; i < kSampleRows; ++i)
-        {
-            const auto* row = reinterpret_cast<const uint16_t*>(base + (size_t) i * _sampleRowPitch);
-
-            for (UINT x = 0; x < _sampleWidth; x += kSampleStride)
-            {
-                const uint16_t hx = row[2 * x];
-                const uint16_t hy = row[2 * x + 1];
-
-                // Negative zero is zero.
-                if (((hx | hy) & 0x7fffu) != 0)
-                    allZero = false;
-
-                const float fx = HalfToFloat(hx);
-                const float fy = HalfToFloat(hy);
-                const float magnitude = std::sqrt(fx * fx + fy * fy);
-
-                if (std::isfinite(magnitude))
-                    _magnitudes.push_back(magnitude);
-            }
-        }
-
-        float median = 0.0f;
-        if (!_magnitudes.empty())
-        {
-            auto middle = _magnitudes.begin() + _magnitudes.size() / 2;
-            std::nth_element(_magnitudes.begin(), middle, _magnitudes.end());
-            median = *middle;
-        }
+        const auto stats =
+            SynthMotionStats::Measure(base, kSampleRows, _sampleRowPitch, _sampleWidth, kSampleStride, _sampleScratch);
+        _fastWindowMotion.Add(stats);
 
         // The field's own scene cut already reached this frame's Reset through _frameSceneCut.
-        _policy.ObserveMotion(median, allZero, false);
+        _policy.ObserveMotion(stats, false);
     }
 }
 
@@ -883,7 +813,8 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
 
     // The policy sees every base frame, generated or not: the clock for the floor, the late motion
     // samples for the fast-motion response and the duplicate advice.
-    _policy.Configure(cfg.FGSynthesizedFastMotion.value_or_default(), cfg.FGSynthesizedMinFps.value_or_default());
+    _policy.Configure(cfg.FGSynthesizedFastMotion.value_or_default(), cfg.FGSynthesizedMinFps.value_or_default(),
+                      cfg.FGSynthesizedIncoherence.value_or_default());
     _policy.ObserveBaseFrame((double) NowMs());
     _ReadSamples();
 
@@ -897,8 +828,10 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
 
     const auto action = _policy.Decide();
 
-    // How often the fast-motion response repeated a frame, summarised every 10 s while it did, so the
-    // threshold can be tuned from the log as well as by eye (the menu's "Fast motion repeat").
+    // How often the fast-motion response repeated a frame, and what the motion samples measured, summarised
+    // every 10 s while the response is configured and the window either repeated a frame or saw large
+    // motion. The thresholds can then be tuned from the log as well as by eye (the menu's "Incoherent
+    // motion" and "Fast motion cap").
     {
         const long long now = NowMs();
         ++_fastWindowFrames;
@@ -911,16 +844,25 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
         }
         else if (now - _fastWindowStartMs >= kFastSummaryMs)
         {
-            if (_fastRepeats > 0)
+            const auto& motion = _fastWindowMotion;
+
+            if (_fastRepeats > 0 ||
+                (_policy.FastMotionConfigured() && motion.maxMedianOfWidth > SynthFgPolicy::kLargeMotionOfWidth))
             {
-                LOG_INFO("synthesized FG input: fast motion repeated {} of the last {} base frames ({:.0f} px "
-                         "threshold)",
-                         _fastRepeats, _fastWindowFrames, cfg.FGSynthesizedFastMotion.value_or_default());
+                LOG_INFO("synthesized FG input: fast motion repeated {} of the last {} base frames "
+                         "(SynthesizedIncoherence {:.2f}, SynthesizedFastMotion {:.0f} px; 0 is off). {} motion "
+                         "samples, mean / max: median {:.1f} / {:.1f} px ({:.1f}% of the width at most), p90 "
+                         "{:.1f} / {:.1f} px, incoherent {:.0f}% / {:.0f}%",
+                         _fastRepeats, _fastWindowFrames, cfg.FGSynthesizedIncoherence.value_or_default(),
+                         cfg.FGSynthesizedFastMotion.value_or_default(), motion.samples, motion.MeanMedianPx(),
+                         motion.maxMedianPx, motion.maxMedianOfWidth * 100.0f, motion.MeanP90Px(), motion.maxP90Px,
+                         motion.MeanIncoherent() * 100.0f, motion.maxIncoherent * 100.0f);
             }
 
             _fastRepeats = 0;
             _fastWindowFrames = 0;
             _fastWindowStartMs = now;
+            _fastWindowMotion = {};
         }
     }
     ID3D12Resource* frameMotion = _frameMotion;

@@ -126,7 +126,7 @@ summary = "Production Vulkan upscaler timing: nonblocking NOT_READY retry, error
 [fg-synth-policy]
 tier = "host"
 timeout = 300
-summary = "Synthesized FG's policy (fast-motion response, low-fps floor, duplicate-present advice) and the NR/FG motion handoff, from the production headers."
+summary = "Synthesized FG's policy (fast-motion response on incoherent motion and its cap, low-fps floor, duplicate-present advice), its motion statistics, and the NR/FG motion handoff, from the production headers."
 
 [mfg-pattern]
 tier = "host"

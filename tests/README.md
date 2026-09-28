@@ -48,9 +48,10 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   or GPU synchronization coverage.
 - `mfg-pattern` — the real MFG byte signatures and scanner matcher against synthetic
   buffers. Runs no patcher and touches no DLL.
-- `fg-synth-policy` — synthesized FG's decisions (fast-motion response, low-fps floor,
-  duplicate-present advice) and the NR/FG motion handoff, from the production headers. Pure
-  logic: no GPU, no readback, no FSR.
+- `fg-synth-policy` — synthesized FG's decisions (fast-motion response on incoherent motion
+  and its cap, low-fps floor, duplicate-present advice), the motion statistics they are made
+  from, and the NR/FG motion handoff, from the production headers. Pure logic on rows laid out
+  as the readback lays them out: no GPU, no FSR.
 - `nr-before-upscale` — pre-upscale boundary functions against strict host fakes.
 - `nr-dispatch` — composition constants, descriptor slots and partial initialization cleanup.
 - `nr-gpu-timing` — portable timing validation, plus the duplicate-execution

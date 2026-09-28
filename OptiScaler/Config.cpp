@@ -231,6 +231,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGSkipReset.set_from_config(readBool("FrameGen", "SkipReset"));
             FGSynthesizedMotion.set_from_config(readBool("FrameGen", "SynthesizedMotion"));
             FGSynthesizedFastMotion.set_from_config(readFloat("FrameGen", "SynthesizedFastMotion"));
+            FGSynthesizedIncoherence.set_from_config(readFloat("FrameGen", "SynthesizedIncoherence"));
             FGSynthesizedMinFps.set_from_config(readFloat("FrameGen", "SynthesizedMinFps"));
             FGRectLeft.set_from_config(readInt("FrameGen", "RectLeft"));
             FGRectTop.set_from_config(readInt("FrameGen", "RectTop"));
@@ -1155,6 +1156,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FGSynthesizedMotion.value_for_config()).c_str());
         ini.SetValue("FrameGen", "SynthesizedFastMotion",
                      GetFloatValue(Instance()->FGSynthesizedFastMotion.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "SynthesizedIncoherence",
+                     GetFloatValue(Instance()->FGSynthesizedIncoherence.value_for_config()).c_str());
         ini.SetValue("FrameGen", "SynthesizedMinFps",
                      GetFloatValue(Instance()->FGSynthesizedMinFps.value_for_config()).c_str());
         ini.SetValue("FrameGen", "RectLeft", GetIntValue(Instance()->FGRectLeft.value_for_config()).c_str());

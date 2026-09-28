@@ -636,6 +636,15 @@ background. The median magnitude cannot tell a fast pan from a fast strafe past 
 It is written while the response is configured and the window repeated a frame or saw a median above
 1% of the width.
 
+**Built** the same day. One change from the plan: the median vector is taken over every fourth vector
+(16 px apart). Its two selections over every vector cost more than the rest of a readback together.
+The CPU time per readback at 3440 wide, measured on the dev box with g++ `-O2`:
+- the old loop, 67 µs;
+- with a full median vector, 261 µs;
+- as built, 148 µs.
+
+That is the extra cost of a base frame on the present thread.
+
 **Not done.** A Reset is whole-frame in FSR, so there is no regional repeat. The thresholds have not
 been measured in a game yet. Tests: `tests/fg-synth-policy`.
 

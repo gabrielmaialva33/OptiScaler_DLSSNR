@@ -120,7 +120,7 @@ class SynthInputs
 
     // Rows of the field read back for the policy, a few confirmed frames late, as the estimator reads
     // its scene-cut flag.
-    static constexpr UINT kSampleRows = 16;
+    static constexpr UINT kSampleRows = SynthMotionStats::kRows;
     static constexpr UINT kSampleSlots = 4;
     static constexpr UINT kSampleLatency = kSampleSlots - 1;
     ID3D12Resource* _readback = nullptr;
@@ -132,7 +132,7 @@ class SynthInputs
     bool _slotValid[kSampleSlots] {};
     UINT64 _slotFrame[kSampleSlots] {};
     UINT64 _motionConfirmed = 0;
-    std::vector<float> _magnitudes;
+    SynthMotionStats::Scratch _sampleScratch;
 
     SynthFgPolicy _policy;
     bool _reportedEstimator = false;
@@ -142,10 +142,11 @@ class SynthInputs
     bool _reportedSkip = false;
     bool _reportedMotionFed = false;
 
-    // Fast-motion repeats in the current 10 s summary window (Feed).
+    // Fast-motion repeats in the current 10 s summary window (Feed), and the motion samples it saw.
     long long _fastWindowStartMs = 0;
     uint32_t _fastWindowFrames = 0;
     uint32_t _fastRepeats = 0;
+    SynthMotionStats::Window _fastWindowMotion;
 
     ID3D12Resource* _velocity = nullptr;
     ID3D12Resource* _depth = nullptr;
