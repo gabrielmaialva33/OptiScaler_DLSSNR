@@ -7,6 +7,7 @@
 #include <memory>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
+#include <shaders/synth_motion/SynthMotion_Handoff.h>
 #include <nvsdk_ngx.h>
 
 // DLSS 5 Neural Rendering, run over the upscaler's output.
@@ -178,9 +179,9 @@ class SynthMotionGuide
     uint32_t _height = 0;
     DXGI_FORMAT _format = DXGI_FORMAT_UNKNOWN;
     long long _lastRecordMs = 0;
-    // While frame generation's estimator warms up and nothing of ours exists: when the wait began, -1
-    // otherwise (SynthMotion::Handoff::WaitForPeer).
-    long long _peerWaitSinceMs = -1;
+    // While frame generation's estimator warms up and nothing of ours exists
+    // (SynthMotion::Handoff::WaitForPeer).
+    SynthMotion::Handoff::PeerWait _peerWait {};
     D3D12_RESOURCE_STATES _handedOutState = D3D12_RESOURCE_STATE_COMMON;
     // The field handed to the pass: ours, or frame generation's taken through SynthMotion::Handoff.
     ID3D12Resource* _handedOutResource = nullptr;

@@ -4,6 +4,7 @@
 #include "Synth_Policy.h"
 
 #include <d3d12.h>
+#include <shaders/synth_motion/SynthMotion_Handoff.h>
 #include <memory>
 #include <vector>
 
@@ -97,9 +98,8 @@ class SynthInputs
     // The estimator, used when DLSS-NR did not publish a field for this base frame.
     std::unique_ptr<SynthMotion::Estimator_Dx12> _estimator;
     long long _lastEstimateMs = 0;
-    // While DLSS-NR's estimator warms up and nothing of ours exists: when the wait began, -1 otherwise
-    // (SynthMotion::Handoff::WaitForPeer).
-    long long _peerWaitSinceMs = -1;
+    // While DLSS-NR's estimator warms up and nothing of ours exists (SynthMotion::Handoff::WaitForPeer).
+    SynthMotion::Handoff::PeerWait _peerWait {};
     bool _estimatorRecorded = false;
 
     // This base frame's field, owned by the estimator or by DLSS-NR; handed to FG instead of the zero

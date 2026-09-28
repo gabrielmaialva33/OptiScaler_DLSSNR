@@ -22,7 +22,9 @@ structs.
     device and extent;
   - `WithdrawWarming` taking back only the releasing consumer's own announcement;
   - `WaitForPeer` only with no estimator and a warming peer;
-  - its `kMaxPeerWaitMs` bound, and a frame with no announcement ending the wait.
+  - its bound, `kMaxPeerWaitFrames` fresh frames in a row, and a frame with no announcement ending it;
+  - a loading screen at a frame every two seconds, which never counts toward the bound, and a stale gap
+    mid-wait starting the count over.
 - **Fast-motion response.** The threshold and its 75% release, the two calm samples needed to leave,
   a spike resetting that count, switching it off mid-burst, and a scene cut repeating exactly one frame.
 - **The low-fps floor.** Skipping below it, the 15% resume hysteresis, a pause restarting the

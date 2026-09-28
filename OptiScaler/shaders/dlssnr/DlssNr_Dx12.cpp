@@ -5249,7 +5249,7 @@ ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCom
     // is next needed.
     if (SynthMotion::Handoff::Take(SynthMotion::Handoff::Owner::DlssNr, device, width, height, &shared))
     {
-        _peerWaitSinceMs = -1;
+        _peerWait = {};
         motion = shared.motion;
         sceneCut = shared.sceneCut;
 
@@ -5262,7 +5262,7 @@ ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCom
         }
     }
     else if (SynthMotion::Handoff::WaitForPeer(
-                 _peerWaitSinceMs, _estimator != nullptr || _nvofa != nullptr,
+                 _peerWait, _estimator != nullptr || _nvofa != nullptr,
                  SynthMotion::Handoff::PeerWarming(SynthMotion::Handoff::Owner::DlssNr, device, width, height),
                  NowMs()))
     {
@@ -5284,15 +5284,15 @@ ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCom
     {
         if (_estimator == nullptr && _nvofa == nullptr)
         {
-            if (_peerWaitSinceMs >= 0)
+            if (_peerWait.sinceMs >= 0)
             {
                 LOG_INFO("DLSS-NR synthesized motion: stopped waiting for frame generation's estimate on the {} route "
-                         "after {} ms ({}); running our own",
-                         route, NowMs() - _peerWaitSinceMs,
+                         "after {} ms, {} fresh frame(s) in a row ({}); running our own",
+                         route, NowMs() - _peerWait.sinceMs, _peerWait.freshFrames,
                          SynthMotion::Handoff::PeerWarming(SynthMotion::Handoff::Owner::DlssNr, device, width, height)
                              ? "still warming"
                              : "no longer announced");
-                _peerWaitSinceMs = -1;
+                _peerWait = {};
             }
 
             if (!_nvofaRefused && queue != nullptr && WantsNvofaMotion())
@@ -5496,7 +5496,7 @@ void SynthMotionGuide::Release()
     _height = 0;
     _format = DXGI_FORMAT_UNKNOWN;
     _lastRecordMs = 0;
-    _peerWaitSinceMs = -1;
+    _peerWait = {};
     _handedOutState = D3D12_RESOURCE_STATE_COMMON;
     _handedOutResource = nullptr;
     _recorded = false;

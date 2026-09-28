@@ -529,7 +529,7 @@ bool SynthInputs::_RecordMotionOn(ID3D12Device* device, ID3D12GraphicsCommandLis
     if (Take(Owner::FrameGen, device, width, height, &shared))
     {
         // DLSS-NR estimated this base frame already, on this device, at this extent.
-        _peerWaitSinceMs = -1;
+        _peerWait = {};
         _frameMotion = shared.motion;
         _frameSceneCut = shared.sceneCut;
 
@@ -541,7 +541,7 @@ bool SynthInputs::_RecordMotionOn(ID3D12Device* device, ID3D12GraphicsCommandLis
                      width, height);
         }
     }
-    else if (WaitForPeer(_peerWaitSinceMs, _estimator != nullptr, PeerWarming(Owner::FrameGen, device, width, height),
+    else if (WaitForPeer(_peerWait, _estimator != nullptr, PeerWarming(Owner::FrameGen, device, width, height),
                          NowMs()))
     {
         // DLSS-NR's estimator recorded this frame and is still warming up (the D3D11 bridge at start-up). A
@@ -559,13 +559,13 @@ bool SynthInputs::_RecordMotionOn(ID3D12Device* device, ID3D12GraphicsCommandLis
     {
         if (_estimator == nullptr)
         {
-            if (_peerWaitSinceMs >= 0)
+            if (_peerWait.sinceMs >= 0)
             {
-                LOG_INFO("synthesized FG input: stopped waiting for DLSS-NR's motion estimate after {} ms ({}); "
-                         "running our own",
-                         NowMs() - _peerWaitSinceMs,
+                LOG_INFO("synthesized FG input: stopped waiting for DLSS-NR's motion estimate after {} ms, {} fresh "
+                         "frame(s) in a row ({}); running our own",
+                         NowMs() - _peerWait.sinceMs, _peerWait.freshFrames,
                          PeerWarming(Owner::FrameGen, device, width, height) ? "still warming" : "no longer announced");
-                _peerWaitSinceMs = -1;
+                _peerWait = {};
             }
 
             _estimator = std::make_unique<SynthMotion::Estimator_Dx12>();
@@ -824,7 +824,7 @@ void SynthInputs::_ReleaseMotion()
     }
 
     _lastEstimateMs = 0;
-    _peerWaitSinceMs = -1;
+    _peerWait = {};
     _estimatorRecorded = false;
     _frameMotion = nullptr;
     _frameSceneCut = false;

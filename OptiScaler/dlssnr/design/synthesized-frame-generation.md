@@ -484,8 +484,13 @@ module) is one slot per process.
   publishes nothing and calls `AnnounceWarming` for the base frame instead.
   - The second consumer, if it has no estimator yet, sees `PeerWarming` and records nothing: zero
     motion, which is all a second estimator would give over the same warm-up frames.
-  - The wait is bounded by `kMaxPeerWaitMs` (1 s): a warm-up, slow start-up frames included, plus
-    NR's 500 ms settle after a resize. A frame with no announcement ends it at once.
+  - The wait is bounded by `kMaxPeerWaitFrames` (16) fresh frames in a row: frames under 250 ms
+    apart, which carry an estimator's history. A warm-up is five. A stale gap starts the count over,
+    because it restarted the peer's warm-up too. A frame with no announcement ends the wait at once.
+  - **Not in milliseconds.** The first version waited at most 1 s. In Divinity a loading screen
+    presented a frame every 2 s, NR's estimator was reset by staleness on each, and FG gave up after
+    "2008 ms (still warming)" and built its own. Over such a stretch FG's own estimator would be reset
+    on each frame too, so waiting costs nothing there.
   - A consumer that already has an estimator keeps using it.
   - NR does not announce while it runs the optical-flow engine, whose fields are never published.
   - A released estimator withdraws its announcement (`WithdrawWarming`), for the case where the

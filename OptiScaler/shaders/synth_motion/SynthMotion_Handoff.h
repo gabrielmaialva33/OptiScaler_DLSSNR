@@ -19,7 +19,7 @@
 //   announces that instead. The other consumer, if it has no estimator of its own, waits for it --
 //   zero motion meanwhile, which is also all a second estimator would give over the same frames --
 //   rather than build one that would then sit idle once the first starts publishing. Bounded by
-//   kMaxPeerWaitMs.
+//   kMaxPeerWaitFrames.
 
 #include <cstdint>
 #include <mutex>
@@ -160,24 +160,43 @@ inline void WithdrawWarming(Owner owner)
         slot.warming = detail::Warming {};
 }
 
-// Longer than a warm-up (five frames, slow ones at start-up included) plus DLSS-NR's 500 ms settle after
-// a resize, during which its host keeps resetting the estimator. A peer warm for longer is not waited for.
-inline constexpr long long kMaxPeerWaitMs = 1000;
+// Frames closer together than this carry an estimator's history. After a longer gap both consumers'
+// staleness rules reset theirs (kSynthMotionStaleMs in DLSS-NR, kMotionStaleMs in the FG input).
+inline constexpr long long kPeerWaitFreshMs = 250;
+
+// How many fresh frames in a row a consumer waits for a warming peer: a warm-up is five (FFX), and
+// this leaves room for slow start-up frames. A peer still warming after that is stuck, and the consumer
+// builds its own. A stale gap starts the count over, because it restarted the peer's warm-up too. Over
+// a slow stretch -- a loading screen at a frame every second or two -- every estimator is reset each
+// frame, the consumer's own included, so waiting there costs nothing and building would give nothing.
+// A bound in milliseconds got exactly that wrong (Divinity, 2026-09-28).
+inline constexpr uint32_t kMaxPeerWaitFrames = 16;
+
+// One consumer's wait, its own state. Put back to {} when it takes a field or releases.
+struct PeerWait
+{
+    long long sinceMs = -1; // when the wait began; -1 when not waiting
+    long long lastMs = -1;
+    uint32_t freshFrames = 0;
+};
 
 // A consumer that took nothing this base frame asks whether to record nothing and wait for a warming
-// peer, rather than build an estimator of its own. waitSinceMs is the consumer's own state: -1 when not
-// waiting, set here on the first frame of a wait, and put back to -1 by the consumer when it takes a
-// field or releases. A consumer that already has an estimator keeps using it, since it is warm or
-// warming already; a consumer whose wait ran out builds one, and then has one.
-inline bool WaitForPeer(long long& waitSinceMs, bool haveEstimator, bool peerWarming, long long nowMs)
+// peer, rather than build an estimator of its own. A consumer that already has an estimator keeps using
+// it, since it is warm or warming already.
+inline bool WaitForPeer(PeerWait& wait, bool haveEstimator, bool peerWarming, long long nowMs)
 {
     if (haveEstimator || !peerWarming)
         return false;
 
-    if (waitSinceMs < 0)
-        waitSinceMs = nowMs;
+    if (wait.sinceMs < 0)
+        wait.sinceMs = nowMs;
+    else if (nowMs - wait.lastMs <= kPeerWaitFreshMs)
+        ++wait.freshFrames;
+    else
+        wait.freshFrames = 0;
 
-    return nowMs - waitSinceMs <= kMaxPeerWaitMs;
+    wait.lastMs = nowMs;
+    return wait.freshFrames <= kMaxPeerWaitFrames;
 }
 
 // Before the resource behind motion is released. Anything else published stays.

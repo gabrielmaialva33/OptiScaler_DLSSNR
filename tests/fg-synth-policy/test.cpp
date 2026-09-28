@@ -103,21 +103,39 @@ static void warmingCases()
     Handoff::WithdrawWarming(Owner::DlssNr);
     assert(!Handoff::PeerWarming(Owner::FrameGen, &device, 1920, 1080));
 
-    // The wait: only with no estimator of one's own and a warming peer, and not past the bound.
-    long long since = -1;
-    assert(!Handoff::WaitForPeer(since, false, false, 1000) && since == -1);
-    assert(!Handoff::WaitForPeer(since, true, true, 1000) && since == -1);
-    assert(Handoff::WaitForPeer(since, false, true, 1000) && since == 1000);
-    assert(Handoff::WaitForPeer(since, false, true, 1000 + Handoff::kMaxPeerWaitMs));
-    assert(!Handoff::WaitForPeer(since, false, true, 1001 + Handoff::kMaxPeerWaitMs));
+    // The wait: only with no estimator of one's own and a warming peer. A frame with no announcement
+    // ends it at once (the peer is gone, or never was), and the consumer builds its own.
+    Handoff::PeerWait wait {};
+    assert(!Handoff::WaitForPeer(wait, false, false, 1000) && wait.sinceMs == -1);
+    assert(!Handoff::WaitForPeer(wait, true, true, 1000) && wait.sinceMs == -1);
 
-    // A frame with no announcement ends the wait at once (the peer is gone, or never was); the clock is
-    // the consumer's to reset, so a later wait after a take starts over.
-    since = -1;
-    assert(Handoff::WaitForPeer(since, false, true, 5000));
-    assert(!Handoff::WaitForPeer(since, false, false, 5010));
-    since = -1;
-    assert(Handoff::WaitForPeer(since, false, true, 9000) && since == 9000);
+    // Bounded in fresh frames: at 60 Hz the first frame starts the wait, and kMaxPeerWaitFrames more follow.
+    long long now = 1000;
+    assert(Handoff::WaitForPeer(wait, false, true, now) && wait.sinceMs == 1000);
+    for (uint32_t i = 0; i < Handoff::kMaxPeerWaitFrames; ++i)
+        assert(Handoff::WaitForPeer(wait, false, true, now += 16));
+    assert(!Handoff::WaitForPeer(wait, false, true, now += 16));
+
+    // A loading screen, a frame every two seconds (Divinity, 2026-09-28): every estimator is reset by
+    // staleness on each, so nothing counts, however long it lasts. A bound in milliseconds gave up here.
+    wait = {};
+    now = 20000;
+    for (int i = 0; i < 100; ++i)
+        assert(Handoff::WaitForPeer(wait, false, true, now += 2000));
+    for (uint32_t i = 0; i < Handoff::kMaxPeerWaitFrames; ++i)
+        assert(Handoff::WaitForPeer(wait, false, true, now += 16));
+    assert(!Handoff::WaitForPeer(wait, false, true, now += 16));
+
+    // A stale gap mid-wait starts the count over: it restarted the peer's warm-up too.
+    wait = {};
+    now = 500000;
+    assert(Handoff::WaitForPeer(wait, false, true, now));
+    for (int i = 0; i < 10; ++i)
+        assert(Handoff::WaitForPeer(wait, false, true, now += 16));
+    assert(Handoff::WaitForPeer(wait, false, true, now += 1000) && wait.freshFrames == 0);
+    for (uint32_t i = 0; i < Handoff::kMaxPeerWaitFrames; ++i)
+        assert(Handoff::WaitForPeer(wait, false, true, now += 16));
+    assert(!Handoff::WaitForPeer(wait, false, true, now += 16));
 
     std::puts("warming cases passed");
 }
