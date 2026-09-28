@@ -332,7 +332,9 @@ int main(int argc, char** argv)
     const bool maskAb = hasFlag("--present-mask-ab");
     const bool transferAb = hasFlag("--present-transfer-ab");
     const bool resetCost = hasFlag("--present-reset-cost");
-    const bool presentNr = compositionAb || hudAb || maskAb || transferAb || resetCost || hasFlag("--present-nr");
+    const bool uiProtectAb = hasFlag("--present-ui-protect-ab");
+    const bool presentNr =
+        compositionAb || hudAb || maskAb || transferAb || resetCost || uiProtectAb || hasFlag("--present-nr");
 
     const char* dllPath = "OptiScaler.dll";
     for (int i = 1; i < argc; ++i)
@@ -493,7 +495,7 @@ int main(int argc, char** argv)
         if (presentNr)
         {
             PresentNr::Run(factory, window, device, queue, alloc, list, fence, fenceEvent, hudAb, compositionAb,
-                           maskAb, transferAb, resetCost);
+                           maskAb, transferAb, resetCost, uiProtectAb);
             DestroyWindow(window);
             CloseHandle(fenceEvent);
             return 0;

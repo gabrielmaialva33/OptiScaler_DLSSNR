@@ -443,6 +443,17 @@ void RenderMenu(Config* config, float menuResScale)
                            "costs a little GPU time; depth stays constant. \"No history without motion\" "
                            "below no longer applies to a frame that has it.");
 
+                bool uiProtection = config->DlssNrUiProtection.value_or_default();
+                if (ImGui::Checkbox(Localization::Label("Protect the HUD"), &uiProtection))
+                    config->DlssNrUiProtection = uiProtection;
+
+                HelpMarker("Experimental. Pixels that stay exactly the same while the scene around them moves "
+                           "are taken for interface and handed back untouched through the model's own UI "
+                           "correction, so text and HUD lines stay crisp. A HUD is only found once the camera "
+                           "has moved behind it, and it stays protected for about a second and a half after "
+                           "the scene stops. A still, detailed patch next to motion can be taken for HUD; it "
+                           "is then shown as the game drew it.");
+
                 bool zeroGuideReset = config->DlssNrZeroGuideReset.value_or_default();
                 if (ImGui::Checkbox(Localization::Label("No history without motion"), &zeroGuideReset))
                     config->DlssNrZeroGuideReset = zeroGuideReset;

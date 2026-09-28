@@ -63,6 +63,13 @@ struct Host
     // from one it does not. -1 writes a null resource, which is what production does by never setting it.
     bool maskAb = false;
     int maskPattern = -1; // -1 null, 0 all zero, 1 all one, 2 one over the HUD and zero elsewhere
+    // --present-ui-protect-ab: the UI correction contract with separate layers (hud-protection.md). The same
+    // mask texture, as RGBA8 with the cover in every channel, goes in as DLSSNR.UIAlpha (uiRoute 1) or as
+    // DLSSNR.UI whose alpha is the mask (uiRoute 2); the model's own input goes in as DLSSNR.Backbuffer
+    // unless uiBackbuffer is off. uiRoute 0 is production's after-upscale call: every layer null.
+    bool uiProtect = false;
+    unsigned uiRoute = 0;
+    bool uiBackbuffer = false;
     unsigned useAutoMask = 1;
     float skinStructure = -1;
     DXGI_FORMAT maskFormat = DXGI_FORMAT_R8_UNORM;
@@ -549,7 +556,7 @@ struct Host
         list->ClearUnorderedAccessViewFloat(Gpu(15), Cpu(15), motion, zero, 0, nullptr);
         Transition(list, depth, Uav, Srv);
         Transition(list, motion, Uav, Srv);
-        if (maskAb && maskPattern >= 0)
+        if ((maskAb || uiProtect) && maskPattern >= 0)
             UploadMask();
         Submit();
         Say("  generation=%u extent=%ux%u guides cleared once and completed serial=%llu\n", generation, w, h, serial);
@@ -558,7 +565,7 @@ struct Host
         // Production defaults: intensity/local structure/tone=1, skin follows structure, mask=1.
         // Default 1 matches production; the opt-in HUD experiment varies only this create argument.
         if (hud)
-            extras(params, 1, nullptr, nullptr, nullptr, 0, 0, 0, 0);
+            SetUiLayers();
         if (maskAb)
             SetMask();
         // SkinStructure is -1, not 1. Minus one means "follow local structure", which is the model's
@@ -676,6 +683,19 @@ struct Host
         Require(read == value, "ControlMask did not round-trip");
     }
 
+    // The UI layers through the forwarder's own export, before create and before every evaluate, exactly as
+    // production calls it. Outside the UI-protection trials every layer is null, which is what production
+    // writes on the after-upscale route.
+    void SetUiLayers()
+    {
+        ID3D12Resource* layer = uiProtect && maskPattern >= 0 ? mask.p : nullptr;
+        ID3D12Resource* ui = uiRoute == 2 ? layer : nullptr;
+        ID3D12Resource* uiAlpha = uiRoute == 1 ? layer : nullptr;
+        ID3D12Resource* bb = uiProtect && uiBackbuffer ? (transferAb ? proxySmall.p : proxy.p) : nullptr;
+        const unsigned lw = layer != nullptr ? workWidth : 0, lh = layer != nullptr ? workHeight : 0;
+        extras(params, 1, ui, uiAlpha, bb, lw, lh, bb != nullptr ? workWidth : 0, bb != nullptr ? workHeight : 0);
+    }
+
     void ShaderAt(unsigned table, unsigned cb, unsigned w, unsigned h)
     {
         ID3D12DescriptorHeap* heaps[] = { gpuHeap.p };
@@ -707,8 +727,8 @@ struct Host
         Begin();
         if (hud)
         {
-            // Match production's explicit clearing of absent UI/UIAlpha/Backbuffer inputs.
-            extras(params, 1, nullptr, nullptr, nullptr, 0, 0, 0, 0);
+            // Production's explicit clearing of absent UI/UIAlpha/Backbuffer inputs, or this trial's layers.
+            SetUiLayers();
             Fixture();
             HudFixture(pixels, width, height, frame);
             UploadFixture(); // Begin has already proved the upload is no longer in use.
@@ -974,7 +994,7 @@ struct Host
         // First, second and last. At the default sixteen the last is frame 15, so the names the
         // analyzer anchors on are unchanged; a longer run moves that name and needs the analyzer told.
         // The mask A/B keeps seven frames a trial rather than all 32: ten trials of every frame is 1.7 GB.
-        const bool keep = maskAb ? (frame % 8 == 0 || frame == 31) : hud;
+        const bool keep = maskAb || uiProtect ? (frame % 8 == 0 || frame == 31) : hud;
         if (keep || frame == 0 || frame == 1 || frame == framesPerGeneration - 1)
         {
             auto prefix = (hud || transferAb ? trial : (composition ? trial + "-" : "") + "g" + std::to_string(generation)) +
@@ -1084,7 +1104,7 @@ struct Host
 static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D12CommandQueue* queue,
                 ID3D12CommandAllocator* alloc, ID3D12GraphicsCommandList* list, ID3D12Fence* fence, HANDLE event,
                 bool hud = false, bool composition = false, bool maskAb = false, bool transferAb = false,
-                bool resetCost = false)
+                bool resetCost = false, bool uiProtect = false)
 {
     Host host { device, queue, alloc, list, fence, event };
     try
@@ -1093,8 +1113,9 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
         Say("  full resolution, one pass, zero guides, no confidence, no upscaler, no FG\n");
         Say(hud ? "  UICorrection A/B: per-trial create value, then optional evaluate-only switch\n"
                 : "  UICorrection=1\n");
-        host.hud = hud || maskAb;
+        host.hud = hud || maskAb || uiProtect;
         host.maskAb = maskAb;
+        host.uiProtect = uiProtect;
         host.transferAb = transferAb;
         host.composition = composition;
         host.Init(factory, window);
@@ -1163,6 +1184,53 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
                 host.ReleaseGeneration();
             }
             host.linearInput = false;
+        }
+        else if (uiProtect)
+        {
+            // The UI correction contract with separate layers, against the fixture's own HUD cover as an
+            // oracle mask. base and bb-only are production's two calls today (after-upscale, present); the
+            // alpha trials are what UiProtection adds, with the cover standing in for the detector.
+            struct Trial
+            {
+                const char* name;
+                unsigned uiCorrection;
+                unsigned route; // 0 no layer, 1 UIAlpha, 2 UI (alpha)
+                bool backbuffer;
+                int pattern;
+            };
+            const Trial trials[] = {
+                { "base", 1, 0, false, -1 },          { "bb-only", 1, 0, true, -1 },
+                { "alpha-hud", 1, 1, true, 2 },       { "ui-a-hud", 1, 2, true, 2 },
+                { "alpha-hud-uic0", 0, 1, true, 2 },  { "alpha-hud-nobb", 1, 1, false, 2 },
+                { "alpha-ones", 1, 1, true, 1 },      { "base-repeat", 1, 0, false, -1 },
+            };
+            for (const auto& t : trials)
+            {
+                host.trial = t.name;
+                host.uiCorrection = t.uiCorrection;
+                host.uiRoute = t.route;
+                host.uiBackbuffer = t.backbuffer;
+                host.maskPattern = t.pattern;
+                host.maskFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+                Say("UI-PROTECT-TRIAL name=%s uic=%u route=%u backbuffer=%d pattern=%d\n", t.name, t.uiCorrection,
+                    t.route, t.backbuffer ? 1 : 0, t.pattern);
+                // Allocate uploads the mask from the cover, and the cover needs an allocated extent, so the
+                // first trial carries no mask and builds the cover after its own Allocate.
+                Require(t.pattern < 0 || !host.hudCover.empty(), "HUD cover missing before a masked trial");
+                host.Allocate(1280, 720);
+                if (host.hudCover.empty())
+                    host.CoverHud();
+                for (unsigned frame = 0; frame < 32; ++frame)
+                {
+                    host.Record(frame);
+                    host.Submit();
+                    host.Inspect(frame);
+                    host.Present();
+                }
+                Check(queue->Signal(fence, ++host.serial), "ui-protect post-Present Signal");
+                host.ReleaseGeneration();
+            }
+            host.uiProtect = false;
         }
         else if (maskAb)
         {
@@ -1304,6 +1372,9 @@ static void Run(IDXGIFactory4* factory, HWND window, ID3D12Device* device, ID3D1
                 host.attempts, host.successes, host.presents, host.controls, host.captures);
         else if (transferAb)
             Say("TRANSFER-AB PASS: trials=6 attempts=%u successes=%u presents=%u controls=%u capture_pairs=%u\n",
+                host.attempts, host.successes, host.presents, host.controls, host.captures);
+        else if (uiProtect)
+            Say("UI-PROTECT-AB PASS: trials=8 attempts=%u successes=%u presents=%u controls=%u capture_pairs=%u\n",
                 host.attempts, host.successes, host.presents, host.controls, host.captures);
         else if (maskAb)
             Say("MASK-AB PASS: trials=13 attempts=%u successes=%u presents=%u controls=%u capture_pairs=%u\n",
