@@ -366,6 +366,12 @@ def judge(report):
         check(any(t_ in window for t_ in raised), f'cut: SceneCut() not raised within t={CUT_FRAME}..{CUT_FRAME + CUT_WINDOW} (raised at {raised})')
         stray = [t_ for t_ in raised if t_ not in window]
         check(not stray, f'cut: SceneCut() raised outside the window at {stray}')
+        # The frame that carries the cut must be Ready(): consumers read SceneCut() beside a Ready field and the
+        # handoff publishes only Ready fields, so a cut on a frame that is not Ready reaches nobody. It did not
+        # before 2026-09-28 (Ready() excluded the cut).
+        cut_not_ready = [f['t'] for f in frames if f['scene_cut_after_record'] and not f['ready']]
+        check(not cut_not_ready, f'cut: SceneCut() raised at t={cut_not_ready} on a frame that is not Ready(), '
+                                 'so no consumer ever sees the cut')
         at_cut = next((f for f in frames if f['t'] == CUT_FRAME and f['scores']), None)
         zero = region(at_cut, 'cutzero') if at_cut else None
         check(zero is not None and zero['epe_mean'] < 1.0,

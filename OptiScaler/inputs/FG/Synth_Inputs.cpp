@@ -1003,7 +1003,13 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
         fg->Mutex.unlockThis(4);
     }
 
-    auto cmdList = fg->GetUICommandList();
+    // No UI list. Both resources are valid until present and nothing is recorded for them, and opening one
+    // here was not free: Feed runs while FG is active but paused or waiting for new frame data, when
+    // fg->Present() does not execute it, so the list stayed open and was submitted later out of order by the
+    // slot recycling. Its fence then went backwards and WaitForUIAllocator blocked the present thread for its
+    // full 5 s on every launch (`waitResult 102`, Generation Zero and Divinity on Rafael's RTX 3060,
+    // 2026-09-28).
+    ID3D12GraphicsCommandList* cmdList = nullptr;
 
     Dx12Resource velocity {};
     velocity.type = FG_ResourceType::Velocity;

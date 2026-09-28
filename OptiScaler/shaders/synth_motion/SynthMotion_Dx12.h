@@ -47,8 +47,8 @@ class Estimator_Dx12
     // D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE. Null until a large enough frame was recorded.
     ID3D12Resource* Motion() const { return _motion; }
 
-    // A real field was produced this frame (false on a reset, during FFX's five warm-up frames after it,
-    // and on a scene cut this object has seen).
+    // A real field was produced this frame (false on a reset and during FFX's five warm-up frames after
+    // it). A scene cut's zero field is Ready, with SceneCut() raised, so consumers can act on the cut.
     bool Ready() const { return _ready; }
 
     // The estimator detected a scene change. Read back from the GPU, so it arrives a few frames late

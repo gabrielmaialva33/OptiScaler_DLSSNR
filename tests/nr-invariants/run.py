@@ -195,6 +195,11 @@ RETIRED = [
     # build (CLAUDE.md, "The present-time pass had never shipped").
     (re.compile(r'^\s*#\s*(if|ifdef|ifndef|elif)\b[^\n]*\bDLSS_NEURAL_RENDERING\b', re.M), sources,
      'a preprocessor gate on DLSS_NEURAL_RENDERING'),
+    # The synthesized FG feed opening a UI command list: while FG was active but paused, fg->Present() did
+    # not execute it, it was submitted later out of order, its fence went backwards, and WaitForUIAllocator
+    # froze the present thread for 5 s on every launch (Rafael's RTX 3060, 2026-09-28).
+    (re.compile(r'GetUICommandList\('), [root / 'OptiScaler/inputs/FG/Synth_Inputs.cpp'],
+     'the synthesized FG feed opening a UI command list'),
     # Folded into HookMethod=2 by e7ca0209; a saved ini that still has it must stay inert.
     (re.compile(r'"DlssNr",\s*"Dx11BridgeHost"'), [root / 'OptiScaler/Config.cpp'],
      'the Dx11BridgeHost key being read or saved'),

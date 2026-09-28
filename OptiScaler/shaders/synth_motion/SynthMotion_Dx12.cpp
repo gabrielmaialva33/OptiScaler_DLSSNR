@@ -782,7 +782,11 @@ bool Estimator_Dx12::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmd
     _recordedFrameIndex = frameIndex;
     _recordedReset = doReset;
     _pending = true;
-    _ready = !doReset && frameIndex > kWarmupFrames && !_sceneCut;
+    // A cut frame is Ready: FFX writes a zero field on it, which is a legitimate field, and it is the only
+    // way SceneCut() reaches a consumer -- DLSS-NR's reset and frame generation's Reset read it beside a
+    // Ready field, and the handoff publishes only Ready fields. With `&& !_sceneCut` here no cut ever
+    // reached either (synthesized-motion.md, "Risks and open questions", item 0).
+    _ready = !doReset && frameIndex > kWarmupFrames;
     return true;
 }
 
