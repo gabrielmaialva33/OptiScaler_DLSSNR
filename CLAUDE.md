@@ -456,6 +456,11 @@ rebuild, no temporal accumulator).
   `DLSS-NR model: ...` (feature built at WxH with which weights, history reset after a control
   change). It also reads "N config(s) available": 310.8 reports one, which is why the preset combo is
   hidden then. Look there before measuring pixels to learn what the model did.
+- **Proton is not a D3D12 validator.** vkd3d-proton accepts calls that native Windows answers by removing
+  the device. The guide resample's 48-byte constant-buffer view ran fine here and killed Rafael's RTX 3060 at
+  the first frame (`13f10d60`; `reduced-scale-guides.md`, "Native Windows"). `nr-invariants` now checks CBV
+  sizes. For any new pass, check descriptor sizes, formats and flags against the D3D12 rules, not against
+  what ran here, and get a run on Rafael's PC before calling it done.
 - **A fault inside the model no longer takes the game down.** The forwarder makes every model call
   inside `__try`; the first fault is recorded, every later call is refused (release included -- the
   model can be left holding its lock), and the host switches NR off for the session with

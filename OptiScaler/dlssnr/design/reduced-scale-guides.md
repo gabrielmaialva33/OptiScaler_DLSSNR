@@ -186,5 +186,25 @@ two ways.
 - **Frame rate** did not move in any arm: about 118 presents to 29 renders a second, with the game's
   4x frame generation and a frame cap. At 0.5 the gain is GPU headroom, not frames.
 
+### Native Windows, 2026-09-28: the resample removed the device until `13f10d60`
+
+- **Symptom.** On Rafael's RTX 3060 (Windows 11, driver 616.92), Divinity at `WorkingScale=0.5` on the
+  D3D11 bridge died on 16dff6de and 467446e9 within ~30 ms of the first model build.
+  - The log read `the working-size resample could not run`, then `CreateDescriptorHeap: 887A0005` and
+    `fg Present failed: 887A0005`.
+  - The game's own dialog said `DXGI_ERROR_DEVICE_REMOVED`, `Reason: S_OK`. It had asked its D3D11
+    device, which was fine; the removed one was the bridge's D3D12 device.
+  - efdec926, from before this note's code, ran the same setup for thousands of frames the same morning.
+- **Cause.** `GuideMatchConstants` was 48 bytes, and its upload buffer and constant-buffer view were
+  created at that size. A CBV must be a multiple of 256 bytes. `CreateConstantBufferView` returns
+  nothing, so native D3D12 removes the device instead. vkd3d-proton writes the descriptor and carries on,
+  so Cyberpunk at 0.5, and Divinity with his exact ini here, both ran.
+- **Fix** (`13f10d60`). The struct is `alignas(256)`, like every other NR constant block.
+  `nr-invariants` now fails any constant-buffer view sized by a struct that is not.
+- **Verified** on his PC at 13:01: `guides matched to the working size: depth and motion 960x540`, the
+  model on every base frame (60 of 60 per 2 s), 0 errors.
+- **The lesson for this fork:** a green run under Proton says nothing about D3D12 validity. Anything that
+  only native Windows validates needs a mechanical check, or a Windows run.
+
 **Still open:** fix 2 needs a render size below the frame's (item 1 as planned, Ray Reconstruction
 off, or `Stage=1`). Items 3 to 6 are not yet run either.
