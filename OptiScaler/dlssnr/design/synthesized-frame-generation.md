@@ -528,6 +528,25 @@ module) is one slot per process.
     - The session had one `allocated` line, and no `stopped waiting` or `runs its own motion
       estimate`.
 
+### Measured on native Windows (Rafael's RTX 3060, 2026-09-28)
+
+This was the first native-Windows run of the estimator and of synthesized FG, on build `13f10d60`.
+Divinity ran at 1920x1080 on the D3D11 bridge, with `WorkingScale=0.5`, `SynthMotion=true`,
+`FGInput=synthesized` and `FGOutput=fsrfg`.
+
+- **Twelve minutes, 0 `[E]`.** The model ran on 21217 of 21223 base frames, about 29 fps base, and
+  every 2 s window reported synthesized motion.
+- **Model time:** 19.5 ms median (p90 21.4) at 960x540. The estimator, guide resample and composition
+  together took 0.67 ms outside it.
+- **One estimator.** FG logged `waiting for it rather than running a second estimator`, then `motion
+  taken from DLSS-NR's estimate ... no second estimate`.
+- **The picture.** The user saw the edge shimmer of that title's previous setup gone: zero motion with
+  `ZeroGuideReset` had dropped the model's history every frame.
+- **FidelityFX DLLs.** FSR-FG needs `amd_fidelityfx_loader_dx12.dll` and
+  `amd_fidelityfx_framegeneration_dx12.dll` beside the proxy or in its `OptiScaler\` subfolder. His install
+  had neither, so FG did not engage at all until they were copied. Nothing in the log says why beyond the
+  `Can't find amd_fidelityfx_*` warnings at start-up.
+
 ### What FSR 3.1 cannot do
 
 The FSR 3.1.x swapchain generates exactly one frame (`numGeneratedFrames = 1`,
