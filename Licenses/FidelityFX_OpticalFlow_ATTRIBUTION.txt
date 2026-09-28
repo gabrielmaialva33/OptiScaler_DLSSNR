@@ -1,0 +1,62 @@
+FidelityFX optical flow
+=======================
+
+Project:  AMD FidelityFX SDK (FSR SDK), version 2.3.0, commit 60f4ea8
+Source:   https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK
+
+What is derived from it
+-----------------------
+
+The synthesized-motion estimator in OptiScaler/shaders/synth_motion/ runs the
+FidelityFX optical flow, compiled into OptiScaler.dll:
+
+  * The shader code under shaders/synth_motion/precompile/ffx/ is copied
+    unchanged from the SDK: the FidelityFX core headers (ffx_core*.h,
+    ffx_common_types.h), the single-pass downsampler (spd/ffx_spd.h) and the
+    optical flow headers (opticalflow/ffx_opticalflow_*.h).
+
+  * synth_motion_callbacks.h and the seven synth_motion_*.hlsl passes that wrap
+    them (prepare luma, luminance pyramid, scene-change histogram and
+    divergence, search, filter, scale) are derived from the SDK's
+    ffx_opticalflow_callbacks_hlsl.h and ffx_opticalflow_*_pass.hlsl. Resource
+    bindings, the root signature and the colour read were changed; the
+    algorithms were not.
+
+  * The host sequence in SynthMotion_Dx12.cpp (resource sizes, pyramid
+    ping-pong, dispatch order and dimensions) follows the SDK's
+    ffx_opticalflow.cpp.
+
+Every one of those source files is listed under the MIT licence in the SDK's
+docs/license.md. The rest of that SDK is distributed under a different, binary-
+only licence, and none of it is compiled into OptiScaler.
+
+What is not derived from it
+---------------------------
+
+synth_motion_expand.hlsl (8x8-block vectors to one vector per pixel) and
+synth_motion_clear.hlsl are OptiScaler's own.
+
+Licence
+-------
+
+MIT License
+
+Copyright (C) 2026 Advanced Micro Devices, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files(the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions :
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

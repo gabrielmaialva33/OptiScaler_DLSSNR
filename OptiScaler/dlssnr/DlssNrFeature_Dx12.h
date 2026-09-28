@@ -22,6 +22,11 @@
 class Config;
 struct IDXGISwapChain3;
 
+namespace SynthMotion
+{
+class Estimator_Dx12;
+}
+
 namespace DlssNr
 {
 // The model runs immediately after the game's upscaler, before the interface is drawn. It is shown a
@@ -101,6 +106,69 @@ bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colou
 // actually are. It reads config keys written for a game's own buffers; a host that guessed the
 // default instead would be right until someone carried an ini over from a game that set them.
 int GuideRestState(bool motionVectors);
+
+// The synthesized motion field's contract, in DlssNrFrameInfo terms: full extent, output resolution,
+// current-to-previous displacement in pixels, +x right and +y down -- the convention the model already
+// takes from a game's DLSS vectors (prev = cur + mv). The y sign was the open question in
+// synthesized-motion.md §9; the estimator's loopback test pins it, and this is the one place it lives.
+constexpr float kSynthMotionScaleX = 1.0f;
+constexpr float kSynthMotionScaleY = 1.0f;
+
+// Motion estimated from the frames themselves, for a present-time host that has no game guides
+// ([DlssNr] SynthMotion). One door for both present routes -- the D3D12 swapchain hook and the
+// D3D11 bridge's host -- so the field is described, reset and handed over the same way on each.
+//
+// Owned per host, like ZeroGuides. It records onto the caller's list and executes on the caller's
+// queue; the caller says whether that list ran.
+class SynthMotionGuide
+{
+  public:
+    SynthMotionGuide();
+    ~SynthMotionGuide();
+
+    SynthMotionGuide(const SynthMotionGuide&) = delete;
+    SynthMotionGuide& operator=(const SynthMotionGuide&) = delete;
+
+    // Whether what is held was built for a colour of another extent or format. A caller that sees
+    // true proves the GPU is done with it, calls Release(), and records again. Nothing held is false.
+    bool NeedsRebuild(uint32_t width, uint32_t height, DXGI_FORMAT format) const;
+
+    // Record the estimator over colour -- the whole frame, arriving in colourState and left there --
+    // and, when it has a field for this frame, return it in GuideRestState(true), with frame describing
+    // it: kSynthMotionScale, output resolution, no zero-guide policy reset, Reset on a scene cut.
+    // Otherwise nullptr, and the caller keeps its zero guide. reset says the previous frame this guide
+    // saw is not the one before this frame (a rebuild, a resize).
+    //
+    // Builds nothing and answers nullptr while [DlssNr] SynthMotion is off.
+    ID3D12Resource* Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
+                           D3D12_RESOURCE_STATES colourState, bool reset, DlssNrFrameInfo& frame, const char* route);
+
+    // After the pass has read the field, on the same list: back where the estimator keeps it.
+    void AfterPass(ID3D12GraphicsCommandList* cmdList);
+
+    // Whether the list carrying the last Record executed.
+    void ConfirmExecuted();
+    void AbandonRecording();
+
+    // Throw everything away. The caller must already have proved the GPU is done with it.
+    void Release();
+
+    // Whether the last recorded frame used the synthesized field rather than zero motion.
+    bool LastFrameSynthesized() const { return _lastSynthesized; }
+
+  private:
+    std::unique_ptr<SynthMotion::Estimator_Dx12> _estimator;
+    uint32_t _width = 0;
+    uint32_t _height = 0;
+    DXGI_FORMAT _format = DXGI_FORMAT_UNKNOWN;
+    long long _lastRecordMs = 0;
+    D3D12_RESOURCE_STATES _handedOutState = D3D12_RESOURCE_STATE_COMMON;
+    bool _recorded = false;
+    bool _handedOut = false;
+    bool _lastSynthesized = false;
+    bool _reportedUse = false;
+    bool _reportedFailure = false;
+};
 
 // The other place the model can run: before the upscaler, over the game's render-resolution colour.
 //

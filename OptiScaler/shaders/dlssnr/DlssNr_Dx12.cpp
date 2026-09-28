@@ -24,6 +24,7 @@
 #include <dlssnr/DlssNr_LogRate.h>
 #include <dlssnr/DlssNr_ZeroGuides.h>
 #include <dlssnr/DlssNr_WorkingScale.h>
+#include <shaders/synth_motion/SynthMotion_Dx12.h>
 
 #include <mutex>
 #include <optional>
@@ -3950,6 +3951,12 @@ static unsigned int g_bbCopyWidth = 0;
 static unsigned int g_bbCopyHeight = 0;
 static DXGI_FORMAT g_bbCopyFormat = DXGI_FORMAT_UNKNOWN;
 
+// The D3D12 present route's synthesized motion ([DlssNr] SynthMotion). One, like the backbuffer copy
+// it reads: this route runs one swapchain's presents. Heap-allocated on first use and never destroyed
+// by a static destructor, which would release D3D12 objects at process exit after the device; Shutdown
+// releases what it holds once the present lists have finished.
+static DlssNr::SynthMotionGuide* g_presentMotion = nullptr;
+
 static void ResetPresentList()
 {
     for (unsigned int i = 0; i < PresentList::kSlots; ++i)
@@ -4065,19 +4072,52 @@ static ID3D12GraphicsCommandList* GetPresentCommandList(ID3D12Device* device, un
     return g_presentList.list[slot];
 }
 
-static void SubmitPresentList(ID3D12CommandQueue* queue, unsigned int slot)
+// Whether the list was executed, which is the answer anything recorded on it is owed.
+static bool SubmitPresentList(ID3D12CommandQueue* queue, unsigned int slot)
 {
     if (!g_presentList.dirty[slot])
-        return;
+        return false;
+
+    bool executed = false;
 
     if (SUCCEEDED(g_presentList.list[slot]->Close()))
     {
         queue->ExecuteCommandLists(1, (ID3D12CommandList**) &g_presentList.list[slot]);
         g_presentList.fenceValue[slot] = ++g_presentFenceValue;
         queue->Signal(g_presentList.fence, g_presentList.fenceValue[slot]);
+        executed = true;
     }
 
     g_presentList.dirty[slot] = false;
+    return executed;
+}
+
+// Every present list submitted so far has finished on the GPU. Bounded; false on a timeout, in which
+// case whatever those lists read is kept, not released.
+static bool WaitPresentListsIdle(DWORD timeoutMs)
+{
+    if (g_presentList.fence == nullptr || g_presentFenceValue == 0 ||
+        g_presentList.fence->GetCompletedValue() >= g_presentFenceValue)
+    {
+        return true;
+    }
+
+    if (FAILED(g_presentList.fence->SetEventOnCompletion(g_presentFenceValue, g_presentList.fenceEvent)))
+        return false;
+
+    return WaitForSingleObject(g_presentList.fenceEvent, timeoutMs) == WAIT_OBJECT_0;
+}
+
+// The present route's synthesized motion is owed the same answer as the list it was recorded on.
+static void SettlePresentMotion(bool executed)
+{
+    if (g_presentMotion == nullptr)
+        return;
+
+    if (executed)
+        g_presentMotion->ConfirmExecuted();
+    else
+        g_presentMotion->AbandonRecording();
 }
 
 static void DropPresentList(unsigned int slot)
@@ -4399,6 +4439,24 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         frame.OutputState = defaults.OutputState;
     }
 
+    // [DlssNr] SynthMotion: with no game guides, motion estimated from this frame and the last in place
+    // of zero motion. Read from the copy, before the pass edits it in place; depth stays the zero guide.
+    if (!temporalValid && cfg.DlssNrSynthMotion.value_or_default())
+    {
+        if (g_presentMotion == nullptr)
+            g_presentMotion = new SynthMotionGuide();
+
+        // Built for another extent: a present list still in flight may read what it holds.
+        if (g_presentMotion->NeedsRebuild(width, height, bbDesc.Format) && WaitPresentListsIdle(2000))
+            g_presentMotion->Release();
+
+        if (auto* synthesized = g_presentMotion->Record(device, list, g_bbCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                        false, frame, "D3D12 present"))
+        {
+            motion = synthesized;
+        }
+    }
+
     if (fgHook)
         g_lastFgFlip = g_presentFlip;
 
@@ -4410,6 +4468,10 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     if (recorded)
         ++g_passesRecorded;
 
+    // The field goes back where the estimator keeps it, on this same list, whether the pass ran or not.
+    if (g_presentMotion != nullptr)
+        g_presentMotion->AfterPass(list);
+
     // The one status line, on its own cadence. present:render is the multiplier that actually reached
     // the screen -- the number a session spends the most effort reconstructing by hand otherwise.
     ReportRuntimeStatus(recorded, reason);
@@ -4417,6 +4479,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     if (g_nr.failed)
     {
         DropPresentList(slot);
+        SettlePresentMotion(false);
         backbuffer->Release();
         device->Release();
         return;
@@ -4438,7 +4501,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     Barrier(list, backbuffer, D3D12_RESOURCE_STATE_COPY_DEST, bbState);
     Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    SubmitPresentList(queue, slot);
+    SettlePresentMotion(SubmitPresentList(queue, slot));
 
     if (cfg.DlssNrPresentSync.value_or_default() && g_presentList.fenceValue[slot] != 0 &&
         g_presentList.fence->GetCompletedValue() < g_presentList.fenceValue[slot])
@@ -4863,6 +4926,180 @@ int GuideRestState(bool motionVectors)
     const Config& cfg = *Config::Instance();
     const auto value = motionVectors ? cfg.MVResourceBarrier : cfg.DepthResourceBarrier;
     return value.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+}
+
+namespace
+{
+// Where the estimator leaves its field between frames (SynthMotion::Estimator_Dx12's contract).
+constexpr D3D12_RESOURCE_STATES kEstimatorMotionState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+// A gap this long between two recordings means the frame the estimator last saw is not the previous
+// frame -- the pass was off, the key toggled, the host rebuilt -- and differencing against it would
+// be motion between two unrelated pictures. Well above any frame time a present host runs at.
+constexpr long long kSynthMotionStaleMs = 250;
+} // namespace
+
+SynthMotionGuide::SynthMotionGuide() = default;
+SynthMotionGuide::~SynthMotionGuide() { Release(); }
+
+bool SynthMotionGuide::NeedsRebuild(uint32_t width, uint32_t height, DXGI_FORMAT format) const
+{
+    return _estimator != nullptr && (_width != width || _height != height || _format != format);
+}
+
+ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
+                                         ID3D12Resource* colour, D3D12_RESOURCE_STATES colourState, bool reset,
+                                         DlssNrFrameInfo& frame, const char* route)
+{
+    _lastSynthesized = false;
+
+    if (!Config::Instance()->DlssNrSynthMotion.value_or_default() || device == nullptr || cmdList == nullptr ||
+        colour == nullptr)
+    {
+        return nullptr;
+    }
+
+    const auto desc = colour->GetDesc();
+    const auto width = static_cast<uint32_t>(desc.Width);
+    const auto height = desc.Height;
+
+    // Built for another frame, and the caller has not yet proved the GPU is done with it. Nothing is
+    // recorded over resources that may still be in flight; the caller keeps its zero guide meanwhile.
+    if (NeedsRebuild(width, height, desc.Format))
+        return nullptr;
+
+    // A field left handed out by a frame that executed without AfterPass sits in the pass's rest
+    // state, not the estimator's. That is a caller bug; nothing more is recorded until a Release().
+    if (_handedOut)
+    {
+        if (!_reportedFailure)
+        {
+            _reportedFailure = true;
+            LOG_ERROR("DLSS-NR synthesized motion: the field was not handed back after the pass on the {} route; "
+                      "zero motion until the next rebuild",
+                      route);
+        }
+
+        return nullptr;
+    }
+
+    if (_estimator == nullptr)
+        _estimator = std::make_unique<SynthMotion::Estimator_Dx12>();
+
+    const long long now = NowMs();
+    const bool stale = _lastRecordMs == 0 || now - _lastRecordMs > kSynthMotionStaleMs;
+    _lastRecordMs = now;
+
+    if (!_estimator->Record(device, cmdList, colour, colourState, reset || stale))
+    {
+        if (!_reportedFailure)
+        {
+            _reportedFailure = true;
+            LOG_WARN("DLSS-NR synthesized motion: the estimator did not record on the {} route ({}x{}); the model "
+                     "keeps zero motion",
+                     route, width, height);
+        }
+
+        return nullptr;
+    }
+
+    _recorded = true;
+    _width = width;
+    _height = height;
+    _format = desc.Format;
+
+    // Nothing to compare against yet -- the first frame, or one after a reset -- or no field at all.
+    ID3D12Resource* motion = _estimator->Ready() ? _estimator->Motion() : nullptr;
+    if (motion == nullptr)
+        return nullptr;
+
+    // The pass transitions a motion guide from GuideRestState(true), so the field is handed over there.
+    // The same state in the default config, when this is no barrier at all.
+    _handedOutState = static_cast<D3D12_RESOURCE_STATES>(GuideRestState(true));
+    Barrier(cmdList, motion, kEstimatorMotionState, _handedOutState);
+    _handedOut = true;
+
+    // Full extent, output resolution, in pixels: nothing about it is at render size or in a subrect.
+    frame.MvScaleX = kSynthMotionScaleX;
+    frame.MvScaleY = kSynthMotionScaleY;
+    frame.MotionVectorsLowResolution = false;
+    frame.MotionSubrectBaseX = 0;
+    frame.MotionSubrectBaseY = 0;
+
+    // Real motion leaves the zero-guide policy reset (ZeroGuideReset) nothing to protect against. A
+    // genuine reset the caller already carried stays.
+    if (frame.ResetIsPolicy)
+    {
+        frame.Reset = false;
+        frame.ResetIsPolicy = false;
+    }
+
+    // A cut is a cut, whoever notices it.
+    if (_estimator->SceneCut())
+    {
+        frame.Reset = true;
+        frame.ResetIsPolicy = false;
+    }
+
+    _lastSynthesized = true;
+
+    if (!_reportedUse)
+    {
+        _reportedUse = true;
+        LOG_INFO("DLSS-NR synthesized motion: first field handed to the model on the {} route ({}x{}, motion vector "
+                 "scale {} x {})",
+                 route, width, height, kSynthMotionScaleX, kSynthMotionScaleY);
+    }
+
+    return motion;
+}
+
+void SynthMotionGuide::AfterPass(ID3D12GraphicsCommandList* cmdList)
+{
+    if (!_handedOut || _estimator == nullptr || cmdList == nullptr)
+        return;
+
+    Barrier(cmdList, _estimator->Motion(), _handedOutState, kEstimatorMotionState);
+    _handedOut = false;
+}
+
+void SynthMotionGuide::ConfirmExecuted()
+{
+    if (!_recorded || _estimator == nullptr)
+        return;
+
+    _estimator->ConfirmExecuted();
+    _recorded = false;
+}
+
+void SynthMotionGuide::AbandonRecording()
+{
+    if (!_recorded || _estimator == nullptr)
+        return;
+
+    // Both barriers, out and back, were on the list nobody ran: the field is where the estimator left it.
+    _handedOut = false;
+    _estimator->AbandonRecording();
+    _recorded = false;
+}
+
+void SynthMotionGuide::Release()
+{
+    if (_estimator != nullptr)
+    {
+        _estimator->Release();
+        _estimator.reset();
+    }
+
+    _width = 0;
+    _height = 0;
+    _format = DXGI_FORMAT_UNKNOWN;
+    _lastRecordMs = 0;
+    _handedOutState = D3D12_RESOURCE_STATE_COMMON;
+    _recorded = false;
+    _handedOut = false;
+    _lastSynthesized = false;
+    _reportedFailure = false;
 }
 
 bool CapturedPresentGuides(ID3D12Resource** depth, ID3D12Resource** motion, DlssNrFrameInfo* frame)
@@ -5732,6 +5969,15 @@ void Shutdown()
     GpuTiming::SetEnabled(false);
 
     g_compose.reset();
+
+    // The present route's motion estimator, once every present list that may read it has finished.
+    if (g_presentMotion != nullptr)
+    {
+        if (WaitPresentListsIdle(2000))
+            g_presentMotion->Release();
+        else
+            LOG_WARN("DLSS-NR shutdown: synthesized motion retained, a present list had not finished");
+    }
 
     ResetPresentList();
     ReleasePresentTemporal();

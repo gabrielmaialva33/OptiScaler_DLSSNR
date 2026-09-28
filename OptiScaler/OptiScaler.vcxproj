@@ -251,6 +251,7 @@ del /Q $(SolutionDir)x64\Release\a\Licenses\*.*
 copy $(SolutionDir)external\xess\LICENSE.txt $(SolutionDir)x64\Release\a\Licenses\XeSS_LICENSE.txt /Y
 copy "$(SolutionDir)READ ME - DLSS Neural Rendering.txt" $(SolutionDir)x64\Release\a\ /Y
 copy "$(SolutionDir)Licenses\RenoDX_ATTRIBUTION.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
+copy "$(SolutionDir)Licenses\FidelityFX_OpticalFlow_ATTRIBUTION.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
 md $(SolutionDir)x64\Release\a\OptiScaler
 copy $(SolutionDir)external\xess\bin\*.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
 copy $(SolutionDir)external\FidelityFX-SDK\docs\license.md $(SolutionDir)x64\Release\a\OptiScaler\Licenses\FidelityFX_v1_LICENSE.md /Y
@@ -432,6 +433,17 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\dlssnr\DlssNr_Vk.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_Stabilizer_Dx12.h" />
     <ClInclude Include="shaders\dlssnr\precompile\DlssNr_Stabilizer_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\SynthMotion_Dx12.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ClearFloat_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ClearUint_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_Expand_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_Filter_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_LuminancePyramid_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_PrepareLuma_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_Scale_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ScdDivergence_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ScdHistogram_Shader.h" />
+    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_Search_Shader.h" />
     <ClInclude Include="dlssnr\DlssNrFeature_Vk.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_PShader.h" />
@@ -855,6 +867,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="inputs\NVNGX_DLSS_Dx11.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_Dx12.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_Stabilizer_Dx12.cpp" />
+    <ClCompile Include="shaders\synth_motion\SynthMotion_Dx12.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNrFeature_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ExposureScan.cpp" />

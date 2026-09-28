@@ -308,7 +308,12 @@ when NR comes back.
 1. ~~Step 2: move NR to once per base frame, before FG.~~ Done, above.
 2. The D3D12 present path (step 5), for PCSX2. Built, below; not yet measured.
 3. Rafael's 3060 (step 6).
-4. The estimator (step 3) and the HUD mask (step 4), when a title needs them.
+4. The estimator (step 3): built and wired into NR's two no-guide present routes behind
+   `[DlssNr] SynthMotion` (synthesized-motion.md, update 2026-09-27). FG integration deferred: FG still
+   gets the zero field from `SynthInputs`, which step 1 measured as enough in Divinity. Wiring the same
+   field into `SynthInputs` (display extent, no second estimator run when NR already recorded one this
+   frame) is the next step, once the field is measured on NR.
+5. The HUD mask (step 4), when a title needs it.
 
 ## Step 5, built
 

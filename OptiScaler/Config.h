@@ -294,6 +294,9 @@ class Config
     CustomOptional<bool> DlssNrRequireDlss { false };
     // Present hosts on zero guides: start the model's history over every frame. Default false.
     CustomOptional<bool> DlssNrZeroGuideReset { false };
+    // Present hosts with no game guides: estimate motion from the frames themselves and hand it to the
+    // model instead of zero motion (synthesized-motion.md). Experimental. Default false.
+    CustomOptional<bool> DlssNrSynthMotion { false };
     // Present hook: wait for GPU completion before flip. Default true.
     CustomOptional<bool> DlssNrPresentSync { true };
     CustomOptional<uint32_t> DlssNrPreset { 0 };

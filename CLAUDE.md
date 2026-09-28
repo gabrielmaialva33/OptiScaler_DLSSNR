@@ -228,7 +228,7 @@ before committing C++, because nothing local enforces it and it had drifted by 5
 ```bash
 python3 tests/run_all.py            # host tier, the default; 18 suites, ~55 s
 python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
-python3 tests/run_all.py --tier all # adds the three wine suites
+python3 tests/run_all.py --tier all # adds the four wine suites
 python3 tests/<name>/run.py         # one suite, unchanged
 ```
 

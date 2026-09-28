@@ -215,6 +215,7 @@ class Config
   public:
     FakeFlag DlssNrEnabled { true };
     FakeFlag DlssNrZeroGuideReset { false };
+    FakeFlag DlssNrSynthMotion { false };
     static Config* Instance()
     {
         static Config config;
@@ -241,6 +242,26 @@ struct DlssNrFrameInfo
 
 namespace DlssNr
 {
+
+// Synthesized motion (DlssNrFeature_Dx12.h). Off by default in these cases: the host must build nothing
+// for it and hand the pass exactly what it did before.
+class SynthMotionGuide
+{
+  public:
+    ID3D12Resource* Record(ID3D12Device*, ID3D12GraphicsCommandList*, ID3D12Resource*, D3D12_RESOURCE_STATES, bool,
+                           DlssNrFrameInfo&, const char*)
+    {
+        ++records;
+        return nullptr;
+    }
+    void AfterPass(ID3D12GraphicsCommandList*) {}
+    void ConfirmExecuted() {}
+    void AbandonRecording() {}
+    void Release() { ++releases; }
+    bool LastFrameSynthesized() const { return false; }
+    int records = 0;
+    int releases = 0;
+};
 
 // The zero guides. Their own contract is tested by nr-zero-guides; here they only have to be there,
 // at the size they were asked for.

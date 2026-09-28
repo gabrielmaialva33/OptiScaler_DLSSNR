@@ -420,6 +420,14 @@ RequireDlss=auto
 ; true or false - Default (auto) is false
 ZeroGuideReset=auto
 
+; Present hosts with no upscaler to take depth and motion from (the D3D11 bridge, a D3D12 title on
+; HookMethod=2 with no DLSS): estimate the motion from the frames themselves and give it to the model
+; instead of zero motion, so its history follows a moving camera rather than ghosting behind it.
+; Experimental: an estimate from colour alone is coarse at thin edges and text, and it costs a little
+; GPU time per frame. Depth stays constant. ZeroGuideReset no longer applies to a frame that has it.
+; true or false - Default (auto) is false
+SynthMotion=auto
+
 ; D3D12, HookMethod 0 or 2 only: wait for the pass's backbuffer write-back to finish on the GPU before
 ; the flip, so the frame that reaches the screen (and frame generation) is the finished one. No effect
 ; on the D3D11 bridge's host, whose work is already on the flip's own queue.

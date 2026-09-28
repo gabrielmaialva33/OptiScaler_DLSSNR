@@ -60,6 +60,16 @@ PresentHost::~PresentHost() { Release(); }
 
 void PresentHost::Release()
 {
+    _ReleaseBuilt();
+
+    if (_motion != nullptr)
+        _motion->Release();
+}
+
+bool PresentHost::MotionSynthesized() const { return _motion != nullptr && _motion->LastFrameSynthesized(); }
+
+void PresentHost::_ReleaseBuilt()
+{
     _toWorking.reset();
     _fromWorking.reset();
     _guides.Release();
@@ -271,8 +281,15 @@ void PresentHost::_ReportWindow()
         // Counted in frames this host was handed, which on a bridge are base frames: the frames frame
         // generation adds never come through here, so this cannot claim them.
         const double seconds = std::chrono::duration<double>(now - _windowAt).count();
-        LOG_INFO("DLSS-NR present host: the model ran on {} of the {} base frames handed to it in the last {:.1f} s",
-                 _serial - _windowSerial, _windowFrames, seconds);
+
+        if (Config::Instance()->DlssNrSynthMotion.value_or_default())
+            LOG_INFO("DLSS-NR present host: the model ran on {} of the {} base frames handed to it in the last "
+                     "{:.1f} s, motion {}",
+                     _serial - _windowSerial, _windowFrames, seconds, MotionSynthesized() ? "synthesized" : "zero");
+        else
+            LOG_INFO(
+                "DLSS-NR present host: the model ran on {} of the {} base frames handed to it in the last {:.1f} s",
+                _serial - _windowSerial, _windowFrames, seconds);
 
         _windowFrames = 0;
         _windowAt = now;
@@ -415,10 +432,25 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         }
     }
 
+    // [DlssNr] SynthMotion: with no game guides, motion estimated from this frame and the last instead of
+    // zero motion. Read from the working colour before the pass edits it in place; depth stays zero.
+    if (motion == _guides.Motion() && Config::Instance()->DlssNrSynthMotion.value_or_default())
+    {
+        if (_motion == nullptr)
+            _motion = std::make_unique<SynthMotionGuide>();
+
+        if (auto* synthesized = _motion->Record(device, cmdList, _toWorking->Buffer(), _workingState, _resetOwed, frame,
+                                                "D3D11 bridge"))
+        {
+            motion = synthesized;
+        }
+    }
+
     // Zero guides tell the model nothing moved, and it blends each frame with its history accordingly:
     // ghosts and doubled edges under a moving camera (Generation Zero, 2026-09-24). Opt-in, because a
     // slow isometric camera (Divinity) was measured fine with history, and history is what smooths.
-    if (depth == _guides.Depth() && Config::Instance()->DlssNrZeroGuideReset.value_or_default())
+    // Keyed on the motion, not the depth: synthesized motion keeps the zero depth and needs no reset.
+    if (motion == _guides.Motion() && Config::Instance()->DlssNrZeroGuideReset.value_or_default())
     {
         // Policy only if nothing real was already owed: a host rebuilt at the same size carries a genuine
         // reset in from PresentFrameDefaults, and that one must still read as a cut.
@@ -428,6 +460,10 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
 
     const char* frameReason = "";
     const bool passed = EvaluateAtPresent(cmdList, _toWorking->Buffer(), depth, motion, frame, queue, &frameReason);
+
+    // The field goes back where the estimator keeps it, on this same list, whether the pass ran or not.
+    if (_motion != nullptr)
+        _motion->AfterPass(cmdList);
 
     if (!passed)
     {
@@ -459,6 +495,9 @@ void PresentHost::ConfirmExecuted()
 
     _guides.ConfirmExecuted();
 
+    if (_motion != nullptr)
+        _motion->ConfirmExecuted();
+
     if (_recordedPass)
     {
         // The model has seen a frame, so the next one has a history to continue from, and the serial
@@ -478,12 +517,17 @@ void PresentHost::AbandonRecording()
 
     _guides.AbandonRecording();
 
+    // The estimator settles its own abandon: its recording never ran either, and it knows what that
+    // leaves it holding.
+    if (_motion != nullptr)
+        _motion->AbandonRecording();
+
     // The states recorded onto that list never happened either, so what this host believes about
     // where its resources are is now a description of a recording nobody ran. Everything is rebuilt
     // rather than reasoned about: a wrong StateBefore is a barrier the runtime rejects, and the
     // cheapest way to be sure is to have nothing left to be wrong about.
     LOG_WARN("DLSS-NR present host: a recording was abandoned, rebuilding its resources");
-    Release();
+    _ReleaseBuilt();
 
     _recorded = false;
     _recordedPass = false;

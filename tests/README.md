@@ -29,7 +29,7 @@ entry, or the next run tells you.
 | Tier | Needs | Suites |
 |---|---|---|
 | `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `vulkan-query-readiness` and `mfg-pattern` |
-| `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
+| `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
 The wine tier is serial on purpose. These suites compile through the single msvc-wine
@@ -82,6 +82,9 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   never loads NGX and never launches a game.
 - `dlssnr-loopback` — drives the production NGX exports, NR composition, resolution changes
   and shutdown on a real GPU under Proton.
+- `synth-motion-d3d12` — the synthesized-motion estimator on a real D3D12 device: endpoint
+  error against known motion, the axis signs, scene cuts, abandon semantics and GPU time.
+  No NGX, no game.
 - `vulkan-overlay` — builds a real DLL and drives real Vulkan to exercise overlay
   lifetime.
 

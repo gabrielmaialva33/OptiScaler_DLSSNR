@@ -1,5 +1,36 @@
 # Synthesized motion vectors for the no-upscaler NR path
 
+Update 2026-09-27 (branch `synth-motion`): **integrated, behind `[DlssNr] SynthMotion`** (default off,
+menu checkbox "Synthesized motion" next to "No history without motion", under HookMethod Present).
+- **The estimator** is `SynthMotion::Estimator_Dx12` (`OptiScaler/shaders/synth_motion/`), the
+  FidelityFX optical-flow port described in the update below. Its output meets §4: `R16G16_FLOAT` at
+  the colour's full extent, current-to-previous in pixels, +x right, +y down, resting in
+  NON_PIXEL_SHADER_RESOURCE between frames.
+- **One door for both present routes**: `DlssNr::SynthMotionGuide` (`DlssNrFeature_Dx12.h`, defined in
+  `DlssNr_Dx12.cpp`) records the estimator, hands the field over in `GuideRestState(true)`, describes
+  it (`kSynthMotionScaleX/Y` = 1, output resolution, no subrect), drops the zero-guide policy reset
+  (`ZeroGuideReset`) for a frame that has real motion, turns an estimator scene cut into a real Reset,
+  and hands the field back after the pass (`AfterPass`). A gap over 250 ms between recordings resets
+  the estimator, so a pass switched off and on never differences two unrelated frames.
+- **D3D12 present** (`RunPresentPass`, the no-capture branch): recorded from `g_bbCopy` after the
+  backbuffer copy, before `EvaluateAtPresent`; confirmed or abandoned with the present list
+  (`SubmitPresentList` now says whether it executed); on an extent change the present lists are
+  waited for (`WaitPresentListsIdle`) before the estimator is released; released in `Shutdown` after
+  the same wait. The owner is one heap-allocated guide, never destroyed statically.
+- **D3D11 bridge** (`PresentHost::Record`, when no guides were captured): recorded from
+  `_toWorking->Buffer()`, the full-extent working colour, before the pass edits it; confirmed and
+  abandoned with the host's own bookkeeping; released in `PresentHost::Release()`, which the bridge
+  calls after its drain. An abandoned recording rebuilds the host's other resources but keeps the
+  estimator, which settles its own abandon. Created on first use only, so an idle host still builds
+  nothing.
+- **Depth stays zero, supersampling stays clamped to native** (§9 question 1 is still open: whether
+  zero depth plus real motion clears the above-1.0 refusal is untested).
+- **Not yet measured**: the y sign (`kSynthMotionScaleY`) is pinned by the estimator's loopback test,
+  and Generation Zero's fast camera is the in-game check (ghosts should go without `ZeroGuideReset`).
+- **Frame generation is not wired**: `SynthInputs` still feeds FSR-FG zeros, which step 1 of
+  synthesized-frame-generation.md measured as enough in Divinity. Handing it this same field is the
+  next step there.
+
 Update 2026-09-27: [synthesized-frame-generation.md](synthesized-frame-generation.md) makes this
 estimator shared with frame generation. It changes two things here:
 - **The kernel** becomes a port of the FidelityFX optical flow: MIT, in the tree under

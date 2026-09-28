@@ -432,6 +432,17 @@ void RenderMenu(Config* config, float menuResScale)
                            "motion -- and treats the scene as standing still, which is right for a "
                            "title whose upscaler is not DLSS.");
 
+                bool synthMotion = config->DlssNrSynthMotion.value_or_default();
+                if (ImGui::Checkbox(Localization::Label("Synthesized motion"), &synthMotion))
+                    config->DlssNrSynthMotion = synthMotion;
+
+                HelpMarker("Experimental. Only for frames with no motion from the game (no upscaler to take "
+                           "it from). Instead of telling the model nothing moved, the motion is estimated "
+                           "from this frame and the last, so its history follows a moving camera rather "
+                           "than ghosting behind it. The estimate is coarse at thin edges and text and "
+                           "costs a little GPU time; depth stays constant. \"No history without motion\" "
+                           "below no longer applies to a frame that has it.");
+
                 bool zeroGuideReset = config->DlssNrZeroGuideReset.value_or_default();
                 if (ImGui::Checkbox(Localization::Label("No history without motion"), &zeroGuideReset))
                     config->DlssNrZeroGuideReset = zeroGuideReset;

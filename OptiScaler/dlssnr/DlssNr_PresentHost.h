@@ -12,6 +12,8 @@ class FT_Dx12;
 namespace DlssNr
 {
 
+class SynthMotionGuide;
+
 // The pass, over a frame that reached present without an upscaler ever being called.
 //
 // Everything the model needs and the frame does not have is owned here: a working colour it can be
@@ -56,6 +58,9 @@ class PresentHost
     // Throw everything away. The caller must already have proved the GPU is done with it.
     void Release();
 
+    // Whether the last frame the model ran on had synthesized motion rather than zero motion.
+    bool MotionSynthesized() const;
+
     // Frames this host has actually put through the model, which is what the model's history is
     // counted in. Not the process-wide frame counter: two hosts advancing one global would each see
     // a history that skipped.
@@ -63,6 +68,10 @@ class PresentHost
 
   private:
     bool _Ensure(ID3D12Device* device, ID3D12Resource* source);
+
+    // Everything Release() drops except the synthesized motion. An abandoned recording rebuilds the
+    // host's own resources at the same size; the estimator settles its own abandon and keeps going.
+    void _ReleaseBuilt();
 
     // Build the model once, on lists of this host's own, before any frame work exists to sit in
     // front of it.
@@ -84,6 +93,10 @@ class PresentHost
     void _ReportWindow();
 
     ZeroGuides _guides;
+
+    // [DlssNr] SynthMotion: motion estimated from the frames, in place of the zero field. Created on
+    // the first frame the key is on and the pass runs, so an idle host still builds nothing.
+    std::unique_ptr<SynthMotionGuide> _motion;
 
     // The colour the model reads and writes. A wide float format rather than the backbuffer's own,
     // for two reasons: the model's edit is composed in floating point and an 8-bit round trip would
