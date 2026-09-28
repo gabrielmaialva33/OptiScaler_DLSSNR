@@ -430,6 +430,111 @@ handed to it.
   px (`tests/nr-present-host`).
 - The D3D11 route has not been re-run since these fixes.
 
+## Motion into FG, and emulator behaviour: design
+
+Written 2026-09-27, before the code. Everything here is opt-in; with the keys at their defaults the
+FG input is byte-for-byte what step 5 shipped.
+
+### The synthesized field as FSR-FG's motion vectors
+
+`[FrameGen] SynthesizedMotion=true` hands FSR-FG the estimator's field
+(`SynthMotion::Estimator_Dx12`, synthesized-motion.md) as Velocity instead of the zero field, on both
+transports.
+- **The convention needs no conversion.** FFX's `motionVectorScale` is documented as "(1.0, 1.0) if
+  motion vectors are already in pixel space" (`ffx_framegeneration.h:137`). FSR's motion vectors
+  encode "the motion from a pixel in the current frame to the position of that same pixel in the
+  previous frame" (`super-resolution-temporal.md:147`, the convention FG shares). That is the
+  estimator's contract: current to previous, display pixels, +y down. So `SetMVScale(1, 1)` and the
+  `DisplayResolutionMVs` flag stay as they are.
+- **The field is used only when it is real.** It is handed over only when the estimator is
+  `Ready()`: not on a reset, not during its five warm-up frames, not on a cut it has seen.
+  Otherwise FSR-FG gets the zero field as before. `SceneCut()` also sets FG's Reset.
+- **No confidence mask.** FSR's interpolator already arbitrates per pixel between the vector field it
+  is given and its own optical flow, keeping whichever reconstructs the colour better
+  (`frame-interpolation.md`). A forward/backward consistency check would need a second estimate,
+  twice the cost. Deferred until a title shows the field misleading FSR.
+
+### Computing the field once when NR and FG both want it
+
+`SynthMotion::Handoff` (`shaders/synth_motion/SynthMotion_Handoff.h`, header only, outside the NR
+module) is one slot per process.
+- **Tokens.** The transport advances a base-frame token before any consumer of that frame runs: the
+  FG present hook on native D3D12, and the bridge's copy on D3D11.
+- **Publishing.** The first consumer to record an estimate publishes its field with that token, its
+  device and extent, and who it is.
+- **Taking.** The second takes the field when the token, device and extent match and the publisher is
+  not itself; it then records no estimate of its own.
+- **Order per transport:**
+  - *D3D12:* FG's feed runs before `fg->Present()`, and NR's pass after it. So FG publishes and NR
+    takes. NR's list runs on the same game queue (the step 5 queue fix), after FG's.
+  - *D3D11 bridge:* NR's host records in the copy, before the synthesized input, so NR publishes and
+    FG takes. Both are on the copy list.
+- **Each keeps its own estimator** for when it is alone. A consumer that took leaves its own
+  estimator idle, and the frame that estimator last saw goes stale. NR's 250 ms staleness rule, and
+  the same rule on the FG side, resets it the next time it records.
+- **Lifetime.** An owner withdraws its field from the slot when it releases the estimator, which
+  happens only after its own drain. FSR-FG's prepare reads the vectors within the base frame, during
+  `Dispatch` on the game queue, so nothing reads a taken field after its frame.
+- **Without a transport** (NR on a plain swapchain, no FG), nobody advances the token. The
+  publisher check stops a consumer from taking its own field back.
+
+### What FSR 3.1 cannot do
+
+The FSR 3.1.x swapchain generates exactly one frame (`numGeneratedFrames = 1`,
+`FrameInterpolationSwapchainDX12.cpp:1927`). The `outputs[4]` array in the API belongs to the ML
+frame generation of FSR 4, which is RDNA 4 only. So adaptive, fractional multipliers aimed at a target
+rate (Lossless Scaling's AFG) are out of reach with this output. That would need our own interpolator,
+the fallback this note keeps open.
+
+### Fast-motion response
+
+`[FrameGen] SynthesizedFastMotion=<px>` (0, the default, is off). When the median motion magnitude
+exceeds that many display pixels per base frame, FG is fed with Reset.
+- **What Reset does.** On a reset FSR's interpolation "copies the current back buffer and doesn't
+  interpolate" (`ffx_frameinterpolation.h:174`). That is AMD AFMF's Fast Motion Response: repeat the
+  frame instead of smearing it. FG stays active, so there is no pause and resume.
+- **Hysteresis.** The response ends after two consecutive samples below 75% of the threshold.
+- **The statistic.** 16 rows of the field are copied to a readback ring and read three confirmed
+  frames later, the same rule as the estimator's `SceneCut()`. Motion is coherent over a few frames,
+  so the lag costs the first two or three frames of a burst, not its body.
+
+### Low-fps floor
+
+`[FrameGen] SynthesizedMinFps=<fps>` (0, the default, is off).
+- **Measurement.** The base rate comes from the interval between feeds, smoothed.
+- **Below the floor, FG is not fed at all.** A sustained condition should not pay for generation it
+  then throws away. FSR-FG pauses itself after three presents without new data
+  (`FSRFG_Dx12::Present`), and when feeding resumes it waits ten frames
+  (`IFGFeature::UpdateTarget`).
+- **Hysteresis.** Feeding resumes above the floor plus 15%.
+
+### Duplicate presents: detected, not collapsed
+
+An emulator showing 30 fps content at 60 Hz presents every frame twice. Interpolating then produces
+uneven cadence rather than smoothness.
+- **Why not collapse.** Collapsing would mean skipping the duplicate present, and that must be decided
+  before this frame's Present. The GPU knows whether the frame equals the previous one only after it
+  has rendered it, so a same-frame decision needs a CPU wait on the GPU every frame. That serialises a
+  present path emulators already bottleneck.
+- **What is done instead: detect late and advise.**
+  - The same row samples show whether a frame was identical to the previous one: all motion exactly
+    zero.
+  - An interleaved pattern of identical and moving frames logs one line naming the emulator's own
+    option (PCSX2: Skip Presenting Duplicate Frames). The threshold is at least a quarter of the last
+    60 samples identical, with at least 20 alternations.
+  - A game that is merely paused, where every sample is zero, does not trigger it.
+
+### Verification in PCSX2
+
+- `[FrameGen] SynthesizedMotion=true` with `[DlssNr] SynthMotion=true`:
+  - the log names FG's own estimator once;
+  - NR's first-field line says it took the field from frame generation, and there is no second
+    estimator allocation;
+  - the motion into FSR is visible in FSR's debug view (`[FrameGen] DebugView`).
+- `SynthesizedFastMotion=24`: whipping the camera shows repeated frames instead of smeared ones.
+- A duplicate-presenting setup (PCSX2 with Skip Presenting Duplicate Frames off) logs the advice
+  once.
+
 ## Open questions
 
 - How FSR's interpolator behaves with flat depth: its disocclusion and inpainting assume real depth.

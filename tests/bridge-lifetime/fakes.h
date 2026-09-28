@@ -445,7 +445,29 @@ struct SynthInputs
         ++releases;
         recordingOutstanding = false;
     }
+
+    // The motion estimate rides the same list as the clear, after it, from the game's frame.
+    unsigned motionRecords = 0;
+    ID3D12Resource* lastMotionColour = nullptr;
+    int lastMotionColourState = -1;
+    bool RecordMotion(void* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, int colourState)
+    {
+        assert(device != nullptr && cmdList != nullptr && colour != nullptr);
+        assert(recordingOutstanding && "RecordMotion is recorded after RecordInit, on the same list");
+        ++motionRecords;
+        lastMotionColour = colour;
+        lastMotionColourState = colourState;
+        return true;
+    }
 };
+
+// SynthMotion::Handoff (shaders/synth_motion/SynthMotion_Handoff.h): only the base-frame boundary the
+// bridge marks before its neural host and the synthesized input run.
+namespace SynthMotion::Handoff
+{
+inline unsigned baseFrames = 0;
+inline void BeginBaseFrame() { ++baseFrames; }
+} // namespace SynthMotion::Handoff
 
 class Dx11wDx12SC
 {

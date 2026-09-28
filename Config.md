@@ -543,6 +543,30 @@ FGInput=synthesized
 FGOutput=fsrfg
 ```
 
+Three optional keys refine it, all off by default:
+
+```ini
+[FrameGen]
+; Hands FSR FG the synthesized motion field (an optical-flow estimate of the presented frames)
+; instead of zero motion vectors. When [DlssNr] SynthMotion is on too, the field is computed once.
+; true or false - Default (auto) is false
+SynthesizedMotion=true
+
+; Needs SynthesizedMotion. Repeats frames instead of interpolating them while the median motion
+; exceeds this many pixels per base frame (like AMD's Fast Motion Response).
+; float value, pixels - Default (auto) is 0, off
+SynthesizedFastMotion=24
+
+; Does not generate while the game runs below this many base frames per second.
+; float value - Default (auto) is 0, off
+SynthesizedMinFps=20
+```
+
+FSR FG generates one frame per base frame; fractional multipliers aimed at a target rate are not
+available with it. An emulator that presents every frame twice cannot be smoothed by interpolation
+either: with `SynthesizedMotion` on, OptiScaler logs once when it sees that cadence, and the fix is
+the emulator's own option (PCSX2: Skip Presenting Duplicate Frames).
+
 ### Logging
 ```ini
 [Log]

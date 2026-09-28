@@ -24,6 +24,7 @@
 
 #include <dlssnr/DlssNr.h>
 #include <inputs/FG/Synth_Inputs.h>
+#include <shaders/synth_motion/SynthMotion_Handoff.h>
 
 #define XEFG_RESOURCE_REF_LIMIT 1
 
@@ -68,6 +69,28 @@ static void FeedSynthD3D12(IDXGISwapChain* swapchain, IFGFeature_Dx12* fg)
     // The one-time clear goes on FG's queue, the one FSR-FG's prepare runs on, ahead of it.
     if (!_synthD3D12->RecordInitOnQueue(queue, desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format))
         return;
+
+    // With [FrameGen] SynthesizedMotion, the motion field from the frame the game just finished, on the same
+    // queue and ahead of FSR-FG's prepare. It is estimated here, before DLSS-NR's pass below, so NR takes
+    // this field instead of estimating again (SynthMotion::Handoff).
+    if (Config::Instance()->FGSynthesizedMotion.value_or_default())
+    {
+        IDXGISwapChain3* swapchain3 = nullptr;
+
+        if (swapchain->QueryInterface(IID_PPV_ARGS(&swapchain3)) == S_OK && swapchain3 != nullptr)
+        {
+            ID3D12Resource* backbuffer = nullptr;
+
+            if (swapchain3->GetBuffer(swapchain3->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&backbuffer)) == S_OK &&
+                backbuffer != nullptr)
+            {
+                _synthD3D12->RecordMotionOnQueue(queue, backbuffer, D3D12_RESOURCE_STATE_PRESENT);
+                backbuffer->Release();
+            }
+
+            swapchain3->Release();
+        }
+    }
 
     ID3D12Device* device = nullptr;
 
@@ -1220,6 +1243,10 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     // Synthesized FG on a native D3D12 swapchain: no upscaler hands FG anything, so this does, once per
     // base frame and before fg->Present() below dispatches it. The D3D11 bridge feeds its own before its
     // presenter's Present; the interop check in SynthD3D12Wanted leaves that swapchain to it.
+    // A new base frame for the synthesized motion handoff, before anything of this frame estimates it.
+    if (willPresent)
+        SynthMotion::Handoff::BeginBaseFrame();
+
     if (willPresent && state.currentFG != nullptr && SynthD3D12Wanted())
         FeedSynthD3D12(This, state.currentFG);
 

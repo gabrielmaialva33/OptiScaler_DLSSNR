@@ -9,6 +9,7 @@
 
 #include <hudfix/Hudfix_Dx11.h>
 #include <resource_tracking/ResTrack_dx11.h>
+#include <shaders/synth_motion/SynthMotion_Handoff.h>
 
 #include <Util.h>
 #include <Config.h>
@@ -1674,6 +1675,10 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     // orders the neural work before the flip without the present thread waiting on it.
     ID3D12Resource* transferSource = _openedDx11BackBuffers[copySlot];
 
+    // A new base frame for the synthesized motion handoff: the neural host below estimates it first, and
+    // the synthesized FG input after it takes that field instead of estimating again.
+    SynthMotion::Handoff::BeginBaseFrame();
+
     if (_nrHost != nullptr &&
         _nrHost->Record(_dx12Device, _copyCommandLists[copySlot], _openedDx11BackBuffers[copySlot],
                         D3D12_RESOURCE_STATE_COPY_SOURCE, _dx12CommandQueue))
@@ -1692,6 +1697,11 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
         const auto fgDesc = fgBackBuffer->GetDesc();
         _synthInputs->RecordInit(_dx12Device, _copyCommandLists[copySlot], (UINT) fgDesc.Width, fgDesc.Height,
                                  fgDesc.Format);
+
+        // With [FrameGen] SynthesizedMotion, the motion field from the game's own frame (the host above may
+        // already have published it), confirmed or abandoned with this list like the clear.
+        _synthInputs->RecordMotion(_dx12Device, _copyCommandLists[copySlot], _openedDx11BackBuffers[copySlot],
+                                   D3D12_RESOURCE_STATE_COPY_SOURCE);
     }
 
     _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, transferSource);
