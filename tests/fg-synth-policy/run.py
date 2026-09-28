@@ -34,9 +34,9 @@ print(f'PASS: the HUD mask\'s {len(names)} thresholds equal DLSS-NR\'s')
 # token that matches a parameter, a swizzle included: `#define UM_PROT(x, y) Load(int2(x, y)).x` called as
 # UM_PROT(x + sx, y + sy) reads `.x + sx`, the support and growth loops count every neighbour as protected, and
 # the mask is 1 on every pixel. The host tests cannot see it (their macros are plain calls); the GPU harness saw
-# it on 2026-09-28. DLSS-NR's pass has it and is left byte-identical here, so it is reported, not failed
-# (hud-protection.md, "The mask macros: every pixel protected").
-KNOWN_SWIZZLE_HAZARD = {'OptiScaler/shaders/dlssnr/precompile/dlssnr_uimask.hlsl'}
+# it on 2026-09-28. DLSS-NR's pass had it until its macros were renamed the same day (hud-protection.md,
+# "The mask macros: every pixel protected"); no includer is excused now.
+KNOWN_SWIZZLE_HAZARD = set()
 DEFINE = re.compile(r'^\s*#\s*define\s+(UM_\w+)\(([^)]*)\)(.*)$', re.M)
 includers = [p for p in (repo / 'OptiScaler/shaders').rglob('*.hlsl')
              if 'static_overlay_rule.h' in p.read_text(errors='replace')]

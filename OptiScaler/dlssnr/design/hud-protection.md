@@ -237,5 +237,9 @@ hands the rule, and this pass has it too.
   `#define UM_PROT(px, py) AccPrevAt(int2(px, py)).x`, and the same for the other three. Then rebuild
   `DlssNr_UiMask_Shader.h`, and look at UiProtection in PCSX2 again: it will start protecting only what the
   rule finds.
-- **Guard.** `tests/fg-synth-policy` refuses the hazard in any shader that includes the rule, and lists this
-  file as the one known exception. The fix above must remove it from that list, or the test fails.
+- **Guard.** `tests/fg-synth-policy` refuses the hazard in any shader that includes the rule. It listed this
+  file as the one known exception until the fix below.
+- **Fixed** on 2026-09-28: all four macros take `px_, py_`, and `DlssNr_UiMask_Shader.cso`/`.h` were rebuilt
+  with the command in the shader's header (dxc `cs_6_0 -O3 -Qstrip_debug -Qstrip_reflect`). In the
+  disassembly, `fadd` of a ±1/±2 constant fell from 21 to 1, and the exception is gone from the guard.
+  Everything this note says UiProtection measured before the fix was measured with the defect.

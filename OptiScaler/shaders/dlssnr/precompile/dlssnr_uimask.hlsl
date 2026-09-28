@@ -55,10 +55,10 @@ float2 AccPrevAt(int2 p) { return gAccPrev.Load(int3(Clamped(p), 0)); }
 #define UM_FN
 #define UM_OUT(T) out T
 #define UM_UNROLL [unroll]
-#define UM_LUMA(x, y) LumaAt(int2(x, y))
-#define UM_CHANGE(x, y) ChangeAt(int2(x, y))
-#define UM_PROT(x, y) AccPrevAt(int2(x, y)).x
-#define UM_STREAK(x, y) AccPrevAt(int2(x, y)).y
+#define UM_LUMA(px_, py_) LumaAt(int2(px_, py_))
+#define UM_CHANGE(px_, py_) ChangeAt(int2(px_, py_))
+#define UM_PROT(px_, py_) AccPrevAt(int2(px_, py_)).x
+#define UM_STREAK(px_, py_) AccPrevAt(int2(px_, py_)).y
 #include "../../synth_motion/precompile/static_overlay_rule.h"
 
 [numthreads(8, 8, 1)]
