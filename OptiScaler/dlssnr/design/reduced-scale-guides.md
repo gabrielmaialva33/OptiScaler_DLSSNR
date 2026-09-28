@@ -1,8 +1,8 @@
 # Guides and motion scale below the frame's size
 
-Status: **built behind two default-on keys; host-tested; not yet run in a game.** Written 2026-09-27.
-The guide resample's bytecode is not in the tree yet. Until it is compiled (commands below), the build
-reports the resample unavailable and only the motion-scale fix is live.
+Status: **built behind two default-on keys; host-tested; fix 1 A/B'd in Cyberpunk 2077 on 2026-09-28**
+(see [Measured](#measured)). Written 2026-09-27. The guide resample's bytecode is in the tree since
+`c95ad19c`; a build without it reports the resample unavailable and only the motion-scale fix is live.
 
 ## Where this comes from
 
@@ -158,3 +158,33 @@ read from the ini only, so restart the game between arms. Use the same save and 
 6. **Then Rafael's 3060** at 0.5: Mortal Shell II and Subnautica 2, the after-upscale titles measured
    on it ([model-cost-across-architectures.md](model-cost-across-architectures.md)). That is where
    the flicker should go away.
+
+## Measured
+
+### Cyberpunk 2077, 2026-09-28: fix 1 confirmed, fix 2 not exercised
+
+This was build `16dff6de` on the RTX 4090. The game ran at 3440x1440 with **Ray Reconstruction on**,
+at native render size: the frame's guides were 3440x1440. So the run differed from plan item 1 in
+two ways.
+
+- **On the ray-reconstruction route, `RRWorkingScale` governs, not `WorkingScale`.** The ini's
+  `WorkingScale=0.5` did nothing, and NR started at 3440x1440. Arm A reached 1720x720 from the
+  "RR Working scale" slider, mid-session. Arm B set `RRWorkingScale=0.5` in the ini.
+- **Render size equalled frame size**, so both scale formulas give 1720 x 720 and fix 2 changed
+  nothing. The only difference between the arms was the size of the guides the model read.
+
+| Arm | Log | Model (median) | Outside the model | Samples |
+|---|---|---|---|---|
+| Full size, reference | working size 3440x1440 | 6.77 ms | 0.18 ms | 132 |
+| A, defaults | `guides matched to the working size: depth and motion 1720x720` | 2.89 ms | 0.24 ms | 196 |
+| B, both keys `false` | `motion texture 3440x1440 (the game's region) ... legacy working/frame conversion` | 3.09 ms | 0.20 ms | 75 |
+
+- **The picture:** the user reported "uma leve cintilação" (a slight scintillation) in arm B and
+  nothing like it in arm A. That is the flicker jlrouzies-fr describes, gone with matched guides.
+- **Cost:** the resample adds about 0.04 ms outside the model's window. Arm B's model window came out
+  0.2 ms longer, over a quarter of arm A's samples, so treat that difference as unproven.
+- **Frame rate** did not move in any arm: about 118 presents to 29 renders a second, with the game's
+  4x frame generation and a frame cap. At 0.5 the gain is GPU headroom, not frames.
+
+**Still open:** fix 2 needs a render size below the frame's (item 1 as planned, Ray Reconstruction
+off, or `Stage=1`). Items 3 to 6 are not yet run either.
