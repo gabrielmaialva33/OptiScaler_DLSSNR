@@ -2,6 +2,8 @@
 
 Status: **first slice built, not yet run on a GPU.** Opt-in `[DlssNr] UiProtection`, default off.
 Written 2026-09-27 on branch `synth-motion` (`57131f07`).
+**2026-09-28: the shipped pass protects nearly every pixel, because of a macro defect in its shader;** see
+[The mask macros: every pixel protected](#the-mask-macros-every-pixel-protected-found-2026-09-28-not-fixed).
 
 ## The problem
 
@@ -204,3 +206,36 @@ Build `4fa5912b`, God Hand from the save state, WorkingScale 0.5, synthesized mo
   coat against the sand. With it off, the edges were clean.
 - **After:** the rim is gone. On the coat and sand, UiProtection on and off look alike.
 - **Not yet measured:** HUD recall in a moving scene.
+
+## The mask macros: every pixel protected (found 2026-09-28, not fixed)
+
+Found while building synthesized frame generation's copy of this mask (synthesized-frame-generation.md, "The
+HUD: near depth and a UI layer"). That copy, run on a real device in `tests/synth-motion-d3d12`, marked
+every pixel of a static frame from its second frame on. The cause is in the macros `dlssnr_uimask.hlsl`
+hands the rule, and this pass has it too.
+
+- **The defect.** `#define UM_PROT(x, y) AccPrevAt(int2(x, y)).x`. A function-like macro substitutes every
+  token that matches a parameter, and the `x` of the swizzle is one. So `UM_PROT(x + sx, y + sy)`, the
+  call in the rule's export loop, expands to `AccPrevAt(int2(x + sx, y + sy)).x + sx`. `UM_STREAK` has the
+  same shape, but the rule only calls it at the centre, where the argument is `x` or `y` itself and the
+  expansion is harmless.
+- **In the committed bytecode.** Disassembled `DlssNr_UiMask_Shader.cso` loads last frame's protection and
+  adds -2, -1, +1 or +2 to it before the `> 0.5` support test (`fadd fast float %883, -2.0`, then
+  `fcmp ogt ..., 0.5`).
+- **The effect.** The `sx = +1` and `+2` columns of the 5x5 always count as protected, so support is at
+  least 10 and always passes. The 3x3 growth reads at least `prot + 1`, so the exported mask is
+  `saturate((0.985 - 0.25) * 2) = 1`.
+  - So `UIAlpha` is 1 on every pixel whose own luma did not jump by more than 0.2 since the last frame,
+    from the second frame after any reset. That is nearly all of them.
+  - With `UiProtection` on, the model is told to leave nearly the whole frame as its input. The measured
+    rule (the gates above) never gets a say, and "UiProtection on and off look alike" in PCSX2 cannot be
+    taken as evidence about it.
+- **Why the tests missed it.** `tests/nr-uimask-rule` includes the same rule, but its macros are plain
+  function calls (`Prot(x, y)`) with no swizzle to substitute. It tests the rule, not the macros.
+- **The fix,** not applied because this branch had to leave DLSS-NR byte-identical: name the parameters
+  anything but `x` and `y`, as frame generation's `synth_overlay_detect.hlsl` does. For example,
+  `#define UM_PROT(px, py) AccPrevAt(int2(px, py)).x`, and the same for the other three. Then rebuild
+  `DlssNr_UiMask_Shader.h`, and look at UiProtection in PCSX2 again: it will start protecting only what the
+  rule finds.
+- **Guard.** `tests/fg-synth-policy` refuses the hazard in any shader that includes the rule, and lists this
+  file as the one known exception. The fix above must remove it from that list, or the test fails.
