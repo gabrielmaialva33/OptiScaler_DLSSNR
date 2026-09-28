@@ -77,7 +77,12 @@ marker: doing so defeats a different recursion/device-capture guard.
 
 Nor is marker presence a complete static proof that no hooks can exist: the late Vulkan load path
 in `hooks/LibraryLoad_Hooks.cpp:392–401` calls `VulkanHooks::Hook(module)` without checking the
-marker, and `Hook` itself does not enforce it. The reported inventory of fourteen marked games
+marker, and `Hook` itself does not enforce it. *(Closed 2026-09-27: the policy is resolved once,
+right after Wine detection, by `dllmain.cpp` `ResolveVulkanHookPolicy` — `[Vulkan] SkipHooks`, or the
+marker as a deprecated fallback — and `VulkanHooks::Hook` returns early whenever
+`State::vulkanHooksSkipped` is set, so the startup and the late-load paths are one gate. On the
+installs checked that day the late path had never fired under the marker: Crimson Desert's log shows
+no Vulkan hook installed after the skip line.)* The reported inventory of fourteen marked games
 out of fifteen explains deployment intent, but should be paired with hook-install/callback logs.
 This audit did not recount the installs or remove any markers. The policy must eventually cover
 both startup and late loading; any fix to this preexisting gap outside the opt-in path should be

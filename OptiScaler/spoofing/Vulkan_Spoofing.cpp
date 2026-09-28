@@ -39,9 +39,6 @@ static bool vkEnumerateInstanceExtensionPropertiesListed = false;
 
 static bool SkipVulkanWdx12Hooks()
 {
-    if (Config::Instance()->VulkanSkipHooks.value_or_default())
-        return true;
-
     wchar_t value[2] {};
     const auto length =
         GetEnvironmentVariableW(L"OPTISCALER_DISABLE_VULKAN_WDX12_HOOKS", value, static_cast<DWORD>(std::size(value)));
@@ -942,7 +939,7 @@ PFN_vkVoidFunction VulkanSpoofing::hkvkGetDeviceProcAddr(const PFN_vkVoidFunctio
 void VulkanSpoofing::HookForVulkanSpoofing(HMODULE vulkanModule)
 {
     if (SkipVulkanWdx12Hooks())
-        LOG_WARN("Skipping Vulkan_wDx12 hooks by diagnostic request");
+        LOG_WARN("Skipping Vulkan_wDx12 hooks by diagnostic environment request");
     else
         Vulkan_wDx12::Hook(vulkanModule);
 

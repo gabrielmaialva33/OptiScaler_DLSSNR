@@ -389,17 +389,30 @@ header.
 
 ### Linux / Proton patches (this fork's own layer)
 
-These must survive every merge from `up`. Why they exist: under vkd3d-proton the Vulkan overlay
-competes with Streamline DLSS-G's swapchain/pacer, producing fence timeouts and
+These must survive every merge from `optiscaler/master`. Why they exist: under vkd3d-proton the
+Vulkan overlay competes with Streamline DLSS-G's swapchain/pacer, producing fence timeouts and
 `VK_ERROR_DEVICE_LOST`; the D3D12 overlay path coexists with native FG.
 
-| Commit | File | Change |
-|---|---|---|
-| `255ca14`, `a4f1bbb` | `dllmain.cpp` | On Wine, if marker file `optiscaler_skip_vulkan_hooks` exists beside the DLL, skip `VulkanHooks::Hook` and set `State::vulkanHooksSkipped` |
-| `33f2961` | `State.h` | `vulkanHooksSkipped` field |
-| `7fe23f4` | `wrapped/wrapped_swapchain.cpp` | With `vulkanHooksSkipped`, bypass the DXVK direct-present shortcut so `MenuOverlayDx` draws the menu via D3D12 |
-| `10c6760` | `menu/menu_overlay_vk.cpp` | `vkWaitForFences` bounded to 1 s; skip the menu frame on timeout |
-| 2026-09-19 | `menu/menu_overlay_vk.cpp`, `hooks/VulkanwDx12_Hooks.cpp` | Present on a non-graphics queue family (id Tech 7): draw the menu on the graphics queue with release/acquire ownership transfers and a three-submit semaphore chain; per-`VkQueue` recursive lock in the `vkQueueSubmit` hooks so that submit cannot race the game's |
+The patch surface was converged with upstream's open PRs on 2026-09-27: where a PR carries the same
+change, our text now matches it, so the day it merges the conflict is empty. The "Upstream" column
+says which rows to drop from this table then.
+
+| Commit | File | Change | Upstream |
+|---|---|---|---|
+| `255ca14`, `a4f1bbb`, 2026-09-27 | `dllmain.cpp` (`ResolveVulkanHookPolicy`), `hooks/Vulkan_Hooks.cpp` (`VulkanHooks::Hook`) | `[Vulkan] SkipHooks=true`, or on Wine the older `optiscaler_skip_vulkan_hooks` marker beside the DLL (deprecated, still honoured, logged), sets `State::vulkanHooksSkipped` right after Wine detection; `VulkanHooks::Hook` returns early when it is set, so a late `vulkan-1.dll` load through the loader hook is covered too. `CheckWorkingMode`'s Vulkan block is back to upstream's text | none (ours) |
+| `33f2961` | `State.h` | `vulkanHooksSkipped` field | none (ours) |
+| `b4e3c5cc`, 2026-09-27 | `spoofing/Vulkan_Spoofing.cpp` | `OPTISCALER_DISABLE_VULKAN_WDX12_HOOKS=1` gates all three Vulkan_wDx12 entry paths. **Byte-identical to PR #1131** (RizziU); `[Vulkan] SkipHooks` no longer feeds it (it now means the whole bundle, as the ini always said) | #1131 open |
+| `d8275824` | `State.h`, `dllmain.cpp`, `DLSSG_Dx12.cpp`, `Streamline_Hooks.*`, `Vulkan_Hooks.cpp`, `menu_overlay_dx.cpp`, `IFeature.cpp` | DLSS-G interlock keyed on `menuOverlayIsVulkan`, overlay routing guards, frozen check under FG, NVAPI loaded early for `DisableFlipMetering`. **y4my4my4m's own commit; identical to PR #1138 in these files** | #1138 open |
+| `7fe23f4`, 2026-09-27 | `wrapped/wrapped_swapchain.cpp` | DXVK direct-present shortcut limited to D3D11 (**text of PR #1163**, jackra1n; #1138 carries the same condition), plus our `&& !vulkanHooksSkipped` so a D3D11 title with the hooks skipped reaches `MenuOverlayDx` too | #1163 / #1138 open; our clause stays |
+| `10c6760`, `8e021bff`, `47138ca0`, `4d2c8078`, 2026-09-19 | `menu/menu_overlay_vk.cpp`, `hooks/VulkanwDx12_Hooks.cpp` | Bounded fence wait; submit on the queue that presents; no leaks across swapchain recreation; no D3D12 probe in a native Vulkan overlay's `Init`; non-graphics present family (id Tech 7) drawn on the graphics queue with ownership transfers and a three-submit semaphore chain; per-`VkQueue` recursive lock in the `vkQueueSubmit` hooks. Diverged beyond #1138's version of this file, so kept whole; #1138's release of `_vkCleanMutex` across `RenderMenu` was not taken (see below) | none |
+
+Not taken from #1138: its `menu_overlay_vk.cpp` drops `_vkCleanMutex` across
+`MenuOverlayBase::RenderMenu` because `RenderMenu` could re-enter `DestroyVulkanObjects` through
+`IdentifyGpu::getPrimaryGpu()` and the swapchain hook. Ours holds both locks across it. The
+re-entry that did happen here (`Init` reaching D3D12 device creation) was removed in `4d2c8078`, and
+`getPrimaryGpu()` is cached from startup, so no re-entry path is known; the menu works in DOOM
+Eternal. If a `resource_deadlock_would_occur` ever surfaces from the Vulkan present hook, that
+revision is the fix to port.
 
 Wine detection (`wine_get_version` → `State::isRunningOnLinux`) is upstream. The upstream fix for
 issue #1101 (dxvk-nvapi recursion in `misc/IdentifyGpu.cpp`) is already in the tree; do not re-apply

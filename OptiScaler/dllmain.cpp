@@ -353,6 +353,37 @@ void LoadAsiPlugins()
     }
 }
 
+// Linux/Proton opt-out from the whole vulkan-1.dll hook bundle: overlay, spoofing and Vulkan_wDx12.
+// Under vkd3d-proton the Vulkan overlay competes with Streamline DLSS-G for the swapchain and its
+// pacer (fence timeouts, VK_ERROR_DEVICE_LOST); with the bundle out, the menu is drawn through the
+// D3D12 path instead. VulkanHooks::Hook enforces the result, so a vulkan-1.dll loaded later through
+// the loader hook is covered too, not only one already in memory at CheckWorkingMode.
+//
+// [Vulkan] SkipHooks is the supported way to ask. The older optiscaler_skip_vulkan_hooks marker
+// beside the DLL is still honoured on Wine, so existing installs keep working without an ini edit.
+// Upstream's OPTISCALER_DISABLE_VULKAN_WDX12_HOOKS (Vulkan_Spoofing.cpp) is narrower: it keeps the
+// overlay and spoofing and drops only the three Vulkan_wDx12 entry paths.
+static void ResolveVulkanHookPolicy()
+{
+    if (Config::Instance()->VulkanSkipHooks.value_or_default())
+    {
+        State::Instance().vulkanHooksSkipped = true;
+        LOG_INFO("vulkan-1.dll hooks will be skipped: [Vulkan] SkipHooks=true");
+        return;
+    }
+
+    if (!State::Instance().isRunningOnLinux)
+        return;
+
+    std::error_code ec;
+    if (std::filesystem::exists(Util::DllPath().parent_path() / L"optiscaler_skip_vulkan_hooks", ec))
+    {
+        State::Instance().vulkanHooksSkipped = true;
+        LOG_WARN("vulkan-1.dll hooks will be skipped: optiscaler_skip_vulkan_hooks marker found (deprecated, "
+                 "[Vulkan] SkipHooks=true is the supported way to ask)");
+    }
+}
+
 static void CheckWorkingMode()
 {
     if (!_passThruMode)
@@ -942,28 +973,8 @@ static void CheckWorkingMode()
 
     if (vulkanModule != nullptr)
     {
-        // Linux/Proton: allow skipping the Vulkan hooks (and with them the Vulkan overlay path) via a
-        // marker file next to the OptiScaler dll, so the D3D overlay path is used instead. Avoids
-        // present races with Streamline DLSS-G under vkd3d-proton.
-        bool skipVulkanHooks = false;
-
-        if (State::Instance().isRunningOnLinux)
-        {
-            std::error_code ec;
-            auto marker = Util::DllPath().parent_path() / L"optiscaler_skip_vulkan_hooks";
-            skipVulkanHooks = std::filesystem::exists(marker, ec);
-        }
-
-        if (skipVulkanHooks)
-        {
-            LOG_WARN("Skipping vulkan-1.dll hooks, optiscaler_skip_vulkan_hooks marker found");
-            State::Instance().vulkanHooksSkipped = true;
-        }
-        else
-        {
-            LOG_DEBUG("Hooking vulkan-1.dll");
-            VulkanHooks::Hook(vulkanModule);
-        }
+        LOG_DEBUG("Hooking vulkan-1.dll");
+        VulkanHooks::Hook(vulkanModule);
     }
 
     // NVAPI
@@ -1918,6 +1929,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         // Check for Wine
         spdlog::info("");
         State::Instance().isRunningOnLinux = IsRunningOnWine();
+        ResolveVulkanHookPolicy();
 
         // Not foolproof
         // calls LoadLibraryExW inside DllMain but seems mostly fine if we only call NvAPI_GetInterfaceVersionString

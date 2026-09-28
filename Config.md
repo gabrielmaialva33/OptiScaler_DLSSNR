@@ -543,6 +543,21 @@ FGInput=synthesized
 FGOutput=fsrfg
 ```
 
+### Vulkan hooks under Wine/Proton
+`SkipHooks=true` keeps the whole vulkan-1.dll hook bundle out (Vulkan overlay, Vulkan spoofing and
+the Vulkan_wDx12 hooks), at startup and on any later load of vulkan-1.dll, and draws the menu
+through the D3D overlay path. Use it for D3D titles under vkd3d-proton/DXVK where the Vulkan overlay
+fights Streamline DLSS-G for the swapchain; never in a native Vulkan game, which has no D3D overlay
+path. On Wine, an `optiscaler_skip_vulkan_hooks` file beside the DLL still does the same (deprecated;
+the log says so). The narrower environment variable `OPTISCALER_DISABLE_VULKAN_WDX12_HOOKS=1`
+(upstream PR #1131) drops only the three Vulkan_wDx12 entry paths and keeps the overlay and spoofing.
+
+```ini
+[Vulkan]
+; true or false - Default (auto) is false
+SkipHooks=true
+```
+
 ### Logging
 ```ini
 [Log]
