@@ -295,6 +295,12 @@ vkd3d-proton with the Proton's own `nvofapi64.dll` beside the harness:
 4. **The prefix** may lack `nvofapi64.dll` (see Proton above).
 5. **Queue identity.** A caller that passes one queue and executes on another races the engine
    against its own list. Both present hosts pass the executing queue; a new caller must too.
+6. **The handoff with synthesized frame generation** (integration, after the merges of 2026-09-28).
+   `SynthMotion::Handoff` promises the taker a field of the current base frame. The engine's field is
+   one frame late, so DLSS-NR publishes only a FidelityFX field. With `SynthMotionSource=nvofa` on the
+   D3D11 bridge, frame generation estimates its own. When frame generation publishes first (native
+   D3D12), DLSS-NR takes that same-frame FidelityFX field rather than build the engine, so there
+   `SynthMotionSource` only matters when frame generation's `SynthesizedMotion` is off.
 
 ## 1. The problem, stated as narrowly as it actually is
 

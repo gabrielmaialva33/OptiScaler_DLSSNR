@@ -5337,7 +5337,10 @@ ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCom
             return nullptr;
 
         // Frame generation, when it runs after this on the same frame (the D3D11 bridge), takes this field.
-        SynthMotion::Handoff::Publish(SynthMotion::Handoff::Owner::DlssNr, device, motion, width, height, sceneCut);
+        // Only a field of this frame: the optical-flow engine's arrives one frame late, and the handoff
+        // promises the taker the current base frame, so frame generation estimates its own instead.
+        if (_nvofa == nullptr)
+            SynthMotion::Handoff::Publish(SynthMotion::Handoff::Owner::DlssNr, device, motion, width, height, sceneCut);
     }
 
     // The pass transitions a motion guide from GuideRestState(true), so the field is handed over there.
