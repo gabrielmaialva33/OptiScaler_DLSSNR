@@ -520,9 +520,13 @@ module) is one slot per process.
     (`SynthInputs::_RecordMotionOn`).
   - FG's own estimator is still warming on those same frames, so it buys nothing. It then sits idle,
     about 34 MB at this size.
-  - The fix is the warm-up wait above (branch `fix/handoff-warming-publisher`, 2026-09-28). The log
-    then reads `DLSS-NR's motion estimate is warming up ... waiting for it rather than running a second
-    estimator`, then the take, with one allocation. That needs checking in a game.
+  - **Fixed** by the warm-up wait above (2026-09-28), and verified in Divinity on build `467446e9`.
+    - FG logged `DLSS-NR's motion estimate is warming up ... waiting for it rather than running a
+      second estimator`, and took NR's field 590 ms later.
+    - It then went through a loading screen that presented a frame every 2 s, from 12:12:23 to
+      12:12:42, and came out with synthesized motion on every frame of the next window (117 of 117).
+    - The session had one `allocated` line, and no `stopped waiting` or `runs its own motion
+      estimate`.
 
 ### What FSR 3.1 cannot do
 
