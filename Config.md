@@ -428,6 +428,16 @@ ZeroGuideReset=auto
 ; true or false - Default (auto) is false
 SynthMotion=auto
 
+; Present hosts (the D3D11 bridge, a D3D12 title or emulator on HookMethod=2): keep the model off the
+; interface. A pixel that stays exactly the same while the scene around it moves is taken for HUD, and the
+; model is told, through its own UI correction, to hand it back untouched; it stays protected for about a
+; second and a half after the scene stops. Experimental: a HUD is only found once the camera has moved
+; behind it, and a still, detailed patch of the scene next to motion can be taken for one (it is then shown
+; as the game drew it). A little GPU time per frame. No effect on the after-upscale route, which runs before
+; the game draws its interface.
+; true or false - Default (auto) is false
+UiProtection=auto
+
 ; D3D12, HookMethod 0 or 2 only: wait for the pass's backbuffer write-back to finish on the GPU before
 ; the flip, so the frame that reaches the screen (and frame generation) is the finished one. No effect
 ; on the D3D11 bridge's host, whose work is already on the flip's own queue.

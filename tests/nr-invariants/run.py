@@ -136,6 +136,10 @@ targets = [
     ('DlssNr_Shader_Vk.spv', 'DlssNr_Shader_Vk.h', 'dlssnr_spv', bytes.fromhex('03022307')),
     ('DlssNr_Stabilizer_Shader.cso', 'DlssNr_Stabilizer_Shader.h', 'DlssNr_Stabilizer_cso', b'DXBC'),
 ]
+# The UI protection mask (hud-protection.md). Checked once its bytecode is committed; until then the
+# build itself fails on the missing header, which is the louder signal.
+if (precompile / 'DlssNr_UiMask_Shader.cso').exists():
+    targets.append(('DlssNr_UiMask_Shader.cso', 'DlssNr_UiMask_Shader.h', 'DlssNr_UiMask_cso', b'DXBC'))
 
 with tempfile.TemporaryDirectory() as scratch:
     for binary, header, array, magic in targets:
@@ -149,7 +153,7 @@ with tempfile.TemporaryDirectory() as scratch:
             fail(f'{header} is not what create_header.py makes from {binary}: regenerate it (array {array})')
 
 if len(failures) == before:
-    print('PASS: DlssNr_Shader.h, DlssNr_Shader_Vk.h and DlssNr_Stabilizer_Shader.h are byte-identical to '
+    print(f'PASS: {", ".join(header for _, header, _, _ in targets)} are byte-identical to '
           'create_header.py over the committed .cso and .spv')
 
 # --- 4. Retired identifiers -------------------------------------------------------------------------

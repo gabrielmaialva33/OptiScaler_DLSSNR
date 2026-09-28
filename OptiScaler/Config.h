@@ -297,6 +297,9 @@ class Config
     // Present hosts with no game guides: estimate motion from the frames themselves and hand it to the
     // model instead of zero motion (synthesized-motion.md). Experimental. Default false.
     CustomOptional<bool> DlssNrSynthMotion { false };
+    // Present hosts: keep the model off pixels that stay still while the scene around them moves -- the
+    // interface -- through its UI correction (hud-protection.md). Experimental. Default false.
+    CustomOptional<bool> DlssNrUiProtection { false };
     // Present hook: wait for GPU completion before flip. Default true.
     CustomOptional<bool> DlssNrPresentSync { true };
     CustomOptional<uint32_t> DlssNrPreset { 0 };

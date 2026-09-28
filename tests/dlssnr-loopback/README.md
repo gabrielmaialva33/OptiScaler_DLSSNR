@@ -52,6 +52,17 @@ Results:
 
 See `OptiScaler/dlssnr/design/sharp-residual.md`.
 
+**2026-09-27 — UI protection A/B: written, not yet run.**
+`python3 tests/dlssnr-loopback/run.py --present-nr --ui-protect-ab` tests the UI correction contract
+with the separate layers every earlier HUD trial left null: `DLSSNR.UIAlpha` or `DLSSNR.UI` (alpha)
+over the HUD fixture's own cover, with the model's input as `DLSSNR.Backbuffer`, against `UICorrection`
+0 and 1. Eight trials of 32 frames. `analyze_uiprotect.py` reports how close each output is to the
+source inside the cover, and how close it is to base outside it, and writes
+`artifacts/ui-protect-run/ui-protect-report.json`. The verdict fields `protects` and
+`gated_by_uicorrection` answer whether the mask works and whether `UICorrection` gates it. It is the
+contract half of [hud-protection.md](../../OptiScaler/dlssnr/design/hud-protection.md). The detector
+half needs a moving scene, which this fixture does not have.
+
 **2026-09-27 — ControlMask A/B: no observed effect.**
 `python3 tests/dlssnr-loopback/run.py --present-nr --mask-ab` sets `DLSSNR.ControlMask`, a
 resource key the model binary names beside Color/MVec/Depth, over the HUD fixture. It ran thirteen

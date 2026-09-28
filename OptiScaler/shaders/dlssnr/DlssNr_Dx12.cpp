@@ -36,6 +36,7 @@
 #include "precompile/DlssNr_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
 #include "DlssNr_Stabilizer_Dx12.h"
+#include "DlssNr_UiMask_Dx12.h"
 
 namespace
 {
@@ -329,6 +330,12 @@ struct NrState
     // drops history that no longer describes the screen.
     DlssNr_Stabilizer_Dx12* stabilizer = nullptr;
     std::chrono::steady_clock::time_point stabilizerLast {};
+
+    // The static-overlay mask for UI protection (design/hud-protection.md). Built for one working size,
+    // parked like the stabilizer when that changes or when it is switched off. uiMaskLast is when it last
+    // ran, so a gap drops a previous frame that no longer describes the screen.
+    DlssNr_UiMask_Dx12* uiMask = nullptr;
+    std::chrono::steady_clock::time_point uiMaskLast {};
 
     unsigned int workWidth = 0;
     unsigned int workHeight = 0;
@@ -1019,6 +1026,7 @@ struct NrRetired
     DlssNr::Submission::Usage usage;
     OS_Dx12* scaler = nullptr;
     DlssNr_Stabilizer_Dx12* stabilizer = nullptr;
+    DlssNr_UiMask_Dx12* uiMask = nullptr;
 };
 
 std::vector<NrRetired> g_nrRetired;
@@ -1084,6 +1092,22 @@ void ParkNrStabilizer(DlssNr_Stabilizer_Dx12*& stabilizer)
     g_nrRetired.push_back(r);
 }
 
+// The UI mask owns its history, descriptor heaps and constants, which the last recordings still reference;
+// a new working size or switching it off parks it rather than deleting it.
+void ParkNrUiMask(DlssNr_UiMask_Dx12*& uiMask)
+{
+    if (!uiMask)
+        return;
+
+    NrRetired r;
+    r.tracked = g_tracked;
+    if (g_tracked)
+        r.usage = g_usage;
+    r.uiMask = uiMask;
+    uiMask = nullptr;
+    g_nrRetired.push_back(r);
+}
+
 void TickNrRetired()
 {
     for (size_t i = 0; i < g_nrRetired.size();)
@@ -1103,6 +1127,7 @@ void TickNrRetired()
 
         delete retired.scaler;
         delete retired.stabilizer;
+        delete retired.uiMask;
 
         g_nrRetired[i] = std::move(g_nrRetired.back());
         g_nrRetired.pop_back();
@@ -2640,6 +2665,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (!(cfg.DlssNrStabilizerStrength.value_or_default() > 0.0f) || beforeUpscale)
         ParkNrStabilizer(g_nr.stabilizer);
 
+    // UI protection switched off, or a frame that is not a present source (no interface in it): the mask's
+    // history goes back once the GPU is done with it.
+    if (!cfg.DlssNrUiProtection.value_or_default() || !frame.PresentSource)
+        ParkNrUiMask(g_nr.uiMask);
+
     const bool resolutionChanged =
         g_nr.width != width || g_nr.height != height || g_nr.workWidth != workWidth || g_nr.workHeight != workHeight;
     const bool placementChanged = g_nr.afterRayReconstruction != frame.AfterRayReconstruction;
@@ -3339,7 +3369,32 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // wrong input would cancel out, so the magnified content could only have come in through here. It is
     // now the model's own input at the working size: the same pixels as before at scale 1 (on a present
     // source the proxy is the frame), and a match at any other scale.
-    SetExtras(cfg, nullptr, frame.PresentSource ? modelInput : nullptr, 0, 0, frame.PresentSource ? workWidth : 0,
+    //
+    // UI protection (design/hud-protection.md): with the model built with UICorrection on, an alpha of 1
+    // makes it return Backbuffer -- its own input -- in that pixel, so the edit there is zero and the
+    // resolve hands back the frame as it was. The alpha is the static-overlay mask, handed as both UI and
+    // UIAlpha; only a present source has interface in it.
+    ID3D12Resource* uiAlpha = nullptr;
+    if (frame.PresentSource && cfg.DlssNrUiProtection.value_or_default())
+    {
+        if (g_nr.uiMask != nullptr && !g_nr.uiMask->Fits(device, workWidth, workHeight))
+            ParkNrUiMask(g_nr.uiMask);
+        if (g_nr.uiMask == nullptr)
+            g_nr.uiMask = new DlssNr_UiMask_Dx12("DLSS-NR UI mask", device, workWidth, workHeight);
+
+        // Not on the model's resets: ZeroGuideReset asks for one every frame, and a mask that forgot the
+        // interface every frame would never protect anything. A gap is different -- last frame's input no
+        // longer describes the screen.
+        const auto now = std::chrono::steady_clock::now();
+        if (now - g_nr.uiMaskLast > std::chrono::milliseconds(250))
+            g_nr.uiMask->Invalidate();
+        g_nr.uiMaskLast = now;
+
+        uiAlpha = g_nr.uiMask->Dispatch(cmdList, modelInput);
+    }
+
+    SetExtras(cfg, uiAlpha, frame.PresentSource ? modelInput : nullptr, uiAlpha != nullptr ? workWidth : 0,
+              uiAlpha != nullptr ? workHeight : 0, frame.PresentSource ? workWidth : 0,
               frame.PresentSource ? workHeight : 0);
 
     // The proxy path, when asked for. Same inputs, same model -- the difference is who calls it.
@@ -5811,6 +5866,7 @@ void Shutdown()
     {
         delete r.scaler;
         delete r.stabilizer;
+        delete r.uiMask;
         if (r.feature != nullptr && g_nr.release != nullptr)
             g_nr.release(r.feature);
 
@@ -5904,6 +5960,12 @@ void Shutdown()
     {
         delete g_nr.stabilizer;
         g_nr.stabilizer = nullptr;
+    }
+
+    if (g_nr.uiMask != nullptr)
+    {
+        delete g_nr.uiMask;
+        g_nr.uiMask = nullptr;
     }
 
     if (g_nr.meter != nullptr)
