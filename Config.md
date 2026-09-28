@@ -583,7 +583,7 @@ FGInput=synthesized
 FGOutput=fsrfg
 ```
 
-Three optional keys refine it, all off by default:
+Four optional keys refine it, all off by default:
 
 ```ini
 [FrameGen]
@@ -592,10 +592,18 @@ Three optional keys refine it, all off by default:
 ; true or false - Default (auto) is false
 SynthesizedMotion=true
 
-; Needs SynthesizedMotion. Repeats frames instead of interpolating them while the median motion
-; exceeds this many pixels per base frame (like AMD's Fast Motion Response).
-; float value, pixels - Default (auto) is 0, off
-SynthesizedFastMotion=24
+; Needs SynthesizedMotion. Repeats frames instead of interpolating them where the motion breaks up:
+; while more than this share of neighbouring motion samples disagree (parallax, disocclusion, thin
+; objects over a far background) and the median motion exceeds 1% of the image width. A uniform pan
+; keeps interpolating at any speed. 0.25 is a starting point; lower repeats more.
+; 0.0 to 1.0 - Default (auto) is 0, off
+SynthesizedIncoherence=0.25
+
+; Needs SynthesizedMotion. Hard cap: repeats frames while the median motion exceeds this many pixels
+; per base frame, however coherent (like AMD's Fast Motion Response). Every repeat restarts FSR's own
+; optical flow for several frames, so keep it well above normal camera speed.
+; float value, pixels - Default (auto) is 0, no cap
+SynthesizedFastMotion=64
 
 ; Does not generate while the game runs below this many base frames per second.
 ; float value - Default (auto) is 0, off

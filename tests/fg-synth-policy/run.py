@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Synthesized FG's policy (inputs/FG/Synth_Policy.h) and the NR/FG motion handoff
-(shaders/synth_motion/SynthMotion_Handoff.h), compiled from the production headers under ASan/UBSan."""
+"""Synthesized FG's policy (inputs/FG/Synth_Policy.h), its motion statistics (inputs/FG/Synth_MotionStats.h)
+and the NR/FG motion handoff (shaders/synth_motion/SynthMotion_Handoff.h), compiled from the production
+headers under ASan/UBSan."""
 from pathlib import Path
 import subprocess
 import tempfile

@@ -983,6 +983,9 @@
     <ClInclude Include="inputs\FG\Synth_Inputs.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="inputs\FG\Synth_MotionStats.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="inputs\FG\Synth_Policy.h">
       <Filter>Header Files</Filter>
     </ClInclude>

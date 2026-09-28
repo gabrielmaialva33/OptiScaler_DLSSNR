@@ -1,8 +1,13 @@
-// Synthesized frame generation's decision logic and the NR/FG motion handoff, compiled from the production
-// headers as they are. Neither touches the GPU, so nothing here is faked: the handoff only stores and
-// compares pointers, and the policy only does arithmetic on numbers the FG input feeds it.
+// Synthesized frame generation's decision logic, the statistics it decides on, and the NR/FG motion handoff,
+// compiled from the production headers as they are. None of it touches the GPU, so nothing here is faked:
+// the handoff only stores and compares pointers, the statistics read rows of halves laid out as the
+// readback lays them out, and the policy only does arithmetic on what the statistics say.
 #include <cassert>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <utility>
+#include <vector>
 
 struct ID3D12Device
 {
@@ -19,6 +24,95 @@ struct ID3D12Resource
 using SynthMotion::Handoff::Field;
 using SynthMotion::Handoff::Owner;
 namespace Handoff = SynthMotion::Handoff;
+using SynthMotionStats::Stats;
+
+constexpr auto Generate = SynthFgPolicy::Action::Generate;
+constexpr auto Reset = SynthFgPolicy::Action::Reset;
+constexpr auto Skip = SynthFgPolicy::Action::Skip;
+
+// A motion sample as the policy sees it, for the cases about the policy rather than the rows: every
+// magnitude at the median, 1920 pixels wide.
+static Stats Sample(float medianPx, bool allZero = false, float incoherent = 0.0f)
+{
+    Stats stats {};
+    stats.medianPx = medianPx;
+    stats.p90Px = medianPx;
+    stats.medianX = medianPx;
+    stats.medianOfWidth = medianPx / 1920.0f;
+    stats.incoherent = incoherent;
+    stats.allZero = allZero;
+    return stats;
+}
+
+// Only what these cases need: zero, infinity, NaN, and normal numbers a half holds exactly.
+static uint16_t FloatToHalf(float value)
+{
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const uint32_t sign = (bits >> 16) & 0x8000u;
+    const uint32_t exponent = (bits >> 23) & 0xffu;
+    const uint32_t mantissa = bits & 0x7fffffu;
+
+    if (exponent == 0xff)
+        return (uint16_t) (sign | 0x7c00u | (mantissa != 0 ? 0x200u : 0u));
+
+    if (exponent == 0 && mantissa == 0)
+        return (uint16_t) sign;
+
+    const int halfExponent = (int) exponent - 127 + 15;
+    assert(halfExponent > 0 && halfExponent < 0x1f && (mantissa & 0x1fffu) == 0);
+    return (uint16_t) (sign | ((uint32_t) halfExponent << 10) | (mantissa >> 13));
+}
+
+// The readback as SynthInputs lays it out: SynthMotionStats::kRows rows of R16G16_FLOAT, each on a pitch
+// aligned to 512 bytes (D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT). The padding past the width holds a
+// moving vector, so reading it would show.
+struct Readback
+{
+    uint32_t width;
+    size_t pitch;
+    std::vector<uint16_t> halves;
+
+    explicit Readback(uint32_t w)
+        : width(w), pitch((w * 4 + 511) / 512 * 512), halves(SynthMotionStats::kRows * pitch / 2, FloatToHalf(7.0f))
+    {
+    }
+
+    void Set(uint32_t row, uint32_t x, float vx, float vy)
+    {
+        halves[row * pitch / 2 + 2 * x] = FloatToHalf(vx);
+        halves[row * pitch / 2 + 2 * x + 1] = FloatToHalf(vy);
+    }
+
+    // field(row, x) -> {vx, vy}, for every pixel of every row, as the copy writes them.
+    template <typename Field> Readback& Fill(Field field)
+    {
+        for (uint32_t row = 0; row < SynthMotionStats::kRows; ++row)
+        {
+            for (uint32_t x = 0; x < width; ++x)
+            {
+                const auto [vx, vy] = field(row, x);
+                Set(row, x, vx, vy);
+            }
+        }
+
+        return *this;
+    }
+
+    Stats Measure(SynthMotionStats::Scratch& scratch) const
+    {
+        return SynthMotionStats::Measure(reinterpret_cast<const uint8_t*>(halves.data()), SynthMotionStats::kRows,
+                                         pitch, width, SynthMotionStats::kStride, scratch);
+    }
+};
+
+// A uniform pan, and 8x8 blocks moving alternately right and left by amplitude (the estimator's block size).
+static std::pair<float, float> Pan40(uint32_t, uint32_t) { return { 40.0f, 0.0f }; }
+static auto Alternating(float amplitude)
+{
+    return [amplitude](uint32_t, uint32_t x)
+    { return std::pair<float, float> { (x / 8) % 2 ? -amplitude : amplitude, 0.0f }; };
+}
 
 static void handoffCases()
 {
@@ -140,44 +234,262 @@ static void warmingCases()
     std::puts("warming cases passed");
 }
 
+static void statsCases()
+{
+    using namespace SynthMotionStats;
+    Scratch scratch;
+
+    // A uniform pan: every statistic at the pan, nothing incoherent. 1920 wide: 480 samples, 479 pairs a row.
+    {
+        const Stats s = Readback(1920).Fill(Pan40).Measure(scratch);
+        assert(s.vectors == kRows * 480 && s.pairs == kRows * 479);
+        assert(s.medianPx == 40.0f && s.p90Px == 40.0f && s.medianX == 40.0f && s.medianY == 0.0f);
+        assert(s.medianOfWidth == 40.0f / 1920.0f && s.incoherent == 0.0f && !s.allZero);
+    }
+
+    // A still frame, negative zeros included. The width is not a multiple of the stride (1002: x = 0..1000,
+    // 251 a row) and the pitch is 4096 bytes: the moving padding past it is never read.
+    {
+        Readback readback(1002);
+        readback.Fill([](uint32_t, uint32_t x) { return std::pair<float, float> { x % 3 ? 0.0f : -0.0f, -0.0f }; });
+        const Stats s = readback.Measure(scratch);
+        assert(readback.pitch == 4096);
+        assert(s.vectors == kRows * 251 && s.pairs == kRows * 250);
+        assert(s.allZero && s.medianPx == 0.0f && s.p90Px == 0.0f && s.incoherent == 0.0f);
+    }
+
+    // Percentiles by nearest rank: magnitudes 0..9 in equal numbers give a median of 5 and a p90 of 8.
+    // Neighbours differ by 1 px (under the 2 px floor) except where 9 wraps to 0, 47 times in a row's 479
+    // pairs.
+    {
+        const Stats s =
+            Readback(1920)
+                .Fill([](uint32_t, uint32_t x) { return std::pair<float, float> { 0.0f, (float) ((x / 4) % 10) }; })
+                .Measure(scratch);
+        assert(s.medianPx == 5.0f && s.p90Px == 8.0f);
+        assert(s.incoherent == 47.0f / 479.0f);
+    }
+
+    // The median vector, per component, over every fourth vector: -12 px in the top 6 rows and 20 px in the
+    // other 10 give 20; -5 and 3 in alternate rows, equal in number, give the upper one.
+    {
+        const Stats s =
+            Readback(1920)
+                .Fill([](uint32_t row, uint32_t)
+                      { return std::pair<float, float> { row < 6 ? -12.0f : 20.0f, row % 2 ? 3.0f : -5.0f }; })
+                .Measure(scratch);
+        assert(s.medianX == 20.0f && s.medianY == 3.0f);
+    }
+
+    // The pair rule: a 2 px floor, and above it a quarter of the larger vector, in any direction.
+    assert(!Disagree(0.0f, 0.0f, 1.5f, 0.0f) && Disagree(0.0f, 0.0f, 3.0f, 0.0f));
+    assert(!Disagree(40.0f, 0.0f, 32.0f, 0.0f) && Disagree(40.0f, 0.0f, 25.0f, 0.0f));
+    assert(!Disagree(0.0f, 40.0f, 0.0f, 30.0f) && Disagree(0.0f, 40.0f, 0.0f, 29.0f));
+    assert(Disagree(30.0f, 0.0f, -30.0f, 0.0f) && Disagree(40.0f, 0.0f, 0.0f, 40.0f));
+
+    // Alternating 8x8 blocks: every block boundary disagrees, 239 of a row's 479 pairs.
+    {
+        const Stats s = Readback(1920).Fill(Alternating(30.0f)).Measure(scratch);
+        assert(s.medianPx == 30.0f && s.incoherent == 239.0f / 479.0f);
+    }
+
+    // Non-finite vectors are left out of everything but allZero, and break the pairs on both sides.
+    {
+        Readback readback(1920);
+        readback.Fill(Pan40);
+        readback.Set(0, 8, INFINITY, 0.0f); // row 0, sample 2: pairs (1,2) and (2,3)
+        readback.Set(1, 0, NAN, NAN);       // row 1, sample 0: pair (0,1)
+        const Stats s = readback.Measure(scratch);
+        assert(s.vectors == kRows * 480 - 2 && s.pairs == kRows * 479 - 3);
+        assert(s.medianPx == 40.0f && s.incoherent == 0.0f && !s.allZero);
+
+        Readback still(1920);
+        still.Fill([](uint32_t, uint32_t) { return std::pair<float, float> { 0.0f, 0.0f }; });
+        still.Set(3, 40, INFINITY, 0.0f);
+        assert(!still.Measure(scratch).allZero);
+    }
+
+    // No rows, no stride: nothing measured.
+    assert(Measure(nullptr, kRows, 512, 64, kStride, scratch).vectors == 0);
+    {
+        const Readback readback(64);
+        const Stats s =
+            Measure(reinterpret_cast<const uint8_t*>(readback.halves.data()), kRows, readback.pitch, 64, 0, scratch);
+        assert(s.vectors == 0 && s.pairs == 0 && s.incoherent == 0.0f);
+    }
+
+    // The summary window: mean and maximum per statistic, and empty after a reset.
+    {
+        Window window;
+        window.Add(Sample(10.0f, false, 0.1f));
+        window.Add(Sample(30.0f, false, 0.5f));
+        assert(window.samples == 2 && window.MeanMedianPx() == 20.0f && window.maxMedianPx == 30.0f);
+        assert(window.maxMedianOfWidth == 30.0f / 1920.0f && window.MeanP90Px() == 20.0f && window.maxP90Px == 30.0f);
+        assert(std::fabs(window.MeanIncoherent() - 0.3f) < 1e-6f && window.maxIncoherent == 0.5f);
+        window = {};
+        assert(window.samples == 0 && window.MeanMedianPx() == 0.0f && window.maxIncoherent == 0.0f);
+    }
+
+    std::puts("stats cases passed");
+}
+
+// The cap alone: SynthesizedFastMotion as it always behaved, now named the cap.
 static void fastMotionCases()
 {
     SynthFgPolicy policy;
-    assert(policy.Decide() == SynthFgPolicy::Action::Generate);
+    assert(policy.Decide() == Generate);
 
     // Off by default: any motion generates.
-    policy.ObserveMotion(500.0f, false, false);
-    assert(policy.Decide() == SynthFgPolicy::Action::Generate);
+    policy.ObserveMotion(Sample(500.0f), false);
+    assert(policy.Decide() == Generate);
 
-    policy.Configure(24.0f, 0.0f);
-    policy.ObserveMotion(30.0f, false, false);
-    assert(policy.Decide() == SynthFgPolicy::Action::Reset);
+    policy.Configure(24.0f, 0.0f, 0.0f);
+    policy.ObserveMotion(Sample(30.0f), false);
+    assert(policy.Decide() == Reset);
 
     // Between the release level (75%) and the threshold: still fast.
-    policy.ObserveMotion(20.0f, false, false);
-    assert(policy.Decide() == SynthFgPolicy::Action::Reset);
+    policy.ObserveMotion(Sample(20.0f), false);
+    assert(policy.Decide() == Reset);
 
     // Two calm samples in a row end it; one is not enough, and a spike in between starts the count over.
-    policy.ObserveMotion(10.0f, false, false);
-    assert(policy.Decide() == SynthFgPolicy::Action::Reset);
-    policy.ObserveMotion(40.0f, false, false);
-    policy.ObserveMotion(10.0f, false, false);
-    assert(policy.Decide() == SynthFgPolicy::Action::Reset);
-    policy.ObserveMotion(10.0f, false, false);
-    assert(policy.Decide() == SynthFgPolicy::Action::Generate);
+    policy.ObserveMotion(Sample(10.0f), false);
+    assert(policy.Decide() == Reset);
+    policy.ObserveMotion(Sample(40.0f), false);
+    policy.ObserveMotion(Sample(10.0f), false);
+    assert(policy.Decide() == Reset);
+    policy.ObserveMotion(Sample(10.0f), false);
+    assert(policy.Decide() == Generate);
+
+    // Exactly at the release level is not below it: not calm, as before.
+    policy.ObserveMotion(Sample(30.0f), false);
+    policy.ObserveMotion(Sample(18.0f), false);
+    policy.ObserveMotion(Sample(18.0f), false);
+    assert(policy.Decide() == Reset);
 
     // Turning it off mid-burst stops it at once.
-    policy.ObserveMotion(99.0f, false, false);
+    policy.ObserveMotion(Sample(99.0f), false);
     assert(policy.Fast());
-    policy.Configure(0.0f, 0.0f);
-    assert(!policy.Fast() && policy.Decide() == SynthFgPolicy::Action::Generate);
+    policy.Configure(0.0f, 0.0f, 0.0f);
+    assert(!policy.Fast() && policy.Decide() == Generate);
 
     // A scene cut repeats exactly one frame, whatever the thresholds.
-    policy.ObserveMotion(0.0f, false, true);
-    assert(policy.Decide() == SynthFgPolicy::Action::Reset);
-    assert(policy.Decide() == SynthFgPolicy::Action::Generate);
+    policy.ObserveMotion(Sample(0.0f), true);
+    assert(policy.Decide() == Reset);
+    assert(policy.Decide() == Generate);
 
     std::puts("fast-motion cases passed");
+}
+
+// The incoherence rule (synthesized-frame-generation.md, "Coherence, not speed"), on rows measured from
+// the readback layout.
+static void coherenceCases()
+{
+    SynthMotionStats::Scratch scratch;
+    const Stats pan = Readback(1920).Fill(Pan40).Measure(scratch);                 // 40 px, 2.1% of the width
+    const Stats blocks = Readback(1920).Fill(Alternating(30.0f)).Measure(scratch); // +-30 px blocks, 1.6%
+    const Stats small = Readback(1920).Fill(Alternating(8.0f)).Measure(scratch);   // +-8 px blocks, 0.4%
+    assert(pan.incoherent == 0.0f && blocks.incoherent > 0.49f && small.incoherent > 0.49f);
+
+    // A coherent 40 px pan interpolates, however long it lasts. The rule before this one repeated every
+    // one of these frames at Generation Zero's 12 px (the cap case below keeps that behaviour).
+    {
+        SynthFgPolicy policy;
+        policy.Configure(0.0f, 0.0f, 0.25f);
+        for (int i = 0; i < 100; ++i)
+        {
+            policy.ObserveMotion(pan, false);
+            assert(policy.Decide() == Generate);
+        }
+    }
+
+    // Incoherent and large: repeated.
+    {
+        SynthFgPolicy policy;
+        policy.Configure(0.0f, 0.0f, 0.25f);
+        policy.ObserveMotion(blocks, false);
+        assert(policy.Fast() && policy.Decide() == Reset);
+    }
+
+    // Incoherent but under 1% of the width: interpolated. A halo of a few pixels costs less than the ten
+    // frames a Reset degrades.
+    {
+        SynthFgPolicy policy;
+        policy.Configure(0.0f, 0.0f, 0.25f);
+        for (int i = 0; i < 10; ++i)
+            policy.ObserveMotion(small, false);
+        assert(policy.Decide() == Generate);
+    }
+
+    // The cap still forces a repeat when set and exceeded, however coherent: alone, beside the rule, and at
+    // Generation Zero's old 12 px, so an existing ini behaves as it did.
+    {
+        SynthFgPolicy policy;
+        policy.Configure(24.0f, 0.0f, 0.0f);
+        policy.ObserveMotion(pan, false);
+        assert(policy.Decide() == Reset);
+
+        policy.Configure(24.0f, 0.0f, 0.25f);
+        policy.ObserveMotion(pan, false);
+        assert(policy.Decide() == Reset);
+
+        policy.Configure(12.0f, 0.0f, 0.0f);
+        policy.ObserveMotion(pan, false);
+        assert(policy.Decide() == Reset);
+    }
+
+    // Both off, the default: nothing repeats, incoherent or not.
+    {
+        SynthFgPolicy policy;
+        policy.Configure(0.0f, 0.0f, 0.0f);
+        policy.ObserveMotion(blocks, false);
+        policy.ObserveMotion(Sample(500.0f, false, 1.0f), false);
+        assert(!policy.FastMotionConfigured() && policy.Decide() == Generate);
+    }
+
+    // Hysteresis: held while either level stays at 75% of its threshold or above, ended by two calm
+    // samples in a row.
+    {
+        SynthFgPolicy policy;
+        policy.Configure(0.0f, 0.0f, 0.25f);
+        policy.ObserveMotion(Sample(30.0f, false, 0.4f), false); // 1.6% of the width, 40% incoherent
+        assert(policy.Decide() == Reset);
+        policy.ObserveMotion(Sample(30.0f, false, 0.2f), false); // 20%: under 25%, over its release 18.75%
+        assert(policy.Decide() == Reset);
+        policy.ObserveMotion(Sample(16.0f, false, 0.4f), false); // 0.83%: under 1%, over its release 0.75%
+        assert(policy.Decide() == Reset);
+        policy.ObserveMotion(pan, false); // calm: coherent
+        assert(policy.Decide() == Reset);
+        policy.ObserveMotion(Sample(30.0f, false, 0.2f), false); // held again: the count starts over
+        policy.ObserveMotion(pan, false);
+        assert(policy.Decide() == Reset);
+        policy.ObserveMotion(Sample(12.0f, false, 0.9f), false); // calm: 0.63% of the width
+        assert(policy.Decide() == Generate);
+    }
+
+    // A threshold change decides afresh: a trigger switched off while it holds the response stops at once.
+    {
+        SynthFgPolicy policy;
+        policy.Configure(24.0f, 0.0f, 0.25f);
+        policy.ObserveMotion(pan, false); // over the cap
+        assert(policy.Decide() == Reset);
+        policy.Configure(0.0f, 0.0f, 0.25f);
+        assert(policy.Decide() == Generate);
+        policy.ObserveMotion(pan, false);
+        assert(policy.Decide() == Generate);
+
+        policy.ObserveMotion(blocks, false);
+        assert(policy.Decide() == Reset);
+        policy.Configure(0.0f, 0.0f, 0.0f);
+        assert(!policy.Fast() && policy.Decide() == Generate);
+
+        // Configured with the same values every frame, nothing is reset.
+        policy.Configure(0.0f, 0.0f, 0.25f);
+        policy.ObserveMotion(blocks, false);
+        policy.Configure(0.0f, 0.0f, 0.25f);
+        assert(policy.Decide() == Reset);
+    }
+
+    std::puts("coherence cases passed");
 }
 
 static void floorCases()
@@ -188,33 +500,33 @@ static void floorCases()
     // Off by default, however slow.
     for (int i = 0; i < 50; ++i)
         policy.ObserveBaseFrame(now += 100.0);
-    assert(policy.Decide() == SynthFgPolicy::Action::Generate);
+    assert(policy.Decide() == Generate);
 
     // 25 fps against a 30 fps floor: skipped.
-    policy.Configure(0.0f, 30.0f);
+    policy.Configure(0.0f, 30.0f, 0.0f);
     for (int i = 0; i < 100; ++i)
         policy.ObserveBaseFrame(now += 40.0);
-    assert(policy.BelowFloor() && policy.Decide() == SynthFgPolicy::Action::Skip);
+    assert(policy.BelowFloor() && policy.Decide() == Skip);
 
     // 32 fps is above the floor but inside the 15% hysteresis: still skipped.
     for (int i = 0; i < 100; ++i)
         policy.ObserveBaseFrame(now += 31.25);
-    assert(policy.Decide() == SynthFgPolicy::Action::Skip);
+    assert(policy.Decide() == Skip);
 
     // 50 fps: generating again.
     for (int i = 0; i < 100; ++i)
         policy.ObserveBaseFrame(now += 20.0);
-    assert(!policy.BelowFloor() && policy.Decide() == SynthFgPolicy::Action::Generate);
+    assert(!policy.BelowFloor() && policy.Decide() == Generate);
 
     // A pause (a menu, a load) is not a frame rate: it restarts the average instead of skipping.
     policy.ObserveBaseFrame(now += 2000.0);
-    assert(policy.Decide() == SynthFgPolicy::Action::Generate && policy.BaseFps() == 0.0);
+    assert(policy.Decide() == Generate && policy.BaseFps() == 0.0);
 
     // The floor wins over a pending cut: nothing is fed below it.
-    policy.ObserveMotion(0.0f, false, true);
+    policy.ObserveMotion(Sample(0.0f), true);
     for (int i = 0; i < 100; ++i)
         policy.ObserveBaseFrame(now += 50.0);
-    assert(policy.Decide() == SynthFgPolicy::Action::Skip);
+    assert(policy.Decide() == Skip);
 
     std::puts("floor cases passed");
 }
@@ -226,7 +538,7 @@ static void duplicateCases()
         SynthFgPolicy policy;
         for (uint32_t i = 0; i < SynthFgPolicy::kWindow; ++i)
         {
-            policy.ObserveMotion(i % 2 ? 0.0f : 6.0f, i % 2 == 1, false);
+            policy.ObserveMotion(Sample(i % 2 ? 0.0f : 6.0f, i % 2 == 1), false);
             if (i + 1 < SynthFgPolicy::kWindow)
                 assert(!policy.TakeDuplicateAdvice());
         }
@@ -236,7 +548,7 @@ static void duplicateCases()
 
         // Counts stay exact once the ring wraps.
         for (uint32_t i = 0; i < 3 * SynthFgPolicy::kWindow; ++i)
-            policy.ObserveMotion(0.0f, i % 2 == 1, false);
+            policy.ObserveMotion(Sample(0.0f, i % 2 == 1), false);
         assert(policy.IdenticalInWindow() == SynthFgPolicy::kWindow / 2);
         assert(policy.AlternationsInWindow() == SynthFgPolicy::kWindow - 1);
     }
@@ -245,7 +557,7 @@ static void duplicateCases()
     {
         SynthFgPolicy policy;
         for (uint32_t i = 0; i < 2 * SynthFgPolicy::kWindow; ++i)
-            policy.ObserveMotion(0.0f, true, false);
+            policy.ObserveMotion(Sample(0.0f, true), false);
         assert(!policy.TakeDuplicateAdvice());
     }
 
@@ -253,7 +565,7 @@ static void duplicateCases()
     {
         SynthFgPolicy policy;
         for (uint32_t i = 0; i < 2 * SynthFgPolicy::kWindow; ++i)
-            policy.ObserveMotion(8.0f, i % 10 == 0, false);
+            policy.ObserveMotion(Sample(8.0f, i % 10 == 0), false);
         assert(!policy.TakeDuplicateAdvice());
     }
 
@@ -261,7 +573,7 @@ static void duplicateCases()
     {
         SynthFgPolicy policy;
         for (uint32_t i = 0; i < 2 * SynthFgPolicy::kWindow; ++i)
-            policy.ObserveMotion(8.0f, (i / 15) % 2 == 1, false);
+            policy.ObserveMotion(Sample(8.0f, (i / 15) % 2 == 1), false);
         assert(!policy.TakeDuplicateAdvice());
     }
 
@@ -272,9 +584,11 @@ int main()
 {
     handoffCases();
     warmingCases();
+    statsCases();
     fastMotionCases();
+    coherenceCases();
     floorCases();
     duplicateCases();
-    std::puts("fg synth policy: handoff, warming, fast-motion, floor and duplicate cases passed");
+    std::puts("fg synth policy: handoff, warming, stats, fast-motion, coherence, floor and duplicate cases passed");
     return 0;
 }
