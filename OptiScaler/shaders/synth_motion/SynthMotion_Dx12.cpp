@@ -738,7 +738,9 @@ bool Estimator_Dx12::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmd
         }
     }
 
-    // Our pass: 8x8-block vectors to one current->previous vector per colour pixel.
+    // Our pass: 8x8-block vectors to one current->previous vector per colour pixel, and per pixel zero
+    // where the level-0 luma pair shows the pixel standing still (a static overlay; synthesized-motion.md,
+    // "Static overlays"). The two lumas are u2 and u3, read through UAVs like everywhere else here.
     {
         ExpandConstants expand = {};
         expand.width = width;
@@ -747,8 +749,8 @@ bool Estimator_Dx12::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmd
         expand.flowHeight = _flowHeight[0];
         expand.zero = (doReset || frameIndex <= kWarmupFrames) ? 1u : 0u;
 
-        _Dispatch(cmdList, PassExpand, _Table(parity, kSlotExpand, { _flowFinal, _motion }), &expand, (width + 7) / 8,
-                  (height + 7) / 8, 1);
+        _Dispatch(cmdList, PassExpand, _Table(parity, kSlotExpand, { _flowFinal, _motion, current[0], previous[0] }),
+                  &expand, (width + 7) / 8, (height + 7) / 8, 1);
     }
 
     Transition(cmdList, _motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);

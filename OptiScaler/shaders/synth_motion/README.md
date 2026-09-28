@@ -18,14 +18,22 @@ Status: built and syntax-checked. Not yet run on a GPU; the loopback harness is 
 | Format | `DXGI_FORMAT_R16G16_FLOAT` |
 | Extent | the colour's |
 | Contents | `.rg` = displacement from the current frame to the previous one, in colour pixels, +x right, +y down. `prev = cur + mv`, the DLSS/FSR convention |
-| Zero | where no motion was found; on a reset; for FFX's five warm-up frames after it; on a scene cut |
+| Zero | where no motion was found; on a reset; for FFX's five warm-up frames after it; on a scene cut; on a pixel the previous frame reproduces clearly better standing still than moved by its block's vector (a static overlay, see below) |
 | State | `D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE` |
 
 **No conversion is applied.** FFX's flow already has exactly this meaning. The search looks for the
 current frame's block in the previous frame's luma and stores where it found it relative to the block:
 `newVector = currentVector + minSadCoord` in `ffx_opticalflow_compute_optical_flow_v5.h`, an offset into
 the second image, which is the previous frame. Level 0 is the colour's own resolution. The expand pass
-only reconstructs bilinearly between 8x8 block centres.
+reconstructs bilinearly between 8x8 block centres, then makes one choice per pixel.
+
+**The per-pixel choice (2026-09-28).** A thin static overlay, such as a crosshair arm or HUD text,
+covers a small part of its 8x8 block, so the moving world decides the block's vector. The expand scores
+two hypotheses on the level-0 luma pair, over the pixel's 3x3 weighted 1-2-1 by 1-2-1: the block's
+vector `v` rounded, and zero. It writes zero only when `2 * S0 + 64 < Sv`, and `v` otherwise. A tie
+keeps `v`. Nothing is tested where `round(v)` is zero or points outside the frame. The rule, its margin
+and what it cannot fix: "Static overlays" in
+[synthesized-motion.md](../../dlssnr/design/synthesized-motion.md).
 
 ## What callers must know
 
@@ -70,7 +78,7 @@ and a global UAV barrier follows each dispatch.
 | 5 | search, per level 6..0 (FFX v5) | current and previous luma at L; the prediction in flow A[L] | flow A[L] | (ceil(W_L/16), ceil(H_L/16)) |
 | 6 | filter, per level (FFX v5, 3x3 median) | flow A[L] | flow B[L], or the final flow at L0 | (fw/16, fh/4) |
 | 7 | scale, levels 6..1 (FFX v5) | luma at L, flow B[L] | prediction in flow B[L-1] | (fw_{L-1}/4, fh_{L-1}/4) |
-| 8 | expand (ours) | final flow L0 (R16G16_SINT, one vector per 8x8) | `Motion()` | (W/8, H/8) |
+| 8 | expand (ours) | final flow L0 (R16G16_SINT, one vector per 8x8); current and previous luma L0 | `Motion()` | (W/8, H/8) |
 | 9 | copy | scene-change output | readback slot | |
 
 Which luma pyramid is current flips with each confirmed frame. Which flow pyramid is A or B flips with
@@ -111,6 +119,10 @@ dispatches, most of them on the 8x8-block grid or smaller. The two full-resoluti
 preparation and the expand, each one read and one write per pixel. AMD's published FSR3
 frame-generation cost (0.7-2.1 ms at 1080p across GPUs) includes this optical flow and more. The
 loopback harness will replace this estimate with a measurement.
+
+The expand's per-pixel choice (2026-09-28) was measured in `tests/synth-motion-d3d12`, with clocks
+locked on the RTX 4090. The whole estimator went from 0.310-0.316 to 0.328 ms at 1080p, and from
+0.591-0.612 to 0.629-0.631 ms at 3440x1440, on uniform pans, where every pixel is tested.
 
 ## Provenance and licence
 

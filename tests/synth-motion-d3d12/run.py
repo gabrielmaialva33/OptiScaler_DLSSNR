@@ -54,6 +54,22 @@ NVOFA_SHADERS = ('SynthMotion_NvofaPrep_Shader.h', 'SynthMotion_NvofaExpand_Shad
 #                        frames of the cut, and never on any frame of any other sequence
 #   abandon              the frame after an abandoned recording must measure two steps of motion
 #                        (history not advanced), within 1 px; the frames after that, one step
+#   static overlay       a crosshair, a HUD panel and outlined glyphs held still over a background
+#                        panning (+8, 0) and (+8, +8) px per frame (synthesized-motion.md, "Static
+#                        overlays"). Two judgements on the overlay:
+#                          smeared   at most OVERLAY_SMEARED of all overlay pixels, and at most
+#                                    ELEMENT_SMEARED of each element's (crosshair, panel, floating text;
+#                                    the large panel would otherwise dilute a smeared crosshair), may
+#                                    carry a vector over 0.5 px whose displacement reads another colour:
+#                                    what frame generation drags. A stroke or fill displaced along itself
+#                                    reads the same overlay and is not smeared.
+#                          clear     the overlay pixels the pair can show are static (the harness leaves
+#                                    out any whose 3x3 the camera's motion reproduces exactly) must have
+#                                    a mean |v| under OVERLAY_EPE px.
+#                        Before the expand's per-pixel choice (2026-09-28) the camera's block vector
+#                        was spread over them. The background away from the overlay is held to the
+#                        small-pan thresholds. The share of overlay pixels with |v| > 0.5 px, the
+#                        ambiguous pixels and the band around the elements are reported, never judged.
 # Only frames where Ready() is true are scored: the estimator yields no field for FFX's five warm-up
 # frames after a reset. Every scored sequence must have at least MIN_READY such frames.
 # GPU time is reported, never judged; it is labelled with the clock state.
@@ -72,6 +88,8 @@ PAN_SMALL = dict(epe=1.0, within=0.90)
 PAN_LARGE = dict(epe=2.0, within=0.80)
 STATIC = dict(epe=0.25, within=0.99)
 OBJECT_EPE, BACKGROUND_EPE = 2.0, 0.5
+OVERLAY_SMEARED, ELEMENT_SMEARED, OVERLAY_EPE = 0.02, 0.05, 0.5
+OVERLAY_ELEMENTS = ('crosshair', 'panel', 'text')
 CUT_FRAME, ABANDON_FRAME = 8, 8
 CUT_WINDOW = 4  # SynthMotion::Estimator_Dx12::ReadbackSlots
 MIN_READY = 4
@@ -217,9 +235,11 @@ def mean(values):
 
 def judge(report):
     failures, rows, notes = [], [], []
+    overlays = {}
     seqs = {s['name']: s for s in report['sequences']}
     lag = report.get('lag_frames', 0)
     detects_cuts = report.get('source', 'ffx') == 'ffx'
+    refines_overlay = report.get('source', 'ffx') == 'ffx'  # the per-pixel choice is the FidelityFX expand's
 
     def check(cond, message):
         if not cond:
@@ -277,6 +297,46 @@ def judge(report):
         check(oe < OBJECT_EPE, f'object: interior mean EPE {oe:.3f} >= {OBJECT_EPE}')
         check(be < BACKGROUND_EPE, f'object: background mean EPE {be:.3f} >= {BACKGROUND_EPE}')
         rows.append(('object', f'obj {oe:.3f} / bg {be:.3f}', f'obj {ow * 100:.1f}%', '-', '-',
+                     f'{mean([f["gpu_ms"] for f in frames]):.3f}'))
+
+    # Static overlay over a pan: clear overlay pixels read zero, the background away from it the pan.
+    for s in report['sequences']:
+        if not s['name'].startswith('overlay_'):
+            continue
+        frames = scored(s['frames'])
+        check(len(frames) >= MIN_READY, f'{s["name"]}: only {len(frames)} ready frames')
+        if not frames:
+            continue
+        stat = {name: (mean([region(f, name)['epe_mean'] for f in frames]),
+                       mean([region(f, name)['over_half_px'] for f in frames]),
+                       mean([region(f, name)['within_1px'] for f in frames]),
+                       region(frames[0], name)['pixels'])
+                for name in ('overlay', 'overlay_clear', 'crosshair_clear', 'panel_clear', 'text_clear',
+                             'background', 'band')}
+        def share(part, whole):
+            return mean([region(f, part)['pixels'] / region(f, whole)['pixels'] for f in frames])
+        smeared = share('overlay_smeared', 'overlay')
+        per_element = {e: share(f'{e}_smeared', e) for e in OVERLAY_ELEMENTS}
+        ce, cm, _, _ = stat['overlay_clear']
+        be, _, bw, _ = stat['background']
+        # Only the FidelityFX expand makes the per-pixel choice; the NVOFA source is left out by design
+        # (synthesized-motion.md, "What it cannot fix"), so its overlay is reported, not judged.
+        if refines_overlay:
+            for e, value in per_element.items():
+                check(value <= ELEMENT_SMEARED, f'{s["name"]}: {value * 100:.1f}% of the {e} smeared, '
+                                                f'limit {ELEMENT_SMEARED * 100:.0f}%')
+            check(smeared <= OVERLAY_SMEARED, f'{s["name"]}: {smeared * 100:.1f}% of overlay pixels smeared (a '
+                                              f'vector over 0.5 px that reads another colour), limit '
+                                              f'{OVERLAY_SMEARED * 100:.0f}%')
+            check(ce < OVERLAY_EPE, f'{s["name"]}: clear overlay mean |v| {ce:.3f} >= {OVERLAY_EPE}')
+        else:
+            notes.append(f'{s["name"]}: overlay not judged for {report.get("source")}, which has no per-pixel '
+                         f'choice; {smeared * 100:.1f}% smeared')
+        check(be < PAN_SMALL['epe'], f'{s["name"]}: background mean EPE {be:.3f} >= {PAN_SMALL["epe"]}')
+        check(bw >= PAN_SMALL['within'], f'{s["name"]}: background within-1px {bw:.3f} < {PAN_SMALL["within"]}')
+        overlays[s['name']] = {'smeared_share': smeared, 'smeared_share_per_element': per_element, 'classes': stat}
+        rows.append((s['name'], f'ovl {ce:.3f} / bg {be:.3f}', f'smear {smeared * 100:.1f}%',
+                     f'moving: all {stat["overlay"][1] * 100:.1f}%, clear {cm * 100:.1f}%', '-',
                      f'{mean([f["gpu_ms"] for f in frames]):.3f}'))
 
     # Scene cut, for a source without detection (nvofa): never raised, and accurate again two clean
@@ -358,7 +418,7 @@ def judge(report):
     # Field extent actually produced (the interface promises the colour extent).
     extents = sorted({(f['field_width'], f['field_height'], s['width'], s['height'])
                       for s in report['sequences'] for f in s['frames'] if f['field_width']})
-    return failures, rows, timing, extents, notes
+    return failures, rows, timing, extents, notes, overlays
 
 
 def execute(lock, source):
@@ -406,7 +466,7 @@ def report_judgement(manifest, source):
     report = json.loads(report_path.read_text())
     if report.get('source', 'ffx') != source:
         raise RuntimeError(f'report is for source {report.get("source", "ffx")}, not {source}')
-    failures, rows, timing, extents, notes = judge(report)
+    failures, rows, timing, extents, notes, overlays = judge(report)
     clock_path = OUT / artifact('clock.txt', source)
     locked = clock_path.exists() and clock_path.read_text().startswith('locked')
     clock = 'locked 2100/10501 MHz' if locked else 'UNLOCKED clocks (numbers indicative only)'
@@ -418,6 +478,13 @@ def report_judgement(manifest, source):
     print(f'\ntiming ({clock}):')
     for name, t in timing.items():
         print(f'  {name}: {t["width"]}x{t["height"]} median {t["median_ms"]} ms, p90 {t["p90_ms"]} ms')
+    if overlays:
+        print('\nstatic overlay, per class (mean |v - truth| px, share > 0.5 px, share < 1 px, pixels):')
+        for name, overlay in overlays.items():
+            print(f'  {name}: {overlay["smeared_share"] * 100:.1f}% of overlay pixels smeared ('
+                  + ', '.join(f'{e} {v * 100:.1f}%' for e, v in overlay['smeared_share_per_element'].items()) + ')')
+            for cls, (e, m, w, n) in overlay['classes'].items():
+                print(f'    {cls:<16} {e:7.3f} px  {m * 100:5.1f}% > 0.5  {w * 100:5.1f}% < 1  {n:>7} px')
     print(f'field extents (field WxH for colour WxH): {extents}')
     for n in notes:
         print('note: ' + n)
@@ -426,7 +493,8 @@ def report_judgement(manifest, source):
     if source == 'nvofa':
         limits += ' GPU time excludes the optical-flow engine, which runs on its own queue.'
     result = {'status': 'PASS' if not failures else 'FAIL', 'source': source, 'failures': failures, 'notes': notes,
-              'clock': clock, 'timing': timing, 'extents': extents, 'manifest': manifest, 'limits': limits}
+              'clock': clock, 'timing': timing, 'overlay': overlays, 'extents': extents, 'manifest': manifest,
+              'limits': limits}
     (OUT / artifact('result.json', source)).write_text(json.dumps(result, indent=2) + '\n')
     if failures:
         print('\nSYNTH-MOTION FAIL:')

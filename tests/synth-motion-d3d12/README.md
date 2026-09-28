@@ -30,6 +30,7 @@ The pans with a single non-zero axis pin each axis' sign independently.
 | `static` | the same frame every time | zero |
 | `cut` | pan, then at t=8 different and much darker content, 18 frames | a zero field at t=8; `SceneCut()` within t=8..12 (it is read back from the GPU, `ReadbackSlots` late at most); steady frames scored as a pan |
 | `abandon` | pan (+4, 0); t=8 recorded and thrown away via `AbandonRecording()` | t=9 must read two steps (−8), later frames one step |
+| `overlay_+8x`, `overlay_+8+8` | a static crosshair, HUD panel and outlined glyphs over a background panning (+8, 0) and (+8, +8) | clear overlay pixels against zero; the background outside a 24 px band around each element against the pan |
 | `time_1080p`, `time_3440` | 24-frame pans at 1920×1080 and 3440×1440 | GPU time only |
 
 GPU time is `Record` bracketed by timestamps on the same list. It is reported, never judged, and
@@ -38,6 +39,33 @@ afterwards), otherwise "UNLOCKED".
 
 Only frames where `Ready()` is true are scored: the estimator yields no field for FFX's five warm-up
 frames after a reset. Thresholds and their reasons are in the comment block at the top of `run.py`.
+
+## The overlay sequences
+
+They reproduce Generation Zero's smeared crosshair and HUD under synthesized FG (2026-09-28), which
+the expand pass's per-pixel choice fixes ("Static overlays" in
+`OptiScaler/dlssnr/design/synthesized-motion.md`). Every colour pixel falls in one class:
+
+- **Overlay, clear.** An overlay pixel the frame pair can show is static. Judged: a mean `|v|` under
+  0.5 px.
+- **Overlay, ambiguous.** An overlay pixel whose 3x3 in frame t is reproduced exactly by frame t-1
+  displaced by the camera's motion: a flat fill, or a stroke along the motion. No estimator that sees
+  only the pair can tell it from moving content, and displacing it reads the same overlay. Not judged;
+  it is in the `overlay` total the report prints.
+- **Overlay, smeared** (any overlay pixel, clear or not). A vector over 0.5 px whose displacement
+  reads another colour than the overlay's: what frame generation drags. Judged: at most 2% of all
+  overlay pixels, and 5% of each element's (crosshair, panel, floating text). The share with
+  `|v| > 0.5` px is reported and not judged. A vector blended across an element's edge can displace
+  a stroke or a fill along itself; the pair cannot object to that, and it reads the same overlay.
+- **Background.** Outside the border band and a 24 px band around each element. Held to the
+  small-pan thresholds.
+- **Band.** The 24 px around each element: block vectors blended across its edge, and the background
+  uncovered from behind it. Reported, not judged.
+
+The report prints every class per sequence, with each element's clear pixels (crosshair, panel,
+floating text) apart. Under `--source nvofa` the overlay is reported, not judged: that source has no
+per-pixel choice. Measured before and after the change: "Static overlays", "Measured" in the design
+note.
 
 ## `--source nvofa`
 

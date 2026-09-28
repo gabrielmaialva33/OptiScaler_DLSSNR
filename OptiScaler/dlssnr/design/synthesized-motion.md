@@ -3,7 +3,9 @@
 Update 2026-09-28 (branch `synth-motion-pixel-refine`): **static overlays keep zero motion.** Generation
 Zero's crosshair and HUD smeared under synthesized FG because every pixel of an 8x8 block got the
 block's vector. The expand pass now chooses, per pixel, between that vector and zero by which one
-reconstructs the pixel's neighbourhood from the previous frame. Always on, no key. Design:
+reconstructs the pixel's neighbourhood from the previous frame. Always on, no key. In the GPU harness
+it takes the smeared share of a static crosshair from 52% and 78% to 0.2% and 0.7%, for 0.01-0.04 ms
+on the RTX 4090. Design and numbers:
 [Static overlays: a per-pixel choice in the expand](#static-overlays-a-per-pixel-choice-in-the-expand).
 
 Update 2026-09-28: **a second motion source**, NVIDIA's Optical Flow Accelerator, behind
@@ -342,7 +344,8 @@ build. Both print `SYNTH-MOTION PASS` over 12 scored sequences, with the sign cu
 
 ## Static overlays: a per-pixel choice in the expand
 
-Status 2026-09-28: designed here first; code, shader and test follow on the same branch.
+Status 2026-09-28: implemented, and **passing the GPU harness** on the RTX 4090 under Proton (see
+"Measured", below). Not yet run in a game or on native Windows.
 
 ### The report
 
@@ -368,7 +371,7 @@ belongs where the field becomes per-pixel, in the expand.
 ### The rule
 
 For each colour pixel `p`, with `v` the bilinear block vector the pass computes today and
-`d = round(v)`:
+`d = round(v)`, halves rounded away from zero:
 
 - `S0`: the weighted sum of absolute differences over the 3x3 around `p` between the current luma
   and the previous luma at the same positions (the zero hypothesis).
@@ -380,7 +383,10 @@ For each colour pixel `p`, with `v` the bilinear block vector the pass computes 
 In mean terms, zero must leave less than half the error `v` leaves, and be at least 4 levels better on
 average. Nothing is tested, and `v` is written, when:
 
-- `d` is zero: the two hypotheses are the same;
+- `d` is zero: the two hypotheses are the same. Rounding halves away from zero keeps this to
+  vectors under half a pixel. HLSL's `round()` is half to even, so with it a pixel one blend step
+  from a zero block, at `(-0.5, -0.5)`, rounded to `d = 0` and was never tested; the harness found
+  that on the first run;
 - `p + d` falls outside the frame: the previous frame has nothing to compare, which is the content
   entering at the border;
 - the field is zeroed anyway (`gZero`: reset, warm-up).
@@ -425,10 +431,20 @@ background it lands on. Zero wins when `c > 2 * d_bg + 8`. A plain 3x3 box would
 
 ### Cost
 
-About 27 extra byte loads for each pixel whose rounded vector is not zero; a pixel with zero motion
-costs nothing extra. A uniform pan is the worst case, since every pixel is tested; the harness's
-timing sequences are such pans. *Estimate:* under 0.1 ms at 3440x1440 on the RTX 4090. The measured
-figure goes here.
+- **The work.** Each 8x8 group loads the 10x10 luma of both frames into groupshared memory, 2 loads
+  per thread, and the undisplaced taps come from there. The 9 displaced taps stay texture loads,
+  since they differ per pixel. A pixel whose rounded vector is zero skips the scoring.
+- **The worst case** is a uniform pan, where every pixel is tested. The harness's timing sequences
+  are such pans.
+- **Measured** on the RTX 4090 with clocks locked at 2100/10501 MHz, as the median of the whole
+  estimator's `Record` against the same harness without the change. Before: four runs, 0.310-0.316 ms
+  at 1080p and 0.591-0.612 ms at 3440x1440. After: two runs, 0.328 ms at 1080p and 0.629-0.631 ms at
+  3440x1440.
+- **So the choice adds 0.01-0.02 ms at 1080p and 0.02-0.04 ms at 3440x1440.** Run-to-run spread is
+  about 0.02 ms here, so the 3440x1440 figure is not finer than that. An RTX 3060 has roughly a third
+  of this card's shader throughput, so expect about three times as much there (*estimate*).
+- **The version without the groupshared tile,** 27 texture loads per pixel, added 0.045-0.06 ms and
+  0.10-0.13 ms, for bit-identical output. It is not kept.
 
 ### What it cannot fix
 
@@ -474,13 +490,63 @@ background that pans (+8, 0) px per frame in one, and (+8, +8) in the other.
   exactly reproduced by the previous frame displaced by the camera's motion (flat fill, lines along
   the motion) cannot be told from moving content by any estimator working on the pair. The judged
   set leaves those out. The full set is reported too.
+- **Smeared overlay pixels are judged.** A pixel is smeared when it carries more than 0.5 px *and*
+  its own displacement reads another colour than the overlay's: what an interpolator drags. At most
+  2% of all overlay pixels, and 5% of each element's, may be smeared. The mean `|v|` of the clear
+  (not ambiguous) overlay pixels must be under 0.5 px.
 - **Background pixels are scored against the pan.** A band around each overlay element (the
   disocclusion and the block blend) and the usual border band are left out.
 - **It must fail on the code before this change and pass after it.** Every existing sequence must
-  keep its EPE or improve it. The numbers go here once measured.
+  keep its EPE or improve it.
+
+**Why the smeared criterion replaced the first one.** The first judged criterion was "at most 5% of
+the clear overlay pixels with `|v| > 0.5`". After the change, 4.9% (+8x) and 8.5% (+8+8) of them
+still carried a vector. A diagnostic listed them:
+
+- **Harmless.** 281 of 388 (+8x) and 602 of 1119 (+8+8) were reproduced exactly by their *own*
+  vector. That vector was a blend across an element's edge, from -0.5 to about -5 px, not the
+  camera's -8 px, and it displaced a stroke or the panel's fill along itself. The pair cannot object
+  to such a vector, and an interpolator reads the same overlay through it. The ambiguity test only
+  knew the camera's motion, so it had called those pixels clear.
+- **Real.** Many of the rest sat at `(-0.5, -0.5)`, which `round()` sent to no test at all. That is
+  now fixed in the rule above.
+- **The remainder** were outline pixels on a horizontal edge under a horizontal pan. Their window
+  holds moving background in both hypotheses, so it is a tie, and the pixel itself reads the same
+  outline either way.
+
+So the judged quantity is now what makes the overlay visibly move. The share with `|v| > 0.5` stays
+in the report.
+
+**`--source nvofa`** runs the same sequences; its overlay is reported, not judged, since that source
+has no per-pixel choice (above).
+
+### Measured (2026-09-28)
+
+RTX 4090 under Proton, clocks locked, 1280x720, frames 6-13 of each sequence (past FFX's warm-up).
+"Smeared" is a share of the element's pixels; "clear |v|" is the mean over the clear overlay pixels.
+
+| | Before | After |
+|---|---|---|
+| `overlay_+8x`: smeared, crosshair / text / panel / all | 52.0% / 32.5% / 2.2% / 6.0% | 0.2% / 0.1% / 0.0% / 0.0% |
+| `overlay_+8x`: clear \|v\|, and share > 0.5 px | 0.849 px, 22.9% | 0.131 px, 4.8% |
+| `overlay_+8x`: all overlay pixels > 0.5 px | 22.2% | 14.2% (the rest: ambiguous, or moved along themselves) |
+| `overlay_+8+8`: smeared, crosshair / text / panel / all | 78.4% / 52.5% / 6.6% / 12.3% | 0.7% / 0.2% / 0.3% / 0.3% |
+| `overlay_+8+8`: clear \|v\|, and share > 0.5 px | 1.181 px, 27.6% | 0.218 px, 6.1% |
+| Background away from the overlay, EPE (both) | 0.000 px | 0.000 px |
+| Band within 24 px of an element, EPE, +8x / +8+8 | 0.945 / 1.464 px | 1.151 / 1.774 px |
+| Pans (8), static, object, abandon, EPE | 0.000 px | 0.000 px |
+| Cut (steady frames), EPE; `SceneCut()` | 0.800 px; raised at t=11 | 0.800 px; raised at t=11 |
+
+- **The band got worse**, and it is the limit named above. Its share over 0.5 px moved only from 24.2%
+  to 24.9% (+8x) and from 30.9% to 31.2% (+8+8). What rose is the size of those errors: background
+  pixels next to an element, including the background uncovered from behind it, that had a partial
+  vector now read zero where the previous frame at the same place matched better.
+- **NVOFA, for comparison** (unrefined): it smears 71.7% (+8x) and 93.3% (+8+8) of the crosshair.
+  Everything else there passes as before.
 
 Not tested here: FSR-FG's response to the field, and a real game. Generation Zero on Rafael's PC is
-the check.
+the check, along with a native Windows run of the new binding (two more `R8_UINT` UAVs in the expand's
+table, the same format and access FidelityFX's search already uses there).
 
 ## 1. The problem, stated as narrowly as it actually is
 
