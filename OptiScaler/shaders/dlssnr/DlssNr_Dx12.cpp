@@ -25,6 +25,7 @@
 #include <dlssnr/DlssNr_ZeroGuides.h>
 #include <dlssnr/DlssNr_WorkingScale.h>
 #include <shaders/synth_motion/SynthMotion_Dx12.h>
+#include <shaders/synth_motion/SynthMotion_Handoff.h>
 
 #include <mutex>
 #include <optional>
@@ -5038,41 +5039,71 @@ ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCom
         return nullptr;
     }
 
-    if (_estimator == nullptr)
-        _estimator = std::make_unique<SynthMotion::Estimator_Dx12>();
+    ID3D12Resource* motion = nullptr;
+    bool sceneCut = false;
+    SynthMotion::Handoff::Field shared {};
 
-    const long long now = NowMs();
-    const bool stale = _lastRecordMs == 0 || now - _lastRecordMs > kSynthMotionStaleMs;
-    _lastRecordMs = now;
-
-    if (!_estimator->Record(device, cmdList, colour, colourState, reset || stale))
+    // Synthesized frame generation may have estimated this base frame already, on this device, at this
+    // extent (native D3D12: its feed runs before this pass). Its field is the same estimate; taking it
+    // costs nothing. Our own estimator then sits idle, and the staleness rule below resets it when it
+    // is next needed.
+    if (SynthMotion::Handoff::Take(SynthMotion::Handoff::Owner::DlssNr, device, width, height, &shared))
     {
-        if (!_reportedFailure)
+        motion = shared.motion;
+        sceneCut = shared.sceneCut;
+
+        if (!_reportedTaken)
         {
-            _reportedFailure = true;
-            LOG_WARN("DLSS-NR synthesized motion: the estimator did not record on the {} route ({}x{}); the model "
-                     "keeps zero motion",
+            _reportedTaken = true;
+            LOG_INFO("DLSS-NR synthesized motion: field taken from frame generation's estimate of the frame on the {} "
+                     "route ({}x{}), no second estimate",
                      route, width, height);
         }
-
-        return nullptr;
     }
+    else
+    {
+        if (_estimator == nullptr)
+            _estimator = std::make_unique<SynthMotion::Estimator_Dx12>();
 
-    _recorded = true;
-    _width = width;
-    _height = height;
-    _format = desc.Format;
+        const long long now = NowMs();
+        const bool stale = _lastRecordMs == 0 || now - _lastRecordMs > kSynthMotionStaleMs;
+        _lastRecordMs = now;
 
-    // Nothing to compare against yet -- the first frame, or one after a reset -- or no field at all.
-    ID3D12Resource* motion = _estimator->Ready() ? _estimator->Motion() : nullptr;
-    if (motion == nullptr)
-        return nullptr;
+        if (!_estimator->Record(device, cmdList, colour, colourState, reset || stale))
+        {
+            if (!_reportedFailure)
+            {
+                _reportedFailure = true;
+                LOG_WARN("DLSS-NR synthesized motion: the estimator did not record on the {} route ({}x{}); the "
+                         "model keeps zero motion",
+                         route, width, height);
+            }
+
+            return nullptr;
+        }
+
+        _recorded = true;
+        _width = width;
+        _height = height;
+        _format = desc.Format;
+
+        // Nothing to compare against yet -- the first frame, or one after a reset -- or no field at all.
+        motion = _estimator->Ready() ? _estimator->Motion() : nullptr;
+        if (motion == nullptr)
+            return nullptr;
+
+        sceneCut = _estimator->SceneCut();
+
+        // Frame generation, when it runs after this on the same frame (the D3D11 bridge), takes this field.
+        SynthMotion::Handoff::Publish(SynthMotion::Handoff::Owner::DlssNr, device, motion, width, height, sceneCut);
+    }
 
     // The pass transitions a motion guide from GuideRestState(true), so the field is handed over there.
     // The same state in the default config, when this is no barrier at all.
     _handedOutState = static_cast<D3D12_RESOURCE_STATES>(GuideRestState(true));
     Barrier(cmdList, motion, kEstimatorMotionState, _handedOutState);
     _handedOut = true;
+    _handedOutResource = motion;
 
     // Full extent, output resolution, in pixels: nothing about it is at render size or in a subrect.
     frame.MvScaleX = kSynthMotionScaleX;
@@ -5090,7 +5121,7 @@ ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCom
     }
 
     // A cut is a cut, whoever notices it.
-    if (_estimator->SceneCut())
+    if (sceneCut)
     {
         frame.Reset = true;
         frame.ResetIsPolicy = false;
@@ -5111,11 +5142,13 @@ ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCom
 
 void SynthMotionGuide::AfterPass(ID3D12GraphicsCommandList* cmdList)
 {
-    if (!_handedOut || _estimator == nullptr || cmdList == nullptr)
+    if (!_handedOut || _handedOutResource == nullptr || cmdList == nullptr)
         return;
 
-    Barrier(cmdList, _estimator->Motion(), _handedOutState, kEstimatorMotionState);
+    // Our own field or frame generation's: either way back where the estimator that made it keeps it.
+    Barrier(cmdList, _handedOutResource, _handedOutState, kEstimatorMotionState);
     _handedOut = false;
+    _handedOutResource = nullptr;
 }
 
 void SynthMotionGuide::ConfirmExecuted()
@@ -5129,11 +5162,16 @@ void SynthMotionGuide::ConfirmExecuted()
 
 void SynthMotionGuide::AbandonRecording()
 {
+    // Both barriers, out and back, were on the list nobody ran: the field is where the estimator left it,
+    // whether it was ours or taken.
+    _handedOut = false;
+    _handedOutResource = nullptr;
+
     if (!_recorded || _estimator == nullptr)
         return;
 
-    // Both barriers, out and back, were on the list nobody ran: the field is where the estimator left it.
-    _handedOut = false;
+    // Published for a list nobody ran: nobody may take it.
+    SynthMotion::Handoff::Withdraw(_estimator->Motion());
     _estimator->AbandonRecording();
     _recorded = false;
 }
@@ -5142,6 +5180,7 @@ void SynthMotionGuide::Release()
 {
     if (_estimator != nullptr)
     {
+        SynthMotion::Handoff::Withdraw(_estimator->Motion());
         _estimator->Release();
         _estimator.reset();
     }
@@ -5151,6 +5190,7 @@ void SynthMotionGuide::Release()
     _format = DXGI_FORMAT_UNKNOWN;
     _lastRecordMs = 0;
     _handedOutState = D3D12_RESOURCE_STATE_COMMON;
+    _handedOutResource = nullptr;
     _recorded = false;
     _handedOut = false;
     _lastSynthesized = false;

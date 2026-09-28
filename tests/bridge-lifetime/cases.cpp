@@ -553,11 +553,19 @@ void synthInputCases()
         auto* synth = f.sc->_synthInputs.get();
         f.presenter.buffer.desc = { 3440, 1440, 24 };
         f.sc->_hasInteropWork = true;
+        const unsigned baseFramesBefore = SynthMotion::Handoff::baseFrames;
         assert(f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
         assert(synth->records == 1 && synth->confirms == 1 && synth->abandons == 0);
         assert(synth->lastWidth == 3440 && synth->lastHeight == 1440);
         assert(!synth->recordingOutstanding);
         assert(f.list.copiedFrom == f.sc->_openedDx11BackBuffers[0]);
+
+        // One base frame per copy, and the motion estimate from the game's own frame (not the neural
+        // host's output) in the copy-source state the copy leaves it in, confirmed with the same list.
+        assert(SynthMotion::Handoff::baseFrames == baseFramesBefore + 1);
+        assert(synth->motionRecords == 1);
+        assert(synth->lastMotionColour == f.sc->_openedDx11BackBuffers[0]);
+        assert(synth->lastMotionColourState == D3D12_RESOURCE_STATE_COPY_SOURCE);
     }
 
     // The list could not be closed: the clear never ran and must stay owed.

@@ -848,6 +848,12 @@ class Config
     CustomOptional<bool> FGDisableHudless { false };
     CustomOptional<bool> FGDisableUI { false };
     CustomOptional<bool> FGSkipReset { false };
+    // FGInput::Synthesized only: the synthesized motion field as FG's motion vectors, the fast-motion
+    // response (median px per base frame, 0 = off) and the low-fps floor (base fps, 0 = off). See
+    // dlssnr/design/synthesized-frame-generation.md, "Motion into FG, and emulator behaviour".
+    CustomOptional<bool> FGSynthesizedMotion { false };
+    CustomOptional<float> FGSynthesizedFastMotion { 0.0f };
+    CustomOptional<float> FGSynthesizedMinFps { 0.0f };
     CustomOptional<int> FGAllowedFrameAhead { 1 };
     CustomOptional<bool> FGDepthValidNow { false };
     CustomOptional<bool> FGVelocityValidNow { false };
