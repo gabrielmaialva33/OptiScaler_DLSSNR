@@ -249,7 +249,7 @@ class SynthMotionGuide
 {
   public:
     ID3D12Resource* Record(ID3D12Device*, ID3D12GraphicsCommandList*, ID3D12Resource*, D3D12_RESOURCE_STATES, bool,
-                           DlssNrFrameInfo&, const char*)
+                           DlssNrFrameInfo&, const char*, ID3D12CommandQueue* = nullptr)
     {
         ++records;
         return nullptr;

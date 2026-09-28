@@ -1,4 +1,6 @@
-// Real-GPU endpoint-error test for SynthMotion::Estimator_Dx12 (OptiScaler/shaders/synth_motion).
+// Real-GPU endpoint-error test for SynthMotion::Estimator_Dx12 (OptiScaler/shaders/synth_motion), and
+// with --source nvofa for SynthMotion::NvofaEstimator_Dx12, the NVIDIA Optical Flow source behind the
+// same contract.
 //
 // Renders synthetic sequences whose true motion is known exactly, runs the production estimator on
 // a real D3D12 device (vkd3d-proton under Wine), reads the motion field back and scores it. Nothing
@@ -8,6 +10,11 @@
 // Convention under test (the interface's promise): Motion() holds, per colour pixel, the
 // displacement from the current frame to the previous one, in colour pixels, +x right, +y down.
 // Content moving by (+dx, +dy) per frame therefore reads (-dx, -dy).
+//
+// The NVIDIA source's field is one frame late by construction (SynthMotionNvofa_Dx12.h): the field
+// read back at frame t describes the pair confirmed at t-1. Each frame is therefore scored against
+// the ground truth of frame t - lag, which is the same for a steady pan and one frame behind for the
+// moving object and around an abandoned recording.
 #include "pch.h"
 
 #include <chrono>
@@ -15,6 +22,7 @@
 #include <cstdio>
 
 #include "SynthMotion_Dx12.h"
+#include "SynthMotionNvofa_Dx12.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -39,6 +47,29 @@ void Log(const char* format, ...)
     Log("FAIL: %s (hr 0x%08X)", what, (unsigned) hr);
     std::fflush(stdout);
     ExitProcess(1);
+}
+
+// The source under test is not present on this machine (--source nvofa without nvofapi64.dll, or a
+// build whose NVOFA shaders were never generated). Not a failure: the report says so and run.py
+// reports SKIP. Same no-unwinding rule as Fail.
+const char* g_reportPath = "synth-motion-report.json";
+[[noreturn]] void Skip(const char* source, const char* why)
+{
+    if (g_report != nullptr)
+        std::fclose(g_report);
+    g_report = nullptr;
+    std::string reason = why;
+    for (char& c : reason)
+        c = (c == '"' || c == '\\') ? '\'' : c;
+    FILE* report = nullptr;
+    if (fopen_s(&report, g_reportPath, "w") == 0 && report != nullptr)
+    {
+        std::fprintf(report, "{\"source\": \"%s\", \"skipped\": \"%s\", \"sequences\": []}\n", source, reason.c_str());
+        std::fclose(report);
+    }
+    Log("SYNTH-MOTION SKIP source=%s: %s", source, reason.c_str());
+    std::fflush(stdout);
+    ExitProcess(0);
 }
 
 void Hr(HRESULT hr, const char* what)
@@ -470,9 +501,39 @@ void WriteSequence(const Sequence& s, const std::vector<FrameResult>& frames, bo
 }
 
 // ---------------------------------------------------------------------------------------------
+// The source under test, behind the calls the production guide (DlssNr::SynthMotionGuide) makes.
+// ---------------------------------------------------------------------------------------------
+struct Estimator
+{
+    SynthMotion::Estimator_Dx12* ffx = nullptr;
+    SynthMotion::NvofaEstimator_Dx12* nvofa = nullptr;
+    ID3D12CommandQueue* queue = nullptr; // the queue the harness executes on; the engine is fenced to it
+
+    const char* Name() const { return nvofa != nullptr ? "nvofa" : "ffx"; }
+    int Lag() const { return nvofa != nullptr ? (int) SynthMotion::NvofaEstimator_Dx12::LagFrames : 0; }
+    bool Record(ID3D12Device* device, ID3D12GraphicsCommandList* list, ID3D12Resource* colour,
+                D3D12_RESOURCE_STATES state, bool reset)
+    {
+        if (nvofa == nullptr)
+            return ffx->Record(device, list, colour, state, reset);
+        if (nvofa->Record(device, list, colour, state, reset, queue))
+            return true;
+        if (!nvofa->Available())
+            Skip("nvofa", nvofa->UnavailableReason());
+        return false;
+    }
+    bool Ready() const { return nvofa != nullptr ? nvofa->Ready() : ffx->Ready(); }
+    bool SceneCut() const { return nvofa != nullptr ? nvofa->SceneCut() : ffx->SceneCut(); }
+    ID3D12Resource* Motion() const { return nvofa != nullptr ? nvofa->Motion() : ffx->Motion(); }
+    void ConfirmExecuted() { nvofa != nullptr ? nvofa->ConfirmExecuted() : ffx->ConfirmExecuted(); }
+    void AbandonRecording() { nvofa != nullptr ? nvofa->AbandonRecording() : ffx->AbandonRecording(); }
+    void Release() { nvofa != nullptr ? nvofa->Release() : ffx->Release(); }
+};
+
+// ---------------------------------------------------------------------------------------------
 // One sequence end to end.
 // ---------------------------------------------------------------------------------------------
-std::vector<FrameResult> RunSequence(Gpu& gpu, SynthMotion::Estimator_Dx12& estimator, const Sequence& s)
+std::vector<FrameResult> RunSequence(Gpu& gpu, Estimator& estimator, const Sequence& s)
 {
     // The colour source: RGBA8 UNORM, what a present-time host hands the estimator after a
     // backbuffer copy. Rewritten from an upload buffer every frame.
@@ -532,7 +593,7 @@ std::vector<FrameResult> RunSequence(Gpu& gpu, SynthMotion::Estimator_Dx12& esti
         list->EndQuery(gpu.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
         list->ResolveQueryData(gpu.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, gpu.timestampReadback.Get(), 0);
         if (!fr.recorded)
-            Fail("Estimator_Dx12::Record returned false");
+            Fail("Record returned false");
         fr.ready = estimator.Ready();
         fr.sceneCutAfterRecord = estimator.SceneCut();
 
@@ -622,8 +683,12 @@ std::vector<FrameResult> RunSequence(Gpu& gpu, SynthMotion::Estimator_Dx12& esti
             fr.fieldW = field.width;
             fr.fieldH = field.height;
             fr.fieldFormat = (int) fieldDesc.Format;
-            if (t > 0)
-                fr.scores = ScoreFrame(s, t, field);
+            // Scored against the frame the field describes. A source with no scene-cut detection
+            // (nvofa) is not scored on the one pair that spans the cut: there is no true motion there.
+            const int described = t - estimator.Lag();
+            const bool spansCut = s.kind == Kind::Cut && described == kCutFrame && estimator.Lag() > 0;
+            if (described > 0 && !spansCut)
+                fr.scores = ScoreFrame(s, described, field);
         }
 
         std::string line;
@@ -648,10 +713,14 @@ std::vector<FrameResult> RunSequence(Gpu& gpu, SynthMotion::Estimator_Dx12& esti
 
 int main(int argc, char** argv)
 {
-    const char* reportPath = "synth-motion-report.json";
+    bool nvofa = false;
     for (int i = 1; i < argc; ++i)
+    {
         if (std::strcmp(argv[i], "--report") == 0 && i + 1 < argc)
-            reportPath = argv[++i];
+            g_reportPath = argv[++i];
+        else if (std::strcmp(argv[i], "--source") == 0 && i + 1 < argc)
+            nvofa = std::strcmp(argv[++i], "nvofa") == 0;
+    }
 
     Gpu gpu;
     gpu.Init();
@@ -674,11 +743,18 @@ int main(int argc, char** argv)
         { "time_3440", Kind::Pan, 3440, 1440, 4, 0, 24, true },
     };
 
-    if (fopen_s(&g_report, reportPath, "w") != 0 || g_report == nullptr)
-        Fail("open report");
-    std::fprintf(g_report, "{\"timestamp_frequency\": %llu, \"sequences\": [", (unsigned long long) gpu.frequency);
+    SynthMotion::Estimator_Dx12 ffx;
+    SynthMotion::NvofaEstimator_Dx12 engine;
+    Estimator estimator;
+    estimator.ffx = &ffx;
+    estimator.nvofa = nvofa ? &engine : nullptr;
+    estimator.queue = gpu.queue.Get();
 
-    SynthMotion::Estimator_Dx12 estimator;
+    if (fopen_s(&g_report, g_reportPath, "w") != 0 || g_report == nullptr)
+        Fail("open report");
+    std::fprintf(g_report, "{\"source\": \"%s\", \"lag_frames\": %d, \"timestamp_frequency\": %llu, \"sequences\": [",
+                 estimator.Name(), estimator.Lag(), (unsigned long long) gpu.frequency);
+
     int frames = 0;
     bool first = true;
     for (const auto& s : sequences)
@@ -692,6 +768,7 @@ int main(int argc, char** argv)
     std::fclose(g_report);
     g_report = nullptr;
 
-    Log("SYNTH-MOTION DONE sequences=%d frames=%d", (int) (sizeof(sequences) / sizeof(sequences[0])), frames);
+    Log("SYNTH-MOTION DONE source=%s sequences=%d frames=%d", estimator.Name(),
+        (int) (sizeof(sequences) / sizeof(sequences[0])), frames);
     return 0;
 }

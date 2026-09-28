@@ -34,3 +34,9 @@ build synth_motion_scale.hlsl               SynthMotion_Scale              Synth
 build synth_motion_expand.hlsl              SynthMotion_Expand             SynthMotion_Expand_cso
 build synth_motion_clear.hlsl               SynthMotion_ClearUint          SynthMotion_ClearUint_cso
 build synth_motion_clear.hlsl               SynthMotion_ClearFloat         SynthMotion_ClearFloat_cso -DSM_CLEAR_FLOAT=1
+
+# NVIDIA Optical Flow backend (SynthMotionNvofa_Dx12.cpp). Ours, not FidelityFX code; same flags. Until
+# these two headers exist the backend compiles to "unavailable" and [DlssNr] SynthMotionSource=nvofa
+# falls back to the FidelityFX estimator.
+build synth_motion_nvofa_prep.hlsl          SynthMotion_NvofaPrep          SynthMotion_NvofaPrep_cso
+build synth_motion_nvofa_expand.hlsl        SynthMotion_NvofaExpand        SynthMotion_NvofaExpand_cso

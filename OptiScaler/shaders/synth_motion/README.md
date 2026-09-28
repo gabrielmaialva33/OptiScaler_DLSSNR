@@ -132,6 +132,29 @@ Every copied or derived file was checked against the SDK's `docs/license.md`. Ea
 MIT, whereas the rest of that SDK is binary-only. The MIT notice ships as
 `Licenses/FidelityFX_OpticalFlow_ATTRIBUTION.txt`.
 
+## The second source: NVIDIA Optical Flow (`NvofaEstimator_Dx12`)
+
+`SynthMotionNvofa_Dx12.{h,cpp}` meets the same output contract, but the search runs on NVIDIA's
+fixed-function optical-flow engine through `nvofapi64.dll`. That DLL is loaded at runtime from the
+driver on Windows, or from dxvk-nvapi under Proton. `[DlssNr] SynthMotionSource=nvofa` selects it,
+and `DlssNr::SynthMotionGuide` falls back to the estimator above whenever it is unavailable. Design:
+"Motion sources" in [synthesized-motion.md](../../dlssnr/design/synthesized-motion.md).
+
+Where it differs from the table above:
+
+- **`Record` takes the queue the list will execute on.** The engine is fenced to it: a GPU wait is
+  queued before the list, and `ConfirmExecuted` signals after it and submits the engine.
+- **The field is one frame late.** `Ready()` is false after a reset until two frames are confirmed.
+- **`SceneCut()` is always false.** The engine has no scene-change output.
+- **Passes.** Two, both ours:
+  - `synth_motion_nvofa_prep.hlsl`: colour to `R8_UNORM` luma at up to 540 lines;
+  - `synth_motion_nvofa_expand.hlsl`: the S10.5 `R16G16_SINT` grid to per-pixel `R16G16_FLOAT` in
+    colour pixels.
+- **Headers.** The NVIDIA headers are MIT, vendored in `OptiScaler/include/nvofa/`, with the notice
+  in `Licenses/NVIDIA_OpticalFlow_ATTRIBUTION.txt`.
+- **Until `build.sh` generates `SynthMotion_NvofaPrep_Shader.h` and `SynthMotion_NvofaExpand_Shader.h`,**
+  the source compiles to "unavailable" (`__has_include`).
+
 ## Rebuilding the shaders
 
 `precompile/build.sh` runs dxc through the msvc-wine prefix and regenerates the `*_Shader.h` headers. It

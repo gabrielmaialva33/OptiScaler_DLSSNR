@@ -252,6 +252,7 @@ copy $(SolutionDir)external\xess\LICENSE.txt $(SolutionDir)x64\Release\a\License
 copy "$(SolutionDir)READ ME - DLSS Neural Rendering.txt" $(SolutionDir)x64\Release\a\ /Y
 copy "$(SolutionDir)Licenses\RenoDX_ATTRIBUTION.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
 copy "$(SolutionDir)Licenses\FidelityFX_OpticalFlow_ATTRIBUTION.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
+copy "$(SolutionDir)Licenses\NVIDIA_OpticalFlow_ATTRIBUTION.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
 md $(SolutionDir)x64\Release\a\OptiScaler
 copy $(SolutionDir)external\xess\bin\*.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
 copy $(SolutionDir)external\FidelityFX-SDK\docs\license.md $(SolutionDir)x64\Release\a\OptiScaler\Licenses\FidelityFX_v1_LICENSE.md /Y
@@ -434,6 +435,9 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\dlssnr\DlssNr_Stabilizer_Dx12.h" />
     <ClInclude Include="shaders\dlssnr\precompile\DlssNr_Stabilizer_Shader.h" />
     <ClInclude Include="shaders\synth_motion\SynthMotion_Dx12.h" />
+    <ClInclude Include="shaders\synth_motion\SynthMotionNvofa_Dx12.h" />
+    <ClInclude Include="include\nvofa\nvOpticalFlowCommon.h" />
+    <ClInclude Include="include\nvofa\nvOpticalFlowD3D12.h" />
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ClearFloat_Shader.h" />
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ClearUint_Shader.h" />
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_Expand_Shader.h" />
@@ -868,6 +872,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="shaders\dlssnr\DlssNr_Dx12.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_Stabilizer_Dx12.cpp" />
     <ClCompile Include="shaders\synth_motion\SynthMotion_Dx12.cpp" />
+    <ClCompile Include="shaders\synth_motion\SynthMotionNvofa_Dx12.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNrFeature_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ExposureScan.cpp" />

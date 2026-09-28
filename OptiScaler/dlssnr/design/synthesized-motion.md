@@ -1,5 +1,11 @@
 # Synthesized motion vectors for the no-upscaler NR path
 
+Update 2026-09-28: **a second motion source**, NVIDIA's Optical Flow Accelerator, behind
+`[DlssNr] SynthMotionSource=auto|ffx|nvofa` (auto = ffx). Code is in; its two shaders are written but
+not compiled, so until `precompile/build.sh` runs the source reports itself unavailable and the guide
+uses FidelityFX. Nothing about it is measured. Design, Proton findings and risks:
+[Motion sources: FidelityFX and NVOFA](#motion-sources-fidelityfx-and-nvofa).
+
 Update 2026-09-27 (branch `synth-motion`): **integrated, behind `[DlssNr] SynthMotion`** (default off,
 menu checkbox "Synthesized motion" next to "No history without motion", under HookMethod Present).
 - **The estimator** is `SynthMotion::Estimator_Dx12` (`OptiScaler/shaders/synth_motion/`), the
@@ -90,6 +96,205 @@ buildings, sky).
   after resets and cuts, against thousands per minute before.
 - **Not settled.** Ghosting under a fast camera. This scene's camera barely moves. Divinity (D3D11
   bridge) and Generation Zero are the tests for that.
+
+## Motion sources: FidelityFX and NVOFA
+
+Status 2026-09-28: implemented, not built (the NVOFA shaders are uncompiled), not run on a GPU, not
+measured. Everything below marked *estimate* is one.
+
+### Why a second source
+
+The FidelityFX estimator runs about 30 compute dispatches on the shader cores: the same cores the NR
+model saturates, and on a mid-range card (the RTX 3060 of the Generation Zero report) that is the
+budget the model is short of. NVIDIA's Optical Flow Accelerator (OFA, Turing and later) is a
+fixed-function engine. The search runs beside the shaders instead of among them, and the only shader
+work left is a downscale in and an expand out. kibblerz/DLSS5-Reshade-AIO already drives NR from it
+(asynchronously, input capped at 180p); DLSS-FG on Ada uses the same engine.
+
+The key: `[DlssNr] SynthMotionSource`, a string in the DlssNr block so the block stays removable
+(`auto`, `ffx`, `nvofa`; `auto` is `ffx` until the two are compared in a game). Four-point round trip,
+shipped ini and `Config.md`.
+
+### The API, as checked
+
+- **Headers.** `nvOpticalFlowCommon.h` and `nvOpticalFlowD3D12.h`, API 5.0, MIT (SPDX, NVIDIA
+  2018-2024). Vendored unchanged under `OptiScaler/include/nvofa/` from dxvk-nvapi's `inc/nvofapi`
+  (commit `5c7b8b28`, 2024-11-04). The notice ships as `Licenses/NVIDIA_OpticalFlow_ATTRIBUTION.txt`.
+- **The DLL is never linked or shipped.** `LoadLibraryW("nvofapi64.dll")`, then
+  `NvOFAPICreateInstanceD3D12(NV_OF_API_VERSION, &list)`, once per process. The driver ships it on
+  Windows and dxvk-nvapi under Proton. Missing DLL, missing entry point, refused version or an
+  incomplete function list is each one reason string in the log, and a fallback.
+- **Session.** `nvCreateOpticalFlowD3D12(device)`. Then:
+  - the formats are checked: input `R8_UNORM`, output `R16G16_SINT`;
+  - the grid is chosen from `NV_OF_CAPS_SUPPORTED_OUTPUT_GRID_SIZES`, preferring 2, else 4;
+  - `nvOFInit` is called with OPTICALFLOW, FORWARD, GRAYSCALE8, perf MEDIUM, and no hints, cost, ROI
+    or global flow;
+  - three resources are registered: two inputs and one flow.
+- **Per frame.** `nvOFExecuteD3D12(input, reference, wait fence points, signal fence point)`.
+- **Teardown.** Unregister, then `nvOFDestroy`.
+- **Direction, so no sign conversion.** FORWARD is "each pixel's position change from inputFrame to
+  referenceFrame". With input = current and reference = previous, that is current → previous, the §4
+  contract.
+- **Units.** `NV_OF_FLOW_VECTOR` is an int16 pair, S10.5 fixed point (÷32), in *input* pixels, one per
+  grid cell.
+
+### Proton
+
+- **Where it comes from.** dxvk-nvapi implements `nvofapi64.dll`'s D3D12 entry points on
+  vkd3d-proton's interop interfaces and `VK_NV_optical_flow`. Both installs here ship it at
+  `files/lib/wine/nvapi/x86_64-windows/nvofapi64.dll`: Proton Experimental, and GE-Proton11-7. The
+  DOOM log shows dxvk-nvapi 0.9.2.
+- **Constraints, read in its source.**
+  - API major 5 is required.
+  - Input formats: `R8_UNORM` only. Output: `R16G16_SINT` only.
+  - The output grid is forced to 4x4, whatever is asked for.
+  - `GetCaps` answers only the grid sizes. The width and height limits come back as errors, so the
+    defaults here apply.
+  - Execute waits on and signals the caller's D3D12 fences from a private interop queue. A null
+    registration fence is tolerated.
+  - It needs `winevulkan.dll` in the process and the extension on vkd3d's device.
+- **This design uses exactly that subset**, so Windows and Proton take the same path.
+- **Not verified:** whether a game's prefix actually resolves `nvofapi64.dll`. Proton places the nvapi
+  DLLs only when nvapi is enabled, and Divinity's prefix had no `nvapi64.dll` (see CLAUDE.md). When it
+  is missing, the log says so once and FidelityFX runs.
+
+### One frame late, and why
+
+The guide records onto the caller's list, and the engine runs on its own queue through its own
+submission, so it cannot run in the middle of that list. There were three options:
+
+- **A CPU wait** for the prep, then the engine. Stalls the present thread every frame; rejected.
+- **Split the caller's submission**: copy and prep, signal, engine, then the pass list waits. Zero
+  latency, but it restructures both present hosts' submission. Deferred until the lag is shown to
+  matter.
+- **One frame late**, fenced on the GPU. Chosen.
+
+```
+frame N    list:    [queue waits C >= c(N-1)]  expand(flow from N-1)  prep(colour N -> in[a])  ... pass
+           confirm: queue.Signal(P, p(N));  nvOFExecute(in[a], ref in[b], wait P >= p(N), signal C = c(N))
+frame N+1  list:    [queue waits C >= c(N)]    expand(flow N -> N-1)  prep(colour N+1 -> in[b]) ... pass
+```
+
+So frame N+1's pass gets the motion from N to N-1:
+
+- **A steady camera:** the same field.
+- **Acceleration:** one frame's velocity change of error.
+- **A cut:** one frame of wrong motion. The engine has no scene-change output, so `SceneCut()` is
+  always false.
+
+After a reset, `Ready()` is false until two frames have been confirmed.
+
+### Synchronisation
+
+- **Fences.** Two, both ours:
+  - `P`: the caller's queue signals it in `ConfirmExecuted`, after the list that wrote the frame's
+    input;
+  - `C`: the engine signals it after each execute.
+- **Per frame.** `Record` queues `queue->Wait(C, last)` ahead of the list, and there is no CPU wait.
+  That one wait covers two hazards:
+  - the input slot about to be overwritten was the last execute's reference;
+  - the flow the expand reads is that execute's output.
+- **The flow's write-after-read** (the next execute overwrites what this list read) is covered by that
+  execute waiting on `P`.
+- **Registration.** A chained fence and one CPU wait per allocation, bounded at 2 s.
+- **Release.** Waits on `C`, bounded at 2 s. If the engine is not idle by then, the registered
+  resources are kept, not freed under it.
+- **An unavailable engine.** One that becomes unavailable mid-session is retired by the guide and
+  freed at the caller's next proven-idle `Release()`, since its last list may still be in flight.
+- **Resource states.** The inputs and the flow rest in COMMON, because they cross queues. Our list
+  moves them explicitly to UAV or NON_PIXEL_SHADER_RESOURCE and back. The field rests in
+  NON_PIXEL_SHADER_RESOURCE, as §4 requires.
+
+### Input conversion
+
+`synth_motion_nvofa_prep.hlsl`:
+
+- **Input.** The colour, in any RGBA view format. TYPELESS is mapped exactly as the FidelityFX backend
+  maps it.
+- **Output.** `R8_UNORM` Rec.709 luma of the saturated colour, a box average of up to 4x4 taps, at
+  `min(H, 540)` lines with the aspect ratio kept (`NvofaEstimator_Dx12::MaxInputHeight`).
+- **Why 540.** The engine's cost scales with its input area, and a guide needs a vector every few
+  pixels, not every pixel. At 3440x1440 the input is 1290x540, and grid 4 gives 323x135 vectors, one
+  per ~10.7 colour pixels: coarser than the FidelityFX backend's 8-pixel blocks, and finer (5.3) only
+  at grid 2, which dxvk-nvapi never grants. kibblerz caps at 180p; 540 was chosen for thin edges and
+  is one constant to tune.
+- **HDR.** Highlights clip, the same as in FidelityFX.
+
+### Output conversion: S10.5 grid → per-pixel R16G16_FLOAT
+
+`synth_motion_nvofa_expand.hlsl` reads the `R16G16_SINT` flow, `ceil(input / grid)` per axis, and
+writes `R16G16_FLOAT` at the colour extent:
+
+- **Interpolation.** Bilinear between cell centres: `p = (id + 0.5) / cell - 0.5`, where
+  `cell = grid · colour / input`.
+- **Units.** Each vector is scaled by `(colour / input) / 32` per axis: S10.5 input pixels to colour
+  pixels.
+- **Sign.** The engine's +y is image-down, like the texture's, so none is applied.
+
+### Cost (estimates)
+
+- **Engine.** NVIDIA's Optical Flow SDK application note puts a 1080p, grid-4 pair on Ampere at about
+  1.6 ms at the fastest preset. The input here is a quarter of that area at MEDIUM, so expect roughly
+  0.5-1 ms of *engine* time. It is off the shader cores and overlaps the model, so it is not added to
+  the frame unless the model waits for it, and the one-frame lag means it does not.
+- **Shaders.** The prep is 1290x540 threads of at most 16 taps; the expand is one thread per colour
+  pixel with 4 loads. Together, well under 0.1 ms on a 4090 (*estimate*).
+- **Memory at 3440x1440.** The inputs are 2 x 0.7 MB, the flow 0.17 MB, the field 19.8 MB. The
+  FidelityFX backend holds about 34 MB.
+- **Under Proton.** One extra interop submission and a fence bridge per frame, unmeasured.
+
+### Selection and fallback
+
+- **When the choice is made.** When the guide builds its estimator: the first `Record` after a
+  `Release()`, which is start-up and every resize. NVOFA is chosen only if the caller passed its queue.
+  Both present hosts do: `RunPresentPass` and `PresentHost::Record`, each with the queue that executes
+  the list.
+- **When it is unavailable.** The DLL, the device, the formats, the shaders, or 8 consecutive refused
+  executes. That is decided before anything is recorded, so the same list goes to FidelityFX with a
+  reset. It is logged once and holds for the session.
+- **`ffx` and `auto`** construct the FidelityFX estimator and call it exactly as before: same calls,
+  same arguments, so its GPU work is unchanged.
+
+### Shaders (written, not compiled)
+
+`__has_include` guards the two headers. Until they are generated, `SynthMotionNvofa_Dx12.cpp` compiles
+to "unavailable" and `nvofa` falls back. After running `precompile/build.sh` (the same flags as the
+FidelityFX passes), add the two `_Shader.h` files to the `.vcxproj` `ClInclude` list.
+
+```
+cd OptiScaler/shaders/synth_motion/precompile
+WINEPREFIX=~/.local/opt/msvc-wineprefix WINEDEBUG=-all wine ../../shader_tools/dxc.exe -T cs_6_2 -E CS -O3 \
+  -Qstrip_debug -Qstrip_reflect -I ffx -DFFX_GPU=1 -DFFX_HLSL=1 -DFFX_HALF=0 -DFFX_HLSL_SM=62 \
+  -DFFX_IMPLICIT_SHADER_REGISTER_BINDING_HLSL=0 -Wno-for-redefinition -Wno-ambig-lit-shift \
+  -Fo SynthMotion_NvofaPrep.cso synth_motion_nvofa_prep.hlsl
+python3 ../../shader_tools/create_header.py SynthMotion_NvofaPrep.cso SynthMotion_NvofaPrep_Shader.h SynthMotion_NvofaPrep_cso
+# the same two lines with NvofaExpand / synth_motion_nvofa_expand.hlsl / SynthMotion_NvofaExpand_cso
+```
+
+### Test
+
+`tests/synth-motion-d3d12/run.py --source nvofa` runs the same sequences through this source on
+vkd3d-proton with the Proton's own `nvofapi64.dll` beside the harness:
+
+- **Scoring.** Each frame is scored against the truth of `t - 1`.
+- **Cuts.** There are no scene-cut expectations. `SceneCut()` must never be raised, and the field must
+  recover two clean pairs after the cut.
+- **The abandon's two-step frame** is t=10.
+- **SKIP, not FAIL,** when the shaders are not generated, no Proton ships the DLL, or the engine refuses
+  the device.
+
+### Risks and open questions
+
+1. **Latency on a fast camera.** A frame-late field may bring back part of the ghosting that motion
+   was meant to remove. Compare it with FidelityFX in Generation Zero, or Witcher 3 DX11.
+2. **Cuts.** One wrong frame, and the engine seeds the next pair from the vectors across the cut
+   (temporal hints are dropped only on a reset). If cuts matter, the FidelityFX scene-change passes
+   could run beside the engine; they are cheap.
+3. **The Windows driver's handling of our fence pattern** is unverified. dxvk-nvapi's is read from
+   source, not run.
+4. **The prefix** may lack `nvofapi64.dll` (see Proton above).
+5. **Queue identity.** A caller that passes one queue and executes on another races the engine
+   against its own list. Both present hosts pass the executing queue; a new caller must too.
 
 ## 1. The problem, stated as narrowly as it actually is
 

@@ -25,7 +25,8 @@ struct IDXGISwapChain3;
 namespace SynthMotion
 {
 class Estimator_Dx12;
-}
+class NvofaEstimator_Dx12;
+} // namespace SynthMotion
 
 namespace DlssNr
 {
@@ -120,6 +121,11 @@ constexpr float kSynthMotionScaleY = 1.0f;
 //
 // Owned per host, like ZeroGuides. It records onto the caller's list and executes on the caller's
 // queue; the caller says whether that list ran.
+//
+// Two estimators stand behind it ([DlssNr] SynthMotionSource, "Motion sources" in
+// synthesized-motion.md): the FidelityFX port on the shader cores, and NVIDIA's optical-flow engine.
+// The choice is made when the estimator is built; an engine that turns out to be unavailable is
+// retired, and the FidelityFX estimator takes over in the same frame.
 class SynthMotionGuide
 {
   public:
@@ -140,8 +146,12 @@ class SynthMotionGuide
     // saw is not the one before this frame (a rebuild, a resize).
     //
     // Builds nothing and answers nullptr while [DlssNr] SynthMotion is off.
+    //
+    // queue is the one cmdList will execute on. Only the optical-flow engine needs it -- it is fenced
+    // against that queue -- and without it the FidelityFX estimator is used.
     ID3D12Resource* Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
-                           D3D12_RESOURCE_STATES colourState, bool reset, DlssNrFrameInfo& frame, const char* route);
+                           D3D12_RESOURCE_STATES colourState, bool reset, DlssNrFrameInfo& frame, const char* route,
+                           ID3D12CommandQueue* queue = nullptr);
 
     // After the pass has read the field, on the same list: back where the estimator keeps it.
     void AfterPass(ID3D12GraphicsCommandList* cmdList);
@@ -157,7 +167,13 @@ class SynthMotionGuide
     bool LastFrameSynthesized() const { return _lastSynthesized; }
 
   private:
+    // Exactly one of the two is live while anything is held.
     std::unique_ptr<SynthMotion::Estimator_Dx12> _estimator;
+    std::unique_ptr<SynthMotion::NvofaEstimator_Dx12> _nvofa;
+    // An engine found unavailable mid-session: its last list may still be in flight, so it is kept
+    // until the caller next proves the GPU idle with Release().
+    std::unique_ptr<SynthMotion::NvofaEstimator_Dx12> _retiredNvofa;
+    bool _nvofaRefused = false; // for the session: once unavailable, not tried again
     uint32_t _width = 0;
     uint32_t _height = 0;
     DXGI_FORMAT _format = DXGI_FORMAT_UNKNOWN;

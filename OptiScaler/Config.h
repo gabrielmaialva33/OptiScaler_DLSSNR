@@ -297,6 +297,10 @@ class Config
     // Present hosts with no game guides: estimate motion from the frames themselves and hand it to the
     // model instead of zero motion (synthesized-motion.md). Experimental. Default false.
     CustomOptional<bool> DlssNrSynthMotion { false };
+    // Which estimator SynthMotion uses: auto, ffx (the FidelityFX optical-flow port on the shader cores),
+    // nvofa (NVIDIA's Optical Flow Accelerator through nvofapi64.dll; falls back to ffx when that is
+    // missing). auto means ffx for now. Read when the estimator is built.
+    CustomOptional<std::string> DlssNrSynthMotionSource { std::string("auto") };
     // Present hook: wait for GPU completion before flip. Default true.
     CustomOptional<bool> DlssNrPresentSync { true };
     CustomOptional<uint32_t> DlssNrPreset { 0 };
