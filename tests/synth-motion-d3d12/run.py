@@ -542,8 +542,11 @@ def execute(lock, source):
     (WORK / report_name).unlink(missing_ok=True)
     locked = lock_clocks(lock)
     try:
+        # About 330 frames at up to 3 s each of host-side rendering and scoring: 600 s was enough before the HUD
+        # mask's two 40-frame sequences, and is not after. Still under the suite's 1800 s in suites.toml, which
+        # also covers the build.
         command(['wine', WORK / 'synth-motion-harness.exe', '--report', report_name, '--source', source], env=env,
-                cwd=WORK, logfile=OUT / artifact('run.log', source), timeout=600)
+                cwd=WORK, logfile=OUT / artifact('run.log', source), timeout=1300)
     finally:
         unlock_clocks(locked)
     (OUT / artifact('clock.txt', source)).write_text('locked 2100/10501 MHz\n' if locked else 'UNLOCKED\n')

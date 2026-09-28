@@ -843,8 +843,12 @@ pass on every frame of every sequence and reads back its depth, mask and layer.
 - **Exactness.** The depth is 0 or 1 everywhere and agrees with the mask. The layer is the frame's own rgb
   with the mask as alpha, byte for byte, on every frame.
 - **Cost of the mask plus the layer:** 0.084 ms at 1920x1080 and 0.19 ms at 3440x1440. The estimator is
-  0.29 and 0.55 ms in the same run. An RTX 3060 has about a third of this card's shader throughput, so
-  expect about three times as much there (*estimate*).
+  0.29 and 0.55 ms in the same run.
+  - A second run, with the card clocked down, read 0.68 and 1.74 ms against the estimator's 1.43 and
+    3.66 ms. The clocks were not lockable, so only the ratio holds: about a third to a half of the
+    estimator's time.
+  - An RTX 3060 has about a third of this card's shader throughput, so expect about three times as much
+    there (*estimate*).
 - **Memory at 3440x1440:** about 85 MB for the mask's state, depth and mask. The layer adds 20 MB (RGBA8)
   or 40 MB (RGBA16F), and FFX keeps a copy of it of the same size.
 
