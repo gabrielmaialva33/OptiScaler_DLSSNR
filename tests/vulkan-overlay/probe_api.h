@@ -4,7 +4,7 @@
 // Test-only ABI. No production source or solution references this header.
 struct VkLifetimeStats
 {
-    uint64_t abi = 2;
+    uint64_t abi = 3;
     uint64_t createCalls = 0;
     uint64_t destroyCalls = 0;
     uint64_t teardownCalls = 0;
@@ -20,7 +20,8 @@ struct VkLifetimeStats
     uint64_t partialFailures = 0;
     uint64_t ready = 0;
     uint64_t imageCount = 0;
-    uint64_t nonGraphicsBailouts = 0;
+    uint64_t crossFamilyDraws = 0; // menu submits on the graphics queue for a non-graphics present
+    uint64_t fenceWaits = 0;       // completed waits on an overlay-armed fence before its image is redrawn
 };
 using GetStats = void (*)(VkLifetimeStats*);
 using ArmFailure = void (*)(unsigned);

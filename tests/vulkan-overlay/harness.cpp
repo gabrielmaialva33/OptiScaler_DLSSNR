@@ -100,7 +100,7 @@ struct Test
     {
         VkLifetimeStats s;
         get(&s);
-        Require(s.abi == 2, "wrong instrumentation ABI");
+        Require(s.abi == 3, "wrong instrumentation ABI");
         return s;
     }
     bool Init()
@@ -427,13 +427,19 @@ struct Test
         Require(after.presentCalls > before.presentCalls, "ZERO COVERAGE: overlay QueuePresent not called");
         if (nonGraphicsPresent)
         {
+            // Since fc08aa32 the menu is drawn on the graphics queue and the image walked across the
+            // family boundary and back; before it, this present bailed out and drew nothing.
             Require(after.presentCalls == before.presentCalls + 1, "expected exactly one overlay present call");
-            Require(after.nonGraphicsBailouts == before.nonGraphicsBailouts + 1,
-                    "ZERO COVERAGE: expected exactly one completed non-graphics present bailout");
-            Require(after.overlaySubmits == 0, "non-graphics present unexpectedly submitted overlay drawing");
+            Require(after.crossFamilyDraws == before.crossFamilyDraws + 1,
+                    "ZERO COVERAGE: non-graphics present did not submit the menu on the graphics queue");
+            Require(after.overlaySubmits == before.overlaySubmits + 1,
+                    "ZERO COVERAGE: non-graphics present did not complete the cross-family submit chain");
         }
         else
+        {
             Require(after.overlaySubmits > before.overlaySubmits, "ZERO COVERAGE: frame had no overlay submission");
+            Require(after.crossFamilyDraws == before.crossFamilyDraws, "graphics present took the cross-family path");
+        }
         Check(vkQueueWaitIdle(queue), "wait for real presentation");
         if (clearQueue != queue) Check(vkQueueWaitIdle(clearQueue), "wait for image clear");
         vkDestroyCommandPool(device, pool, nullptr);
@@ -441,6 +447,10 @@ struct Test
         vkDestroySemaphore(device, rendered, nullptr);
         initialized[index] = true;
         ++frames;
+    }
+    unsigned ImagesDrawn() const
+    {
+        return static_cast<unsigned>(std::count(initialized.begin(), initialized.end(), true));
     }
     VkLifetimeStats Finish()
     {
@@ -459,14 +469,19 @@ struct Test
             Require(exclusivePresent ? (clearQueue == queue && clearQueue != graphicsQueue) :
                                        (clearQueue == graphicsQueue && clearQueue != queue),
                     "harness image work did not use the required device queue");
-            Require(frames == 1 && final.presentCalls == 1 && final.nonGraphicsBailouts == 1,
-                    "expected exactly one non-graphics present and bailout");
-            Require(final.overlaySubmits == 0, "non-graphics control drew the overlay");
+            // More presents than images, so at least one image comes round again: its fence, armed by
+            // the last submit of the chain, is waited on, and its transfer buffers and semaphores reused.
+            Require(frames > images.size() && final.presentCalls == frames,
+                    "expected more non-graphics presents than swapchain images, each reaching the overlay");
+            Require(final.crossFamilyDraws == frames && final.overlaySubmits == frames,
+                    "ZERO COVERAGE: not every non-graphics present drew the menu across families");
+            Require(final.fenceWaits > 0 && final.fenceWaits == frames - ImagesDrawn(),
+                    "ZERO COVERAGE: an armed cross-family fence was not waited on before its image was redrawn");
         }
         else
         {
             Require(final.overlaySubmits > 0, "ZERO COVERAGE: overlay never submitted a rendered frame");
-            Require(final.nonGraphicsBailouts == 0, "graphics control reached non-graphics bailout");
+            Require(final.crossFamilyDraws == 0, "graphics control took the cross-family path");
             Require(countChanges > 0, "ZERO COVERAGE: actual image count never changed");
             Require(extentChanges > 0, "ZERO COVERAGE: actual surface extent never changed");
         }
@@ -517,7 +532,8 @@ int main(int argc, char** argv)
         {
             test.Recreate(0);
             test.openMenu();
-            test.Frame();
+            const size_t frames = 2 * test.images.size();
+            for (size_t frame = 0; frame < frames; ++frame) test.Frame();
             auto s = test.Finish();
             std::ofstream out("result.json");
             out << "{\n  \"status\": \"PASS\",\n  \"validation_active\": true,\n  \"validation_errors\": " << validationErrors
@@ -527,16 +543,19 @@ int main(int argc, char** argv)
                 << (test.sharingMode == VK_SHARING_MODE_EXCLUSIVE ? "EXCLUSIVE" : "CONCURRENT") << "\""
                 << ",\n  \"present_queue_family\": " << test.family
                 << ",\n  \"present_queue_flags\": " << test.presentQueueFlags
-                << ",\n  \"surface_support\": true,\n  \"frames\": " << test.frames
+                << ",\n  \"surface_support\": true,\n  \"image_count\": " << test.images.size()
+                << ",\n  \"frames\": " << test.frames
                 << ",\n  \"present_calls\": " << s.presentCalls
-                << ",\n  \"non_graphics_bailouts\": " << s.nonGraphicsBailouts
+                << ",\n  \"cross_family_draws\": " << s.crossFamilyDraws
+                << ",\n  \"images_drawn\": " << test.ImagesDrawn()
+                << ",\n  \"fence_waits\": " << s.fenceWaits
                 << ",\n  \"overlay_submits\": " << s.overlaySubmits
                 << ",\n  \"allocations\": " << s.allocations << ",\n  \"releases\": " << s.releases
                 << ",\n  \"live_bytes\": " << s.liveBytes
                 << ",\n  \"objects_created\": " << s.objectsCreated
                 << ",\n  \"objects_destroyed\": " << s.objectsDestroyed << "\n}\n";
-            std::printf("PASS: non-graphics-present %s completed exactly one bailout, no overlay submission, clean teardown and zero validation errors\n",
-                        test.exclusivePresent ? "EXCLUSIVE" : "CONCURRENT");
+            std::printf("PASS: non-graphics-present %s drew the menu across families on all %u presents, clean teardown and zero validation errors\n",
+                        test.exclusivePresent ? "EXCLUSIVE" : "CONCURRENT", test.frames);
             return 0;
         }
         for (unsigned generation = 0; generation < 13; ++generation)

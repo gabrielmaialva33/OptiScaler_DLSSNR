@@ -75,10 +75,17 @@ inline VkResult vkCreateFramebuffer(VkDevice d, const VkFramebufferCreateInfo* i
     if (r == VK_SUCCESS) ++stats.objectsCreated;
     return r;
 }
+// Destroying a pool frees every command buffer still allocated from it, which is how production
+// releases the cross-family transfer buffers. Track per pool so those count as destroyed.
+inline std::unordered_map<VkCommandPool, uint64_t> poolBuffers;
 inline VkResult vkAllocateCommandBuffers(VkDevice d, const VkCommandBufferAllocateInfo* i, VkCommandBuffer* b)
 {
     auto r = ::vkAllocateCommandBuffers(d, i, b);
-    if (r == VK_SUCCESS) stats.objectsCreated += i->commandBufferCount;
+    if (r == VK_SUCCESS)
+    {
+        stats.objectsCreated += i->commandBufferCount;
+        poolBuffers[i->commandPool] += i->commandBufferCount;
+    }
     return r;
 }
 #define PROBE_DESTROY(Name, Handle) \
@@ -90,7 +97,6 @@ inline void Name(VkDevice d, Handle h, const VkAllocationCallbacks* a) \
 PROBE_DESTROY(vkDestroyImageView, VkImageView)
 PROBE_DESTROY(vkDestroyRenderPass, VkRenderPass)
 PROBE_DESTROY(vkDestroyDescriptorPool, VkDescriptorPool)
-PROBE_DESTROY(vkDestroyCommandPool, VkCommandPool)
 PROBE_DESTROY(vkDestroyFence, VkFence)
 PROBE_DESTROY(vkDestroySemaphore, VkSemaphore)
 PROBE_DESTROY(vkDestroyFramebuffer, VkFramebuffer)
@@ -98,7 +104,22 @@ PROBE_DESTROY(vkDestroyFramebuffer, VkFramebuffer)
 inline void vkFreeCommandBuffers(VkDevice d, VkCommandPool p, uint32_t count, const VkCommandBuffer* b)
 {
     stats.objectsDestroyed += count;
+    poolBuffers[p] -= count;
     ::vkFreeCommandBuffers(d, p, count, b);
+}
+inline void vkDestroyCommandPool(VkDevice d, VkCommandPool p, const VkAllocationCallbacks* a)
+{
+    if (p)
+    {
+        ++stats.objectsDestroyed;
+        auto it = poolBuffers.find(p);
+        if (it != poolBuffers.end())
+        {
+            stats.objectsDestroyed += it->second;
+            poolBuffers.erase(it);
+        }
+    }
+    ::vkDestroyCommandPool(d, p, a);
 }
 }
 #undef IM_ALLOC

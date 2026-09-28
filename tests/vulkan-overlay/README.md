@@ -35,7 +35,9 @@ It requires all of the following:
   cannot silently pass.
 - Balanced `IM_ALLOC`/`IM_FREE` calls and zero remaining tracked bytes. Vulkan object
   counts cover the objects owned directly by the overlay translation unit;
-  internal ImGui backend allocations are outside these counters.
+  internal ImGui backend allocations are outside these counters. Command buffers
+  still allocated from a pool when it is destroyed count as destroyed with it,
+  which is how production releases its cross-family transfer buffers.
 - An injected failed drain preserves ownership without frees or replacement,
   followed by successful real-drain cleanup. Failure of the second framebuffer
   creation cleans up the partially initialized generation. Rendering then recovers.
@@ -51,22 +53,36 @@ It requires all of the following:
   preferring a compute-capable non-graphics family (such as DOOM Eternal's family
   2, flags `0xE`) over other non-graphics families. The swapchain uses concurrent
   sharing between these families, with a semaphore connecting clear and present.
-  Exactly one real present must reach the completed non-graphics bailout exactly
-  once, log the full matching family/flags and CONCURRENT warning exactly once, and submit **zero**
-  overlay draws. Overlay creation, balanced allocation/object cleanup, successful
-  presentation, the validation fence probe, and zero unexpected validation errors
-  are required. Results appear under `non_graphics_present_control` in the aggregate
+  It presents **twice as many frames as the swapchain has images**, so images come
+  round again: each present after an image's first must complete a wait on the
+  fence the chain's last submit armed (`fence_waits == frames - images_drawn`,
+  counted where production clears the pending flag after a successful wait) and
+  reuses that image's transfer command buffers and semaphores. **Every**
+  present must take the cross-family path: one menu submit on the graphics queue
+  (`cross_family_draws`, counted at the middle submit of the chain) and one
+  completed chain back to the present queue (`overlay_submits`, counted where the
+  image's fence is armed), both equal to `frames` and `present_calls`. `frames`
+  counts only presents that returned success and drained. The production log must
+  hold `present happens on queue family <present> (flags <X>), which cannot run a
+  render pass; drawing the menu on graphics family <graphics> with a queue-family
+  transfer around it (CONCURRENT swapchain)` exactly once (it is one-shot), and
+  none of the chain's failure exits: a fence-wait timeout (`vkWaitForFences
+  returned`), a failed release/menu/acquire submit, failed transfer recording or
+  cross-family object creation, `menu disabled`, or the graphics-family pool move.
+  Overlay creation, balanced allocation/object cleanup, the validation fence probe,
+  and zero unexpected validation errors (synchronization validation included) are
+  required. Results appear under `non_graphics_present_control` in the aggregate
   JSON and in `artifacts/non-graphics-present/result.json`.
 - A fourth process with `--non-graphics-present-exclusive` uses an **EXCLUSIVE**
   swapchain. All harness image work (both layout transitions and the clear) runs
   on the same non-graphics queue as presentation. The graphics queue is created
-  for overlay initialization; the harness never submits image work to it. No
-  harness ownership transfer is needed, so a future overlay writer on graphics
-  must handle the ownership transfer itself. The selected present family must
-  support compute or transfer commands to clear the image; other unsupported
-  capabilities fail explicitly. This control has the same bailout, validation,
-  and cleanup assertions as CONCURRENT, and additionally checks the **EXCLUSIVE**
-  warning about a release barrier on the present queue and an acquire on graphics.
+  for overlay initialization; the harness never submits image work to it, so the
+  only ownership transfers are the overlay's own release/acquire pairs, and the
+  harness's next clear on the present family validates that ownership came back.
+  The selected present family must support compute or transfer commands to clear
+  the image; other unsupported capabilities fail explicitly. This control has the
+  same cross-family, validation, and cleanup assertions as CONCURRENT, with the
+  log line ending `(EXCLUSIVE swapchain)`.
   Both controls verify production's recorded sharing mode and report/assert the
   clear queue family (graphics for CONCURRENT, present for EXCLUSIVE). Results are
   under `non_graphics_present_exclusive_control` and in
@@ -80,6 +96,21 @@ SKIP`** for that control. The runner prints that reason loudly; the graphics tes
 still must pass, and their aggregate PASS does not claim non-graphics coverage.
 A failed or interrupted run cannot leave an aggregate PASS from an earlier execution.
 
+## History of the non-graphics controls
+
+Until `fc08aa32` (2026-09-19, "menu: draw Vulkan overlay on non-graphics present
+queues via cross-family transfer") a present from a family without graphics could
+not run the menu's render pass, and the overlay bailed out: the controls asserted
+exactly one completed bailout, **zero** overlay submits, and a one-shot "the Vulkan
+overlay is not possible on this swapchain" warning naming what a cross-family draw
+would need. `fc08aa32` built exactly that for id Tech 7 (DOOM Eternal presents from
+compute family 2): release on the present queue, acquire + menu + release on the
+graphics queue, acquire back on the present queue, three submits chained by
+semaphores with the image's fence on the last. The bailout, its counter
+(`nonGraphicsBailouts`) and its warning are gone; the suite stayed red on its
+retired anchors until the controls were rewritten to assert the draw instead
+(probe ABI 3, counter `crossFamilyDraws`).
+
 ## Scope and packaging
 
 This tests a serialized, real Vulkan overlay lifecycle under Wine. The application
@@ -87,7 +118,9 @@ drains its work before recreation and after each frame. The drain error and part
 initialization error are **simulated**, not actual GPU exhaustion or failure. This
 does not prove safety under concurrent presents, device loss, every initialization
 failure, DLSS-G/Streamline pacing, or any game's rendering path. No image comparison
-or manual visual-quality assertion is made.
+or manual visual-quality assertion is made: the non-graphics controls prove the
+cross-family chain submits, completes and validates, not that the menu's pixels
+reached the presented image.
 
 All generated sources, DLLs, executables, logs, and prefixes are in ignored
 `tests/vulkan-overlay/artifacts/`. No test is added to `OptiScaler.sln` or its projects.

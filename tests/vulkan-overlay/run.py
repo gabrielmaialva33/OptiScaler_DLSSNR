@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -59,20 +60,33 @@ def instrument(ref):
             raise RuntimeError(f'instrumentation anchor changed: {function}')
         body = source.index('{', source.index(function)) + 1
         source = source[:body] + f'\n    ++VkLifetimeProbe::stats.{counter};' + source[body:]
+    # Two submit sites since fc08aa32: the present-queue path and the cross-family transfer path
+    # (a present on a non-graphics queue family, id Tech 7). Each counts one overlay submit: the
+    # submit that arms the image's fence, the last of the chain on the cross-family path.
     anchor = '    _frameFencePending[idx] = true;'
-    if source.count(anchor) != 1:
-        raise RuntimeError('overlay submit instrumentation anchor changed')
+    if source.count(anchor) != 2:
+        raise RuntimeError(f'overlay submit instrumentation anchor changed: expected 2 sites (present queue '
+                           f'and cross-family chain, fc08aa32), found {source.count(anchor)}')
     source = source.replace(anchor, anchor + '\n    ++VkLifetimeProbe::stats.overlaySubmits;')
-    # Count the completed non-graphics bailout, not just QueuePresent entry or its warning.
-    anchor = '''            ImGui::Render();
-            return true;
-        }
+    # The menu's own submit on the graphics queue, the middle of the cross-family chain. Before fc08aa32
+    # a non-graphics present bailed out here with nothing drawn; that bailout and its counter are gone.
+    anchor = '''    auto r2 = vkQueueSubmit(_ImVulkan_Info.Queue, 1, &draw, VK_NULL_HANDLE);
 
-        LOG_WARN("present happens on queue family {0}, not {1}; moving the overlay's command pools to it",'''
+    if (r2 == VK_SUCCESS)
+        chain = _xferToPresent[idx];
+'''
     if source.count(anchor) != 1:
-        raise RuntimeError('non-graphics present bailout instrumentation anchor changed')
-    source = source.replace(anchor, anchor.replace('            return true;',
-                            '            ++VkLifetimeProbe::stats.nonGraphicsBailouts;\n            return true;'))
+        raise RuntimeError('cross-family draw instrumentation anchor changed: the menu submit on the graphics '
+                           'queue (r2, between the release and acquire submits) is no longer where fc08aa32 put it')
+    source = source.replace(anchor, anchor.replace('        chain = _xferToPresent[idx];\n',
+                            '    {\n        chain = _xferToPresent[idx];\n'
+                            '        ++VkLifetimeProbe::stats.crossFamilyDraws;\n    }\n'))
+    # A completed wait on the fence an earlier overlay submit armed, before the image is drawn again.
+    anchor = '        _frameFencePending[idx] = false;'
+    if source.count(anchor) != 1:
+        raise RuntimeError('fence wait instrumentation anchor changed: the bounded wait on an armed per-image '
+                           'fence in QueuePresent no longer clears _frameFencePending[idx] in one place')
+    source = source.replace(anchor, anchor + '\n        ++VkLifetimeProbe::stats.fenceWaits;')
     source += r'''
 // Test exports exist only in this generated translation unit, never in production.
 extern void KeyUp(UINT vKey);
@@ -185,6 +199,13 @@ def execute_non_graphics_control(work, env, *, exclusive):
                                  cwd=nongraphics, env=env, stdin=subprocess.DEVNULL,
                                  stdout=log, stderr=subprocess.STDOUT, timeout=60)
     evidence = json.loads((nongraphics / 'result.json').read_text())
+    if evidence.get('status') not in ('PASS', 'SKIP'):
+        # Name the harness's own reason and every validation message id, not just the exit code.
+        log = (OUT / (name + '.log')).read_text(errors='replace')
+        reason = next((line for line in reversed(log.splitlines()) if line.startswith('FAIL: ')), 'no FAIL line')
+        ids = sorted(set(re.findall(r'\b(?:VUID|SYNC-HAZARD)-[\w-]+', log)) - {'VUID-VkFenceCreateInfo-flags-parameter'})
+        raise RuntimeError(f'{name} ({sharing}) control failed (exit {process.returncode}): {reason}'
+                           + (f'; validation ids: {", ".join(ids)}' if ids else '') + f'; see {OUT / (name + ".log")}')
     if evidence.get('sharing_mode') != sharing:
         raise RuntimeError(f'{name} did not report the requested sharing mode')
     if process.returncode == 77 and evidence.get('status') == 'SKIP' and evidence.get('reason'):
@@ -192,10 +213,22 @@ def execute_non_graphics_control(work, env, *, exclusive):
             raise RuntimeError(f'{name} skip reported validation errors')
         print(f'SKIP: {name}: ' + evidence['reason'], flush=True)
     elif process.returncode == 0 and evidence.get('status') == 'PASS':
-        expected = {'frames': 1, 'present_calls': 1, 'non_graphics_bailouts': 1, 'overlay_submits': 0,
-                    'validation_active': True, 'validation_errors': 0, 'surface_support': True}
+        expected = {'validation_active': True, 'validation_errors': 0, 'surface_support': True}
         if any(evidence.get(key) != value for key, value in expected.items()):
             raise RuntimeError(f'{name} control did not prove the required coverage')
+        # Every present draws the menu on graphics and completes the chain back to the present queue.
+        # frames counts only presents that succeeded and drained.
+        frames = evidence.get('frames', 0)
+        counts = {key: evidence.get(key) for key in ('present_calls', 'cross_family_draws', 'overlay_submits')}
+        if frames <= evidence.get('image_count', 0) or any(value != frames for value in counts.values()):
+            raise RuntimeError(f'{name} did not draw the menu across families on every present: frames={frames} '
+                               f'images={evidence.get("image_count")} {counts} (before fc08aa32 this path '
+                               'bailed out with 0 overlay submits)')
+        # Each present after an image's first waits on the fence the chain's last submit armed.
+        waits, drawn = evidence.get('fence_waits', 0), evidence.get('images_drawn', 0)
+        if waits <= 0 or waits != frames - drawn:
+            raise RuntimeError(f'{name} fence waits {waits} != {frames} presents - {drawn} images drawn: an armed '
+                               'cross-family fence was not waited on before its image was redrawn')
         flags = evidence.get('present_queue_flags')
         if not isinstance(flags, int) or flags & 1:
             raise RuntimeError(f'{name} control selected a graphics queue')
@@ -208,25 +241,31 @@ def execute_non_graphics_control(work, env, *, exclusive):
                 evidence.get('objects_created', 0) <= 0 or
                 evidence.get('objects_created') != evidence.get('objects_destroyed')):
             raise RuntimeError(f'{name} did not balance overlay allocations and Vulkan objects')
-        warning = (f"present happens on queue family {evidence['present_queue_family']} "
-                   f"(flags {flags:X}), which cannot run a render pass; "
-                   "the Vulkan overlay is not possible on this swapchain")
-        detail = ("an ownership transfer -- the swapchain is EXCLUSIVE, so a release "
-                  "barrier on this queue and an acquire on the graphics one" if exclusive else
-                  "nothing more -- the swapchain is CONCURRENT and already lists that family, so it may "
-                  "write the image directly")
-        full_warning = (warning + ". Drawing it on the overlay's own "
-                        f"graphics family ({graphics}) instead would need: a semaphore so the present waits for the "
-                        "overlay's submit, and " + detail)
+        # One-shot line, so exactly once per process whatever the frame count.
+        crossing = (f"present happens on queue family {present} (flags {flags:X}), which cannot run a render pass; "
+                    f"drawing the menu on graphics family {graphics} with a queue-family transfer around it "
+                    f"({sharing} swapchain)")
         production_log = (nongraphics / 'OptiScaler.log').read_text(errors='replace')
-        warnings = production_log.count(warning)
-        if warnings != 1 or production_log.count(full_warning) != 1:
-            raise RuntimeError(f'{name} expected exactly one {sharing} bailout warning; see {nongraphics / "OptiScaler.log"}')
+        crossings = production_log.count(crossing)
+        if crossings != 1:
+            raise RuntimeError(f'{name} expected the cross-family line exactly once, found {crossings}; '
+                               f'see {nongraphics / "OptiScaler.log"}')
         if production_log.count('swapchain image sharing mode ' + sharing) != 1:
             raise RuntimeError(f'{name} production did not record the requested sharing mode')
-        evidence['bailout_warnings'] = warnings
-        print(f'PASS: {name} ({sharing}) family {evidence["present_queue_family"]} flags 0x{flags:X}: '
-              'one bailout, no overlay submission, zero unexpected validation errors', flush=True)
+        # The chain's failure exits, a fence timeout, and the graphics-family repath all let the present
+        # through without the menu; any of them here means the transfer did not hold.
+        failures = [marker for marker in (
+            'vkWaitForFences returned', 'could not build the cross-family objects',
+            'could not record the queue-family transfer', 'vkQueueSubmit (release) error',
+            'vkQueueSubmit (menu, graphics queue) error', 'vkQueueSubmit (acquire) error',
+            "moving the overlay's command pools", 'menu disabled') if marker in production_log]
+        if failures:
+            raise RuntimeError(f'{name} production logged a cross-family failure: {failures}; '
+                               f'see {nongraphics / "OptiScaler.log"}')
+        evidence['cross_family_lines'] = crossings
+        print(f'PASS: {name} ({sharing}) family {present} flags 0x{flags:X}: menu drawn on graphics family '
+              f'{graphics} across the family boundary on {frames}/{frames} presents ({evidence["image_count"]} images), '
+              'zero unexpected validation errors', flush=True)
     else:
         raise RuntimeError(f'{name} control failed (exit {process.returncode}); '
                            f'see {OUT / (name + ".log")}')
@@ -286,9 +325,17 @@ def execute():
     if negative.returncode != 1 or 'ZERO COVERAGE:' not in (OUT / 'negative-control.log').read_text():
         raise RuntimeError('disabled-overlay negative control did not fail explicitly on zero coverage')
     result['zero_coverage_control'] = 'PASS (disabled overlay rejected with exit 1)'
-    # Fresh processes keep the production one-shot warning independent for both sharing modes.
-    result['non_graphics_present_control'] = execute_non_graphics_control(work, env, exclusive=False)
-    result['non_graphics_present_exclusive_control'] = execute_non_graphics_control(work, env, exclusive=True)
+    # Fresh processes keep the production one-shot line independent for both sharing modes. Both run
+    # before anything fails, so a defect in one mode does not hide the other's result.
+    failures = []
+    for key, exclusive in (('non_graphics_present_control', False), ('non_graphics_present_exclusive_control', True)):
+        try:
+            result[key] = execute_non_graphics_control(work, env, exclusive=exclusive)
+        except (RuntimeError, subprocess.TimeoutExpired, OSError, KeyError, ValueError) as error:
+            print('FAIL:', error, file=sys.stderr, flush=True)
+            failures.append(str(error))
+    if failures:
+        raise RuntimeError(' | '.join(failures))
     result['source'] = provenance
     (OUT / 'results.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2))
