@@ -215,6 +215,32 @@ if re.search(r'set\w*\([^;]*"DLSSNR\.GlobalToneStrength"', forwarder):
 if len(failures) == before:
     print(f'PASS: no retired identifier is live ({len(sources)} sources scanned)')
 
+# --- 5. Constant-buffer views are multiples of 256 bytes -------------------------------------------
+# CreateConstantBufferView returns nothing, so an invalid size cannot fail the call: native Windows D3D12
+# removes the device instead, and vkd3d-proton accepts it, so nothing on Linux shows it. The guide resample's
+# 48-byte view took Rafael's RTX 3060 down on 2026-09-28. Every view sized by sizeof(T) in a shader pass
+# needs T declared alignas(256), which also makes the upload buffer behind it large enough.
+before = len(failures)
+shader_sources = sorted((root / 'OptiScaler/shaders').rglob('*.cpp')) + sorted((root / 'OptiScaler/shaders').rglob('*.h'))
+shader_text = {path: path.read_text(errors='replace') for path in shader_sources if 'precompile' not in path.parts}
+cbv_sites = 0
+for path, text in shader_text.items():
+    for match in re.finditer(r'SizeInBytes\s*=\s*sizeof\((\w+)\)', text):
+        cbv_sites += 1
+        name = match.group(1)
+        declared = [p for p, t in shader_text.items() if re.search(rf'\bstruct\s+(alignas\(\d+\)\s+)?{name}\b', t)]
+        aligned = [p for p in declared if re.search(rf'\bstruct\s+alignas\(256\)\s+{name}\b', shader_text[p])]
+        line = text.count('\n', 0, match.start()) + 1
+        if not declared:
+            fail(f'{path.relative_to(root)}:{line}: a constant-buffer view is sized by {name}, declared nowhere under shaders/')
+        elif not aligned:
+            fail(f'{path.relative_to(root)}:{line}: a constant-buffer view is sized by {name}, which is not alignas(256)')
+
+if cbv_sites == 0:
+    fail('found no constant-buffer view sized by sizeof(...) under shaders/; the scan no longer matches the code')
+if len(failures) == before:
+    print(f'PASS: {cbv_sites} constant-buffer views sized by sizeof(T) are all over alignas(256) structs')
+
 if failures:
     for message in failures:
         print(f'FAIL: {message}')

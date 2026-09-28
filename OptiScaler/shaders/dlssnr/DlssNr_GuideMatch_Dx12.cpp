@@ -2,6 +2,7 @@
 
 #include "DlssNr_GuideMatch_Dx12.h"
 
+#include <cstddef>
 #include <cstring>
 
 // The resample's bytecode, when the build carries it. See the header: its absence is a supported state,
@@ -15,8 +16,12 @@
 
 namespace
 {
-// One ordered list with the cbuffer in dlssnr_guides.hlsl; twelve scalars, sixteen-byte rows.
-struct GuideMatchConstants
+// One ordered list with the cbuffer in dlssnr_guides.hlsl; twelve scalars, sixteen-byte rows. alignas(256)
+// because a constant-buffer view must be a multiple of D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT, and so
+// must the upload buffer behind it. At 48 bytes, CreateConstantBufferView -- which cannot return an error --
+// made native Windows D3D12 remove the device on the spot; vkd3d-proton accepted it (Rafael's RTX 3060,
+// Divinity at WorkingScale 0.5, 2026-09-28).
+struct alignas(256) GuideMatchConstants
 {
     uint32_t DepthBaseX;
     uint32_t DepthBaseY;
@@ -32,7 +37,9 @@ struct GuideMatchConstants
     uint32_t Pad1;
 };
 
-static_assert(sizeof(GuideMatchConstants) == 48, "GuideMatchConstants must match cbuffer Params");
+static_assert(offsetof(GuideMatchConstants, Pad1) == 44, "GuideMatchConstants must match cbuffer Params");
+static_assert(sizeof(GuideMatchConstants) % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT == 0,
+              "a constant-buffer view must be a multiple of 256 bytes");
 
 constexpr uint32_t kSrvCount = 2;
 constexpr uint32_t kUavCount = 2;

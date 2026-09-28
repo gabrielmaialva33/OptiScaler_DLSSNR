@@ -789,6 +789,12 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
                       "fullscreen {}, plain presenter {}); reported once, every failure below",
                       (UINT) result, SyncInterval, Flags, presenterFullscreen != FALSE, _emulatedFullscreen,
                       _EmulatesFullscreen());
+
+            // The removed device is the bridge's own D3D12 one, not the game's: the game only learns of it
+            // through this Present, asks its D3D11 device why, and gets S_OK (Divinity's dialog on Rafael's
+            // PC, 2026-09-28). The real reason is only here.
+            if ((result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET) && _dx12Device != nullptr)
+                Util::GetDeviceRemovedReason(_dx12Device);
         }
         LOG_ERROR("fg Present failed: {:X}", (UINT) result);
     }
