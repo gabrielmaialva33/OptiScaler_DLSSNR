@@ -705,7 +705,7 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nframe. Those two disagree by the shrink's blur as well as by the model's edit,"
                        "\nand the composition cannot tell them apart -- it reads the blur as brightness"
                        "\nthe frame has and the model never saw. The lower the model resolution the"
-                       "\nlarger that error, and it is the colour shift that shows up at 50%."
+                       "\nlarger that error, and it is the colour shift that shows up at half size."
                        "\n\nMatched residual carries up only the model's difference and lays it on the"
                        "\nframe's own proxy, so both pictures being compared are full size and the only"
                        "\nthing that came from the small raster is the edit itself."
@@ -1004,7 +1004,7 @@ void RenderMenu(Config* config, float menuResScale)
                             ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
                                                Localization::Tr("Game exposure %.4f  ->  white point %.2f%s"),
                                                ex.exposure, ex.preExposure / ex.exposure * trim,
-                                               ex.offeredNow ? "" : "  (held: absent this frame)");
+                                               ex.offeredNow ? "" : Localization::Tr("  (held: absent this frame)"));
                         }
                         else
                             ImGui::TextDisabled(Localization::Tr("Reading the exposure..."));
@@ -1125,11 +1125,12 @@ void RenderMenu(Config* config, float menuResScale)
                         float pw = editingRow ? anchors[selectedAnchor].white
                                               : config->DlssNrWhitePointScale.value_or_default();
 
-                        char lbl[48];
+                        char lbl[96];
                         if (editingRow)
-                            snprintf(lbl, sizeof(lbl), "Paper white (editing point %d)", selectedAnchor + 1);
+                            snprintf(lbl, sizeof(lbl), Localization::Tr("Paper white (editing point %d)"),
+                                     selectedAnchor + 1);
                         else
-                            snprintf(lbl, sizeof(lbl), "Paper white");
+                            snprintf(lbl, sizeof(lbl), "%s", Localization::Tr("Paper white"));
 
                         if (ImGui::SliderFloat(lbl, &pw, 0.01f, 2000.0f, "%.2fx", ImGuiSliderFlags_Logarithmic))
                         {
@@ -1408,9 +1409,9 @@ void RenderMenu(Config* config, float menuResScale)
 
                                 const bool sel = (int) i == selectedAnchor;
                                 char row[96];
-                                snprintf(row, sizeof(row), "%s scan %.4f  ->  white %.2f%s",
+                                snprintf(row, sizeof(row), Localization::Tr("%s scan %.4f  ->  white %.2f%s"),
                                          ((int) i == active && isSource) ? ">" : "  ", anchors[i].scan,
-                                         anchors[i].white, sel ? "   [editing]" : "");
+                                         anchors[i].white, sel ? Localization::Tr("   [editing]") : "");
 
                                 // Click selects the row (slider edits it); click again deselects (slider
                                 // returns to the live unanchored point).
@@ -1453,8 +1454,9 @@ void RenderMenu(Config* config, float menuResScale)
 
                             if (found.empty())
                             {
-                                ImGui::TextDisabled(Localization::Tr("%s"),
-                                                    why != nullptr && why[0] != 0 ? why : "nothing matched yet.");
+                                ImGui::TextDisabled(
+                                    Localization::Tr("%s"),
+                                    why != nullptr && why[0] != 0 ? why : Localization::Tr("nothing matched yet."));
                             }
                             else
                             {
@@ -1470,11 +1472,11 @@ void RenderMenu(Config* config, float menuResScale)
                                     }
 
                                     // Moving is the whole signal, so it is the thing that is coloured.
-                                    ImGui::TextColored(c.moves ? ImVec4(0.45f, 0.8f, 0.45f, 1.0f)
-                                                               : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
-                                                       Localization::Tr("%zu. %s = %.5f  (seen %.5f..%.5f) %s"), i + 1,
-                                                       c.shape.c_str(), c.latest, c.lowest, c.highest,
-                                                       c.moves ? "MOVES" : "flat so far");
+                                    ImGui::TextColored(
+                                        c.moves ? ImVec4(0.45f, 0.8f, 0.45f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                                        Localization::Tr("%zu. %s = %.5f  (seen %.5f..%.5f) %s"), i + 1,
+                                        c.shape.c_str(), c.latest, c.lowest, c.highest,
+                                        c.moves ? Localization::Tr("MOVES") : Localization::Tr("flat so far"));
                                 }
 
                                 ImGui::TextDisabled(

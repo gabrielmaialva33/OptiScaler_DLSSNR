@@ -11,25 +11,35 @@ Only deploy that staged selection as part of an explicitly authorized game test.
 application after changing or removing the active dictionary. Remove/rename `OptiScaler.lang`
 and restart to return to English. The optional directory can safely remain in place.
 
-## Deliberately partial coverage
+## What it covers
 
-This first pack translates NR status, section text and selected main-control explanations.
-It includes Portuguese terminology for the main controls and menu shell, but interactive
-labels are only translated where the original already contains a stable `###` identifier.
-Labels with no hidden ID, or only `##`, **remain in English**, including the existing main
-NR control labels, combo options and most shell controls. Their translated explanations help
-interpret those controls without changing their interaction or stored ImGui identity.
-Dynamic diagnostic reasons and text absent from the dictionary fall back to English.
-This is not a fully translated menu, nor a runtime language switcher.
+The pack covers the DLSS Neural Rendering panel, synthesized frame generation's settings, the
+section headers and menu shell already routed through `Localization`, and the status and failure
+reasons the NR panel shows. The rest of upstream's menu is untouched and stays in English: routing
+its strings would change most of `menu_common.cpp`, an upstream file, and every merge from
+`optiscaler/master` would conflict on it. Dynamic diagnostic text absent from the dictionary also
+falls back to English. This is not a runtime language switcher.
 
-The conservative label rule is intentional: ImGui hashes the `###` marker itself. Simply
-turning `Reset` into `Redefinir###Reset` changes the original identifier; retaining only
-`##id` also changes it. Neither is used here. Existing `###` suffixes are preserved exactly.
-The test suite checks actual menu labels against the repository's real `ImHashStr`.
+English is the default and is unchanged without the file: `Tr` returns the original pointer and
+`Label` the original string, byte for byte. Filter names (FSR1, Lanczos3, ...) are kept in English
+and listed as themselves, because every production label must have an entry (see the tests).
 
-The supplied Portuguese text uses glyphs in the existing default Latin range. No Chinese
-font loading, font atlas rebuilding, automatic locale selection or shader change is imported.
-Actual on-screen layout/glyph rendering remains an integration check.
+## Labels and ImGui identity
+
+ImGui identifies a control by hashing its label, and `ImHashStr` restarts at `###`, so everything
+after it is the control's whole identity. `Label` keeps that identity stable under translation:
+
+- a label that already has `###` keeps it: `Reset###fixed` becomes `Redefinir###fixed`;
+- a bare or `##` label gets its whole original text after a new `###`: `Reset##detail` becomes
+  `Redefinir###Reset##detail`, and `Enable Neural Rendering` becomes
+  `Ativar renderização neural###Enable Neural Rendering`.
+
+The second case changes the control's ID from `hash(original)` to `hash("###" + original)`. That is
+safe here: the pack loads once per process, so the ID is fixed for the whole run, and nothing stores
+ImGui IDs across runs (`menu_common.cpp` sets `io.IniFilename` to null). Two labels share an ID after
+translation exactly when their English originals did, so no two controls merge; the suite checks that
+over every production label. Until 2026-09-28 bare and `##` labels stayed in English to keep the
+original hash, which left most of the panel's controls untranslated.
 
 ## Dictionary format
 

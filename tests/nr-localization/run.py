@@ -18,6 +18,25 @@ with tempfile.TemporaryDirectory(prefix="nr-localization-") as temp:
     for relative in ("OptiScaler/dlssnr/DlssNr_Menu.cpp", "OptiScaler/menu/menu_common.cpp"):
         labels.extend(label_pattern.findall((ROOT / relative).read_text()))
     assert len(labels) >= 60, "ZERO/LOW COVERAGE: expected actual production menu label call sites"
+
+    # Drift guard for display text: every literal the two menus send through Tr, or through the NR
+    # menu's HelpMarker (which calls Tr), has an entry. Labels are checked in cases.cpp.
+    def c_text(literals):
+        escapes = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "'": "'"}
+        return re.sub(r"\\(.)", lambda m: escapes[m.group(1)], "".join(re.findall(r'"((?:\\.|[^"\\])*)"', literals)))
+    pack_keys = set()
+    for line in pack_text.splitlines():
+        if line and not line.startswith("#"):
+            pack_keys.add(re.sub(r"\\(.)", lambda m: {"n": "\n", "t": "\t", "r": "\r", "\\": "\\"}[m.group(1)],
+                                 line.split("\t")[0]))
+    text_pattern = re.compile(r'(?:Localization::Tr|\bHelpMarker)\(((?:"(?:\\.|[^"\\])*"\s*)+)\)')
+    missing = []
+    for relative in ("OptiScaler/dlssnr/DlssNr_Menu.cpp", "OptiScaler/menu/menu_common.cpp"):
+        for literals in text_pattern.findall((ROOT / relative).read_text()):
+            text = c_text(literals)
+            if re.search(r"[A-Za-z]{2}", text) and text not in pack_keys:
+                missing.append(f"{relative}: {text[:80]!r}")
+    assert not missing, "pt-BR pack lacks display text:\n" + "\n".join(missing)
     (Path(temp) / "menu-labels.h").write_text(
         "static const char* menuLabels[] = {\n" + ",\n".join(labels) + "\n};\n")
     subprocess.run([

@@ -12,7 +12,8 @@ int main(int argc, char** argv)
     const char* translated = Localization::Tr(original);
     if (!active) assert(translated == original);
     else assert(std::string(translated) == "Salvar configurações");
-    assert(std::string(Localization::Label("Reset##first")) == "Reset##first");
+    assert(std::string(Localization::Label("Reset##first")) ==
+           (active ? "Redefinir###Reset##first" : "Reset##first"));
     assert(std::string(Localization::Label("Reset###first")) ==
            (active ? "Redefinir###first" : "Reset###first"));
     assert(std::string(Localization::Tr("Reset")) == (active ? "Redefinir" : "Reset"));

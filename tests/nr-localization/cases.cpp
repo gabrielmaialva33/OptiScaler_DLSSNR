@@ -7,8 +7,37 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <string>
+#include <vector>
 
 using Localization::Dictionary;
+
+// The ImGui identity a label must have once translated: an existing ### ID is kept; a translated bare
+// or ## label is identified by "###" plus its whole original text; an untranslated one is unchanged.
+static ImGuiID ExpectedId(const Dictionary& dictionary, const char* label, ImGuiID seed)
+{
+    const std::string original(label);
+    const std::string visible = original.substr(0, original.find("##"));
+    if (original.find("###") != std::string::npos || visible == dictionary.Find(visible.c_str()))
+        return ImHashStr(label, 0, seed);
+    return ImHashStr(("###" + original).c_str(), 0, seed);
+}
+
+// Translation must not merge or split controls: two labels share an ID after it exactly when they
+// shared one in English.
+static void AssertSameCollisions(const Dictionary& dictionary, const std::vector<const char*>& labels)
+{
+    for (size_t a = 0; a < labels.size(); ++a)
+        for (size_t b = a + 1; b < labels.size(); ++b)
+            for (const auto seed : { 0u, 0x12345678u })
+            {
+                const bool english = ImHashStr(labels[a], 0, seed) == ImHashStr(labels[b], 0, seed);
+                const bool translated = ImHashStr(dictionary.LabelValue(labels[a]).c_str(), 0, seed) ==
+                                        ImHashStr(dictionary.LabelValue(labels[b]).c_str(), 0, seed);
+                assert(english == translated);
+            }
+}
+
 int main(int argc, char** argv)
 {
     assert(argc == 2);
@@ -28,14 +57,22 @@ int main(int argc, char** argv)
     assert(std::string(dictionary.Find("Value: %*.*f %%")) == "Valor: %*.*f %%");
     assert(dictionary.Find(english) == english);
     // Use the repository's real ImHashStr; seeds model independent windows/PushID scopes.
-    for (const auto* label : { "Bare", "Other", "Reset##first", "Reset##second", "Reset###fixed",
-                               "Reset###first###last", "Bare###bare", "Other###other", "Unknown", "##hidden", "###hidden" })
+    const std::vector<const char*> cases { "Bare", "Other", "Reset##first", "Reset##second", "Reset###fixed",
+                                           "Reset###first###last", "Bare###bare", "Other###other", "Unknown",
+                                           "##hidden", "###hidden", "Reset" };
+    for (const auto* label : cases)
         for (const auto seed : { 0u, 1u, 0x12345678u, 0xFFFFFFFFu })
-            assert(ImHashStr(label, 0, seed) == ImHashStr(dictionary.LabelValue(label).c_str(), 0, seed));
+            assert(ExpectedId(dictionary, label, seed) == ImHashStr(dictionary.LabelValue(label).c_str(), 0, seed));
+    AssertSameCollisions(dictionary, cases);
+    // Two labels that translate to the same word stay two controls.
+    assert(dictionary.LabelValue("Bare") == "Rótulo###Bare");
+    assert(dictionary.LabelValue("Other") == "Rótulo###Other");
     assert(ImHashStr(dictionary.LabelValue("Bare").c_str()) !=
            ImHashStr(dictionary.LabelValue("Other").c_str()));
-    assert(dictionary.LabelValue("Reset##first") == "Reset##first");
+    assert(dictionary.LabelValue("Reset##first") == "Redefinir###Reset##first");
     assert(dictionary.LabelValue("Reset###first") == "Redefinir###first");
+    assert(dictionary.LabelValue("Unknown") == "Unknown");
+    assert(dictionary.LabelValue("##hidden") == "##hidden");
     assert(ImHashStr(dictionary.LabelValue("Bare###bare").c_str()) !=
            ImHashStr(dictionary.LabelValue("Other###other").c_str()));
     assert(std::string(dictionary.Find("Reset")) == "Redefinir"); // Display text never has hidden IDs.
@@ -84,10 +121,20 @@ int main(int argc, char** argv)
     assert(pack && shipped.Load(pack));
     assert(shipped.Size() >= 100);
     assert(std::string(shipped.Find("Save Settings")) == "Salvar configurações");
+    size_t translatedLabels = 0;
     for (const auto* label : menuLabels)
+    {
+        translatedLabels += shipped.LabelValue(label) != label;
+        // Every production label has an entry; a name kept in English is listed as itself.
+        const std::string original(label);
+        const std::string visible = original.substr(0, original.find("##"));
+        assert(visible.empty() || shipped.Find(visible.c_str()) != visible.c_str());
         for (const auto seed : { 0u, 1u, 0x12345678u, 0xFFFFFFFFu })
-            assert(ImHashStr(label, 0, seed) == ImHashStr(shipped.LabelValue(label).c_str(), 0, seed));
+            assert(ExpectedId(shipped, label, seed) == ImHashStr(shipped.LabelValue(label).c_str(), 0, seed));
+    }
+    AssertSameCollisions(shipped, std::vector<const char*>(std::begin(menuLabels), std::end(menuLabels)));
     std::cout << "PASS: real parser and ImHashStr; default English, UTF-8, printf signatures, malformed packs, "
                  "transactional fallback, ##/### identities across four seeds; " << shipped.Size()
-              << " shipped pt-BR entries; " << std::size(menuLabels) << " production menu labels checked\n";
+              << " shipped pt-BR entries; " << translatedLabels << " of " << std::size(menuLabels)
+              << " production menu labels translated, identities and collisions checked\n";
 }

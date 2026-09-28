@@ -3585,62 +3585,65 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             ImGui::PushItemWidth(220.0f * menuResScale);
 
             bool synthMotion = config->FGSynthesizedMotion.value_or_default();
-            if (ImGui::Checkbox("Synthesized motion", &synthMotion))
+            if (ImGui::Checkbox(Localization::Label("Synthesized motion"), &synthMotion))
                 config->FGSynthesizedMotion = synthMotion;
-            ShowHelpMarker("Hands FSR FG a motion field estimated from the presented frames\n"
-                           "instead of zero motion; the same estimate DLSS-NR uses when both are on");
+            ShowHelpMarker(Localization::Tr("Hands FSR FG a motion field estimated from the presented frames\n"
+                                            "instead of zero motion; the same estimate DLSS-NR uses when both are on"));
 
             ImGui::BeginDisabled(!synthMotion);
             // Stored as a share, 0..1; shown as a percentage.
             float incoherence = config->FGSynthesizedIncoherence.value_or_default() * 100.0f;
-            if (ImGui::SliderFloat("Incoherent motion", &incoherence, 0.0f, 100.0f,
-                                   incoherence <= 0.0f ? "Off" : "%.0f%%"))
+            if (ImGui::SliderFloat(Localization::Label("Incoherent motion"), &incoherence, 0.0f, 100.0f,
+                                   incoherence <= 0.0f ? Localization::Tr("Off") : "%.0f%%"))
                 config->FGSynthesizedIncoherence = incoherence / 100.0f;
             // ShowHelpMarker's text is a printf format (ImGui::Text): a percent sign is written %%.
-            ShowHelpMarker("Repeats frames instead of interpolating them where the motion breaks up:\n"
-                           "while more than this share of neighbouring motion samples disagree and the\n"
-                           "median motion exceeds 1%% of the image width (parallax, disocclusion, thin\n"
-                           "objects over a far background). A uniform pan keeps interpolating at any\n"
-                           "speed. 25%% is a starting point; lower repeats more. 0 is off");
+            ShowHelpMarker(
+                Localization::Tr("Repeats frames instead of interpolating them where the motion breaks up:\n"
+                                 "while more than this share of neighbouring motion samples disagree and the\n"
+                                 "median motion exceeds 1%% of the image width (parallax, disocclusion, thin\n"
+                                 "objects over a far background). A uniform pan keeps interpolating at any\n"
+                                 "speed. 25%% is a starting point; lower repeats more. 0 is off"));
 
             float fastMotion = config->FGSynthesizedFastMotion.value_or_default();
-            if (ImGui::SliderFloat("Fast motion cap", &fastMotion, 0.0f, 128.0f,
-                                   fastMotion <= 0.0f ? "Off" : "%.0f px"))
+            if (ImGui::SliderFloat(Localization::Label("Fast motion cap"), &fastMotion, 0.0f, 128.0f,
+                                   fastMotion <= 0.0f ? Localization::Tr("Off") : "%.0f px"))
                 config->FGSynthesizedFastMotion = fastMotion;
-            ShowHelpMarker("Repeats frames whenever the median motion exceeds this many pixels per\n"
-                           "base frame, however coherent, like AMD's Fast Motion Response. Every\n"
-                           "repeat restarts FSR's own optical flow for several frames, so keep it\n"
-                           "above normal camera speed. 0 is no cap");
+            ShowHelpMarker(Localization::Tr("Repeats frames whenever the median motion exceeds this many pixels per\n"
+                                            "base frame, however coherent, like AMD's Fast Motion Response. Every\n"
+                                            "repeat restarts FSR's own optical flow for several frames, so keep it\n"
+                                            "above normal camera speed. 0 is no cap"));
             ImGui::EndDisabled();
 
             float minFps = config->FGSynthesizedMinFps.value_or_default();
-            if (ImGui::SliderFloat("Minimum base fps", &minFps, 0.0f, 60.0f, minFps <= 0.0f ? "Off" : "%.0f fps"))
+            if (ImGui::SliderFloat(Localization::Label("Minimum base fps"), &minFps, 0.0f, 60.0f,
+                                   minFps <= 0.0f ? Localization::Tr("Off") : "%.0f fps"))
                 config->FGSynthesizedMinFps = minFps;
-            ShowHelpMarker("Stops generating frames while the base frame rate is below this,\n"
-                           "and resumes once it recovers. 0 is off");
+            ShowHelpMarker(Localization::Tr("Stops generating frames while the base frame rate is below this,\n"
+                                            "and resumes once it recovers. 0 is off. Not a frame rate target:\n"
+                                            "above the game's base frame rate, frame generation never runs"));
 
             // The HUD (synthesized-frame-generation.md, "The HUD: near depth and a UI layer"). Near depth changes
             // nothing without a motion field, so it is disabled without one, like the fast-motion threshold.
             ImGui::BeginDisabled(!synthMotion);
             bool hudDepth = config->FGSynthesizedHudDepth.value_or_default();
-            if (ImGui::Checkbox("HUD depth", &hudDepth))
+            if (ImGui::Checkbox(Localization::Label("HUD depth"), &hudDepth))
                 config->FGSynthesizedHudDepth = hudDepth;
-            ShowHelpMarker("Detects the HUD (pixels that stay still while the scene around\n"
-                           "them moves) and hands it to FSR FG as near depth, so the scene\n"
-                           "beside it is not blended with it and its own motion is kept.\n"
-                           "Needs Synthesized motion");
+            ShowHelpMarker(Localization::Tr("Detects the HUD (pixels that stay still while the scene around\n"
+                                            "them moves) and hands it to FSR FG as near depth, so the scene\n"
+                                            "beside it is not blended with it and its own motion is kept.\n"
+                                            "Needs Synthesized motion"));
             ImGui::EndDisabled();
 
             ImGui::SameLine(0.0f, 16.0f);
 
             ImGui::BeginDisabled(config->FGDisableUI.value_or_default());
             bool hudLayer = config->FGSynthesizedHudLayer.value_or_default();
-            if (ImGui::Checkbox("HUD layer", &hudLayer))
+            if (ImGui::Checkbox(Localization::Label("HUD layer"), &hudLayer))
                 config->FGSynthesizedHudLayer = hudLayer;
-            ShowHelpMarker("Experimental. Composes the detected HUD over generated frames\n"
-                           "from the real frame, through FSR FG's own UI layer, so it is\n"
-                           "never warped; real frames are unchanged. Off while \"Disable UI\n"
-                           "texture\" is on");
+            ShowHelpMarker(Localization::Tr("Experimental. Composes the detected HUD over generated frames\n"
+                                            "from the real frame, through FSR FG's own UI layer, so it is\n"
+                                            "never warped; real frames are unchanged. Off while \"Disable UI\n"
+                                            "texture\" is on"));
             ImGui::EndDisabled();
 
             ImGui::PopItemWidth();

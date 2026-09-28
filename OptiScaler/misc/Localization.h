@@ -207,22 +207,26 @@ class Dictionary
         if (!source)
             return {};
         const std::string original(source);
-        const auto stable = original.find("###");
-        // ### itself contributes to ImHashStr. Adding it to a bare/## label changes the original
-        // hash even if the original text follows it. Such controls keep their original labels.
-        if (stable == std::string::npos)
-            return original;
         const std::string visible = original.substr(0, original.find("##"));
         const char* translated = Find(visible.c_str());
         if (visible == translated)
             return original;
-        return std::string(translated) + original.substr(stable);
+        // ImHashStr restarts at ###, so what follows it is the control's whole identity. A label that
+        // has one keeps it. A bare or ## label gets its whole original text after a new ###: its ID
+        // becomes hash("###" + original) instead of hash(original), fixed for the process (the pack
+        // loads once), and two labels share an ID exactly when their English originals did. Nothing
+        // stores ImGui IDs across runs (menu_common.cpp sets io.IniFilename to null), and without a
+        // pack, or for text the pack lacks, the label is returned unchanged.
+        const auto stable = original.find("###");
+        if (stable != std::string::npos)
+            return std::string(translated) + original.substr(stable);
+        return std::string(translated) + "###" + original;
     }
 
     size_t Size() const { return entries_.size(); }
 };
 
-// Exact-source lookup for display text; Label additionally preserves the original ImGui hash.
+// Exact-source lookup for display text; Label also keeps each control's ImGui identity stable (see LabelValue).
 const char* Tr(const char* source);
 const char* Label(const char* source);
 } // namespace Localization

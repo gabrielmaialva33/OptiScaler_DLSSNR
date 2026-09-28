@@ -29,7 +29,7 @@ const char* Tr(const char* source) { return ActiveDictionary().Find(source); }
 
 const char* Label(const char* source)
 {
-    if (!source || std::string_view(source).find("###") == std::string_view::npos || ActiveDictionary().Size() == 0)
+    if (!source || ActiveDictionary().Size() == 0)
         return source;
     static std::mutex mutex;
     static std::unordered_map<std::string, std::string> labels;
