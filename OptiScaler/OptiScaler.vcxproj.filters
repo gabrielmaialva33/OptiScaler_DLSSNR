@@ -33,6 +33,13 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="shaders\synth_motion\SynthMotion_Handoff.h">
+    <ClInclude Include="shaders\synth_motion\SynthMotionNvofa_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\nvofa\nvOpticalFlowCommon.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\nvofa\nvOpticalFlowD3D12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ClearFloat_Shader.h">
@@ -1034,6 +1041,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="shaders\synth_motion\SynthMotion_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="shaders\synth_motion\SynthMotionNvofa_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Config.cpp">

@@ -4,6 +4,10 @@
 Compiles the production OptiScaler/shaders/synth_motion estimator with a pch/Logger shim, runs it in
 an isolated Wine prefix on vkd3d-proton, and judges synth-motion-report.json against the thresholds
 below. Never loads NGX, OptiScaler.dll or a game.
+
+--source nvofa runs the same sequences through the NVIDIA Optical Flow source instead
+(SynthMotionNvofa_Dx12, through dxvk-nvapi's nvofapi64.dll from a Proton install). It reports SKIP,
+not FAIL, when that DLL, the source's generated shaders, or the engine itself is unavailable.
 """
 import argparse
 import hashlib
@@ -27,6 +31,10 @@ VKD3D = [
     *sorted((Path.home() / '.local/share/Steam/compatibilitytools.d').glob('GE-Proton*/files/lib/wine/vkd3d-proton/x86_64-windows'),
             reverse=True),
 ]
+# dxvk-nvapi's nvofapi64.dll, for --source nvofa. The Proton that supplies vkd3d-proton is preferred,
+# since dxvk-nvapi reaches the Vulkan device through vkd3d-proton's interop interfaces.
+NVOFAPI = [v.parent.parent / 'nvapi/x86_64-windows' for v in VKD3D]
+NVOFA_SHADERS = ('SynthMotion_NvofaPrep_Shader.h', 'SynthMotion_NvofaExpand_Shader.h')
 
 # ------------------------------------------------------------------------------------------------
 # Thresholds, and why.
@@ -49,6 +57,16 @@ VKD3D = [
 # Only frames where Ready() is true are scored: the estimator yields no field for FFX's five warm-up
 # frames after a reset. Every scored sequence must have at least MIN_READY such frames.
 # GPU time is reported, never judged; it is labelled with the clock state.
+#
+# --source nvofa: the same thresholds for pans, static and the object -- they are about correctness,
+# and the engine is quarter-pel on a grid finer than the block matcher's. What differs is contract:
+#   lag                  the field is lag_frames (1) late, so the harness scores frame t against the
+#                        truth of t - lag; the abandon's two-step frame moves to t=10
+#   scene cut            the source has no scene-cut detection: SceneCut() must never be raised, the
+#                        pair spanning the cut is not scored, and frames from CUT_FRAME + 3 on (two
+#                        clean pairs after it) must be as accurate as a small pan
+#   GPU time             covers the two shader passes on the list only; the engine runs on its own
+#                        queue and is not timed here
 # ------------------------------------------------------------------------------------------------
 PAN_SMALL = dict(epe=1.0, within=0.90)
 PAN_LARGE = dict(epe=2.0, within=0.80)
@@ -62,6 +80,29 @@ SCORED_FROM = 6  # timing: past the warm-up
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def artifact(name, source):
+    # One set of run artifacts per source; the ffx names are the historical ones.
+    if source == 'ffx':
+        return name
+    stem, dot, ext = name.partition('.')
+    return f'{stem}-{source}{dot}{ext}'
+
+
+def nvofapi():
+    return next((p / 'nvofapi64.dll' for p in NVOFAPI if (p / 'nvofapi64.dll').exists()), None)
+
+
+def nvofa_unavailable():
+    # Why --source nvofa cannot run here, before anything is built; None when it can.
+    missing = [h for h in NVOFA_SHADERS if not (ESTIMATOR / 'precompile' / h).exists()]
+    if missing:
+        return ('the NVOFA shaders are not generated (' + ', '.join(missing)
+                + '); run OptiScaler/shaders/synth_motion/precompile/build.sh outside a build window')
+    if nvofapi() is None:
+        return 'no nvofapi64.dll (dxvk-nvapi) in any Proton install'
+    return None
 
 
 def estimator_sources():
@@ -125,6 +166,12 @@ def build():
     for name in ('d3d12.dll', 'd3d12core.dll'):
         (WORK / name).unlink(missing_ok=True)
         shutil.copy2(vkd3d / name, WORK / name)
+    # For --source nvofa, from the same Proton as vkd3d-proton when it has one. Only that mode loads it.
+    same = vkd3d.parent.parent / 'nvapi/x86_64-windows/nvofapi64.dll'
+    ofa = same if same.exists() else nvofapi()
+    (WORK / 'nvofapi64.dll').unlink(missing_ok=True)
+    if ofa is not None:
+        shutil.copy2(ofa, WORK / 'nvofapi64.dll')
     redists = sorted(MSVC.parents[1].glob('VC/Redist/MSVC/*/x64/Microsoft.VC143.CRT'))
     if not redists:
         raise RuntimeError('native MSVC x64 runtime missing')
@@ -135,6 +182,7 @@ def build():
         'sources': sources(),
         'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
         'vkd3d': str(vkd3d),
+        'nvofapi': str(ofa) if ofa is not None else None,
         'binaries': {p.name: digest(p) for p in WORK.iterdir() if p.suffix in ('.dll', '.exe')},
     }, indent=2) + '\n')
 
@@ -170,6 +218,8 @@ def mean(values):
 def judge(report):
     failures, rows, notes = [], [], []
     seqs = {s['name']: s for s in report['sequences']}
+    lag = report.get('lag_frames', 0)
+    detects_cuts = report.get('source', 'ffx') == 'ffx'
 
     def check(cond, message):
         if not cond:
@@ -229,8 +279,26 @@ def judge(report):
         rows.append(('object', f'obj {oe:.3f} / bg {be:.3f}', f'obj {ow * 100:.1f}%', '-', '-',
                      f'{mean([f["gpu_ms"] for f in frames]):.3f}'))
 
+    # Scene cut, for a source without detection (nvofa): never raised, and accurate again two clean
+    # pairs after the cut. The pair spanning it carries no scores (the harness skips it).
+    if 'cut' in seqs and not detects_cuts:
+        frames = seqs['cut']['frames']
+        raised = [f['t'] for f in frames if f['scene_cut_after_record'] or f['scene_cut_after_confirm']]
+        check(not raised, f'cut: SceneCut() raised at {raised} by a source that promises it never is')
+        recovered = [f for f in scored(frames) if f['t'] >= CUT_FRAME + 3]
+        check(len(recovered) >= MIN_READY, f'cut: only {len(recovered)} scored frames after the cut')
+        epe = mean([region(f, 'interior')['epe_mean'] for f in recovered])
+        check(epe < PAN_SMALL['epe'], f'cut: mean EPE {epe:.3f} from t={CUT_FRAME + 3} on >= {PAN_SMALL["epe"]}')
+        transient = [f for f in scored(frames) if CUT_FRAME + lag < f['t'] < CUT_FRAME + 3]
+        if transient:
+            notes.append('cut: first clean pair after the cut, EPE '
+                         + ', '.join(f't={f["t"]} {region(f, "interior")["epe_mean"]:.3f}' for f in transient)
+                         + ' (not judged: the engine may still seed from the pair across the cut)')
+        rows.append(('cut', f'{epe:.3f} (after)', '-', '-', 'not detected (by contract)',
+                     f'{mean([f["gpu_ms"] for f in recovered]):.3f}'))
+
     # Scene cut: zero field at the cut frame, SceneCut() within the readback window, nowhere else.
-    if 'cut' in seqs:
+    if 'cut' in seqs and detects_cuts:
         frames = seqs['cut']['frames']
         flags = {f['t']: f['scene_cut_after_record'] or f['scene_cut_after_confirm'] for f in frames}
         raised = [t_ for t_, v in flags.items() if v]
@@ -261,20 +329,22 @@ def judge(report):
         stray = [f['t'] for f in s['frames'] if f['scene_cut_after_record'] or f['scene_cut_after_confirm']]
         check(not stray, f'{s["name"]}: SceneCut() raised at {stray} with no cut in the content')
 
-    # Abandon: history must not advance on an abandoned recording.
+    # Abandon: history must not advance on an abandoned recording. The field that measures the pair
+    # across it arrives lag frames later.
     if 'abandon' in seqs:
         s = seqs['abandon']
-        after = next((f for f in s['frames'] if f['t'] == ABANDON_FRAME + 1), None)
-        check(after is not None and after['ready'], f'abandon: frame {ABANDON_FRAME + 1} not ready after an abandoned recording')
+        two = ABANDON_FRAME + 1 + lag
+        after = next((f for f in s['frames'] if f['t'] == two), None)
+        check(after is not None and after['ready'], f'abandon: frame {two} not ready after an abandoned recording')
         ok = after is not None and after['scores'] and abs(region(after, 'interior')['median_x'] - (-2 * s['dx'])) < 1.0
-        check(ok, f'abandon: frame {ABANDON_FRAME + 1} median x '
+        check(ok, f'abandon: frame {two} median x '
                   f'{region(after, "interior")["median_x"] if after and after["scores"] else "n/a"} != {-2 * s["dx"]} '
                   '(an abandoned recording advanced the history?)')
-        later = [f for f in s['frames'] if f['t'] > ABANDON_FRAME + 1 and f['ready'] and f['scores']]
+        later = [f for f in s['frames'] if f['t'] > two and f['ready'] and f['scores']]
         for f in later:
             check(abs(region(f, 'interior')['median_x'] - (-s['dx'])) < 1.0, f'abandon: frame {f["t"]} not one step')
         rows.append(('abandon', f'{region(after, "interior")["epe_mean"]:.3f}' if after and after['scores'] else 'n/a',
-                     '-', f't={ABANDON_FRAME + 1}: {region(after, "interior")["median_x"]:.2f} (want {-2 * s["dx"]})'
+                     '-', f't={two}: {region(after, "interior")["median_x"]:.2f} (want {-2 * s["dx"]})'
                      if after and after['scores'] else '-', '-', '-'))
 
     # Timing-only sequences.
@@ -291,7 +361,7 @@ def judge(report):
     return failures, rows, timing, extents, notes
 
 
-def execute(lock):
+def execute(lock, source):
     manifest = json.loads((OUT / 'manifest.json').read_text())
     if manifest['sources'] != sources():
         raise RuntimeError('sources changed after the harness was built; rebuild required')
@@ -300,31 +370,48 @@ def execute(lock):
             raise RuntimeError('binary changed after build: ' + name)
     if any(WORK.glob('*ngx*.dll')) or any(WORK.glob('OptiScaler*.dll')):
         raise RuntimeError('unexpected NGX/OptiScaler DLL in the isolated harness; refusing to run')
+    if source == 'nvofa' and not (WORK / 'nvofapi64.dll').exists():
+        skip(source, 'the harness was built without an nvofapi64.dll beside it (rebuild after installing Proton)')
+        return
     env = dict(os.environ, WINEPREFIX=str(OUT / 'wineprefix'), WINEDEBUG='-all',
-               WINEDLLOVERRIDES='d3d12=n;d3d12core=n;vcruntime140=n;vcruntime140_1=n;msvcp140=n',
+               WINEDLLOVERRIDES='d3d12=n;d3d12core=n;vcruntime140=n;vcruntime140_1=n;msvcp140=n;nvofapi64=n',
                VKD3D_DEBUG='warn', VK_LOADER_LAYERS_DISABLE='~implicit~')
-    report_path = WORK / 'synth-motion-report.json'
-    report_path.unlink(missing_ok=True)
+    report_name = artifact('synth-motion-report.json', source)
+    (WORK / report_name).unlink(missing_ok=True)
     locked = lock_clocks(lock)
     try:
-        command(['wine', WORK / 'synth-motion-harness.exe', '--report', 'synth-motion-report.json'], env=env,
-                cwd=WORK, logfile=OUT / 'run.log', timeout=600)
+        command(['wine', WORK / 'synth-motion-harness.exe', '--report', report_name, '--source', source], env=env,
+                cwd=WORK, logfile=OUT / artifact('run.log', source), timeout=600)
     finally:
         unlock_clocks(locked)
-    (OUT / 'clock.txt').write_text('locked 2100/10501 MHz\n' if locked else 'UNLOCKED\n')
-    report_judgement(manifest)
+    (OUT / artifact('clock.txt', source)).write_text('locked 2100/10501 MHz\n' if locked else 'UNLOCKED\n')
+    report_judgement(manifest, source)
 
 
-def report_judgement(manifest):
-    report_path = WORK / 'synth-motion-report.json'
-    log = (OUT / 'run.log').read_text(errors='replace') if (OUT / 'run.log').exists() else ''
+def skip(source, reason):
+    (OUT / artifact('result.json', source)).write_text(
+        json.dumps({'status': 'SKIP', 'source': source, 'reason': reason}, indent=2) + '\n')
+    print(f'SYNTH-MOTION SKIP ({source}): {reason}')
+
+
+def report_judgement(manifest, source):
+    report_path = WORK / artifact('synth-motion-report.json', source)
+    log_path = OUT / artifact('run.log', source)
+    log = log_path.read_text(errors='replace') if log_path.exists() else ''
+    if 'SYNTH-MOTION SKIP' in log and report_path.exists():
+        skip(source, json.loads(report_path.read_text()).get('skipped', 'the harness skipped'))
+        return
     if 'SYNTH-MOTION DONE' not in log or not report_path.exists():
         raise RuntimeError('ZERO COVERAGE: the harness did not complete every sequence')
     report = json.loads(report_path.read_text())
+    if report.get('source', 'ffx') != source:
+        raise RuntimeError(f'report is for source {report.get("source", "ffx")}, not {source}')
     failures, rows, timing, extents, notes = judge(report)
-    locked = (OUT / 'clock.txt').exists() and (OUT / 'clock.txt').read_text().startswith('locked')
+    clock_path = OUT / artifact('clock.txt', source)
+    locked = clock_path.exists() and clock_path.read_text().startswith('locked')
     clock = 'locked 2100/10501 MHz' if locked else 'UNLOCKED clocks (numbers indicative only)'
 
+    print(f'\nsource: {source} (field {report.get("lag_frames", 0)} frame(s) late)')
     print(f'\n{"sequence":<12} {"EPE px":<20} {"<1px":<12} {"sign":<44} {"scene cut":<26} gpu ms')
     for r in rows:
         print(f'{r[0]:<12} {r[1]:<20} {r[2]:<12} {r[3]:<44} {r[4]:<26} {r[5]}')
@@ -335,16 +422,18 @@ def report_judgement(manifest):
     for n in notes:
         print('note: ' + n)
 
-    result = {'status': 'PASS' if not failures else 'FAIL', 'failures': failures, 'notes': notes, 'clock': clock,
-              'timing': timing, 'extents': extents, 'manifest': manifest,
-              'limits': 'Synthetic content, integer motion, RGBA8 SDR input, one device and queue. Not game footage.'}
-    (OUT / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+    limits = 'Synthetic content, integer motion, RGBA8 SDR input, one device and queue. Not game footage.'
+    if source == 'nvofa':
+        limits += ' GPU time excludes the optical-flow engine, which runs on its own queue.'
+    result = {'status': 'PASS' if not failures else 'FAIL', 'source': source, 'failures': failures, 'notes': notes,
+              'clock': clock, 'timing': timing, 'extents': extents, 'manifest': manifest, 'limits': limits}
+    (OUT / artifact('result.json', source)).write_text(json.dumps(result, indent=2) + '\n')
     if failures:
         print('\nSYNTH-MOTION FAIL:')
         for f in failures:
             print('  - ' + f)
         raise SystemExit(1)
-    print(f'\nSYNTH-MOTION PASS: {len(rows)} scored sequences, sign current->previous (+y down), {clock}')
+    print(f'\nSYNTH-MOTION PASS ({source}): {len(rows)} scored sequences, sign current->previous (+y down), {clock}')
 
 
 def main():
@@ -353,18 +442,25 @@ def main():
     ap.add_argument('--run-only', action='store_true')
     ap.add_argument('--no-lock', action='store_true', help='do not try to lock GPU clocks for the timing numbers')
     ap.add_argument('--judge-only', action='store_true', help='re-score the last run report without running anything')
+    ap.add_argument('--source', choices=('ffx', 'nvofa'), default='ffx',
+                    help='the motion source to run: the FidelityFX estimator (default) or NVIDIA Optical Flow')
     args = ap.parse_args()
     if args.build_only and args.run_only:
         ap.error('choose at most one mode')
     OUT.mkdir(exist_ok=True)
     if args.judge_only:
-        report_judgement(json.loads((OUT / 'manifest.json').read_text()))
+        report_judgement(json.loads((OUT / 'manifest.json').read_text()), args.source)
         return
-    (OUT / 'result.json').write_text('{"status":"RUNNING"}\n')
+    if args.source == 'nvofa' and not args.build_only:
+        reason = nvofa_unavailable()
+        if reason is not None:
+            skip(args.source, reason)
+            return
+    (OUT / artifact('result.json', args.source)).write_text('{"status":"RUNNING"}\n')
     if not args.run_only:
         build()
     if not args.build_only:
-        execute(not args.no_lock)
+        execute(not args.no_lock, args.source)
 
 
 if __name__ == '__main__':
@@ -372,6 +468,8 @@ if __name__ == '__main__':
         main()
     except (RuntimeError, OSError, subprocess.SubprocessError, KeyError, ValueError, TypeError) as error:
         OUT.mkdir(exist_ok=True)
-        (OUT / 'result.json').write_text(json.dumps({'status': 'FAIL', 'reason': str(error)}, indent=2) + '\n')
+        source = 'nvofa' if 'nvofa' in sys.argv else 'ffx'
+        (OUT / artifact('result.json', source)).write_text(
+            json.dumps({'status': 'FAIL', 'reason': str(error)}, indent=2) + '\n')
         print('FAIL:', error, file=sys.stderr)
         sys.exit(1)

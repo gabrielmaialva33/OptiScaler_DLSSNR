@@ -430,6 +430,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrUiProtection.set_from_config(readBool("DlssNr", "UiProtection"));
             DlssNrMatchGuides.set_from_config(readBool("DlssNr", "MatchGuides"));
             DlssNrRenderMotionScale.set_from_config(readBool("DlssNr", "RenderMotionScale"));
+            DlssNrSynthMotionSource.set_from_config(readString("DlssNr", "SynthMotionSource", true));
             DlssNrPresentSync.set_from_config(readBool("DlssNr", "PresentSync"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
@@ -1392,6 +1393,8 @@ bool Config::SaveIni()
         ini.SetValue("DlssNr", "MatchGuides", GetBoolValue(Instance()->DlssNrMatchGuides.value_for_config()).c_str());
         ini.SetValue("DlssNr", "RenderMotionScale",
                      GetBoolValue(Instance()->DlssNrRenderMotionScale.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SynthMotionSource",
+                     Instance()->DlssNrSynthMotionSource.value_for_config_or("auto").c_str());
         ini.SetValue("DlssNr", "PresentSync", GetBoolValue(Instance()->DlssNrPresentSync.value_for_config()).c_str());
         ini.SetValue("DlssNr", "TransferStrength",
                      GetFloatValue(Instance()->DlssNrTransferStrength.value_for_config()).c_str());

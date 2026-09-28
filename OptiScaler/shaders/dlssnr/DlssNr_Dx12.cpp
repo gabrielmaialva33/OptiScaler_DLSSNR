@@ -26,6 +26,7 @@
 #include <dlssnr/DlssNr_WorkingScale.h>
 #include <shaders/synth_motion/SynthMotion_Dx12.h>
 #include <shaders/synth_motion/SynthMotion_Handoff.h>
+#include <shaders/synth_motion/SynthMotionNvofa_Dx12.h>
 
 #include <mutex>
 #include <optional>
@@ -4645,7 +4646,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
             g_presentMotion->Release();
 
         if (auto* synthesized = g_presentMotion->Record(device, list, g_bbCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                                        false, frame, "D3D12 present"))
+                                                        false, frame, "D3D12 present", queue))
         {
             motion = synthesized;
         }
@@ -5131,6 +5132,24 @@ constexpr D3D12_RESOURCE_STATES kEstimatorMotionState = D3D12_RESOURCE_STATE_NON
 // frame -- the pass was off, the key toggled, the host rebuilt -- and differencing against it would
 // be motion between two unrelated pictures. Well above any frame time a present host runs at.
 constexpr long long kSynthMotionStaleMs = 250;
+
+// [DlssNr] SynthMotionSource, resolved. auto is the FidelityFX estimator until the engine has been
+// measured against it in a game (synthesized-motion.md, "Motion sources").
+bool WantsNvofaMotion()
+{
+    const std::string source = Config::Instance()->DlssNrSynthMotionSource.value_or_default();
+    if (source == "nvofa")
+        return true;
+
+    static bool reportedUnknown = false;
+    if (source != "auto" && source != "ffx" && !reportedUnknown)
+    {
+        reportedUnknown = true;
+        LOG_WARN("DLSS-NR synthesized motion: SynthMotionSource={} is not auto, ffx or nvofa; using ffx", source);
+    }
+
+    return false;
+}
 } // namespace
 
 SynthMotionGuide::SynthMotionGuide() = default;
@@ -5138,12 +5157,12 @@ SynthMotionGuide::~SynthMotionGuide() { Release(); }
 
 bool SynthMotionGuide::NeedsRebuild(uint32_t width, uint32_t height, DXGI_FORMAT format) const
 {
-    return _estimator != nullptr && (_width != width || _height != height || _format != format);
+    return (_estimator != nullptr || _nvofa != nullptr) && (_width != width || _height != height || _format != format);
 }
 
 ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
                                          ID3D12Resource* colour, D3D12_RESOURCE_STATES colourState, bool reset,
-                                         DlssNrFrameInfo& frame, const char* route)
+                                         DlssNrFrameInfo& frame, const char* route, ID3D12CommandQueue* queue)
 {
     _lastSynthesized = false;
 
@@ -5200,14 +5219,48 @@ ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCom
     }
     else
     {
-        if (_estimator == nullptr)
-            _estimator = std::make_unique<SynthMotion::Estimator_Dx12>();
+        if (_estimator == nullptr && _nvofa == nullptr)
+        {
+            if (!_nvofaRefused && queue != nullptr && WantsNvofaMotion())
+            {
+                _nvofa = std::make_unique<SynthMotion::NvofaEstimator_Dx12>();
+                LOG_INFO("DLSS-NR synthesized motion: NVIDIA Optical Flow selected on the {} route", route);
+            }
+            else
+            {
+                _estimator = std::make_unique<SynthMotion::Estimator_Dx12>();
+            }
+        }
 
         const long long now = NowMs();
         const bool stale = _lastRecordMs == 0 || now - _lastRecordMs > kSynthMotionStaleMs;
         _lastRecordMs = now;
 
-        if (!_estimator->Record(device, cmdList, colour, colourState, reset || stale))
+        bool recorded = false;
+        bool fellBack = false;
+        if (_nvofa != nullptr)
+        {
+            recorded = _nvofa->Record(device, cmdList, colour, colourState, reset || stale, queue);
+
+            // Unavailable is decided before anything is recorded, so this list is still clean: the
+            // FidelityFX estimator starts over on it. The engine's previous list may still be in flight, so
+            // it is retired rather than released.
+            if (!recorded && !_nvofa->Available())
+            {
+                LOG_WARN("DLSS-NR synthesized motion: NVIDIA Optical Flow is unavailable on the {} route ({}); using "
+                         "the FidelityFX estimator for the session",
+                         route, _nvofa->UnavailableReason());
+                _nvofaRefused = true;
+                _retiredNvofa = std::move(_nvofa);
+                _estimator = std::make_unique<SynthMotion::Estimator_Dx12>();
+                fellBack = true;
+            }
+        }
+
+        if (_estimator != nullptr)
+            recorded = _estimator->Record(device, cmdList, colour, colourState, reset || stale || fellBack);
+
+        if (!recorded)
         {
             if (!_reportedFailure)
             {
@@ -5226,11 +5279,19 @@ ID3D12Resource* SynthMotionGuide::Record(ID3D12Device* device, ID3D12GraphicsCom
         _format = desc.Format;
 
         // Nothing to compare against yet -- the first frame, or one after a reset -- or no field at all.
-        motion = _estimator->Ready() ? _estimator->Motion() : nullptr;
+        if (_nvofa != nullptr)
+        {
+            motion = _nvofa->Ready() ? _nvofa->Motion() : nullptr;
+            sceneCut = _nvofa->SceneCut();
+        }
+        else
+        {
+            motion = _estimator->Ready() ? _estimator->Motion() : nullptr;
+            sceneCut = _estimator->SceneCut();
+        }
+
         if (motion == nullptr)
             return nullptr;
-
-        sceneCut = _estimator->SceneCut();
 
         // Frame generation, when it runs after this on the same frame (the D3D11 bridge), takes this field.
         SynthMotion::Handoff::Publish(SynthMotion::Handoff::Owner::DlssNr, device, motion, width, height, sceneCut);
@@ -5291,10 +5352,13 @@ void SynthMotionGuide::AfterPass(ID3D12GraphicsCommandList* cmdList)
 
 void SynthMotionGuide::ConfirmExecuted()
 {
-    if (!_recorded || _estimator == nullptr)
+    if (!_recorded || (_estimator == nullptr && _nvofa == nullptr))
         return;
 
-    _estimator->ConfirmExecuted();
+    if (_nvofa != nullptr)
+        _nvofa->ConfirmExecuted();
+    else
+        _estimator->ConfirmExecuted();
     _recorded = false;
 }
 
@@ -5305,12 +5369,20 @@ void SynthMotionGuide::AbandonRecording()
     _handedOut = false;
     _handedOutResource = nullptr;
 
-    if (!_recorded || _estimator == nullptr)
+    if (!_recorded || (_estimator == nullptr && _nvofa == nullptr))
         return;
 
     // Published for a list nobody ran: nobody may take it.
-    SynthMotion::Handoff::Withdraw(_estimator->Motion());
-    _estimator->AbandonRecording();
+    if (_nvofa != nullptr)
+    {
+        SynthMotion::Handoff::Withdraw(_nvofa->Motion());
+        _nvofa->AbandonRecording();
+    }
+    else
+    {
+        SynthMotion::Handoff::Withdraw(_estimator->Motion());
+        _estimator->AbandonRecording();
+    }
     _recorded = false;
 }
 
@@ -5321,6 +5393,16 @@ void SynthMotionGuide::Release()
         SynthMotion::Handoff::Withdraw(_estimator->Motion());
         _estimator->Release();
         _estimator.reset();
+    }
+
+    for (auto* nvofa : { &_nvofa, &_retiredNvofa })
+    {
+        if (*nvofa != nullptr)
+        {
+            SynthMotion::Handoff::Withdraw((*nvofa)->Motion());
+            (*nvofa)->Release();
+            nvofa->reset();
+        }
     }
 
     _width = 0;

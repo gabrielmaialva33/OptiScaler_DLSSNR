@@ -106,7 +106,7 @@ summary = "Drives the production NGX exports on a real D3D12 device and exercise
 [synth-motion-d3d12]
 tier = "wine"
 timeout = 1800
-summary = "The synthesized-motion estimator (FidelityFX optical flow port) on a real D3D12 device under Wine: endpoint error against known pans, a moving object, static and cut frames, abandon semantics, the axis signs and GPU time. Never loads NGX or a game."
+summary = "The synthesized-motion estimator (FidelityFX optical flow port) on a real D3D12 device under Wine: endpoint error against known pans, a moving object, static and cut frames, abandon semantics, the axis signs and GPU time; --source nvofa runs the NVIDIA Optical Flow source the same way (SKIP when unavailable). Never loads NGX or a game."
 
 [bridge-lifetime]
 tier = "host"

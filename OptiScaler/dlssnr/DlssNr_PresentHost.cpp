@@ -440,7 +440,7 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
             _motion = std::make_unique<SynthMotionGuide>();
 
         if (auto* synthesized = _motion->Record(device, cmdList, _toWorking->Buffer(), _workingState, _resetOwed, frame,
-                                                "D3D11 bridge"))
+                                                "D3D11 bridge", queue))
         {
             motion = synthesized;
         }

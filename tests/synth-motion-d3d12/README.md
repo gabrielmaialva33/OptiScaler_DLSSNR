@@ -39,6 +39,27 @@ afterwards), otherwise "UNLOCKED".
 Only frames where `Ready()` is true are scored: the estimator yields no field for FFX's five warm-up
 frames after a reset. Thresholds and their reasons are in the comment block at the top of `run.py`.
 
+## `--source nvofa`
+
+`--source nvofa` runs the same binary and sequences through `SynthMotion::NvofaEstimator_Dx12`, the
+NVIDIA Optical Flow source. The Proton's own dxvk-nvapi `nvofapi64.dll` is copied beside the harness,
+preferably from the Proton that supplied vkd3d-proton. Its artifacts carry a `-nvofa` suffix
+(`run-nvofa.log`, `run/synth-motion-report-nvofa.json`, `result-nvofa.json`).
+
+- **Lag.** The field is one frame late by contract, so frame t is scored against the truth of t-1.
+  That is the same for the pans and one frame behind for the object; the abandon's two-step frame is
+  t=10.
+- **Scene cut.** The source has none. `SceneCut()` must never be raised, the pair spanning the cut is
+  not scored, and frames from t=11 on must be as accurate as a small pan.
+- **GPU time** covers the two shader passes on the list, not the engine, which runs on its own queue.
+- **SKIP** (exit 0, `"status": "SKIP"` in `result-nvofa.json`) when:
+  - the NVOFA shaders are not generated;
+  - no Proton ships `nvofapi64.dll`;
+  - the estimator reports itself unavailable on the device (missing `VK_NV_optical_flow`, a refused
+    format, and so on). The reason is in the report.
+
+`run_all.py` runs the default source only.
+
 ## Limits
 
 Synthetic content, integer motion, SDR RGBA8 input, one device and queue, frames never overlap on

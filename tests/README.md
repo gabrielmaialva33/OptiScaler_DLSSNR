@@ -87,7 +87,8 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   and shutdown on a real GPU under Proton.
 - `synth-motion-d3d12` — the synthesized-motion estimator on a real D3D12 device: endpoint
   error against known motion, the axis signs, scene cuts, abandon semantics and GPU time.
-  No NGX, no game.
+  `--source nvofa` runs the NVIDIA Optical Flow source through the same sequences, and skips
+  when `nvofapi64.dll` or its shaders are unavailable. No NGX, no game.
 - `vulkan-overlay` — builds a real DLL and drives real Vulkan to exercise overlay
   lifetime.
 
