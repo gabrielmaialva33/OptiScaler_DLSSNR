@@ -2223,6 +2223,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     case DLL_PROCESS_DETACH:
         State::Instance().isShuttingDown = true;
 
+        // lpReserved != NULL: the process is terminating. ExitProcess has already stopped every other
+        // thread, possibly while one held a lock (the async logger's queue, a loader-side lock), so
+        // freeing libraries, logging or shutting spdlog down here can hang the exit. The OS reclaims all
+        // of it. Only an explicit FreeLibrary of this DLL (lpReserved == NULL) takes the cleanup below.
+        if (lpReserved != nullptr)
+            break;
+
         // Unhooking and cleaning stuff causing issues during shutdown.
         // Disabled for now to check if it cause any issues
         // UnhookApis();
