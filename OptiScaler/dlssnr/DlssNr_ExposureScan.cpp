@@ -99,6 +99,7 @@ struct ScanState
     bool complained = false;
     bool barrenLogged = false;       // once per transition into the barren cadence
     unsigned int nearMissLogged = 0; // bounded diagnostic; see NoteResource
+    unsigned int passedOver = 0;     // candidates seen while the scan was not wanted, and not kept (Adopt)
 };
 
 ScanState g_scan;
@@ -300,6 +301,21 @@ bool LooksLikeANumber(const D3D12_RESOURCE_DESC& rd, std::string* outShape, unsi
 
 void Adopt(ID3D12Resource* resource, const std::string& shape, unsigned int bytes, bool isBuffer, DXGI_FORMAT texFormat)
 {
+    // Adopting holds a reference, and that is only worth its risk while the scan is wanted. Held whenever
+    // NR was on, Cyberpunk 2077 with DLSS Frame Generation had 64 references to small buffers Streamline
+    // and the game create, recycle and free every few frames, and removed the device (0x887A0006) within
+    // seconds of NR starting -- the pinned-wrapper hazard ReleaseTrackedResources describes, taken on for
+    // a scan nobody had chosen. The cost is the case NoteUav was ungated for: an engine that creates its
+    // exposure once at start-up is not seen by a scan chosen later, and the game has to be restarted with
+    // it selected. Tick says so when that is what happened.
+    if (!Wanted())
+    {
+        if (g_scan.passedOver++ == 0)
+            LOG_INFO("DLSS-NR exposure scan: candidates are not kept while the scan is not the white point's "
+                     "source; choose it and restart the game if it then finds nothing");
+        return;
+    }
+
     for (const Tracked& t : g_scan.tracked)
     {
         if (t.resource == resource)
@@ -388,7 +404,7 @@ void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* d
     if (ScopedInternalResourceCreation::Active())
         return;
 
-    // Deliberately NOT gated on the scan setting, and that was a real bug rather than a nicety.
+    // Not gated on the scan setting here; Adopt is, since 2026-09-29.
     //
     // An engine creates its eye adaptation view once, when it builds its render targets, which is
     // long before anybody opens a menu and ticks a box. Gating the recording meant every candidate
@@ -396,8 +412,10 @@ void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* d
     // yet -- play for a few seconds", which is advice that could never come true no matter how long
     // anyone played.
     //
-    // Recording is a resource description and a pointer. What is genuinely risky -- reading a buffer
-    // the game owns, on an assumption about its state -- lives in Tick, and that is still gated.
+    // Recording was taken to be a resource description and a pointer, but the pointer is a reference
+    // held on a resource the game owns, and holding dozens of them for a scan nobody chose is what
+    // Cyberpunk under DLSS-G removed the device over. So the pass-over now happens in Adopt, and the
+    // readout says to restart rather than to keep playing.
     if (!Config::Instance()->DlssNrEnabled.value_or_default())
         return;
 
@@ -439,7 +457,10 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList)
 
     if (g_scan.tracked.empty())
     {
-        g_scan.status = "no buffer in this game is shaped like an exposure";
+        g_scan.status = g_scan.passedOver != 0
+                            ? "nothing kept yet: exposures created before the scan was chosen were not kept -- "
+                              "restart the game with the scan selected"
+                            : "no buffer in this game is shaped like an exposure";
         return;
     }
 
