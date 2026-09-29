@@ -236,7 +236,7 @@ RWTexture2D<float4> gTarget   : register(u0);  // encode: the proxy. resolve: th
 #ifdef VK_MODE
 [[vk::binding(6, 0)]]
 #endif
-RWTexture2D<float4> gKeep     : register(u1);  // encode: the untouched copy. unused by the resolve.
+RWTexture2D<float4> gKeep     : register(u1);  // encode: the frame value for value. unused by the resolve.
 #ifdef VK_MODE
 [[vk::binding(7, 0)]]
 #endif
@@ -710,8 +710,11 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         float4 source = gSource.Load(int3(id.xy, 0));
         float3 frame = max(source.rgb, float3(0.0, 0.0, 0.0));
 
-        // Kept so the resolve has the frame as it was, rather than having to reconstruct it.
-        gKeep[id.xy] = float4(frame, source.a);
+        // Kept so the resolve has the frame as it was, rather than having to reconstruct it -- value for
+        // value, signs included. Scene-linear HDR carries negative channels after a wide-gamut transform,
+        // and scRGB carries them by definition; clamping them here took them out of the frame even with
+        // the model's edit at zero. Only what the model is shown below has to be non-negative light.
+        gKeep[id.xy] = source;
 
         // Some games hand DLSS a frame that has already been through their tonemapper. The game says
         // which in its own DLSS creation flags, and converting one that needs no conversion is pure
@@ -791,6 +794,16 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         onDivider = abs(uv.x - gCompareSplit) < (1.0 / max(gWidth, 1u));
     }
 
+    // Strength zero is the frame, exactly, and nothing the model returned is read for it. Letting the
+    // composition reduce to the frame was not the same thing: lerp(a, b, 0) is a + 0 * (b - a), and 0 * NaN
+    // is NaN, so one non-finite value from the model reached a frame meant to be untouched; x / w * w is
+    // not always x; and the replace decodes and the colour boost above 1 never reduced to the frame at all.
+    if (gCompareMode == 0 && gDebugView == 0 && gTransferStrength <= 0.0)
+    {
+        gTarget[id.xy] = gOriginal.Load(int3(id.xy, 0));
+        return;
+    }
+
     // Sampled rather than loaded: when the model ran at a reduced resolution these are smaller than the
     // frame, and its edit is enlarged here while the frame underneath stays untouched.
     float4 proxySample = gSource.SampleLevel(gLinear, cmpUv, 0);
@@ -814,8 +827,15 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // the shadow branch never fires, every pixel takes the highlight branch, and the clamp flattens
     // the result to a near-constant scale. Colour still moves, because that comes from the model's
     // own hue, which is what makes the failure so confusing to look at.
+    //
+    // The composition works on the frame with its negative channels at zero, which is the frame it has
+    // always been given. What that leaves out -- the negative part of a wide-gamut or scRGB value -- is
+    // handed back after it (signedRest), so the frame keeps it and gains only the model's edit. A frame
+    // with nothing negative in it is composed, and comes out, exactly as before. min() rather than a
+    // subtraction so a NaN in the frame is left out here as the old clamp left it out.
     const float normScale = gPassthrough != 0 ? 1.0 : WhitePoint();
-    float3 original = originalSample.rgb / normScale;
+    const float3 signedRest = min(originalSample.rgb, 0.0);
+    float3 original = max(originalSample.rgb, 0.0) / normScale;
 
     float originalLuma = dot(original, kLuma);
     float proxyLuma = dot(proxy, kLuma);
@@ -825,7 +845,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // with and without Neural Rendering. In passthrough the frame is already display-referred.
     if (gApplyModel == 0)
     {
-        gTarget[id.xy] = float4(max(originalSample.rgb, 0.0), originalSample.a);
+        gTarget[id.xy] = originalSample;
         return;
     }
 
@@ -1126,8 +1146,9 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     else if (gReversibleMode == 4)
         result = gPassthrough != 0 ? modelDirect : HybridDecode(modelDirect);
 
-    // Back out of the normalised space the composition worked in.
-    result *= normScale;
+    // Back out of the normalised space the composition worked in, still non-negative as it always was, and
+    // give the frame back what the composition never saw.
+    result = max(result * normScale, 0.0) + signedRest;
 
     // The side being shown untouched takes the frame as it arrived, past every step above.
     if (showOriginal)
@@ -1142,5 +1163,5 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     if (onDivider)
         result = float3(WhitePoint(), WhitePoint(), WhitePoint());
 
-    gTarget[id.xy] = float4(max(result, float3(0.0, 0.0, 0.0)), originalSample.a);
+    gTarget[id.xy] = float4(result, originalSample.a);
 }

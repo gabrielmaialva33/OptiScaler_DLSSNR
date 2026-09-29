@@ -122,7 +122,15 @@ part of the solution, and builds with everything else.
   composed back as a ratio against the original's luminance, scaled by a measured slope, with the
   chroma added. Composing it additively — which earlier revisions did — discards the model's
   behaviour in highlights and makes every arrangement look alike. At strength zero the frame is
-  bit-identical, always.
+  bit-identical, always. Since 2026-09-29 that is a branch to the kept frame, taken before anything
+  the model returned is read: the composition reducing to the frame was not exact (0 x NaN is NaN,
+  `x / w * w` is not always `x`), and the replace decodes and the colour boost above 1 did not reduce
+  to it at all.
+- **Signed values survive the pass.** Scene-linear HDR carries negative channels after a wide-gamut
+  transform, and scRGB by definition. The encode used to keep the frame with them clamped to zero, so
+  they were gone even at strength zero or with `ApplyModel` off. The kept copy is now the frame value
+  for value; the composition still works on the non-negative frame it always saw, and the negative part
+  is added back after it (sqmq13's `3fd08a94`, adapted). A frame with nothing negative is unchanged.
 - **Create-time and live parameters.** The preset (the weight set) is read when the feature is
   built, so a preset change rebuilds it after a settle, as do resolution and placement. Style,
   intensity, local structure and tone, skin and the auto mask are read at every evaluate and apply
