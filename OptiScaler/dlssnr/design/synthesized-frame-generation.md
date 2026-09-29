@@ -1247,6 +1247,26 @@ Generation Zero on the lead's PC, FSR-FG, `SynthesizedMotion=true`, `Synthesized
 - **Native Windows:** the new passes use group-shared memory, group-shared atomics and RGBA8 UAV stores. Proton
   accepted them; the 3060 run is what says the D3D12 rules were read right.
 
+### In game (2026-09-29): Generation Zero, the lead's PC
+
+Build `09765552`, FSR-FG, `SynthesizedMotion=true`, `SynthesizedHudDepth=true`, `SynthesizedHudLayer=true`,
+DLSS-NR on at present (`HookMethod=2`).
+- **The layer ran.** The three log lines above appeared, once each.
+- **The HUD still smears on camera turns**, in short flashes: the crosshair, the compass, world-anchored markers and
+  the fixed text (ammo, health). Every margin from 0 to 24 showed it. The layer does not fix Generation Zero; the
+  harness's recall did not carry over to it.
+- **Not DLSS-NR.** The same with the pass toggled off (F7).
+- **DLSS-G does much better on the same input.** With `FGOutput=dlssg`, which gets the strict mask as depth and no
+  layer, the smear is still there but, in the lead's words, almost imperceptible. Its optical flow sees what the
+  synthesized vectors and the mask miss.
+- **Leading suspect, not measured: the HUD is translucent.** Generation Zero draws white text and marks with soft
+  shadows. A translucent pixel changes with the scenery behind it, so it never stays within `stillEps` of its
+  anchor, and so never seeds or carries growth. The crosshair, the compass and the markers also change on their own
+  while the camera turns: spread, scroll, world position. The next measurement is eight consecutive frames from
+  `dlssnr-capture.trigger` during a turn, to read the HUD pixels' frame-to-frame change.
+- **Merged anyway, off by default.** `SynthesizedHudLayer` defaults to false, so nothing changes unless it is set,
+  and the rule stays for the measurement above. Not run on Rafael's 3060.
+
 ## DLSS-G output
 
 Written 2026-09-28, before the code, on branch `synth-fg-dlssg`, against `02c5d0f6`. Until now the input fed
