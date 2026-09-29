@@ -324,6 +324,24 @@ struct NrState
     OS_Dx12* superDown = nullptr;
     Scaler nrScaler = Scaler::Count;
 
+    // The format-bound surfaces of the colour format the frame is not in right now, kept aside for a game
+    // that alternates between two (FF7 Rebirth: R11G11B10 in play, RGBA16F on cutscene camera cuts) and
+    // swapped back when the format returns at the same extent. See ReleaseSurfacesIfFormatChanged.
+    struct AltSurfaces
+    {
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        unsigned int width = 0;
+        unsigned int height = 0;
+        unsigned int workWidth = 0;
+        unsigned int workHeight = 0;
+        ID3D12Resource* output = nullptr;
+        ID3D12Resource* colorCopy = nullptr;
+        ID3D12Resource* hdrCopy = nullptr;
+        ID3D12Resource* colorSmall = nullptr;
+        ID3D12Resource* outputNative = nullptr;
+        ID3D12Resource* passPing = nullptr;
+    } alt;
+
     // Frame hold (design/frame-hold.md): a persistent copy of the output taken on hold-on and restored
     // over the live output before the encode reads it while held, so a setting change re-renders the
     // same frame. heldWhitePoint is the snapshot used while held -- measurement is suspended.
@@ -1187,7 +1205,8 @@ bool RetiredCapacity()
     if (!g_tracked)
         return true;
     TickNrRetired();
-    // A rebuild can retire at most 16 objects. Refuse BEFORE recording or allocation,
+    // A rebuild can retire at most 16 objects, and the six of the other colour format's set with a
+    // resolution change (ParkAltSurfaces). Refuse BEFORE recording or allocation,
     // not after unsubmitted slider/DRS changes already consumed arbitrary memory.
     return DlssNr::Chain::RetirementAllowed(g_nrRetired.size());
 }
@@ -1204,26 +1223,70 @@ void ForgetCalibration()
     g_nr.calibWhy = "measuring...";
 }
 
-void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
+void ParkAltSurfaces()
+{
+    auto& alt = g_nr.alt;
+
+    for (ID3D12Resource** r :
+         { &alt.output, &alt.colorCopy, &alt.hdrCopy, &alt.colorSmall, &alt.outputNative, &alt.passPing })
+        ParkNrResource(*r);
+
+    alt = {};
+}
+
+// Whether the set kept aside is the one a frame in this format, at this extent, needs.
+bool AltSurfacesFit(DXGI_FORMAT format, unsigned int width, unsigned int height, unsigned int workWidth,
+                    unsigned int workHeight)
+{
+    const auto& alt = g_nr.alt;
+    return alt.output != nullptr && alt.format == format && alt.width == width && alt.height == height &&
+           alt.workWidth == workWidth && alt.workHeight == workHeight;
+}
+
+// The format-bound surfaces follow the frame's colour format. The model does not: feature 18 is created
+// for an extent and a preset and is never told a format, so a format change alone keeps every feature and
+// pulses a history reset. It used to park them all, and a game that alternates formats (FF7 Rebirth,
+// R11G11B10 in play and RGBA16F on cutscene camera cuts, found by hhkbble) paid a feature creation --
+// 700 ms there -- on every cut, which is also the rebuild storm that exhausts the driver's latches.
+//
+// The surfaces of the format being left are kept aside rather than parked, and swapped back in when that
+// format returns at the same extent, so an alternating game allocates both sets once. A swap frees nothing;
+// what the slot held before, if it does not fit, is parked like any retired surface.
+void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed, unsigned int width, unsigned int height, unsigned int workWidth,
+                                    unsigned int workHeight)
 {
     if (g_nr.output == nullptr || g_nr.output->GetDesc().Format == needed)
         return;
 
-    LOG_INFO("DLSS-NR rebuilding surfaces: format {} -> {} (inject point changed)", (int) g_nr.output->GetDesc().Format,
-             (int) needed);
+    const auto outputDesc = g_nr.output->GetDesc();
+    const auto frameDesc = g_nr.colorCopy != nullptr ? g_nr.colorCopy->GetDesc() : outputDesc;
+    const bool reuse = AltSurfacesFit(needed, width, height, workWidth, workHeight);
+
+    LOG_INFO("DLSS-NR surfaces: format {} -> {} ({}); the model is kept", (int) outputDesc.Format, (int) needed,
+             reuse ? "the set kept for it is swapped back in" : "a set is built for it, the old one kept aside");
 
     ForgetCalibration();
 
-    ParkNrFeature(g_nr.feature);
+    if (!reuse)
+        ParkAltSurfaces();
 
-    // The extras go with it: they were built for this raster and this tuning too.
-    for (void*& f : g_nr.passFeature)
-        ParkNrFeature(f);
+    auto& alt = g_nr.alt;
+    std::swap(g_nr.output, alt.output);
+    std::swap(g_nr.colorCopy, alt.colorCopy);
+    std::swap(g_nr.hdrCopy, alt.hdrCopy);
+    std::swap(g_nr.colorSmall, alt.colorSmall);
+    std::swap(g_nr.outputNative, alt.outputNative);
+    std::swap(g_nr.passPing, alt.passPing);
+    alt.format = outputDesc.Format;
+    alt.width = (unsigned int) frameDesc.Width;
+    alt.height = frameDesc.Height;
+    alt.workWidth = (unsigned int) outputDesc.Width;
+    alt.workHeight = outputDesc.Height;
 
-    for (ID3D12Resource** r : { &g_nr.output, &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall, &g_nr.passPing })
-        ParkNrResource(*r);
-
+    // A different picture in a different encoding: no history carries over, for the first pass or the rest.
     g_nr.reset = true;
+    for (auto& reset : g_nr.passReset)
+        reset = true;
 }
 
 void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESOURCE_STATES from,
@@ -2681,7 +2744,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (chainEnabled && (!g_nr.feature || g_nr.width != width || g_nr.height != height || g_nr.workWidth != workWidth ||
                          g_nr.workHeight != workHeight || g_nr.passBuilt[0] != firstSettings ||
-                         (g_nr.output && g_nr.output->GetDesc().Format != desc.Format)))
+                         (g_nr.output && g_nr.output->GetDesc().Format != desc.Format &&
+                          !AltSurfacesFit(desc.Format, width, height, workWidth, workHeight))))
     {
         DXGI_QUERY_VIDEO_MEMORY_INFO budget {};
         const uint64_t surfaceBytes = uint64_t(workWidth) * workHeight * 48 + uint64_t(width) * height * 48;
@@ -2697,7 +2761,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
 
-    ReleaseSurfacesIfFormatChanged(desc.Format);
+    ReleaseSurfacesIfFormatChanged(desc.Format, width, height, workWidth, workHeight);
 
     const bool beforeUpscale = !sourceIsTarget;
     if (g_lastBeforeUpscale != beforeUpscale || g_lastAfterRayReconstruction != frame.AfterRayReconstruction)
@@ -2720,6 +2784,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     const bool resolutionChanged =
         g_nr.width != width || g_nr.height != height || g_nr.workWidth != workWidth || g_nr.workHeight != workHeight;
+
+    // The set kept for the other colour format was built for the old extent.
+    if (resolutionChanged)
+        ParkAltSurfaces();
+
     const bool placementChanged = g_nr.afterRayReconstruction != frame.AfterRayReconstruction;
     const bool presetChanged = g_nr.builtPreset != presetForChain;
 
@@ -6344,6 +6413,14 @@ void Shutdown()
         g_nr.outputNative->Release();
         g_nr.outputNative = nullptr;
     }
+
+    for (ID3D12Resource** r : { &g_nr.alt.output, &g_nr.alt.colorCopy, &g_nr.alt.hdrCopy, &g_nr.alt.colorSmall,
+                                &g_nr.alt.outputNative, &g_nr.alt.passPing })
+    {
+        if (*r != nullptr)
+            (*r)->Release();
+    }
+    g_nr.alt = {};
 
     if (g_nr.heldColor != nullptr)
     {
