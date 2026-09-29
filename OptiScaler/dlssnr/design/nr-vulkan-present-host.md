@@ -203,6 +203,12 @@ The Vulkan implementation also has gaps that 150 recorded frames cannot discharg
   entry points, or make model/composition state per owner. A secondary swapchain must not switch
   or destroy it. The forwarder initialization flag must be tied to device generation; a second
   device must not receive success because the first initialized.
+  *2026-09-29:* the forwarder now tracks the device it initialised NGX on and initialises a new
+  one (janblade's `8be449d5`), so the host's re-init after `ShutdownVk(false)` is real. The same
+  change fixed `NVSDK_NGX_VULKAN_Init_Ext`'s argument order: the forwarder had passed the feature
+  info before the SDK version, so NGX got version 0 and a feature-info "pointer" of `0x15`. The
+  same-handle case (a new device reusing the old handle value) and a `Shutdown1` before
+  `vkDestroyDevice` are still open: the host has no device-destroy hook to hang them on.
 - `DlssNr_Vk` rotates eighteen descriptor/constant slots (`6 × 3`) on each dispatch without a
   completion test. Query/meter rings similarly assume age implies completion. Add completion-based
   reuse; do not claim a frame ring is a fence. Initially allow one NR recording outstanding and

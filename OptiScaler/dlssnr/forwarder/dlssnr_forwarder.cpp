@@ -258,7 +258,11 @@ extern "C"
     // parameter setter the D3D12 path uses for ID3D12Resource*.
     // ---------------------------------------------------------------------------------------------
 
-    using PFN_NrVkInitExt = int(__cdecl*)(unsigned long long, const wchar_t*, void*, void*, void*, const void*, int);
+    // nvsdk_ngx_vk.h: NVSDK_NGX_VULKAN_Init_Ext(ApplicationId, ApplicationDataPath, VkInstance, VkPhysicalDevice,
+    // VkDevice, NVSDK_NGX_Version InSDKVersion, const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo): the version comes
+    // before the feature info. It was declared the other way round here once, which handed NGX version 0 and a
+    // feature-info "pointer" of 0x15. The plain NVSDK_NGX_VULKAN_Init is the one that ends feature info, version.
+    using PFN_NrVkInitExt = int(__cdecl*)(unsigned long long, const wchar_t*, void*, void*, void*, int, const void*);
     using PFN_NrVkCreate = int(__cdecl*)(void*, int, const void*, void**);
     using PFN_NrVkEvaluate = int(__cdecl*)(void*, const void*, const void*, void*);
 
@@ -269,7 +273,9 @@ extern "C"
         PFN_NrVkCreate create = nullptr;
         PFN_NrVkEvaluate evaluate = nullptr;
         PFN_NrRelease release = nullptr;
-        bool initialised = false;
+        // The device NGX was initialised on. NGX binds to a device, so a new one needs its own init: a single
+        // "initialised" flag answered 1 for the replacement device without initialising NGX on it.
+        void* initialisedDevice = nullptr;
     };
 
     VkSnippet g_vk;
@@ -776,7 +782,7 @@ extern "C"
             return -1;
         }
 
-        if (g_vk.initialised)
+        if (device != nullptr && device == g_vk.initialisedDevice)
         {
             return 1;
         }
@@ -784,10 +790,15 @@ extern "C"
         // Assigned rather than returned directly. A tail call becomes a jmp, and the snippet resolves its
         // caller from the return address -- so tail calling hands it whoever called this instead of this
         // module, and the caller gate rejects it before a single argument is read.
-        volatile int result = Guarded(g_vk.init, 0x0, dataPath, instance, physicalDevice, device, nullptr, sdkVersion);
+        volatile int result = Guarded(g_vk.init, 0x0, dataPath, instance, physicalDevice, device, sdkVersion, nullptr);
 
         dlssnr_vk_last_init = (int) result;
-        g_vk.initialised = result == 1;
+
+        // Only a success changes what is tracked: a failed init on another device must not forget the live one.
+        if (result == 1)
+        {
+            g_vk.initialisedDevice = device;
+        }
 
         return (int) result;
     }
