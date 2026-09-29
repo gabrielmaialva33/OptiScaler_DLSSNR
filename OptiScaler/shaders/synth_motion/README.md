@@ -185,13 +185,30 @@ not depend on the DLSS-NR module. Design: "The HUD: near depth and a UI layer" i
   the rule's ping-ponged state (`R16_FLOAT` luma, `R16G16_FLOAT` protection and streak). A linear frame
   (an sRGB view, a float format) is brought close to encoded with a 2.2 power first, because the
   thresholds were tuned on an encoded image.
-- **`synth_overlay_layer.hlsl`** writes the UI layer: the presented frame's rgb, with the mask as alpha.
-  It is `RGBA8_UNORM` for an 8-bit UNORM frame and `RGBA16F` otherwise, so FFX's
-  `lerp(x, layer, a)` gives a real frame back unchanged.
-- **Bindings.** Its own root signature: three SRVs, four UAVs, sixteen root constants. The previous
-  frame's state is read through SRVs, never typed UAV loads. There is no constant buffer. Every
-  resource rests in `NON_PIXEL_SHADER_RESOURCE`, where it was created. Descriptors come from a ring of
-  16 records.
+- **The UI layer's own mask** (`precompile/static_overlay_layer.h`, frame generation only; design: "The HUD
+  layer's own mask: recall and a margin"). A superset of the strict mask for the layer alone; the depth keeps
+  the strict one. Seeds are pixels still against an anchor for 8 frames, with contrast, where last frame's tile
+  map shows the scene moving on three of the four sides within a sixth of the frame's height, two perpendicular
+  orientations of static structure in the 5x5 tiles around (counted only against steady neighbours), and the
+  camera moving. Growth carries the core 2 px a frame through steady pixels, up to 48 px from a seed. It is
+  computed by a second permutation of `synth_overlay_detect.hlsl`, `SynthOverlay_DetectLayer`
+  (`SYNTH_OVERLAY_LAYER=1`), only when `Record` is asked for the layer: then it also writes a per-pixel state
+  (`RGBA8_UNORM`: still frames, hold, grown distance, anchor), a tile map (`RGBA8_UNORM`, one texel per 8x8
+  group, counts exact in 8 bits: pixels moved, pixels textured, orientation bits and a core bit, pixels in the
+  image) and the core (`R8_UNORM`, the strict mask with the grown set). Without the layer the pass is the plain `SynthOverlay_Detect`, the same bytecode as before the layer had
+  a mask of its own, and none of that is allocated. The layer's history is its own: a `Record` without the
+  layer breaks it.
+- **`synth_overlay_layer.hlsl`** writes the UI layer: the presented frame's rgb, with the core dilated and
+  feathered into a band of `[FrameGen] SynthesizedHudMargin` px as alpha (1 within half the margin, 0 past it;
+  a separable maximum in group-shared memory on 16x16 groups; a group whose apron reaches no tile with the core
+  bit set, in the tile map the same `Record` wrote, loads nothing more). It is
+  `RGBA8_UNORM` for an 8-bit UNORM frame and `RGBA16F` otherwise, so FFX's `lerp(x, layer, a)` gives a real
+  frame back unchanged, whatever the alpha.
+- **Bindings.** Its own root signature: five SRVs, seven UAVs, sixteen root constants. The plain mask pass
+  declares three and four of them, the layer pass three and one. The previous frame's state is read through
+  SRVs, never typed UAV loads; the stores are to R8_UNORM, R16_FLOAT, R16G16_FLOAT, R32_FLOAT, RGBA8_UNORM and
+  RGBA16F, which every D3D12 device supports. There is no constant buffer. Every resource rests in
+  `NON_PIXEL_SHADER_RESOURCE`, where it was created. Descriptors come from a ring of 16 records.
 - **History** follows the estimator's discipline. The state swaps only on `ConfirmExecuted()`, and
   `AbandonRecording()` leaves it where it was. On an extent change the old objects are parked until
   `Release()`.

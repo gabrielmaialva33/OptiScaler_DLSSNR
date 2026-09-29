@@ -31,7 +31,8 @@ The pans with a single non-zero axis pin each axis' sign independently.
 | `cut` | pan, then at t=8 different and much darker content, 18 frames | a zero field at t=8; `SceneCut()` within t=8..12 (it is read back from the GPU, `ReadbackSlots` late at most); steady frames scored as a pan |
 | `abandon` | pan (+4, 0); t=8 recorded and thrown away via `AbandonRecording()` | t=9 must read two steps (−8), later frames one step |
 | `overlay_+8x`, `overlay_+8+8` | a static crosshair, HUD panel and outlined glyphs over a background panning (+8, 0) and (+8, +8) | clear overlay pixels against zero; the background outside a 24 px band around each element against the pan |
-| `time_1080p`, `time_3440` | 24-frame pans at 1920×1080 and 3440×1440 | GPU time only |
+| `hud_+8x`, `hud_+3+2` | the same overlay plus a 1 px hollow frame with a drop shadow and a translucent panel, over pans of (+8, 0) and (+3, +2), 40 frames | the HUD mask and the UI layer's own mask only (below) |
+| `time_1080p`, `time_3440` | 32-frame pans at 1920×1080 and 3440×1440 with the `hud_*` overlay | GPU time only |
 
 GPU time is `Record` bracketed by timestamps on the same list. It is reported, never judged, and
 labelled with the clock state: `sudo -n nvidia-smi -lgc 2100,2100 -lmc 10501` if available (reset
@@ -71,23 +72,45 @@ note.
 
 Every frame of every sequence also runs `SynthMotion::Overlay_Dx12` (`shaders/synth_motion/SynthOverlay_Dx12.*`,
 the HUD mask of "The HUD: near depth and a UI layer" in `synthesized-frame-generation.md`), on the same
-list, right after the estimator and on the same frame, then its UI layer from that frame. Its depth, mask
-and layer are read back and scored; timestamps 2 and 3 bracket it.
+list, right after the estimator and on the same frame. On `overlay_*` it runs the mask alone, the default
+(`SynthesizedHudDepth` without the layer); everywhere else it also computes the UI layer's own mask and records the
+layer from that frame ("The HUD layer's own mask: recall and a margin"). The depth, the mask, and with the layer
+its core and the layer itself are read back and scored. Timestamps 2 to 3 bracket the mask pass, 3 to 4 the layer
+pass.
 
-- **Exact, everywhere:** the depth is 0 or 1 and agrees with the mask, and the layer is the frame's own
-  rgb with the mask as alpha, byte for byte (an RGBA8 frame gives an RGBA8 layer).
-- **No scenery:** on the pans, the moving object, static, cut and abandon, not one pixel is marked.
+- **Exact, everywhere:** the depth is 0 or 1 and agrees with the mask. With the layer: its rgb is the frame's own,
+  byte for byte (an RGBA8 frame gives an RGBA8 layer); its alpha is the read-back core dilated and feathered on the
+  CPU at the default margin (`kLayerMargin`, held equal to `[FrameGen] SynthesizedHudMargin`'s default), within one
+  step, and never under the strict mask; the core is never under the strict mask.
+- **No scenery:** on the pans, the moving object, static, cut and abandon, not one pixel is marked, and not one
+  pixel of the layer's core or alpha.
 - **Precision, on `overlay_*` and `hud_*`, from t=10** (the rule's 8-frame entry streak starts at t=1): at
-  least 99% of the marked pixels are overlay pixels or within 1 px of one.
-- **Recall, on `hud_+8x` and `hud_+3+2`**, the same overlay over 40 frames, estimator not scored: the mean
-  share of the crosshair's pixels marked from t=30 at least 10%, and of the floating text's at least 15%.
-  These are floors under what was measured on 2026-09-28 (34%/39% at 8 px a frame, 21%/30% at (3, 2)).
-  About half of each element is its 1 px dark outline, which the rule never marks, and the protection
-  builds up as the scene moves past. The panel's recall is reported only: its flat interior never sees
-  motion on four sides.
-- **GPU time** of the mask plus its layer on the timing sequences, reported.
+  least 99% of the marked pixels are overlay pixels or within 1 px of one. The same for the layer's core on `hud_*`.
+- **Recall, on `hud_*`**, the same overlay over 40 frames, estimator not scored, mean from t=30:
+  - the strict mask: at least 10% of the crosshair's pixels and 15% of the floating text's. These are floors under
+    what was measured on 2026-09-28 (34%/39% at 8 px a frame, 21%/30% at (3, 2)). About half of each element is
+    its 1 px dark outline, which the rule never marks, and the protection builds up as the scene moves past. The
+    panel, the frame and the glass are reported only: the strict rule marks none of them;
+  - the layer's core: at least 95% of the crosshair, text, frame and panel, and 85% of the glass's opaque parts (its
+    fill is the scene behind, darkened, and never still). Measured 100% and 93% on 2026-09-29.
+- **The band, on `hud_*`**, reported against the old layer (whose alpha was the strict mask):
+  - every overlay pixel is one part (stroke, outline or fill), and the strict mask, the core and the alpha are
+    reported per element and part;
+  - the background's mean alpha in rings 1-2, 3-4, 5-8, 9-16, 17-24 and 25+ px from the nearest overlay pixel;
+  - the smear set: the background whose sample at half the pan (q + d/2 or q - d/2, both roundings) lands on the
+    overlay, which is where FSR blends the overlay in under flat depth. Its mean alpha is judged: at least 90% of
+    all of it, 95% beside the crosshair, text, frame and panel, and 60% beside the glass. The glass's 1 px border
+    has no still neighbour to contrast with (the scene outside and its own fill inside both move), so it seeds only
+    near the glass's text and grows 48 px along itself from there: its bare bottom edge stays out;
+  - the held background: the alpha outside the smear set, base-frame pixels where interpolation was right;
+  - a sweep of margins 0 to 24, dilated on the CPU from the core.
+- **GPU time** on the timing sequences, whose first half runs the mask alone and second half the layer: the mask
+  alone, and with the layer the mask pass and the layer pass. Reported, never judged.
 
-None of this runs FSR, so it says the mask is right on synthetic frames, not what FSR-FG does with it.
+`SYNTH_HUD_DUMP=<dir>` (a Windows path, `Z:\...` for a Linux one) writes each sequence's last layer core and alpha
+as PGM files there, for looking at.
+
+None of this runs FSR, so it says the masks are right on synthetic frames, not what FSR-FG does with them.
 
 ## `--source nvofa`
 

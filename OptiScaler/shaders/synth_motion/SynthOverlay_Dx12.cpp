@@ -6,6 +6,7 @@
 #include <d3dx/d3dx12.h>
 
 #include "precompile/SynthOverlay_Detect_Shader.h"
+#include "precompile/SynthOverlay_DetectLayer_Shader.h"
 #include "precompile/SynthOverlay_Layer_Shader.h"
 
 namespace SynthMotion
@@ -30,11 +31,12 @@ constexpr float kSidesMin = 4.0f;
 // frames of the evidence stopping.
 constexpr float kNearMin = 0.5f;
 
-// One descriptor ring for both passes: per record, three SRVs then four UAVs, contiguous, so each record's
+// One descriptor ring for both passes: per record, five SRVs then seven UAVs, contiguous, so each record's
 // two tables stay valid until the ring comes round. Two records a frame at most (the mask, then the layer),
-// so a slot comes back eight frames later.
-constexpr uint32_t kSrvs = 3;
-constexpr uint32_t kUavs = 4;
+// so a slot comes back eight frames later. The mask alone binds the first three and four of them (its bytecode
+// declares no more); the layer's permutation all of them; the layer pass three and one.
+constexpr uint32_t kSrvs = 5;
+constexpr uint32_t kUavs = 7;
 constexpr uint32_t kSlotSize = kSrvs + kUavs;
 constexpr uint32_t kSlots = 16;
 constexpr uint32_t kRootConstants = 16;
@@ -56,16 +58,17 @@ struct DetectConstants
     float sidesMin;
     float nearMin;
     uint32_t linearInput;
-    uint32_t pad0;
+    uint32_t layerValid; // the layer's permutation only (gPad0 in the mask's)
     uint32_t pad1;
 };
 
-// The Params cbuffer of synth_overlay_layer.hlsl: the first two are read.
+// The Params cbuffer of synth_overlay_layer.hlsl: the first three are read.
 struct LayerConstants
 {
     uint32_t width;
     uint32_t height;
-    uint32_t pad[kRootConstants - 2];
+    uint32_t margin;
+    uint32_t pad[kRootConstants - 3];
 };
 
 static_assert(sizeof(DetectConstants) == kRootConstants * 4 && sizeof(LayerConstants) == kRootConstants * 4,
@@ -139,6 +142,11 @@ DXGI_FORMAT LayerFormat(DXGI_FORMAT view)
     }
 }
 
+// The layer's own mask works on 8x8 tiles, one per thread group of the detect pass (UL_TILE in
+// precompile/static_overlay_layer.h); the layer pass on 16x16 groups.
+constexpr uint32_t kTile = 8;
+constexpr uint32_t kLayerGroup = 16;
+
 // Everything here rests in NON_PIXEL_SHADER_RESOURCE, where FSR-FG reads the depth and FFX copies the layer.
 constexpr D3D12_RESOURCE_STATES kRest = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
@@ -195,8 +203,9 @@ bool Overlay_Dx12::_EnsureDevice(ID3D12Device* device)
     {
         _Park();
 
-        for (IUnknown* object : { static_cast<IUnknown*>(_rootSignature), static_cast<IUnknown*>(_detectPipeline),
-                                  static_cast<IUnknown*>(_layerPipeline) })
+        for (IUnknown* object :
+             { static_cast<IUnknown*>(_rootSignature), static_cast<IUnknown*>(_detectPipeline),
+               static_cast<IUnknown*>(_detectLayerPipeline), static_cast<IUnknown*>(_layerPipeline) })
         {
             if (object != nullptr)
                 _parked.push_back(object);
@@ -204,12 +213,13 @@ bool Overlay_Dx12::_EnsureDevice(ID3D12Device* device)
 
         _rootSignature = nullptr;
         _detectPipeline = nullptr;
+        _detectLayerPipeline = nullptr;
         _layerPipeline = nullptr;
     }
 
     _device = device;
 
-    // t0..t2 and u0..u3 per record, the constants as root constants at b0: no constant-buffer view to size.
+    // t0..t4 and u0..u6 per record, the constants as root constants at b0: no constant-buffer view to size.
     CD3DX12_DESCRIPTOR_RANGE1 srvRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kSrvs, 0, 0,
                                        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
                                            D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE);
@@ -248,6 +258,7 @@ bool Overlay_Dx12::_EnsureDevice(ID3D12Device* device)
     };
     const Blob blobs[] = {
         { SynthOverlay_Detect_cso, sizeof(SynthOverlay_Detect_cso), &_detectPipeline },
+        { SynthOverlay_DetectLayer_cso, sizeof(SynthOverlay_DetectLayer_cso), &_detectLayerPipeline },
         { SynthOverlay_Layer_cso, sizeof(SynthOverlay_Layer_cso), &_layerPipeline },
     };
 
@@ -350,6 +361,51 @@ bool Overlay_Dx12::_EnsureLayer(DXGI_FORMAT format)
     return true;
 }
 
+bool Overlay_Dx12::_EnsureLayerMask()
+{
+    if (_core != nullptr)
+        return true;
+
+    ScopedInternalResourceCreation internalResources {};
+
+    const uint32_t tilesW = (_width + kTile - 1) / kTile;
+    const uint32_t tilesH = (_height + kTile - 1) / kTile;
+
+    _layerState[0] = CreateTexture(_device, _width, _height, DXGI_FORMAT_R8G8B8A8_UNORM, L"SynthOverlay_LayerState1");
+    _layerState[1] = CreateTexture(_device, _width, _height, DXGI_FORMAT_R8G8B8A8_UNORM, L"SynthOverlay_LayerState2");
+    _tiles[0] = CreateTexture(_device, tilesW, tilesH, DXGI_FORMAT_R8G8B8A8_UNORM, L"SynthOverlay_Tiles1");
+    _tiles[1] = CreateTexture(_device, tilesW, tilesH, DXGI_FORMAT_R8G8B8A8_UNORM, L"SynthOverlay_Tiles2");
+    _core = CreateTexture(_device, _width, _height, DXGI_FORMAT_R8_UNORM, L"SynthOverlay_LayerCore");
+
+    if (_layerState[0] == nullptr || _layerState[1] == nullptr || _tiles[0] == nullptr || _tiles[1] == nullptr ||
+        _core == nullptr)
+    {
+        for (auto** object : { &_layerState[0], &_layerState[1], &_tiles[0], &_tiles[1], &_core })
+        {
+            if (*object != nullptr)
+            {
+                _parked.push_back(*object);
+                *object = nullptr;
+            }
+        }
+
+        if (!_warnedLayerMask)
+        {
+            _warnedLayerMask = true;
+            LOG_WARN("synthesized FG HUD mask: could not allocate the UI layer's own mask ({}x{}); no UI layer", _width,
+                     _height);
+        }
+        return false;
+    }
+
+    // Nothing the new pairs hold has executed.
+    _layerValid = false;
+
+    LOG_INFO("synthesized FG HUD mask: the UI layer's own mask allocated, {}x{} ({}x{} tiles)", _width, _height, tilesW,
+             tilesH);
+    return true;
+}
+
 void Overlay_Dx12::_Park()
 {
     auto park = [this](auto*& object)
@@ -370,6 +426,12 @@ void Overlay_Dx12::_Park()
     park(_mask);
     park(_depth);
     park(_layer);
+    park(_core);
+    for (uint32_t i = 0; i < 2; ++i)
+    {
+        park(_layerState[i]);
+        park(_tiles[i]);
+    }
     park(_heap);
 
     _layerFormat = DXGI_FORMAT_UNKNOWN;
@@ -378,7 +440,11 @@ void Overlay_Dx12::_Park()
     _current = 0;
     _slot = 0;
     _valid = false;
+    _layerValid = false;
     _pending = false;
+    _pendingLayer = false;
+    _coreRecorded = false;
+    _coreTiles = nullptr;
     _layerPending = false;
     _layerWritten = false;
 }
@@ -399,6 +465,7 @@ void Overlay_Dx12::Release()
     _ReleaseParked();
 
     SafeRelease(_detectPipeline);
+    SafeRelease(_detectLayerPipeline);
     SafeRelease(_layerPipeline);
     SafeRelease(_rootSignature);
     _device = nullptr;
@@ -406,6 +473,7 @@ void Overlay_Dx12::Release()
     _failed = false;
     _warnedFormat = false;
     _warnedLayer = false;
+    _warnedLayerMask = false;
 }
 
 uint32_t Overlay_Dx12::_WriteSlot(ID3D12Resource* const* srvs, const DXGI_FORMAT* srvFormats, uint32_t srvCount,
@@ -457,11 +525,15 @@ D3D12_GPU_DESCRIPTOR_HANDLE Overlay_Dx12::_Gpu(uint32_t index) const
 }
 
 bool Overlay_Dx12::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
-                          D3D12_RESOURCE_STATES colourState, bool reset)
+                          D3D12_RESOURCE_STATES colourState, bool reset, bool layer)
 {
     // A previous recording nobody confirmed or abandoned is treated as dropped.
     if (_pending || _layerPending)
         AbandonRecording();
+
+    // Set again below when this Record computes the layer's core; a Record that stops before that leaves none.
+    _coreRecorded = false;
+    _coreTiles = nullptr;
 
     if (_failed || device == nullptr || cmdList == nullptr || colour == nullptr)
         return false;
@@ -504,13 +576,28 @@ bool Overlay_Dx12::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLi
         }
     }
 
+    // The layer's own mask: allocated on first use at this extent. Without it the layer gets nothing this frame,
+    // and the mask and depth are recorded all the same.
+    const bool withLayer = layer && _EnsureLayerMask();
+
     const uint32_t previous = _current;
     const uint32_t next = _current ^ 1u;
 
     ID3D12Resource* srvs[kSrvs] = { colour, _luma[previous], _acc[previous] };
-    const DXGI_FORMAT srvFormats[kSrvs] = { viewFormat, DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16G16_FLOAT };
+    const DXGI_FORMAT srvFormats[kSrvs] = { viewFormat, DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
+                                            DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM };
     ID3D12Resource* uavs[kUavs] = { _luma[next], _acc[next], _mask, _depth };
-    const uint32_t first = _WriteSlot(srvs, srvFormats, kSrvs, uavs, kUavs);
+    uint32_t srvCount = 3;
+    uint32_t uavCount = 4;
+    if (withLayer)
+    {
+        srvs[srvCount++] = _layerState[previous];
+        srvs[srvCount++] = _tiles[previous];
+        uavs[uavCount++] = _layerState[next];
+        uavs[uavCount++] = _tiles[next];
+        uavs[uavCount++] = _core;
+    }
+    const uint32_t first = _WriteSlot(srvs, srvFormats, srvCount, uavs, uavCount);
 
     // The frame is read through an SRV; a state without NON_PIXEL_SHADER_RESOURCE is moved there and back.
     const bool colourNeedsTransition = (colourState & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) == 0;
@@ -518,10 +605,10 @@ bool Overlay_Dx12::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLi
     D3D12_RESOURCE_BARRIER before[kUavs + 1];
     D3D12_RESOURCE_BARRIER after[kUavs + 1];
     uint32_t count = 0;
-    for (auto* uav : uavs)
+    for (uint32_t i = 0; i < uavCount; ++i)
     {
-        before[count] = Transition(uav, kRest, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        after[count] = Transition(uav, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kRest);
+        before[count] = Transition(uavs[i], kRest, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        after[count] = Transition(uavs[i], D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kRest);
         ++count;
     }
     if (colourNeedsTransition)
@@ -546,29 +633,39 @@ bool Overlay_Dx12::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLi
     constants.sidesMin = kSidesMin;
     constants.nearMin = kNearMin;
     constants.linearInput = LinearView(viewFormat) ? 1u : 0u;
+    // The layer's history holds only when the frame before this one computed it too.
+    constants.layerValid = (constants.valid != 0 && _layerValid) ? 1u : 0u;
 
     cmdList->ResourceBarrier(count, before);
 
     ID3D12DescriptorHeap* heaps[] = { _heap };
     cmdList->SetDescriptorHeaps(_countof(heaps), heaps);
     cmdList->SetComputeRootSignature(_rootSignature);
-    cmdList->SetPipelineState(_detectPipeline);
+    cmdList->SetPipelineState(withLayer ? _detectLayerPipeline : _detectPipeline);
     cmdList->SetComputeRootDescriptorTable(0, _Gpu(first));
     cmdList->SetComputeRootDescriptorTable(1, _Gpu(first + kSrvs));
     cmdList->SetComputeRoot32BitConstants(2, kRootConstants, &constants, 0);
-    cmdList->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    // One thread group per 8x8 tile: the layer's permutation writes one tile-map texel per group.
+    cmdList->Dispatch((width + kTile - 1) / kTile, (height + kTile - 1) / kTile, 1);
 
     cmdList->ResourceBarrier(count, after);
 
     _pending = true;
+    _pendingLayer = withLayer;
+    _coreRecorded = withLayer;
+    _coreTiles = withLayer ? _tiles[next] : nullptr;
     return true;
 }
 
 bool Overlay_Dx12::RecordLayer(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* presented,
-                               D3D12_RESOURCE_STATES presentedState)
+                               D3D12_RESOURCE_STATES presentedState, uint32_t margin)
 {
-    if (_failed || cmdList == nullptr || presented == nullptr || _device == nullptr || _depth == nullptr)
+    // The alpha is the core the last Record computed; one that did not ask for the layer left none to read.
+    if (_failed || cmdList == nullptr || presented == nullptr || _device == nullptr || _depth == nullptr ||
+        _core == nullptr || _coreTiles == nullptr || !_coreRecorded)
+    {
         return false;
+    }
 
     const auto desc = presented->GetDesc();
     const DXGI_FORMAT viewFormat = ColourViewFormat(desc.Format);
@@ -590,8 +687,9 @@ bool Overlay_Dx12::RecordLayer(ID3D12GraphicsCommandList* cmdList, ID3D12Resourc
     if (!_EnsureLayer(LayerFormat(viewFormat)))
         return false;
 
-    ID3D12Resource* srvs[] = { presented, _mask };
-    const DXGI_FORMAT srvFormats[] = { viewFormat, DXGI_FORMAT_R8_UNORM };
+    // With the tile map the same Record wrote, whose UL_TILE_CORE bits let a group with no core in reach skip.
+    ID3D12Resource* srvs[] = { presented, _core, _coreTiles };
+    const DXGI_FORMAT srvFormats[] = { viewFormat, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM };
     ID3D12Resource* uavs[] = { _layer };
     const uint32_t first = _WriteSlot(srvs, srvFormats, _countof(srvs), uavs, _countof(uavs));
 
@@ -613,6 +711,7 @@ bool Overlay_Dx12::RecordLayer(ID3D12GraphicsCommandList* cmdList, ID3D12Resourc
     LayerConstants constants = {};
     constants.width = _width;
     constants.height = _height;
+    constants.margin = margin < MaxLayerMargin ? margin : MaxLayerMargin;
 
     cmdList->ResourceBarrier(count, before);
 
@@ -624,7 +723,7 @@ bool Overlay_Dx12::RecordLayer(ID3D12GraphicsCommandList* cmdList, ID3D12Resourc
     cmdList->SetComputeRootDescriptorTable(0, _Gpu(first));
     cmdList->SetComputeRootDescriptorTable(1, _Gpu(first + kSrvs));
     cmdList->SetComputeRoot32BitConstants(2, kRootConstants, &constants, 0);
-    cmdList->Dispatch((_width + 7) / 8, (_height + 7) / 8, 1);
+    cmdList->Dispatch((_width + kLayerGroup - 1) / kLayerGroup, (_height + kLayerGroup - 1) / kLayerGroup, 1);
 
     cmdList->ResourceBarrier(count, after);
 
@@ -638,7 +737,9 @@ void Overlay_Dx12::ConfirmExecuted()
     {
         _current ^= 1u;
         _valid = true;
+        _layerValid = _pendingLayer;
         _pending = false;
+        _pendingLayer = false;
     }
 
     if (_layerPending)
@@ -650,7 +751,11 @@ void Overlay_Dx12::ConfirmExecuted()
 
 void Overlay_Dx12::AbandonRecording()
 {
+    // The pairs stay where they were; a core recorded on the dropped list was never written.
     _pending = false;
+    _pendingLayer = false;
+    _coreRecorded = false;
+    _coreTiles = nullptr;
     _layerPending = false;
 }
 } // namespace SynthMotion

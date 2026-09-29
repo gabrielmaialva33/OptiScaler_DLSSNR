@@ -36,6 +36,13 @@ UINT AlignUp(UINT value, UINT alignment) { return (value + alignment - 1) / alig
 
 bool MotionWanted() { return Config::Instance()->FGSynthesizedMotion.value_or_default(); }
 
+// [FrameGen] SynthesizedHudMargin: the band around the layer's own mask, read every base frame like the keys.
+uint32_t HudMargin()
+{
+    const int margin = Config::Instance()->FGSynthesizedHudMargin.value_or_default();
+    return margin > 0 ? static_cast<uint32_t>(margin) : 0u;
+}
+
 // Read every base frame, so the menu's checkboxes apply at once. Only FSR-FG composes the UI layer; DLSS-G gets
 // near depth alone (synthesized-frame-generation.md, "DLSS-G output").
 SynthHudPlan HudPlan()
@@ -535,7 +542,7 @@ bool SynthInputs::RecordLayerOnQueue(ID3D12CommandQueue* queue, ID3D12Resource* 
     return _RunOnQueue(queue,
                        [&](ID3D12Device*, ID3D12GraphicsCommandList* list)
                        {
-                           if (_overlay->RecordLayer(list, presented, presentedState))
+                           if (_overlay->RecordLayer(list, presented, presentedState, HudMargin()))
                            {
                                _layerRecorded = true;
                                return true;
@@ -589,7 +596,8 @@ bool SynthInputs::_RecordOverlayOn(ID3D12Device* device, ID3D12GraphicsCommandLi
     const bool stale = _lastOverlayMs == 0 || now - _lastOverlayMs > kMotionStaleMs;
     _lastOverlayMs = now;
 
-    if (!_overlay->Record(device, cmdList, colour, colourState, stale))
+    // The layer's own mask only when a layer is planned: the depth-only default runs the mask alone.
+    if (!_overlay->Record(device, cmdList, colour, colourState, stale, plan.layer))
     {
         if (!_reportedOverlayFailure)
         {
@@ -609,7 +617,7 @@ bool SynthInputs::_RecordOverlayOn(ID3D12Device* device, ID3D12GraphicsCommandLi
     // DLSS-NR's pass, and records the layer then (RecordLayerOnQueue).
     if (_overlayRecorded && plan.layer && presented != nullptr)
     {
-        if (_overlay->RecordLayer(cmdList, presented, presentedState))
+        if (_overlay->RecordLayer(cmdList, presented, presentedState, HudMargin()))
         {
             _layerRecorded = true;
         }

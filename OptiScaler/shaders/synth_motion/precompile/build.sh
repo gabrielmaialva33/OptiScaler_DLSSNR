@@ -42,6 +42,9 @@ build synth_motion_nvofa_prep.hlsl          SynthMotion_NvofaPrep          Synth
 build synth_motion_nvofa_expand.hlsl        SynthMotion_NvofaExpand        SynthMotion_NvofaExpand_cso
 
 # Synthesized frame generation's HUD mask and UI layer (SynthOverlay_Dx12.cpp). Ours; same flags. The mask
-# runs DLSS-NR's static-overlay rule, static_overlay_rule.h, which dlssnr_uimask.hlsl includes from here.
+# runs DLSS-NR's static-overlay rule, static_overlay_rule.h, which dlssnr_uimask.hlsl includes from here. The
+# DetectLayer permutation adds the UI layer's own mask (static_overlay_layer.h, frame generation only); the plain
+# Detect is the same source without it, and must stay the bytecode it was.
 build synth_overlay_detect.hlsl             SynthOverlay_Detect            SynthOverlay_Detect_cso
+build synth_overlay_detect.hlsl             SynthOverlay_DetectLayer       SynthOverlay_DetectLayer_cso -DSYNTH_OVERLAY_LAYER=1
 build synth_overlay_layer.hlsl              SynthOverlay_Layer             SynthOverlay_Layer_cso

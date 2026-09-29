@@ -37,7 +37,9 @@ print(f'PASS: the HUD mask\'s {len(names)} thresholds equal DLSS-NR\'s')
 # it on 2026-09-28. DLSS-NR's pass had it until its macros were renamed the same day (hud-protection.md,
 # "The mask macros: every pixel protected"); no includer is excused now.
 KNOWN_SWIZZLE_HAZARD = set()
-DEFINE = re.compile(r'^\s*#\s*define\s+(UM_\w+)\(([^)]*)\)(.*)$', re.M)
+# UM_ for the strict rule's includers, UL_ for the UI layer's own mask (static_overlay_layer.h), whose macros are
+# handed the same way.
+DEFINE = re.compile(r'^\s*#\s*define\s+(U[ML]_\w+)\(([^)]*)\)(.*)$', re.M)
 includers = [p for p in (repo / 'OptiScaler/shaders').rglob('*.hlsl')
              if 'static_overlay_rule.h' in p.read_text(errors='replace')]
 if len(includers) < 2:
@@ -70,6 +72,23 @@ if radius is None:
     print('FAIL: synth_overlay_detect.hlsl no longer defines UM_CORE_RADIUS')
     sys.exit(1)
 
+# The UI layer's widest band: the layer shader sizes its group-shared memory for UL_MAX_MARGIN, and the C++ side
+# clamps the margin to MaxLayerMargin before it gets there; the key's range is the same number. Three copies of one
+# limit drift unless something holds them together.
+layer_header = (repo / 'OptiScaler/shaders/synth_motion/precompile/static_overlay_layer.h').read_text()
+overlay_header = (repo / 'OptiScaler/shaders/synth_motion/SynthOverlay_Dx12.h').read_text()
+config_cpp = (repo / 'OptiScaler/Config.cpp').read_text()
+limits = {
+    'UL_MAX_MARGIN (static_overlay_layer.h)': re.search(r'#define\s+UL_MAX_MARGIN\s+(\d+)', layer_header),
+    'MaxLayerMargin (SynthOverlay_Dx12.h)': re.search(r'MaxLayerMargin\s*=\s*(\d+)\s*;', overlay_header),
+    'SynthesizedHudMargin range (Config.cpp)': re.search(r'FGSynthesizedHudMargin\.value\(\)\s*>\s*(\d+)', config_cpp),
+}
+if any(m is None for m in limits.values()) or len({m.group(1) for m in limits.values()}) != 1:
+    print('FAIL: the UI layer\'s widest band differs: '
+          + ', '.join(f'{k} {m.group(1) if m else "missing"}' for k, m in limits.items()))
+    sys.exit(1)
+print(f'PASS: the UI layer\'s widest band is {next(iter(limits.values())).group(1)} px everywhere')
+
 with tempfile.TemporaryDirectory(prefix='optiscaler-fg-synth-policy-') as directory:
     rule = str(Path(directory) / 'rule')
     subprocess.run(['g++', '-std=c++20', '-O1', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
@@ -78,6 +97,14 @@ with tempfile.TemporaryDirectory(prefix='optiscaler-fg-synth-policy-') as direct
                    check=True)
     print(f'rule fixtures at frame generation\'s core radius {radius.group(1)}:', flush=True)
     subprocess.run([rule], check=True)
+
+    # The UI layer's own mask (static_overlay_layer.h), its decisions on the CPU over fixtures (layer.cpp).
+    layer = str(Path(directory) / 'layer')
+    subprocess.run(['g++', '-std=c++20', '-O1', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+                    '-fno-omit-frame-pointer', '-g', '-I', str(repo / 'OptiScaler'), str(root / 'layer.cpp'), '-o',
+                    layer], check=True)
+    print('the UI layer\'s own mask:', flush=True)
+    subprocess.run([layer], check=True)
 
     binary = str(Path(directory) / 'test')
     subprocess.run(['g++', '-std=c++20', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',

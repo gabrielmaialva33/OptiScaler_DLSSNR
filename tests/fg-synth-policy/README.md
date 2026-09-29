@@ -8,7 +8,9 @@ them touches the GPU, so nothing is faked beyond two empty `ID3D12Device` / `ID3
 
 Before compiling, `run.py` also holds the HUD mask's thresholds (`shaders/synth_motion/SynthOverlay_Dx12.cpp`)
 equal to DLSS-NR's (`shaders/dlssnr/DlssNr_UiMask_Dx12.cpp`), which they copy: one rule, one set of
-thresholds, two passes.
+thresholds, two passes. It holds the UI layer's widest band equal in its three places (`UL_MAX_MARGIN`, which
+sizes the layer shader's group-shared memory; `MaxLayerMargin`, the C++ clamp; the key's range in `Config.cpp`),
+and refuses a swizzle-named macro parameter in either rule's includers (`UM_` and `UL_` macros).
 
 ## What it exercises
 
@@ -78,9 +80,27 @@ thresholds, two passes.
     equals `hudDepth && motion` whatever the output, and the layer equals
     `hudLayer && !disableUi && layerComposed`.
 
+- **The UI layer's own mask** (`layer.cpp`, a second binary). It runs
+  `shaders/synth_motion/precompile/static_overlay_layer.h`, the decisions of the detect shader's
+  `SYNTH_OVERLAY_LAYER` permutation, on the CPU: the shader's structure (8x8 tiles, the group's tile tests on last
+  frame's tile map, the per-pixel state, this frame's tile map stored in 8 bits) and nothing else. Design:
+  "The HUD layer's own mask: recall and a margin". Where a fixture is for a false positive, it also runs with the
+  gate that stops it switched off, and asserts that then something is seeded, so the fixture tests something.
+  - a glyph and a 1 px hollow frame with a drop shadow over a pan: nothing before the still count, then every
+    pixel of both, outlines and shadows included, and nothing of the scene;
+  - a glyph that vanishes: its pixels leave the core on that frame;
+  - sand beside a swaying coat, a concave gap between legs, and a moving patch, each with a still camera: nothing;
+    with one moving side enough and no camera gate, the still scene is seeded;
+  - a straight stripe running along a pan (the aperture case): nothing; without the orientation test, seeded;
+  - sparse rain over a still scene: nothing;
+  - the GPU harness's own texture panning (1, 0), (0, 1), (4, 0), (3, 2), and at the cut's gain 0.35: nothing. The
+    darker one, from the crop where the first GPU run seeded it, seeds when the orientation is taken against
+    moving neighbours too;
+  - units: the band's weight, the orientation of lines and diagonals, the side reach at 192 to 2160 lines.
+
 ## What it does not cover
 
-- The GPU side: the copy of the rows into the readback, the estimator, the HUD mask's pixels
+- The GPU side: the copy of the rows into the readback, the estimator, the HUD mask's pixels, the layer's band
   (`tests/synth-motion-d3d12` runs those on a GPU), FSR-FG's or DLSS-G's reaction to Reset, depth or a UI
   layer, and the bridge and D3D12 call sites (`tests/bridge-lifetime` covers the bridge's calls with fakes).
 - Anything about image quality.
@@ -88,4 +108,5 @@ thresholds, two passes.
   10 s summary in the log.
 
 Design: `OptiScaler/dlssnr/design/synthesized-frame-generation.md`, "Motion into FG, and emulator
-behaviour", "Coherence, not speed" and "The HUD: near depth and a UI layer".
+behaviour", "Coherence, not speed", "The HUD: near depth and a UI layer" and "The HUD layer's own mask:
+recall and a margin".

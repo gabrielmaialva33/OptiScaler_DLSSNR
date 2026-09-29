@@ -235,6 +235,10 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGSynthesizedMinFps.set_from_config(readFloat("FrameGen", "SynthesizedMinFps"));
             FGSynthesizedHudDepth.set_from_config(readBool("FrameGen", "SynthesizedHudDepth"));
             FGSynthesizedHudLayer.set_from_config(readBool("FrameGen", "SynthesizedHudLayer"));
+            FGSynthesizedHudMargin.set_from_config(readInt("FrameGen", "SynthesizedHudMargin"));
+            if (FGSynthesizedHudMargin.has_value() &&
+                (FGSynthesizedHudMargin.value() < 0 || FGSynthesizedHudMargin.value() > 24))
+                FGSynthesizedHudMargin.reset();
             FGRectLeft.set_from_config(readInt("FrameGen", "RectLeft"));
             FGRectTop.set_from_config(readInt("FrameGen", "RectTop"));
             FGRectWidth.set_from_config(readInt("FrameGen", "RectWidth"));
@@ -1166,6 +1170,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FGSynthesizedHudDepth.value_for_config()).c_str());
         ini.SetValue("FrameGen", "SynthesizedHudLayer",
                      GetBoolValue(Instance()->FGSynthesizedHudLayer.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "SynthesizedHudMargin",
+                     GetIntValue(Instance()->FGSynthesizedHudMargin.value_for_config()).c_str());
         ini.SetValue("FrameGen", "RectLeft", GetIntValue(Instance()->FGRectLeft.value_for_config()).c_str());
         ini.SetValue("FrameGen", "RectTop", GetIntValue(Instance()->FGRectTop.value_for_config()).c_str());
         ini.SetValue("FrameGen", "RectWidth", GetIntValue(Instance()->FGRectWidth.value_for_config()).c_str());

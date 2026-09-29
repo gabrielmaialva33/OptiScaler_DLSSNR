@@ -3648,6 +3648,21 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                                             "UI texture\" is on"));
             ImGui::EndDisabled();
 
+            // The band around the layer's own mask (synthesized-frame-generation.md, "The HUD layer's own mask:
+            // recall and a margin"). Only the layer uses it.
+            ImGui::BeginDisabled(!hudLayer || config->FGDisableUI.value_or_default() ||
+                                 state.activeFgOutput != FGOutput::FSRFG);
+            int hudMargin = config->FGSynthesizedHudMargin.value_or_default();
+            if (ImGui::SliderInt(Localization::Label("HUD margin"), &hudMargin, 0, 24, "%d px",
+                                 ImGuiSliderFlags_AlwaysClamp))
+                config->FGSynthesizedHudMargin = hudMargin;
+            ShowHelpMarker(Localization::Tr("How far around the detected HUD, in pixels, generated frames show\n"
+                                            "the real frame, to cover the smear beside each element; the outer\n"
+                                            "half fades out. It covers the smear fully up to this many pixels of\n"
+                                            "motion per base frame. Around the HUD the background then moves at\n"
+                                            "the base frame rate. 0 is the detected HUD alone"));
+            ImGui::EndDisabled();
+
             ImGui::PopItemWidth();
         }
 

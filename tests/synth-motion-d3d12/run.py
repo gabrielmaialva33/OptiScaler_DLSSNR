@@ -103,13 +103,40 @@ NVOFA_SHADERS = ('SynthMotion_NvofaPrep_Shader.h', 'SynthMotion_NvofaExpand_Shad
 #                        frame) and 0.21/0.30 (3, 2) measured on 2026-09-28. The panel is reported only: a
 #                        flat 208x76 panel is marked nowhere, its interior never sees motion on four sides
 #                        (hud-protection.md, "What it costs in recall"). overlay_* is too short for recall
-#   GPU time             of the mask plus its layer, reported, never judged
+#   GPU time             of the mask alone, and of the mask with the layer's own and the layer pass, reported,
+#                        never judged
 # HUD_FROM: t=0 has no previous frame, the rule's 8-frame entry streak protects from t=8, and the export,
 # which reads last frame's protection, shows it from t=9; t=10 leaves one frame of margin.
+#
+# The UI layer's own mask ("The HUD layer's own mask: recall and a margin" in synthesized-frame-generation.md), on
+# every sequence but overlay_* (which run the mask alone, the default) and the first half of each timing sequence:
+#   exact                on every frame it ran: the layer's rgb is the frame's; its alpha is the core dilated at
+#                        the default margin on the CPU, within one step, and never under the strict mask; the core
+#                        is never under the strict mask
+#   no scenery           pans, the moving object, static, cut and abandon: not one pixel of core or alpha
+#   precision            hud_*, from HUD_FROM: at least LAYER_PRECISION of the core within 1 px of the overlay
+#   recall               hud_*, mean over t >= HUD_STEADY: the share of each element's pixels in the core, the
+#                        glass's opaque parts only (its fill is the scene behind it, never still). Floors under what
+#                        was measured on 2026-09-29 (100% of each, 93% of the glass's opaque parts), where the
+#                        strict mask has none of the frame, the panel or the glass
+#   smear                hud_*, same frames: the mean alpha over the smear set (the background whose sample at half
+#                        the pan lands on the overlay) at LAYER_MARGIN, at least LAYER_MIN_SMEAR: of all of it, and of
+#                        the part beside each element (by the element its sample lands on)
+#   reported             per element and part (stroke, outline, fill) the strict mask, core and alpha; the rings
+#                        1-2 .. 25+ px from the overlay, the smear set and the held background, old (the strict
+#                        mask as alpha) against new; a sweep of margins dilated on the CPU from the core
 HUD_FROM = 10
 HUD_STEADY = 30
 HUD_PRECISION = 0.99
 HUD_MIN_RECALL = {'crosshair': 0.10, 'text': 0.15}
+LAYER_MARGIN = 16  # harness.cpp's kLayerMargin, [FrameGen] SynthesizedHudMargin's default (checked below)
+LAYER_PRECISION = 0.99
+LAYER_MIN_RECALL = {'crosshair': 0.95, 'text': 0.95, 'frame': 0.95, 'panel': 0.95, 'glass': 0.85}
+# The smear set beside each element (by the element the half-pan sample lands on), and all of it. The glass is under
+# its floor on purpose: its 1 px border has no still neighbour to contrast with (the scene outside, its own fill
+# inside, both move), so it seeds only near the glass's text and grows 48 px along itself from there.
+LAYER_MIN_SMEAR = {'crosshair': 0.95, 'text': 0.95, 'frame': 0.95, 'panel': 0.95, 'glass': 0.60, 'all': 0.90}
+RINGS = ('1-2', '3-4', '5-8', '9-16', '17-24', '25+')
 PAN_SMALL = dict(epe=1.0, within=0.90)
 PAN_LARGE = dict(epe=2.0, within=0.80)
 STATIC = dict(epe=0.25, within=0.99)
@@ -150,7 +177,20 @@ def nvofa_unavailable():
 
 
 def estimator_sources():
-    return sorted(ESTIMATOR.glob('*.cpp')), sorted(ESTIMATOR.glob('*.h')) + sorted((ESTIMATOR / 'precompile').glob('*_Shader*.h'))
+    precompile = ESTIMATOR / 'precompile'
+    return (sorted(ESTIMATOR.glob('*.cpp')),
+            sorted(ESTIMATOR.glob('*.h')) + sorted(precompile.glob('*_Shader*.h')) + sorted(precompile.glob('static_overlay_*.h')))
+
+
+def check_layer_margin():
+    # The harness dilates at its kLayerMargin; that is only the shipped default while it equals Config.h's.
+    import re
+    harness = re.search(r'constexpr uint32_t kLayerMargin = (\d+);', (HERE / 'harness.cpp').read_text())
+    config = re.search(r'CustomOptional<int> FGSynthesizedHudMargin \{ (\d+) \};', (ROOT / 'OptiScaler/Config.h').read_text())
+    if harness is None or config is None:
+        raise RuntimeError('cannot find kLayerMargin in harness.cpp or FGSynthesizedHudMargin in Config.h')
+    if not int(harness.group(1)) == int(config.group(1)) == LAYER_MARGIN:
+        raise RuntimeError(f'layer margin drift: harness {harness.group(1)}, Config.h {config.group(1)}, run.py {LAYER_MARGIN}')
 
 
 def sources():
@@ -454,21 +494,35 @@ def judge(report):
 
 
 def judge_hud(report):
-    """Synthesized FG's HUD mask: exactness everywhere, no scenery marked, precision and recall on overlay_*."""
+    """Synthesized FG's HUD mask and the UI layer's own: exactness everywhere, no scenery marked, precision and
+    recall on overlay_* and hud_*, the band on hud_*."""
     failures, summary = [], {'sequences': {}, 'timing': {}}
 
     def check(cond, message):
         if not cond:
             failures.append(message)
 
+    def share(num, den):
+        return num / den if den else float('nan')
+
     scored_any = False
+    layer_any = False
     for s in report['sequences']:
         frames = [f for f in s['frames'] if f.get('hud') and not f['abandoned']]
         if s['timing_only']:
-            ms = sorted(f['hud_gpu_ms'] for f in s['frames'] if f['t'] >= SCORED_FROM and f.get('hud_gpu_ms', 0) > 0)
-            summary['timing'][s['name']] = {'width': s['width'], 'height': s['height'],
-                                            'median_ms': ms[len(ms) // 2] if ms else None,
-                                            'p90_ms': ms[int(len(ms) * 0.9)] if ms else None}
+            half = len(s['frames']) // 2
+            def median(values):
+                values = sorted(v for v in values if v > 0)
+                return values[len(values) // 2] if values else None
+            off = [f for f in s['frames'] if SCORED_FROM <= f['t'] < half]
+            on = [f for f in s['frames'] if f['t'] >= half + SCORED_FROM]
+            summary['timing'][s['name']] = {
+                'width': s['width'], 'height': s['height'],
+                'mask_only_ms': median([f['hud_detect_ms'] for f in off]),
+                'layer_mask_ms': median([f['hud_detect_ms'] for f in on]),
+                'layer_pass_ms': median([f['hud_layer_pass_ms'] for f in on]),
+                'layer_total_ms': median([f['hud_gpu_ms'] for f in on]),
+            }
             continue
         check(len(frames) >= MIN_READY, f'{s["name"]}: HUD mask scored on only {len(frames)} frames')
         scored_any = scored_any or bool(frames)
@@ -477,14 +531,29 @@ def judge_hud(report):
             check(h['depth_not_binary'] == 0, f'{s["name"]} t={f["t"]}: {h["depth_not_binary"]} depth values neither 0 nor 1')
             check(h['depth_mask_mismatch'] == 0, f'{s["name"]} t={f["t"]}: depth disagrees with the mask at '
                                                  f'{h["depth_mask_mismatch"]} pixels')
-            check(h['layer_checked'] and h['layer_mismatch'] == 0,
-                  f'{s["name"]} t={f["t"]}: UI layer differs from the frame and mask at {h["layer_mismatch"]} pixels')
+            if not h['layer']:
+                continue
+            layer_any = True
+            check(h['layer_rgb_mismatch'] == 0, f'{s["name"]} t={f["t"]}: the UI layer\'s rgb differs from the frame at '
+                                                f'{h["layer_rgb_mismatch"]} pixels')
+            check(h['alpha_band_mismatch'] == 0, f'{s["name"]} t={f["t"]}: the UI layer\'s alpha is more than one step from '
+                                                 f'the core dilated at the default margin at {h["alpha_band_mismatch"]} '
+                                                 f'pixels (up to {h["alpha_band_max_diff"]})')
+            check(h['alpha_below_mask'] == 0, f'{s["name"]} t={f["t"]}: the UI layer\'s alpha is under the strict mask at '
+                                              f'{h["alpha_below_mask"]} pixels')
+            check(h['core_below_mask'] == 0, f'{s["name"]} t={f["t"]}: the layer core is under the strict mask at '
+                                             f'{h["core_below_mask"]} pixels')
 
         is_hud = s['name'].startswith('hud_')
         if not (is_hud or s['name'].startswith('overlay_')):
             marked = [(f['t'], f['hud']['marked']) for f in frames if f['hud']['marked'] > 0]
             check(not marked, f'{s["name"]}: scenery marked as HUD (t, pixels): {marked}')
-            summary['sequences'][s['name']] = {'marked_total': sum(f['hud']['marked'] for f in frames)}
+            held = [(f['t'], f['hud']['core_nonzero'], f['hud']['alpha_nonzero']) for f in frames
+                    if f['hud']['layer'] and (f['hud']['core_nonzero'] or f['hud']['alpha_nonzero'])]
+            check(not held, f'{s["name"]}: scenery in the UI layer (t, core pixels, alpha pixels): {held}')
+            summary['sequences'][s['name']] = {'marked_total': sum(f['hud']['marked'] for f in frames),
+                                               'layer_total': sum(f['hud'].get('alpha_nonzero', 0) for f in frames),
+                                               'layer_frames': sum(1 for f in frames if f['hud']['layer'])}
             continue
 
         late = [f for f in frames if f['t'] >= HUD_FROM]
@@ -501,10 +570,12 @@ def judge_hud(report):
               f'{marked - grown} pixels of scenery marked over {len(late)} frames')
 
         steady = [f for f in frames if f['t'] >= HUD_STEADY] if is_hud else late
+        elements = list(steady[0]['hud']['overlay_pixels']) if steady else []
         recall = {}
-        for e in OVERLAY_ELEMENTS:
+        for e in elements:
             pixels = sum(f['hud']['overlay_pixels'][e] for f in steady)
-            recall[e] = sum(f['hud']['overlay_marked'][e] for f in steady) / pixels if pixels else float('nan')
+            if pixels:
+                recall[e] = sum(f['hud']['overlay_marked'][e] for f in steady) / pixels
         pixels_all = sum(sum(f['hud']['overlay_pixels'].values()) for f in steady)
         on_steady = sum(f['hud']['marked_overlay'] for f in steady)
         recall_all = on_steady / pixels_all if pixels_all else float('nan')
@@ -512,14 +583,95 @@ def judge_hud(report):
             check(len(steady) >= 5, f'{s["name"]}: only {len(steady)} HUD frames from t={HUD_STEADY}')
             check(marked > 0, f'{s["name"]}: the HUD mask marked nothing from t={HUD_FROM}')
             for e, minimum in HUD_MIN_RECALL.items():
-                check(recall[e] >= minimum, f'{s["name"]}: HUD mask recall on the {e} {recall[e]:.3f} < {minimum} '
-                                            f'(mean over t>={HUD_STEADY})')
-        summary['sequences'][s['name']] = {
+                check(recall.get(e, 0.0) >= minimum, f'{s["name"]}: HUD mask recall on the {e} {recall.get(e, 0.0):.3f} '
+                                                     f'< {minimum} (mean over t>={HUD_STEADY})')
+        entry = {
             'frames': len(late), 'marked_per_frame': marked / len(late), 'precision_within_1px': precision,
             'precision_on_overlay': strict, 'scenery_marked_total': marked - grown, 'recall': recall,
             'recall_all': recall_all, 'recall_from': HUD_STEADY if is_hud else HUD_FROM, 'recall_judged': is_hud,
         }
+
+        # The UI layer's own mask: per element and part, the strict mask (the old layer's alpha), the core and the
+        # new alpha; the band's rings, the smear set and what is held, old against new; the margin sweep.
+        layered = [f for f in steady if f['hud']['layer']]
+        if is_hud:
+            check(len(layered) >= 5, f'{s["name"]}: the UI layer\'s mask ran on only {len(layered)} frames from '
+                                     f't={HUD_STEADY}')
+        if layered:
+            parts = {}
+            for e in elements:
+                for part in ('stroke', 'outline', 'fill'):
+                    px = sum(f['hud']['part_pixels'][e][part] for f in layered)
+                    if not px:
+                        continue
+                    parts[f'{e}/{part}'] = {
+                        'pixels': px // len(layered),
+                        'strict': share(sum(f['hud']['part_strict'][e][part] for f in layered), px),
+                        'core': share(sum(f['hud']['part_core'][e][part] for f in layered), px),
+                        'alpha': share(sum(f['hud']['part_alpha'][e][part] for f in layered), px),
+                        'old_alpha': share(sum(f['hud']['part_mask'][e][part] for f in layered), px),
+                    }
+
+            def element_recall(e, key, skip=()):
+                px = sum(f['hud']['part_pixels'][e][p] for f in layered for p in ('stroke', 'outline', 'fill')
+                         if p not in skip)
+                hit = sum(f['hud'][key][e][p] for f in layered for p in ('stroke', 'outline', 'fill') if p not in skip)
+                return share(hit, px)
+
+            # The glass's fill is never still: it is the scene behind, darkened. Its recall is its opaque parts'.
+            layer_recall = {e: element_recall(e, 'part_core', ('fill',) if e == 'glass' else ()) for e in elements}
+            core_marked = sum(f['hud']['core_marked'] for f in late if f['hud']['layer'])
+            core_grown = sum(f['hud']['core_grown'] for f in late if f['hud']['layer'])
+            core_precision = share(core_grown, core_marked)
+            rings = [{'ring': RINGS[r],
+                      'pixels': sum(f['hud']['ring_pixels'][r] for f in layered) // len(layered),
+                      'alpha': share(sum(f['hud']['ring_alpha'][r] for f in layered),
+                                     sum(f['hud']['ring_pixels'][r] for f in layered)),
+                      'old_alpha': share(sum(f['hud']['ring_mask'][r] for f in layered),
+                                         sum(f['hud']['ring_pixels'][r] for f in layered))}
+                     for r in range(len(RINGS))]
+            smear_px = sum(f['hud']['smear_pixels'] for f in layered)
+            smear = share(sum(f['hud']['smear_alpha'] for f in layered), smear_px)
+            smear_by = {e: share(sum(f['hud']['smear_element_alpha'][e] for f in layered),
+                                 sum(f['hud']['smear_element_pixels'][e] for f in layered)) for e in elements}
+            old_smear = share(sum(f['hud']['smear_mask'] for f in layered), smear_px)
+            held = sum(f['hud']['held_alpha'] for f in layered) / len(layered)
+            old_held = sum(f['hud']['held_mask'] for f in layered) / len(layered)
+            swept = [f for f in layered if f['hud'].get('swept')]
+            sweep = []
+            if swept:
+                for k, row in enumerate(swept[0]['hud']['sweep']):
+                    sweep.append({
+                        'margin': row['margin'],
+                        'smear': share(sum(f['hud']['sweep'][k]['smear'] for f in swept), smear_px * len(swept) / len(layered)),
+                        'held_per_frame': sum(f['hud']['sweep'][k]['held'] for f in swept) / len(swept),
+                        'rings': [share(sum(f['hud']['sweep'][k]['rings'][r] for f in swept),
+                                        sum(f['hud']['ring_pixels'][r] for f in swept)) for r in range(len(RINGS))],
+                    })
+            if is_hud:
+                check(core_marked > 0, f'{s["name"]}: the UI layer\'s core is empty from t={HUD_FROM}')
+                check(core_precision >= LAYER_PRECISION,
+                      f'{s["name"]}: layer core precision {core_precision:.4f} (within 1 px of the overlay) < '
+                      f'{LAYER_PRECISION}; {core_marked - core_grown} pixels of scenery in it')
+                for e, minimum in LAYER_MIN_RECALL.items():
+                    check(layer_recall.get(e, 0.0) >= minimum,
+                          f'{s["name"]}: layer core recall on the {e} {layer_recall.get(e, 0.0):.3f} < {minimum} '
+                          f'(mean over t>={HUD_STEADY})')
+                check(smear >= LAYER_MIN_SMEAR['all'], f'{s["name"]}: the UI layer covers {smear:.3f} of the smear '
+                                                       f'set, < {LAYER_MIN_SMEAR["all"]} (margin {LAYER_MARGIN})')
+                for e, minimum in LAYER_MIN_SMEAR.items():
+                    if e != 'all':
+                        check(smear_by.get(e, 0.0) >= minimum,
+                              f'{s["name"]}: the UI layer covers {smear_by.get(e, 0.0):.3f} of the smear set beside '
+                              f'the {e}, < {minimum} (margin {LAYER_MARGIN})')
+            entry['layer'] = {'core_precision_within_1px': core_precision, 'core_scenery_total': core_marked - core_grown,
+                              'recall': layer_recall, 'parts': parts, 'rings': rings, 'smear': smear,
+                              'smear_by_element': smear_by,
+                              'old_smear': old_smear, 'held_per_frame': held, 'old_held_per_frame': old_held,
+                              'sweep': sweep, 'margin': LAYER_MARGIN}
+        summary['sequences'][s['name']] = entry
     check(scored_any, 'ZERO COVERAGE: the HUD mask was never scored')
+    check(layer_any, 'ZERO COVERAGE: the UI layer\'s own mask was never scored')
     return failures, summary
 
 
@@ -603,9 +755,31 @@ def report_judgement(manifest, source):
                   + ', '.join(f'{e} {v * 100:.1f}%' for e, v in h['recall'].items())
                   + f', all {h["recall_all"] * 100:.1f}%')
         else:
-            print(f'  {name}: {h["marked_total"]} px marked over all frames')
+            print(f'  {name}: {h["marked_total"]} px marked over all frames; UI layer: {h["layer_total"]} alpha px over '
+                  f'{h["layer_frames"]} frames')
+    for name, h in hud['sequences'].items():
+        L = h.get('layer')
+        if not L:
+            continue
+        print(f'\nUI layer\'s own mask, {name} (margin {L["margin"]}; from t={HUD_STEADY}; old = the strict mask as alpha):')
+        print(f'  core precision {L["core_precision_within_1px"] * 100:.2f}% within 1 px of the overlay, '
+              f'{L["core_scenery_total"]} scenery px; core recall '
+              + ', '.join(f'{e} {v * 100:.1f}%' for e, v in L['recall'].items()))
+        print(f'  {"element/part":<18} {"px":>6} {"strict":>8} {"core":>8} {"alpha":>8} {"old alpha":>10}')
+        for key, v in L['parts'].items():
+            print(f'  {key:<18} {v["pixels"]:>6} {v["strict"] * 100:>7.1f}% {v["core"] * 100:>7.1f}% '
+                  f'{v["alpha"] * 100:>7.1f}% {v["old_alpha"] * 100:>9.1f}%')
+        print('  background rings (mean alpha, new / old): '
+              + ', '.join(f'{r["ring"]} px {r["alpha"] * 100:.1f}% / {r["old_alpha"] * 100:.1f}%' for r in L['rings']))
+        print(f'  smear set: {L["smear"] * 100:.1f}% covered (old {L["old_smear"] * 100:.1f}%; by element '
+              + ', '.join(f'{e} {v * 100:.1f}%' for e, v in L['smear_by_element'].items())
+              + f'); held background {L["held_per_frame"]:.0f} px per frame (old {L["old_held_per_frame"]:.0f})')
+        for row in L['sweep']:
+            print(f'    margin {row["margin"]:>2}: smear {row["smear"] * 100:5.1f}%, held {row["held_per_frame"]:7.0f} px, rings '
+                  + ' '.join(f'{v * 100:5.1f}%' for v in row['rings']))
     for name, t in hud['timing'].items():
-        print(f'  timing {name}: {t["width"]}x{t["height"]} mask + layer median {t["median_ms"]} ms, p90 {t["p90_ms"]} ms ({clock})')
+        print(f'  timing {name}: {t["width"]}x{t["height"]} mask alone {t["mask_only_ms"]} ms; with the layer: mask '
+              f'{t["layer_mask_ms"]} ms + layer pass {t["layer_pass_ms"]} ms = {t["layer_total_ms"]} ms (medians, {clock})')
     for n in notes:
         print('note: ' + n)
 
@@ -636,6 +810,7 @@ def main():
     if args.build_only and args.run_only:
         ap.error('choose at most one mode')
     OUT.mkdir(exist_ok=True)
+    check_layer_margin()
     if args.judge_only:
         report_judgement(json.loads((OUT / 'manifest.json').read_text()), args.source)
         return

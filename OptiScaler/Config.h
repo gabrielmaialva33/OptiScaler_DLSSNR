@@ -896,6 +896,9 @@ class Config
     // layer. See synthesized-frame-generation.md, "The HUD: near depth and a UI layer".
     CustomOptional<bool> FGSynthesizedHudDepth { true };
     CustomOptional<bool> FGSynthesizedHudLayer { false };
+    // With FGSynthesizedHudLayer: the band around the detected HUD that the layer shows from the real frame, in px,
+    // 0..24, its outer half feathered. See synthesized-frame-generation.md, "The HUD layer's own mask".
+    CustomOptional<int> FGSynthesizedHudMargin { 16 };
     CustomOptional<int> FGAllowedFrameAhead { 1 };
     CustomOptional<bool> FGDepthValidNow { false };
     CustomOptional<bool> FGVelocityValidNow { false };

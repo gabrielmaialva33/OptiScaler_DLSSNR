@@ -629,7 +629,7 @@ SynthesizedFastMotion=64
 SynthesizedMinFps=20
 ```
 
-Two more keys handle the HUD, which a title with no upscaler never hands over separately. Both detect
+Three more keys handle the HUD, which a title with no upscaler never hands over separately. They detect
 it from the frames: a pixel that stays still while the scene around it moves is taken for interface.
 Design: "The HUD: near depth and a UI layer" in the note above.
 
@@ -645,10 +645,20 @@ SynthesizedHudDepth=true
 ; DisableUI=true.
 ; true or false - Default (auto) is false
 SynthesizedHudLayer=true
+
+; With SynthesizedHudLayer. How far around the detected HUD, in pixels, generated frames show the real
+; frame, which covers the smear FG leaves beside each element; the outer half fades out. A margin covers
+; the smear fully up to that many pixels of motion per base frame. The cost: around the HUD the background
+; moves at the base frame rate. 0 is the detected HUD alone.
+; 0 to 24 - Default (auto) is 16
+SynthesizedHudMargin=16
 ```
 
-A HUD over a still scene is never detected, and large solid panels are detected at their inner outlined
-edges only; crosshairs, text and thin lines are what these cover.
+A HUD over a still scene is never detected. Near depth takes the pixels that stay still while the scene
+moves on every side of them: crosshairs, text and the outlined edges of panels. The layer takes more,
+with a detection of its own: 1 px outlines and drop shadows, thin frames and bars, and panel fills, grown
+from those. A translucent panel's fill is never taken, only its opaque border and text, and the margin
+around them. Design: "The HUD layer's own mask: recall and a margin" in the note above.
 
 FSR FG generates one frame per base frame; fractional multipliers aimed at a target rate are not
 available with it. An emulator that presents every frame twice cannot be smoothed by interpolation
