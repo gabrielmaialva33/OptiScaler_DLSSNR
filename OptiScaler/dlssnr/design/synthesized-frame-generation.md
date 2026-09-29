@@ -961,7 +961,9 @@ game-vector field's depth priority (top middle) and the disocclusion mask (botto
 
 ## The HUD layer's own mask: recall and a margin
 
-Written 2026-09-29, before the code, on branch `synth-hud-layer-recall`, against `0914ca4f`.
+Written 2026-09-29, before the code, on branch `synth-hud-layer-recall`, against `0914ca4f`; built and measured
+the same day, see [Built and measured](#built-and-measured-2026-09-29), which also says what the build changed.
+The text below is the design as built.
 
 **What was seen.** Generation Zero, FSR-FG, `SynthesizedHudDepth=true` and `SynthesizedHudLayer=true`: the HUD
 still smears while the camera turns.
@@ -994,16 +996,20 @@ D-map work do the same three things:
 ### The layer's mask, in three steps
 
 1. **Seeds**, per pixel. A pixel is a seed while all of these hold:
-   - it has been still for at least K = 8 frames in a row. Still means its luma changed by less than 0.012
-     from the frame before. A count of still frames is the "|I_t - I_{t-k}| small for k = 1, 2, 4" test in
-     cumulative form. Eight still frames bound the change against every one of the last eight frames, at one
-     8-bit channel of state instead of three frames of luma history;
+   - it has been still for at least K = 8 frames in a row: within 0.012 of its anchor, the luma it had when the
+     still run began. That is the "|I_t - I_{t-k}| small for k = 1, 2, 4" test for every k up to the run's
+     length, any two frames of the run within twice 0.012 of each other, at two 8-bit channels of state (the
+     count and the anchor) instead of three frames of luma history. *Changed while building it:* the plan
+     compared each frame with the one before, which lets a slow drift through;
    - it has contrast: 0.15 against a 4-neighbour, the strict rule's figure;
-   - **the scene moves on all four axis sides within R.** R is about a sixth of the frame's height (120 px at
-     720p, 240 px at 1440p), read from a tile map (below). That is the strict rule's own reach of 24 px, made
-     large enough to span a panel;
+   - **the scene moves on at least three of the four axis sides within R.** R is about a sixth of the frame's
+     height (120 px at 720p, 240 px at 1440p), read from a tile map (below). That is the strict rule's own reach
+     of 24 px, made large enough to span a panel. *Changed while building it:* the plan said all four, which
+     seeds only the middle of a panel wider than R;
    - **two perpendicular orientations of static structure** within the surrounding 5x5 tiles, about 20 px:
-     horizontal and vertical edges, or both diagonals;
+     horizontal and vertical edges, or both diagonals. One orientation per pixel, the direction it changes least
+     along, and only against neighbours that are steady too: static structure is still on both sides of its
+     edge. *Both added while building it;*
    - **the camera moves**: at least half of the textured tiles are moving, from 256 tiles sampled over the frame.
 
    A seed stays one for 90 frames (1.5 s, the strict decay) while it stays still, and drops at once when it
@@ -1030,7 +1036,7 @@ D-map work do the same three things:
 - every straight scenery edge that runs along the motion. That is the aperture problem: strafe along a wall,
   and its skirting line stays still on screen while the wall around it moves.
 
-Each seed then holds a ring of moving scenery. Four sides, two orientations and a moving camera answer both:
+Each seed then holds a ring of moving scenery. Three sides, two orientations and a moving camera answer both:
 - the patch has motion on one side only, and with a still camera the camera gate is closed anyway;
 - the skirting line has one orientation only;
 - HUD elements have both: crosshair arms, glyph strokes, the corners of frames and panels;
@@ -1041,22 +1047,23 @@ Each seed then holds a ring of moving scenery. Four sides, two orientations and 
 - **The detect pass gets a second permutation.** `SynthOverlay_DetectLayer` is compiled from the same source
   with `SYNTH_OVERLAY_LAYER=1`, and runs only with the layer on. With the layer off the pass is today's bytecode
   and nothing new is allocated, so the depth-only default costs and produces exactly what it did.
-- **A tile map.** Each 8x8 thread group writes one RGBA8 texel per frame:
-  - the share of its pixels that moved (luma change above 0.02, the strict rule's figure);
-  - the share that is textured (4-neighbour contrast above 0.04);
-  - the orientations of its static structure.
+- **A tile map.** Each 8x8 thread group writes one RGBA8 texel per frame, all counts, exact in 8 bits:
+  - its pixels that moved (luma change above 0.02, the strict rule's figure); the tile moves when half do;
+  - its pixels that are textured (4-neighbour contrast above 0.04); the tile is textured when a quarter are;
+  - the orientations of its static structure, and whether it holds some of the layer's core;
+  - its pixels inside the image.
 
   The next frame reads it, so the side scan, the orientation test and the camera gate are a frame late. The
   camera turns continuously, and a seed already holds for 1.5 s, so the lag costs one frame when motion starts.
-- **The per-pixel state** is one RGBA8 texel: still frames, hold, grown distance. It is a ping-pong pair
+- **The per-pixel state** is one RGBA8 texel: still frames, hold, grown distance, anchor. It is a ping-pong pair
   beside the strict rule's, advanced by the same confirm and abandon.
 - **The rule is a header**, `precompile/static_overlay_layer.h`, as `static_overlay_rule.h` is. The shader and a
   host test run the same decisions. `static_overlay_rule.h` and DLSS-NR's pass are not touched, so NR's bytecode
   stays byte-identical by construction.
 - **The layer pass does the band.** It keeps its place (after DLSS-NR's pass on native D3D12, on the copy list
   on the bridge). It reads the core with an apron into group-shared memory and runs a separable max filter:
-  16x16 groups, at most 26 KB of group-shared memory at the 24 px cap, which is under D3D12's 32 KB. A group
-  whose apron holds no core skips the filter.
+  16x16 groups, about 20 KB of group-shared memory at the 24 px cap, which is under D3D12's 32 KB. A group whose
+  apron reaches no tile with core in it, by the tile map the same Record wrote, loads nothing more.
 - **Memory**, with the layer on only, at 3440x1440: about 40 MB for the state pair, 5 MB for the core, and
   under 1 MB for the tiles.
 
@@ -1107,6 +1114,138 @@ Each seed then holds a ring of moving scenery. Four sides, two orientations and 
   - a straight edge along the motion;
   - a still scene with rain;
   - a moving patch over a still scene.
+
+### Built and measured (2026-09-29)
+
+**Code.**
+- `precompile/static_overlay_layer.h`: the rule, shared by the shader and the host test.
+- `synth_overlay_detect.hlsl`: the `SYNTH_OVERLAY_LAYER` permutation, `SynthOverlay_DetectLayer`. The plain
+  permutation compiles to the committed `SynthOverlay_Detect.cso`, byte for byte, checked by recompiling.
+- `synth_overlay_layer.hlsl`: the band.
+- `SynthMotion::Overlay_Dx12`: `Record(..., layer)`, `RecordLayer(..., margin)`, `LayerCore()`.
+- `SynthInputs`: the layer's mask only when a layer is planned; the margin read every base frame.
+- `[FrameGen] SynthesizedHudMargin`, 0 to 24, default 16, with a menu slider under "HUD layer".
+- `static_overlay_rule.h` and every DLSS-NR file are untouched, so NR's bytecode is the same by construction.
+
+**What the build changed, and why.** Each change came from a measurement.
+- **One orientation per pixel.** Each diagonal tested on its own gave a straight stripe running along a pan both
+  diagonals, because beside a straight edge the diagonal neighbours lie in whatever texture borders it. That made
+  the stripe "perpendicular" structure. Found by the host fixture before the first GPU run.
+- **Still against an anchor, not the frame before.** The first GPU run seeded scenery on the harness's 1 px pans,
+  26,000 to 63,000 core pixels a frame, and alpha over 87% of the frame. Its brick mortar runs along the pan and
+  changes by less than 0.012 a frame, so a frame-to-frame count let it through, and growth then carried the core
+  through the rest of the slowly drifting texture.
+- **Orientation only against steady neighbours.** The cut's darker content, panning 4 px a frame, still seeded.
+  Smooth dark brick stays within 0.012 of its anchor while a mortar joint slides up beside it, and the edge
+  between them read as vertical structure. The first fix counted a moving neighbour as the pixel's own value,
+  which gave that direction a spurious "along"; a moving neighbour now gives no evidence either way.
+- **Three sides of four.** With four, the panel was 60% covered on the GPU. A 208 px panel is wider than the
+  120 px reach at 720p, so only its middle tiles saw motion both left and right. The host emulation had shown
+  88%, because a tile with exactly 32 of 64 pixels moving rounded to "moving" on the CPU and not on the GPU.
+- **Counts in the tile map.** The same knife edge, fixed at its source: counts are exact in 8 bits, and a share
+  is compared as count >= share * pixels.
+- **A tile moves when half its pixels do, not a quarter.** Sparse rain changes about a fifth of a still scene's
+  pixels.
+- **Cost.** Every load comes before any store; the orientation runs only for steady pixels; the layer pass skips
+  groups by the core bit. With the final masks the first timing read 0.20 ms (1080p) and 0.47 ms (3440x1440);
+  now 0.18 and 0.37.
+
+**Host fixtures** (`tests/fg-synth-policy`, `layer.cpp`), the shader's decisions on the CPU:
+- **Over a 3 px pan:** a glyph and a 1 px frame with a drop shadow are taken whole, 502 of 502 pixels, from t=9,
+  and nothing of the scene.
+- **Nothing is seeded in:**
+  - sand beside a swaying coat, a concave gap, a moving patch (still camera);
+  - a stripe running along a pan;
+  - sparse rain;
+  - the harness's texture panning in five directions and speeds, and darkened;
+  - 40 more pans on the CPU at 1280x720, not in the suite: ten directions and speeds up to 48 px a frame, each at
+    four brightnesses.
+- **The fixtures are live:** the coat, the gap, the patch, the stripe and the darkened pan each seed with their
+  gate switched off (one side enough and no camera gate; no orientation test; orientation against moving
+  neighbours), so they test something. The rain and the other pans are regression guards only.
+
+**GPU harness** (`tests/synth-motion-d3d12`, RTX 4090 under vkd3d-proton, clocks locked at 2100/10501 MHz). The
+`hud_*` sequences now carry a 1 px hollow frame with a drop shadow and a translucent panel ("glass": the scene at
+45%, an opaque 1 px border, outlined text) besides the crosshair, text and panel. Recall is the mean over t=30-39.
+
+| element, part | strict mask = old layer, `+8x` / `(3, 2)` | new core, both |
+|---|---|---|
+| crosshair stroke / outline | 35.6 / 20.6%, 29.4 / 16.4% | 100%, 100% |
+| text stroke / outline | 41.4 / 34.5%, 22.8 / 16.8% | 100%, 100% |
+| panel border and glyphs / fill | 0%, 0% | 100%, 100% |
+| 1 px frame line / shadow | 0%, 0% | 100%, 100% |
+| glass border and text / outlines | 0.7 / 0%, 0.5 / 0% | 87%, 100% |
+| glass translucent fill | 0% | 0.1% (the band covers 64% of it) |
+
+- **No scenery in the layer:** not one core or alpha pixel on the eight pans, the object, static, cut and abandon.
+  The core's precision on `hud_*` is 100.00% within 1 px of the overlay, with 23 scenery pixels over 30 frames of
+  `+8x`.
+- **The strict mask and depth are unchanged:** the same recall to the decimal as before on `hud_*` and
+  `overlay_*`, and still 100.00% precise.
+- **Exact:** the layer's rgb is the frame's, and its alpha is the CPU dilation of the read-back core at margin 16.
+  Off by 0 on every pixel of every frame.
+- **The smear set** (background whose half-pan sample lands on the overlay), old layer against new at margin 16:
+
+  | | old | new | beside crosshair, text, frame, panel | beside the glass |
+  |---|---|---|---|---|
+  | `+8x` (4 px each side) | 0% | 100% | 100% | 100% |
+  | `(3, 2)` (1-2 px) | 0% | 91.6% | 100% | 67.1% |
+
+  The glass's 1 px border has no still neighbour to contrast with: outside is the scene and inside its own fill,
+  and both move. So it seeds only within the orientation test's reach of the glass's text, and grows 48 px along
+  itself from there. Its bare bottom edge stays out, and the diagonal pan's smear lands on it.
+- **The band and its cost, by margin** (`+8x`, from the read-back core; "held" is alpha on background outside the
+  smear set, per 1280x720 frame, of 921,600 pixels):
+
+  | margin | smear covered | held px | rings 1-2 / 3-4 / 5-8 / 9-16 px |
+  |---|---|---|---|
+  | 0 | 0% | 0 | 0 / 0 / 0 / 0% |
+  | 4 | 78.0% | 4,224 | 88 / 43 / 0 / 0% |
+  | 8 | 100% | 9,766 | 88 / 87 / 43 / 0% |
+  | 16 | 100% | 23,035 | 89 / 88 / 88 / 43% |
+  | 24 | 100% | 37,630 | 91 / 89 / 89 / 81% |
+
+  The smear set is covered fully once the margin reaches the motion per base frame (8 px here), as designed.
+  Beyond that a margin only adds held background, about 1,400 px per px of margin for this HUD.
+  **The default, 16,** covers the smear fully up to 16 px of motion per base frame and partly to 32. That is a
+  slow-to-moderate turn: a 90 degree per second turn at 3440 wide and 50 fps base moves about 60 px a frame. The
+  speed that matters in Generation Zero has not been measured. The rings stop at about 90% because the glass's
+  bare border has no core to grow a band from.
+- **GPU time**, medians:
+
+  | | 1920x1080 | 3440x1440 |
+  |---|---|---|
+  | before: mask + old layer (always both in the harness) | 0.097 ms | 0.219 ms |
+  | mask alone (`SynthesizedHudLayer` off, the default) | 0.080 ms | 0.174 ms |
+  | mask with the layer's own + layer pass | 0.147 + 0.030 = 0.176 ms | 0.313 + 0.056 = 0.369 ms |
+
+  So the layer now costs 0.10 ms more at 1080p, and 0.19 ms more at 3440x1440, than the mask alone.
+  - The mask alone is the same bytecode as before.
+  - The estimator is 0.33 and 0.64 ms in the same run.
+  - On an RTX 3060, about a third of this card's shader throughput, expect about 0.5 and 1.1 ms for the mask with
+    the layer (*estimate*).
+- **Memory,** only with the layer, at 3440x1440: the state pair 40 MB, the core 5 MB, the tiles 0.6 MB.
+
+**Not measured:** anything FSR does with it, and any game.
+
+### What needs a game (the layer's own mask)
+
+Generation Zero on the lead's PC, FSR-FG, `SynthesizedMotion=true`, `SynthesizedHudDepth=true`,
+`SynthesizedHudLayer=true`, then Rafael's RTX 3060 on native Windows.
+- **Camera turns:** the HUD itself (crosshair, compass, text, bars, outlines and shadows) should no longer smear,
+  and the band beside it should no longer carry ghosts of it.
+- **The judder ring.** Margins 0, 8, 16 and 24 from the menu, on the same turn: how wide a ring moves at the base
+  rate around each element, against how much ghost is left. That picks the default.
+- **False holds.** Look for scenery that judders while the camera moves and nothing is near the HUD. The design's
+  candidates: a far object between near moving ones while walking, and a weapon or cockpit static on screen.
+- **Still camera:** nothing should change; the camera gate keeps the layer to the strict mask.
+- **Log, once each:**
+  - `synthesized FG HUD mask: the UI layer's own mask allocated, WxH (TWxTH tiles)`;
+  - `UI layer WxH, format N`;
+  - `the HUD layer ... is FFX's UI resource`.
+- **Cost:** the pass next to the model, on the 3060.
+- **Native Windows:** the new passes use group-shared memory, group-shared atomics and RGBA8 UAV stores. Proton
+  accepted them; the 3060 run is what says the D3D12 rules were read right.
 
 ## DLSS-G output
 
