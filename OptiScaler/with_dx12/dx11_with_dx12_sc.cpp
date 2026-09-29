@@ -1446,7 +1446,15 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::CheckColorSpaceSupport(DXGI_COLOR_SPACE_T
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetColorSpace1(DXGI_COLOR_SPACE_TYPE ColorSpace)
 {
     if (_fgSwapChain != nullptr)
-        return _fgSwapChain->SetColorSpace1(ColorSpace);
+    {
+        const HRESULT result = _fgSwapChain->SetColorSpace1(ColorSpace);
+
+        // The NR host declines an HDR frame (dlssnr/DlssNr_PresentColour.h).
+        if (SUCCEEDED(result) && _nrHost != nullptr)
+            _nrHost->NoteColourSpace(ColorSpace);
+
+        return result;
+    }
 
     return _real3 != nullptr ? _real3->SetColorSpace1(ColorSpace) : DXGI_ERROR_DEVICE_REMOVED;
 }

@@ -32,6 +32,12 @@ model's creation there, and the model ran on none of the frames that followed. T
   not on every frame the model has no history. It carries on without a reset when the model starts,
   and a resize owes it the reset again. Otherwise it never warms up, and frame generation, which takes
   its field on the bridge, builds a second estimator (Divinity, 2026-09-28).
+- An HDR swapchain (2026-09-29): a ten-bit frame the bridge was told is PQ, scRGB, HLG or Rec.2020 is
+  declined before anything is built and said once; set back to sRGB it builds and runs, and a switch
+  to HDR mid-session keeps what was built and owes a reset on the first frame back. FP16 is declined
+  whatever colour space it was told, ten bits with none set runs (DXGI's default is sRGB), and eight
+  bits run even with a PQ colour space noted. The rule is `DlssNr_PresentColour.h` itself, compiled
+  in, not a fake; the D3D12 present pass calls the same function.
 
 ## What this does not cover
 

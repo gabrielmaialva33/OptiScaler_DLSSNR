@@ -3,6 +3,7 @@
 #include "DlssNr_PresentHost.h"
 #include "DlssNrFeature_Dx12.h"
 #include "DlssNr_Identity.h"
+#include "DlssNr_PresentColour.h"
 
 #include <shaders/format_transfer/FT_Dx12.h>
 
@@ -338,6 +339,15 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     if (sourceWidth < kDlssNrMinExtent || sourceHeight < kDlssNrMinExtent)
     {
         ReportFrameSkip("the frame is below 64 pixels; nothing is built for it and the model is not attempted");
+        return false;
+    }
+
+    // An HDR frame is declined before anything is built for it, and the history the model has is not the
+    // frame that follows when it runs again. What was built stays, as for a frame too small.
+    if (const char* refusal = PresentColourRefusal(sourceDesc.Format, _colourSpace))
+    {
+        _resetOwed = true;
+        ReportFrameSkip(refusal);
         return false;
     }
 

@@ -297,6 +297,18 @@ and UAV/copy compatibility need an explicit colour-space/format check. Initially
 contracts with a reason rather than feed HDR values to an SDR passthrough. This slice needs no HLSL
 or `DlssNrConstants` change; reusing the existing gates is preferable to inventing a second encode.
 
+*2026-09-29, implemented as the refusal only.* That skip had never been written: every present host
+called `PresentFrameDefaults` and ran the model on whatever the swapchain held. `DlssNr_PresentColour.h`
+now declines an FP16 backbuffer (scRGB on a flip-model swapchain whatever it was told), and a ten-bit or
+other non-8-bit one whose last successful `SetColorSpace1` was not a Rec.709 gamma space (PQ, scRGB,
+HLG, Rec.2020); eight-bit formats cannot carry HDR and always run. `RunPresentPass` reads the colour
+space the wrapped swapchain records (`State::outputColorSpace`, plus `ForceHDR`+`UseHDR10`, which sets
+PQ on resize without recording it); the D3D11 bridge's host is told by `Dx11wDx12SC::SetColorSpace1`.
+Each reason is logged once, the status line carries it, and the first frame back owes a reset. Taken
+from NeuRotic (`849ed5a9`, `c71e3677`), whose per-swapchain observation registry was not: the
+refusal needs only the last colour space and the format. The PQ/scRGB conversion that would let the
+pass run on those frames is the follow-up.
+
 ## Guards and the required review
 
 These are proposed acceptance conditions, not claims that an implementation has passed them.

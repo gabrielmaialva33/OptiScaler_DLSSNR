@@ -12,6 +12,7 @@
 #include <dlssnr/DlssNr_ModelLog.h>
 #include <dlssnr/DlssNr_DirectRuntime.h>
 #include <dlssnr/DlssNr_NgxInfo.h>
+#include <dlssnr/DlssNr_PresentColour.h>
 #include <dxgi1_4.h>
 
 #include "DlssNr_Dx12.h"
@@ -4516,6 +4517,28 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     {
         ReportRuntimeStatus(false, "startup deferred (stabilizing swapchain)");
         return;
+    }
+
+    // An HDR swapchain is declined before anything is built for it (DlssNr_PresentColour.h). The colour
+    // space is the last one a successful SetColorSpace1 set, which the wrapped swapchain records; ForceHDR
+    // sets PQ itself on resize without recording it, so that one is read from the config.
+    {
+        DXGI_SWAP_CHAIN_DESC1 scDesc {};
+        const DXGI_COLOR_SPACE_TYPE colourSpace = cfg.ForceHDR.value_or_default() && cfg.UseHDR10.value_or_default()
+                                                      ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+                                                      : State::Instance().outputColorSpace.dxgiColorSpace;
+
+        if (SUCCEEDED(swapchain->GetDesc1(&scDesc)))
+        {
+            if (const char* refusal = PresentColourRefusal(scDesc.Format, colourSpace))
+            {
+                // What the model last saw is not the frame that follows once it runs again.
+                g_resetOnReturn = true;
+                ReportSkipOnce(refusal);
+                ReportRuntimeStatus(false, refusal);
+                return;
+            }
+        }
     }
 
     ID3D12Resource* backbuffer = nullptr;

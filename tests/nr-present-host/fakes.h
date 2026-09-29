@@ -42,7 +42,27 @@ enum DXGI_FORMAT
 {
     DXGI_FORMAT_UNKNOWN = 0,
     DXGI_FORMAT_R16G16B16A16_FLOAT = 10,
+    DXGI_FORMAT_R10G10B10A2_UNORM = 24,
     DXGI_FORMAT_R8G8B8A8_UNORM = 28,
+    DXGI_FORMAT_R8G8B8A8_UNORM_SRGB = 29,
+    DXGI_FORMAT_B8G8R8A8_UNORM = 87,
+    DXGI_FORMAT_B8G8R8X8_UNORM = 88,
+    DXGI_FORMAT_B8G8R8A8_UNORM_SRGB = 91,
+    DXGI_FORMAT_B8G8R8X8_UNORM_SRGB = 93,
+};
+// dxgicommon.h's values, for the ones DlssNr_PresentColour.h names.
+enum DXGI_COLOR_SPACE_TYPE
+{
+    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 = 0,
+    DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 = 1,
+    DXGI_COLOR_SPACE_RGB_STUDIO_G22_NONE_P709 = 2,
+    DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 = 12,
+    DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020 = 13,
+    DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020 = 14,
+    DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020 = 16,
+    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020 = 17,
+    DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020 = 19,
+    DXGI_COLOR_SPACE_RGB_STUDIO_G24_NONE_P709 = 20,
 };
 enum D3D12_RESOURCE_STATES
 {
@@ -305,7 +325,8 @@ struct Creation
 inline std::vector<Creation> g_creations;
 inline uint32_t g_modelWidth = 0, g_modelHeight = 0;
 inline unsigned g_passesRun = 0;
-inline bool g_refuseModel = false; // NGX refusing the feature: the pass declines every frame
+inline bool g_refuseModel = false;   // NGX refusing the feature: the pass declines every frame
+inline bool g_lastPassReset = false; // the Reset the pass was last handed, on a frame it ran
 
 inline DlssNrFrameInfo PresentFrameDefaults(bool reset)
 {
@@ -325,7 +346,7 @@ inline int GuideRestState(bool) { return (int) D3D12_RESOURCE_STATE_NON_PIXEL_SH
 // minimum size (the rule is production's, kDlssNrMinExtent), and otherwise (re)creates the model when
 // the colour's size differs from the one it has, then runs.
 inline bool EvaluateAtPresent(ID3D12GraphicsCommandList* list, ID3D12Resource* colour, ID3D12Resource* depth,
-                              ID3D12Resource* motion, const DlssNrFrameInfo&, ID3D12CommandQueue* = nullptr,
+                              ID3D12Resource* motion, const DlssNrFrameInfo& frame, ID3D12CommandQueue* = nullptr,
                               const char** outReason = nullptr)
 {
     static const char* disabled = "the pass is disabled";
@@ -359,6 +380,7 @@ inline bool EvaluateAtPresent(ID3D12GraphicsCommandList* list, ID3D12Resource* c
     }
     ++list->recorded;
     ++g_passesRun;
+    g_lastPassReset = frame.Reset;
     *outReason = ran;
     return true;
 }

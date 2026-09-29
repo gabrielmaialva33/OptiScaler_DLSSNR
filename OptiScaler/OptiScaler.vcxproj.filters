@@ -1735,6 +1735,9 @@
     <ClInclude Include="dlssnr\DlssNr_PeScan.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_PresentColour.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="dlssnr\DlssNr_Chain.h">
       <Filter>Header Files</Filter>
     </ClInclude>

@@ -30,7 +30,7 @@ what keeps it honest (last taken 2026-09-23).
 | `upscalers/IFeature_VkwDx12.cpp` | the pass and pre-upscale scope inside the Vulkan-on-D3D12 bridge |
 | `wrapped/wrapped_swapchain.cpp` | the present-time pass (`RunPresentPass`) |
 | `hooks/FG_Hooks.cpp` | the present-time pass from OptiScaler's frame-generation present |
-| `with_dx12/dx11_with_dx12_sc.{h,cpp}` | the D3D11 bridge's present host (`PresentHost`) |
+| `with_dx12/dx11_with_dx12_sc.{h,cpp}` | the D3D11 bridge's present host (`PresentHost`), and the colour space it is told on `SetColorSpace1` |
 | `hooks/D3D12_Hooks.cpp` | exposure-scan resource notes |
 | `resource_tracking/ResTrack_dx12.cpp` | exposure-scan resource notes and submission tracking |
 | `hooks/Vulkan_Hooks.cpp` | the device extensions the Vulkan route needs (`VkExt`) |
@@ -66,6 +66,7 @@ experiment.
 | `DlssNr_DirectRuntime.h/.cpp` | `ModelLoader=direct`: the forwarder's D3D12 calls made from OptiScaler.dll, passing the caller check through the model's own `GetModuleFileNameW/A` imports (wilsjo2's technique); `FORWARDER_INVESTIGATION.md` |
 | `DlssNr_NgxInfo.h/.cpp` | the `DLSS-NR NGX:` line at the first build (loader, its build, whether it routes feature 18 itself, the model) and the 616.64 pairing check; `design/ngx-driver-616.md` |
 | `DlssNr_PeScan.h` | header-only byte scans both of those act on: the model's caller-path import slots, the loader's feature-18 table; tested by `tests/nr-model-loader` |
+| `DlssNr_PresentColour.h` | which presented frames the present hosts decline: HDR10/PQ, scRGB and other non-sRGB swapchains, until the hosts convert them; `design/nr-present-hook.md` |
 | `shaders/dlssnr/DlssNr_Dx12.h/.cpp` | the pass: forwarder loading, feature lifetime, the evaluate path, encode/resolve orchestration, capture |
 | `shaders/dlssnr/DlssNr_Common.h` | the constant buffer, shared by the host and the shader |
 | `shaders/dlssnr/precompile/dlssnr.hlsl` | **the live shader**: encode (scale and sRGB-encode with a soft knee), area downsample, resolve (RenoDX's two-branch composition, OkLab hue correction, AP1 clamp, the guard) |

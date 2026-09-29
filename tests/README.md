@@ -81,7 +81,8 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-pass-config` — the pass-settings codec and the four-point Config round trip
   for the master keys.
 - `nr-present-host` — what the production present host builds and when: a frame too small
-  for the model, a resize, the pass switched off, and on which list the model is created.
+  for the model, a resize, the pass switched off, an HDR swapchain declined, and on which list the
+  model is created.
 - `nr-uimask-rule` — the HUD-protection mask's per-pixel rule, compiled from the header the shader
   itself includes, over synthetic sequences: a glyph over a panning scene is protected after the
   streak and nothing else is; still, grainy scenery beside a swaying silhouette is never protected

@@ -953,6 +953,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\DlssNr_NgxInfo.h" />
     <ClInclude Include="dlssnr\DlssNr_DirectRuntime.h" />
     <ClInclude Include="dlssnr\DlssNr_PeScan.h" />
+    <ClInclude Include="dlssnr\DlssNr_PresentColour.h" />
     <ClInclude Include="dlssnr\DlssNr_ZeroGuides.h" />
     <ClInclude Include="dlssnr\DlssNr_PresentHost.h" />
     <ClInclude Include="dlssnr\DlssNr_Exposure.h" />

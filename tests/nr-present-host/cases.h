@@ -17,7 +17,10 @@ struct Rig
     std::vector<std::unique_ptr<ID3D12GraphicsCommandList>> frameLists;
     DlssNr::PresentHost host; // last, so it is torn down while the device that owns its lists still exists
 
-    void Size(uint32_t width, uint32_t height) { source.desc = { width, height, DXGI_FORMAT_R8G8B8A8_UNORM }; }
+    void Size(uint32_t width, uint32_t height, DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM)
+    {
+        source.desc = { width, height, format };
+    }
 
     bool Frame()
     {
@@ -191,6 +194,78 @@ int main()
         assert(r.Frame());
         assert(DlssNr::g_motionResets.size() == 5 && DlssNr::g_motionResets.back());
         CASE("a resize owes the estimator its reset again");
+    }
+
+    // --- an HDR swapchain ------------------------------------------------------------------------------
+    // Every present host says its frame is SDR (PresentFrameDefaults). An HDR10 or scRGB backbuffer is
+    // not, and the model shown PQ code values or linear light as sRGB answers for a picture that is not on
+    // screen; until the hosts convert, such a frame is declined (DlssNr_PresentColour.h).
+    {
+        Fresh();
+        Rig r;
+        r.Size(1920, 1080, DXGI_FORMAT_R10G10B10A2_UNORM);
+        r.host.NoteColourSpace(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+        assert(!r.Frame() && !r.Frame());
+        assert(g_transferBuffersMade == 0 && r.device.lists.empty() && DlssNr::g_creations.empty());
+        assert(LogCount("no pass on this frame") == 1);
+        CASE("HDR10 (ten bits, PQ): declined before anything is built, and said once");
+
+        r.host.NoteColourSpace(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        assert(r.Frame());
+        assert(DlssNr::g_creations.size() == 1 && CreatedOnEmptyListAt(0, 1920, 1080));
+        CASE("the same ten-bit swapchain set back to sRGB builds, creates the model on its own list, and runs");
+
+        r.host.NoteColourSpace(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+        assert(!r.Frame());
+        const auto made = g_transferBuffersMade;
+        r.host.NoteColourSpace(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        assert(r.Frame() && DlssNr::g_lastPassReset && g_transferBuffersMade == made);
+        assert(r.Frame() && !DlssNr::g_lastPassReset);
+        CASE("HDR mid-session keeps what was built, and the first frame back is a reset, the next is not");
+    }
+    {
+        Fresh();
+        Rig r;
+        r.Size(1920, 1080, DXGI_FORMAT_R10G10B10A2_UNORM);
+        assert(r.Frame());
+        CASE("ten bits with no colour space ever set is DXGI's default, sRGB, and runs");
+    }
+    {
+        Fresh();
+        Rig r;
+        r.Size(1920, 1080, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        assert(!r.Frame());
+        r.host.NoteColourSpace(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        assert(!r.Frame());
+        assert(g_transferBuffersMade == 0 && DlssNr::g_creations.empty());
+        CASE("FP16 is scRGB on a flip-model swapchain whatever it was told, and is declined");
+    }
+    {
+        Fresh();
+        Rig r;
+        r.Size(1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM);
+        r.host.NoteColourSpace(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+        assert(r.Frame());
+        CASE("eight bits cannot carry HDR, so a PQ colour space noted on one does not stop the pass");
+    }
+    {
+        Fresh();
+        Rig r;
+        r.Size(1920, 1080, DXGI_FORMAT_R10G10B10A2_UNORM);
+        for (const auto space :
+             { DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020,
+               DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020, DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020 })
+        {
+            r.host.NoteColourSpace(space);
+            assert(!r.Frame());
+        }
+        for (const auto space :
+             { DXGI_COLOR_SPACE_RGB_STUDIO_G22_NONE_P709, DXGI_COLOR_SPACE_RGB_STUDIO_G24_NONE_P709 })
+        {
+            r.host.NoteColourSpace(space);
+            assert(r.Frame());
+        }
+        CASE("scRGB, HLG, Rec.2020 and studio PQ are declined; the Rec.709 gamma spaces run");
     }
 
     assert(g_transferBuffersLive == 0);

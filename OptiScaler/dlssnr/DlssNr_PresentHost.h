@@ -58,6 +58,11 @@ class PresentHost
     // Throw everything away. The caller must already have proved the GPU is done with it.
     void Release();
 
+    // The colour space the swapchain was last set to, from a SetColorSpace1 that succeeded. An HDR one
+    // declines the pass until it changes back (DlssNr_PresentColour.h); a host never told keeps DXGI's
+    // default, sRGB.
+    void NoteColourSpace(DXGI_COLOR_SPACE_TYPE colourSpace) { _colourSpace = colourSpace; }
+
     // Whether the last frame the model ran on had synthesized motion rather than zero motion.
     bool MotionSynthesized() const;
 
@@ -122,6 +127,7 @@ class PresentHost
     uint32_t _width = 0;
     uint32_t _height = 0;
     unsigned int _sourceFormat = 0;
+    DXGI_COLOR_SPACE_TYPE _colourSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
 
     bool _recorded = false;
     bool _recordedPass = false;

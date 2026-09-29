@@ -25,7 +25,7 @@ header = (root / 'OptiScaler/dlssnr/DlssNr_PresentHost.h').read_text()
 expected = {'#include "pch.h"', '#include "DlssNr_PresentHost.h"', '#include "DlssNrFeature_Dx12.h"',
             '#include "DlssNr_Identity.h"', '#include <shaders/format_transfer/FT_Dx12.h>', '#include <Config.h>',
             '#include <Logger.h>', '#include "DlssNr_ZeroGuides.h"', '#include <d3d12.h>', '#include <chrono>',
-            '#include <cstdint>', '#include <memory>'}
+            '#include <cstdint>', '#include <memory>', '#include "DlssNr_PresentColour.h"'}
 found = {l.strip() for l in (source + '\n' + header).splitlines() if l.startswith('#include')}
 assert found == expected, f'production include boundary changed: {sorted(found ^ expected)}'
 
@@ -34,7 +34,14 @@ def strip_includes(text):
     return '\n'.join(l for l in text.splitlines() if not l.startswith('#include') and l != '#pragma once')
 
 
+# DlssNr_PresentColour.h is not faked: which frames the host declines is its rule, and the cases below
+# exercise it as production has it. Its one include (dxgi1_4.h) is what fakes.h supplies.
+colour = (root / 'OptiScaler/dlssnr/DlssNr_PresentColour.h').read_text()
+colour_includes = {l.strip() for l in colour.splitlines() if l.startswith('#include')}
+assert colour_includes == {'#include <dxgi1_4.h>'}, f'DlssNr_PresentColour.h includes changed: {colour_includes}'
+
 unit = (here / 'fakes.h').read_text().replace('#pragma once\n', '', 1)
+unit += '\n' + strip_includes(colour)
 unit += '\n' + strip_includes(header)
 unit += '\n' + strip_includes(source)
 unit += '\n' + (here / 'cases.h').read_text()
