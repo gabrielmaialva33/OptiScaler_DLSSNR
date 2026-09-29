@@ -6,6 +6,11 @@
 #include <scanner/scanner.h>
 #include <misc/IdentifyGpu.h>
 
+#include <algorithm>
+#include <filesystem>
+#include <mutex>
+#include <vector>
+
 namespace
 {
 // mov ebx,1 / mov r8d,<count> / cmp <reg>,0x1b0 / cmovl r8d,ebx. Both the published count and the
@@ -427,21 +432,37 @@ const char* Status(PatchStatus status)
 }
 } // namespace
 
-void MfgUnlock::TryApply()
+void MfgUnlock::TryApply(HMODULE provider)
 {
     if (!Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default())
         return;
 
+    // Reached from the load hooks and from Streamline calls on whatever thread makes them.
+    static std::mutex mutex;
+    std::lock_guard lock(mutex);
+
     // The two modules arrive at different times and each is latched on its own, so whichever is
     // present first is patched then rather than waiting for the other.
-    static bool snippetDone = false;
+    //
+    // The snippet is latched per module rather than once. A game can map its own nvngx_dlssg.dll and
+    // NGX the driver's OTA copy (ProgramData\NVIDIA\NGX\models\dlssg\versions\<n>\files\<hash>.bin),
+    // and the one that loaded first is not necessarily the one NGX goes on to use. The OTA copy has no
+    // recognisable name, so only the load hook can hand it over; asked without one, this can find only
+    // the game's copy.
+    static std::vector<HMODULE> snippetsDone;
     static bool wrapperDone = false;
 
-    if (!snippetDone)
     {
-        if (auto module = GetModuleHandleW(L"nvngx_dlssg.dll"); module != nullptr)
+        HMODULE module = provider != nullptr ? provider : GetModuleHandleW(L"nvngx_dlssg.dll");
+
+        if (module != nullptr && std::find(snippetsDone.begin(), snippetsDone.end(), module) == snippetsDone.end())
         {
-            snippetDone = true;
+            snippetsDone.push_back(module);
+
+            wchar_t modulePath[MAX_PATH] = {};
+            GetModuleFileNameW(module, modulePath, MAX_PATH);
+            const std::string moduleName = wstring_to_string(std::filesystem::path(modulePath).filename().wstring());
+            LOG_INFO("MFG unlock: DLSS-G provider at {}", wstring_to_string(modulePath));
 
             const PatchStatus advertise = PatchAdvertise(module) ? PatchStatus::Ok : PatchStatus::Miss;
             const PatchStatus validate = PatchValidate(module) ? PatchStatus::Ok : PatchStatus::Miss;
@@ -470,10 +491,10 @@ void MfgUnlock::TryApply()
             // 180k-line log: WARN the moment any patch missed, INFO only when the module is whole.
             if (advertise == PatchStatus::Miss || validate == PatchStatus::Miss ||
                 blackwellKernels == PatchStatus::Miss)
-                LOG_WARN("MFG unlock summary (nvngx_dlssg.dll): advertise={} validate={} blackwellKernels={}",
+                LOG_WARN("MFG unlock summary ({}): advertise={} validate={} blackwellKernels={}", moduleName,
                          Status(advertise), Status(validate), Status(blackwellKernels));
             else
-                LOG_INFO("MFG unlock summary (nvngx_dlssg.dll): advertise={} validate={} blackwellKernels={}",
+                LOG_INFO("MFG unlock summary ({}): advertise={} validate={} blackwellKernels={}", moduleName,
                          Status(advertise), Status(validate), Status(blackwellKernels));
         }
     }

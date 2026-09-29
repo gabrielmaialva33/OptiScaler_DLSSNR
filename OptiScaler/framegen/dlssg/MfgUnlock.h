@@ -1,5 +1,7 @@
 #pragma once
 
+#include <windows.h>
+
 // Multi Frame Generation on Ada.
 //
 // nvngx_dlssg.dll gates MFG on the architecture id reported by the driver: 0x1b0 is Blackwell, Ada
@@ -27,10 +29,14 @@
 // weight inside the model's PTX; that is not done here.
 namespace MfgUnlock
 {
-// Applies both patches once per process. Silent and harmless when the config option is off, when
-// nvngx_dlssg.dll is not loaded, or when either signature does not match exactly once. Once a module
-// has been handled it logs a single "MFG unlock summary (<module>): ..." line naming every patch and
+// Applies the patches once per module. Silent and harmless when the config option is off, when no
+// DLSS-G provider is loaded, or when either signature does not match exactly once. Once a module has
+// been handled it logs a single "MFG unlock summary (<module>): ..." line naming every patch and
 // whether it applied (ok), missed (MISS) or was not attempted (skip), so a half-applied module is
 // one WARN rather than a lone warning buried in the log.
-void TryApply();
+//
+// provider: the DLSS-G snippet the load hook just mapped. Without one, the game's nvngx_dlssg.dll is
+// looked up by name -- which cannot find the driver's own copy, a <hash>.bin under
+// ProgramData\NVIDIA\NGX\models\dlssg\, so the load hook hands that one over itself.
+void TryApply(HMODULE provider = nullptr);
 } // namespace MfgUnlock

@@ -119,7 +119,7 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
         auto dlssgSnippet = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
 
         if (dlssgSnippet != nullptr)
-            MfgUnlock::TryApply();
+            MfgUnlock::TryApply(dlssgSnippet);
         else
             LOG_ERROR("Trying to load dll as nvngx_dlssg: {}", libNameA);
 
@@ -144,6 +144,14 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
             {
                 State::Instance().NGX_OTA_Dlssd = wstring_to_string(lpLibFullPath);
             }
+
+            // The driver's own DLSS-G snippet: models\dlssg\versions\<n>\files\<hash>.bin. The name check
+            // above only ever sees the game's nvngx_dlssg.dll, so the OTA copy -- the active provider in
+            // S.T.A.L.K.E.R. 2, per KleberMotta's port -- was loaded here and never unlocked. Same timing
+            // as that branch: straight after the load, before NGX initialises it and publishes its count.
+            // See Licenses/MFGUnlock_ATTRIBUTION.txt.
+            if (normalizedPath.contains(L"\\models\\dlssg\\"))
+                MfgUnlock::TryApply(loadedBin);
         }
         return loadedBin;
     }
