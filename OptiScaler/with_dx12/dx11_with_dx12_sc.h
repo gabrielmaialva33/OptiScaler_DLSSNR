@@ -151,6 +151,8 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     bool _OwnsFgPresenter() const;
     bool _OwnsPresenter() const;
     bool _OwnsOverlay() const;
+    bool _PresenterDrawsOverlay() const;
+    void _ReleaseOverlayForResize();
     void _FinishRelease(bool deviceLost);
     void _DetachWrapperGlobals();
     static void _CollectRetired();
@@ -165,6 +167,8 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     void _LeaveBorderless();
     HRESULT _RecoverPresenter();
     HRESULT _ResizePresenterToMatch();
+    HRESULT _ResizePresenter(UINT bufferCount, UINT width, UINT height, DXGI_FORMAT format, UINT flags);
+    void _RetryRefusedPresenterResize();
 
     IDXGISwapChain* _real = nullptr;
     IDXGISwapChain1* _real1 = nullptr;
@@ -237,6 +241,15 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     bool _presenterResizeOwed = false;
     bool _presenterRecoveryArmed = false;
     bool _presenterRecoveryReported = false;
+
+    // The presenter refused its last resize. A frame generation backend has dropped its own buffers by then
+    // and rebuilds them only on a resize that succeeds; DLSS-G's Present meanwhile returns S_OK and shows
+    // nothing, so no Present result can arm a recovery. The refusal does: a few resizes of the presenter
+    // alone at its own size, one per present (_RetryRefusedPresenterResize), then nothing until the game's
+    // next resize, which the owed flag lets through.
+    static constexpr UINT kRefusedResizeRetries = 3;
+    bool _presenterResizeRefused = false;
+    UINT _refusedResizeRetriesLeft = 0;
     UINT64 _dx11DrainValue = 0;
     ID3D12Fence* _drainFences[2] {};
     bool _drainSignaled[2] {};

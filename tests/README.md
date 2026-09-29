@@ -43,7 +43,8 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
   ownership and deferred release against scripted COM/Win32 fakes, and which FG input and output
-  the bridge is built for. No GPU coverage.
+  the bridge is built for. Also a refused presenter resize and its recovery, and the D3D12 overlay's
+  render-target release under the present-thread race that caused it. No GPU coverage.
 - `vulkan-query-readiness` — production Vulkan upscaler timing, nonblocking
   readiness retry, error rejection and single consumption. No frame-identity
   or GPU synchronization coverage.

@@ -273,6 +273,9 @@ struct Swapchain : Ref
     // unless a case gives this swapchain a window of another size -- the output, say, once a
     // borderless placement has landed that the client rect sampled earlier did not see.
     UINT windowWidth = 0, windowHeight = 0;
+    // Results for the next resizes, in order, before resizeResult applies again: a refusal that a second
+    // attempt gets past, say.
+    std::deque<HRESULT> resizeResults;
     HRESULT ResizeBuffers(UINT count, UINT width, UINT height, int format, UINT flags)
     {
         ++resizes;
@@ -280,16 +283,23 @@ struct Swapchain : Ref
         lastResizeHeight = height;
         lastResizeFlags = flags;
         resizedAt = ++g_resizeClock;
-        if (SUCCEEDED(resizeResult))
+        HRESULT result = resizeResult;
+        if (!resizeResults.empty())
         {
-            const RECT window = windowWidth != 0 ? RECT { 0, 0, (LONG) windowWidth, (LONG) windowHeight } : g_clientRect;
+            result = resizeResults.front();
+            resizeResults.pop_front();
+        }
+        if (SUCCEEDED(result))
+        {
+            const RECT window =
+                windowWidth != 0 ? RECT { 0, 0, (LONG) windowWidth, (LONG) windowHeight } : g_clientRect;
             desc.BufferDesc.Width = width != 0 ? width : (UINT) (window.right - window.left);
             desc.BufferDesc.Height = height != 0 ? height : (UINT) (window.bottom - window.top);
             desc.BufferCount = count != 0 ? count : desc.BufferCount;
             desc.BufferDesc.Format = format != DXGI_FORMAT_UNKNOWN ? format : desc.BufferDesc.Format;
             desc.Flags = flags;
         }
-        return resizeResult;
+        return result;
     }
     HRESULT ResizeBuffers1(UINT, UINT width, UINT height, int, UINT, const UINT*, IUnknown* const*)
     {
@@ -582,6 +592,14 @@ class Dx11wDx12SC
         _emulatedFullscreen = false;
     }
     bool _presenterResizeOwed = false, _presenterRecoveryArmed = false, _presenterRecoveryReported = false;
+    // A refused presenter resize and its Present-time retries. run.py puts production's retry count here.
+    // @kRefusedResizeRetries@
+    bool _presenterResizeRefused = false;
+    UINT _refusedResizeRetriesLeft = 0;
+    bool _PresenterDrawsOverlay() const;
+    void _ReleaseOverlayForResize();
+    HRESULT _ResizePresenter(UINT, UINT, UINT, DXGI_FORMAT, UINT);
+    void _RetryRefusedPresenterResize();
     int _id = 1;
     HRESULT _WaitForCopyAllocator(UINT);
     HRESULT _WaitForCopyQueueIdle(DWORD);

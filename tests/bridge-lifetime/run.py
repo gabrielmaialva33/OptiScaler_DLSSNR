@@ -38,6 +38,10 @@ signatures = [
     'bool Dx11wDx12SC::_EmulatesFullscreen()',
     'HRESULT Dx11wDx12SC::_RecoverPresenter()',
     'HRESULT Dx11wDx12SC::_ResizePresenterToMatch()',
+    'HRESULT Dx11wDx12SC::_ResizePresenter(',
+    'void Dx11wDx12SC::_RetryRefusedPresenterResize()',
+    'bool Dx11wDx12SC::_PresenterDrawsOverlay()',
+    'void Dx11wDx12SC::_ReleaseOverlayForResize()',
     'HRESULT Dx11wDx12SC::_WaitForCopyAllocator(',
     'HRESULT Dx11wDx12SC::_WaitForCopyQueueIdle(',
     'HRESULT Dx11wDx12SC::_DrainForTeardown(',
@@ -61,12 +65,35 @@ predicates = 'namespace Dx11wDx12\n{\n' + ''.join(map(function, [
 ])) + '} // namespace Dx11wDx12\n'
 # Upstream's skip-resize test lives in the production file's anonymous namespace; verbatim here too.
 helpers = 'namespace\n{\n' + function('bool IsSame(IDXGISwapChain* swapchain,') + '} // namespace\n'
-unit = ((here / 'fakes.h').read_text() + waiter + predicates + helpers + '\n'.join(map(function, signatures)) +
+# Production's retry budget for a refused presenter resize, verbatim from the header, into the fake class.
+bridge_header = (root / 'OptiScaler/with_dx12/dx11_with_dx12_sc.h').read_text()
+retries = re.search(r'^\s*static constexpr UINT kRefusedResizeRetries = \d+;$', bridge_header, re.M).group(0)
+fakes = (here / 'fakes.h').read_text()
+assert fakes.count('// @kRefusedResizeRetries@') == 1
+fakes = fakes.replace('// @kRefusedResizeRetries@', retries.strip())
+unit = (fakes + waiter + predicates + helpers + '\n'.join(map(function, signatures)) +
         (here / 'cases.cpp').read_text())
 with tempfile.TemporaryDirectory(prefix='optiscaler-bridge-lifetime-') as directory:
     cpp = Path(directory) / 'bridge.cpp'
     binary = Path(directory) / 'bridge'
     cpp.write_text(unit)
+    subprocess.run(['g++', '-std=c++20', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
+                    '-Wno-unused-parameter', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                    str(cpp), '-o', str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
+# The D3D12 overlay's render-target lifetime, which the bridge's resize contract leans on: the production
+# CreateRenderTargetDx12 and CleanupRenderTargetDx12 from menu_overlay_dx.cpp, over scripted swapchain buffers
+# whose public reference counts decide a vkd3d-proton-style ResizeBuffers.
+overlay_source = (root / 'OptiScaler/menu/menu_overlay_dx.cpp').read_text()
+overlay_unit = ((here / 'overlay_fakes.h').read_text() +
+                function('static void CreateRenderTargetDx12(', overlay_source) +
+                function('static void CleanupRenderTargetDx12(', overlay_source) +
+                (here / 'overlay_cases.cpp').read_text())
+with tempfile.TemporaryDirectory(prefix='optiscaler-overlay-targets-') as directory:
+    cpp = Path(directory) / 'overlay.cpp'
+    binary = Path(directory) / 'overlay'
+    cpp.write_text(overlay_unit)
     subprocess.run(['g++', '-std=c++20', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                     str(cpp), '-o', str(binary)], check=True)

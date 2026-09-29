@@ -924,6 +924,133 @@ void fullscreenCases()
     }
 }
 
+// Generation Zero with synthesized FG and the DLSS-G output on this bridge, 2026-09-29 (build 8009f920). The
+// window regained focus, DLSS-G started interpolating again, and the game went back to fullscreen and resized.
+// The bridge's own overlay cleanup raced Streamline's present thread, the real swapchain kept a reference to
+// its buffers, and DLSS-G's resize was refused with 887A0001. DLSS-G had already let its proxy buffers go, so
+// every present after it returned S_OK and showed nothing: 979 presents of one frozen frame.
+void refusedResizeCases()
+{
+    const UINT kRetries = Dx11wDx12SC::kRefusedResizeRetries;
+    assert(kRetries > 0);
+
+    // A frame generation presenter draws the overlay from its own present path (LocalPresent, on DLSS-G's
+    // present thread). The bridge leaves its render targets to the real swapchain's resize, inside the
+    // backend's, and still pauses frame generation as the overlay cleanup did.
+    {
+        FGHooks::interopPresenter = false;
+        Fixture f;
+        f.fg.active = true;
+        assert(f.sc->_PresenterDrawsOverlay());
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == S_OK);
+        assert(MenuOverlayDx::cleanups == 0);
+        assert(f.fg.deactivations == 1 && f.fg.targetUpdates == 1 && State::Instance().fgChanged);
+        assert(f.presenter.resizes == 1 && f.real.resizes == 1);
+        f.fg.active = false;
+        assert(f.sc->ResizeBuffers1(2, 1024, 768, 0, 0, nullptr, nullptr) == S_OK);
+        assert(MenuOverlayDx::cleanups == 0 && f.fg.deactivations == 1);
+        // The Present-time recovery resize takes the same route.
+        f.presenter.descResult = S_OK;
+        f.sc->_presenterRecoveryArmed = true;
+        assert(SUCCEEDED(f.sc->_RecoverPresenter()));
+        assert(MenuOverlayDx::cleanups == 0 && f.presenter.resizes == 3);
+        FGHooks::interopPresenter = true;
+    }
+
+    // The plain presenter's overlay is this wrapper's own, drawn on this thread: it is still let go here.
+    {
+        Fixture f;
+        assert(!f.sc->_PresenterDrawsOverlay());
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == S_OK);
+        assert(MenuOverlayDx::cleanups == 1);
+    }
+
+    // A presenter that refuses once and then takes the resize: a holder that only lost a race is gone once
+    // the backend's first attempt returns. The game sees success and the hidden swapchain follows.
+    {
+        FGHooks::interopPresenter = false;
+        Fixture f;
+        f.presenter.resizeResults = { DXGI_ERROR_INVALID_CALL };
+        const int warnings = logWarnings;
+        assert(f.sc->ResizeBuffers(0, 3440, 1440, 28, 2) == S_OK);
+        assert(f.presenter.resizes == 2 && f.real.resizes == 1 && f.presenter.resizedAt < f.real.resizedAt);
+        assert(f.presenter.lastResizeWidth == 3440 && f.presenter.lastResizeHeight == 1440);
+        assert(!f.sc->_presenterResizeRefused && !f.sc->_presenterResizeOwed && !f.sc->_resizeIncomplete);
+        assert(logWarnings == warnings + 1);
+        FGHooks::interopPresenter = true;
+    }
+
+    // A presenter that refuses both attempts: the game has the error, and the hidden swapchain is left at the
+    // size the presenter kept. The resize stays owed and the next presents each try one at the presenter's own
+    // size, a bounded number of times. The game's next resize reaches it even at that same size.
+    {
+        FGHooks::interopPresenter = false;
+        Fixture f;
+        f.presenter.descResult = S_OK;
+        f.presenter.desc.BufferCount = 2;
+        f.presenter.desc.BufferDesc.Width = 3440;
+        f.presenter.desc.BufferDesc.Height = 1418;
+        f.presenter.desc.BufferDesc.Format = 28;
+        f.presenter.desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+        f.presenter.resizeResult = DXGI_ERROR_INVALID_CALL;
+        assert(f.sc->ResizeBuffers(0, 3440, 1440, 28, DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH) ==
+               DXGI_ERROR_INVALID_CALL);
+        assert(f.presenter.resizes == 2 && f.real.resizes == 0 && !f.sc->_resizeIncomplete);
+        assert(f.sc->_presenterResizeOwed && f.sc->_presenterResizeRefused);
+        assert(f.sc->_refusedResizeRetriesLeft == kRetries);
+        for (UINT attempt = 1; attempt <= kRetries; ++attempt)
+        {
+            if (attempt > 1)
+            {
+                // The copy of the frame between two presents, pinned again.
+                f.shadow.AddRef();
+                f.sc->_openedDx11BackBuffers = { &f.shadow };
+            }
+            f.sc->_RetryRefusedPresenterResize();
+            assert(f.presenter.resizes == 2 + (int) attempt);
+            assert(f.presenter.lastResizeWidth == 3440 && f.presenter.lastResizeHeight == 1418);
+            // The interop buffers were let go before each attempt, and the hidden swapchain never touched.
+            assert(f.sc->_openedDx11BackBuffers.empty() && f.real.resizes == 0);
+        }
+        // Spent: nothing more from Present.
+        f.sc->_RetryRefusedPresenterResize();
+        assert(f.presenter.resizes == 2 + (int) kRetries && f.sc->_presenterResizeRefused);
+        // The game resizes again at the size the presenter kept, which IsSame would skip. Owed, it goes through.
+        f.presenter.resizeResult = S_OK;
+        assert(f.sc->ResizeBuffers(0, 3440, 1418, 28, DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH) == S_OK);
+        assert(f.presenter.resizes == 3 + (int) kRetries && f.real.resizes == 1);
+        assert(!f.sc->_presenterResizeRefused && !f.sc->_presenterResizeOwed);
+        FGHooks::interopPresenter = true;
+    }
+
+    // A refusal the next present gets past: the presenter is presenting again, and nothing further is tried.
+    {
+        FGHooks::interopPresenter = false;
+        Fixture f;
+        f.presenter.descResult = S_OK;
+        f.presenter.desc.BufferCount = 2;
+        f.presenter.desc.BufferDesc.Width = 3440;
+        f.presenter.desc.BufferDesc.Height = 1418;
+        f.presenter.resizeResults = { DXGI_ERROR_INVALID_CALL, DXGI_ERROR_INVALID_CALL };
+        assert(f.sc->ResizeBuffers(0, 3440, 1440, 28, 0) == DXGI_ERROR_INVALID_CALL);
+        f.sc->_RetryRefusedPresenterResize();
+        assert(f.presenter.resizes == 3 && !f.sc->_presenterResizeRefused && !f.sc->_presenterResizeOwed);
+        f.sc->_RetryRefusedPresenterResize();
+        assert(f.presenter.resizes == 3 && MenuOverlayDx::cleanups == 0);
+        FGHooks::interopPresenter = true;
+    }
+
+    // Only a refusal is retried at once; any failure still arms the Present-time attempts, because the
+    // backend has dropped its buffers either way.
+    {
+        Fixture f;
+        f.presenter.resizeResult = E_FAIL;
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == E_FAIL);
+        assert(f.presenter.resizes == 1 && f.real.resizes == 0);
+        assert(f.sc->_presenterResizeRefused && f.sc->_refusedResizeRetriesLeft == kRetries);
+    }
+}
+
 int main()
 {
     waitCases();
@@ -940,8 +1067,9 @@ int main()
     synthInputCases();
     coexistenceCases();
     fullscreenCases();
+    refusedResizeCases();
     predicateCases();
     assert(Dx11wDx12SC::_retired == nullptr);
     std::cout << "bridge lifetime: production wait, copy, resize, release, retirement, neural host, synthesized input, "
-                 "coexistence, fullscreen and predicate cases passed\n";
+                 "coexistence, fullscreen, refused-resize and predicate cases passed\n";
 }

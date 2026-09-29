@@ -199,3 +199,54 @@ state:
   for it, so no bridge is built for them.
 - DLSSG was refused until 2026-09-28 (synthesized-frame-generation.md, "DLSS-G output"). Restoring that
   refusal in the production predicate fails these cases.
+
+## A refused presenter resize (2026-09-29)
+
+Generation Zero with synthesized FG and the DLSS-G output on this bridge, build `8009f920`. The window regained
+focus, DLSS-G began interpolating again, and the game went back to fullscreen and resized. DLSS-G's resize of the
+real swapchain was refused with `887A0001`. By then Streamline had released its proxy buffers, so every present
+after it returned S_OK and showed nothing. The cause and the log are in `synthesized-frame-generation.md`,
+"DLSS-G output", "First run".
+
+`refusedResizeCases` compiles the production `_PresenterDrawsOverlay`, `_ReleaseOverlayForResize`,
+`_ResizePresenter` and `_RetryRefusedPresenterResize` with the resize entry points. `run.py` copies the retry
+budget, `kRefusedResizeRetries`, from the production header into the fake class.
+
+- **The overlay on a frame generation presenter.** Neither resize entry point nor the Present-time recovery
+  cleans the overlay from the game thread. Frame generation is still paused. The plain presenter's overlay is
+  still cleaned here, because this wrapper draws it.
+- **One refusal, then success.** The game sees S_OK, the presenter is tried exactly twice, and the hidden
+  swapchain follows it.
+- **Two refusals.** The game gets the error, and the hidden swapchain keeps the size the presenter kept. The
+  resize stays owed. Each of the next `kRefusedResizeRetries` presents makes one resize of the presenter alone
+  at its own size, releasing the interop buffers first, and then nothing more. The game's next resize at that
+  same size reaches the presenter, which `IsSame` alone would skip.
+- **A refusal the next present gets past.** The recovery stops as soon as a resize succeeds.
+- **Any other failure** is not retried at once, but still arms the Present-time attempts.
+
+The overlay unit (`overlay_fakes.h`, `overlay_cases.cpp`) compiles the production `CreateRenderTargetDx12` and
+`CleanupRenderTargetDx12` from `menu/menu_overlay_dx.cpp`. The fake swapchain refuses `ResizeBuffers` while a
+buffer holds a public reference, which is vkd3d-proton's rule. The race is replayed in the log's order:
+
+1. The bridge's cleanup releases the render targets.
+2. Inside the ImGui shutdown, the other thread's present finds the overlay still initialised and re-creates
+   them.
+3. The cleanup clears the init state over them.
+4. The cleanup inside the real swapchain's resize must still let them go.
+
+That case, the ordinary cleanup, a handle change and process shutdown make up the unit.
+
+Eight mutations were each confirmed to fail a case:
+
+- the overlay's init-state guard back before the release (upstream's order);
+- the bridge cleaning the overlay for a frame generation presenter;
+- frame generation not paused there;
+- no immediate retry;
+- a refusal that leaves nothing owed;
+- unbounded Present-time retries;
+- retries never armed;
+- a successful own-size resize that does not clear the refusal.
+
+What these fakes cannot show: that Streamline recreates its proxy buffers on the retried resize, or that
+DLSS-G's present thread is really idle when the real swapchain's cleanup runs. The log supports the second
+(`flushAll` precedes the real swapchain's `ResizeBuffers` in both resizes); the first needs a game.

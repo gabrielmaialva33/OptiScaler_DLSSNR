@@ -500,6 +500,48 @@ bool Dx11wDx12SC::_OwnsOverlay() const
     return _OwnsFgPresenter() || (current && _OwnsPresenter() && State::Instance().currentFGSwapchain == nullptr);
 }
 
+// Whether the overlay on this bridge's presenter is drawn by frame generation's present path -- FGHooks::FGPresent,
+// the backend, and the wrapped real swapchain's LocalPresent -- rather than by this wrapper's Present. For the
+// plain D3D12 presenter it is this wrapper's (Present calls MenuOverlayDx::Present itself).
+bool Dx11wDx12SC::_PresenterDrawsOverlay() const
+{
+    return _fgSwapChain != nullptr && State::Instance().currentFGSwapchain == _fgSwapChain &&
+           !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
+}
+
+// What a resize owes the overlay and frame generation before the presenter's buffers change.
+//
+// On the plain presenter the overlay's render targets are the presenter's own buffers and only this thread draws
+// them, so they are let go here. On a frame generation presenter they belong to the real swapchain inside the
+// backend, and the backend draws them from its own present path -- DLSS-G from a present thread of its own, while
+// interpolating. Letting them go from here raced that thread: Generation Zero with DLSS-G on this bridge
+// (2026-09-29) re-created them on Streamline's present thread in the middle of this cleanup, the cleanup then
+// cleared the overlay's init state over them, and the cleanup inside the real swapchain's resize, which checks
+// that state, kept them. vkd3d-proton refuses a ResizeBuffers while any buffer is referenced, so the backend's
+// resize failed and DLSS-G was left with no buffers. That cleanup in WrappedIDXGISwapChain4::ResizeBuffers runs
+// inside the backend's resize, after the backend has stopped presenting (Streamline flushes first), which is
+// where upstream's native D3D12 path lets them go too. Frame generation is still paused here, as the overlay
+// cleanup did.
+void Dx11wDx12SC::_ReleaseOverlayForResize()
+{
+    if (!_OwnsOverlay())
+        return;
+
+    if (!_PresenterDrawsOverlay())
+    {
+        MenuOverlayDx::CleanupRenderTarget(true, _handle);
+        return;
+    }
+
+    auto fg = State::Instance().currentFG;
+    if (fg != nullptr && fg->FrameGenerationContext() != nullptr && fg->IsActive())
+    {
+        State::Instance().fgChanged = true;
+        fg->UpdateTarget();
+        fg->Deactivate();
+    }
+}
+
 bool Dx11wDx12SC::_DevicesRemoved() const
 {
     // Shared storage can still be used by either API. One removed device does not prove that
@@ -686,6 +728,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
         _ResetTeardownDrain();
     }
 
+    // Before this frame's copy: a presenter that refused its last resize may be presenting nothing at all.
+    _RetryRefusedPresenterResize();
+
     const bool dx11HudfixPresent = Config::Instance()->FGHUDFix.value_or_default() &&
                                    State::Instance().activeFgInput == FGInput::Upscaler &&
                                    State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
@@ -731,8 +776,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (!_WaitForInteropCopyOnPresentQueue())
         return DXGI_ERROR_DEVICE_REMOVED;
 
-    const bool fgHookedPresenter =
-        State::Instance().currentFGSwapchain == _fgSwapChain && !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
+    const bool fgHookedPresenter = _PresenterDrawsOverlay();
 
     // The game-facing DX11 swapchain is never presented in this wrapper.
     // For a plain external DX12 presenter, draw Opti's overlay here.
@@ -965,16 +1009,85 @@ HRESULT Dx11wDx12SC::_ResizePresenterToMatch()
     if (FAILED(drainResult))
         return drainResult;
 
-    if (_OwnsOverlay())
-        MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    _ReleaseOverlayForResize();
     _ResetTeardownDrain();
     _ReleaseInteropBackBuffers();
 
     const auto result = _fgSwapChain->ResizeBuffers(0, desc.Width, desc.Height, DXGI_FORMAT_UNKNOWN, desc.Flags);
     if (SUCCEEDED(result))
+    {
         _presenterResizeOwed = false;
+        _presenterResizeRefused = false;
+    }
 
     return result;
+}
+
+// The presenter's own ResizeBuffers, for the game's resize: one retry on a refusal, and a refusal remembered.
+//
+// DXGI_ERROR_INVALID_CALL from a flip-model ResizeBuffers means a reference to one of its buffers is still out
+// (the flags that would also cause it are kept valid by PresenterResizeFlags). A frame generation backend makes
+// its own cleanup inside that call -- Streamline flushes its present thread and the wrapped real swapchain lets
+// the overlay go -- so a holder that only lost a race is gone once the first attempt returns, and the second
+// finds the buffers free. Anything else, or a second refusal, is not retried here.
+//
+// A refusal is expensive with a backend behind the presenter: DLSS-G has already released its proxy buffers and
+// shows nothing until a resize succeeds (Generation Zero, 2026-09-29: the picture froze for good after one
+// refused resize). So a failure leaves the resize owed, which lets the game's next resize through even at the
+// size the presenter already has, and arms a few attempts at its own size from Present.
+HRESULT Dx11wDx12SC::_ResizePresenter(UINT bufferCount, UINT width, UINT height, DXGI_FORMAT format, UINT flags)
+{
+    auto result = _fgSwapChain->ResizeBuffers(bufferCount, width, height, format, flags);
+
+    if (result == DXGI_ERROR_INVALID_CALL)
+    {
+        LOG_WARN("Dx11wDx12SC {}: the presenter refused ResizeBuffers ({}x{}, count {}) with 887A0001; a buffer of "
+                 "it was still referenced. Trying once more",
+                 _id, width, height, bufferCount);
+        result = _fgSwapChain->ResizeBuffers(bufferCount, width, height, format, flags);
+    }
+
+    if (SUCCEEDED(result))
+    {
+        _presenterResizeOwed = false;
+        _presenterResizeRefused = false;
+        return result;
+    }
+
+    LOG_ERROR("Dx11wDx12SC {}: the presenter refused ResizeBuffers: {:X}. Its size is unchanged and the hidden "
+              "swapchain is left to match it; up to {} resizes at its own size follow from Present",
+              _id, (UINT) result, kRefusedResizeRetries);
+
+    _presenterResizeOwed = true;
+    _presenterResizeRefused = true;
+    _refusedResizeRetriesLeft = kRefusedResizeRetries;
+    return result;
+}
+
+// What a presenter that refused the game's resize gets from the next presents: see _ResizePresenter. One attempt
+// per present, through _ResizePresenterToMatch -- the presenter alone, at the count, size and flags it kept, which
+// the hidden swapchain still matches because a refused presenter leaves it untouched. After the last attempt, one
+// line; the game's next resize is the only thing that tries again.
+void Dx11wDx12SC::_RetryRefusedPresenterResize()
+{
+    if (!_presenterResizeRefused || _refusedResizeRetriesLeft == 0 || _fgSwapChain == nullptr)
+        return;
+
+    --_refusedResizeRetriesLeft;
+    const auto result = _ResizePresenterToMatch();
+
+    if (SUCCEEDED(result))
+    {
+        LOG_INFO("Dx11wDx12SC {}: the presenter took a resize at its own size after refusing the game's; "
+                 "presenting through it again",
+                 _id);
+        return;
+    }
+
+    if (_refusedResizeRetriesLeft == 0)
+        LOG_ERROR("Dx11wDx12SC {}: the presenter refused {} more resizes at its own size, the last with {:X}. A "
+                  "frame generation presenter may show nothing until the game resizes again",
+                  _id, kRefusedResizeRetries, (UINT) result);
 }
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetBuffer(UINT Buffer, REFIID riid, void** ppSurface)
@@ -1103,8 +1216,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         return drainResult;
     }
 
-    if (_OwnsOverlay())
-        MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    _ReleaseOverlayForResize();
     _ResetTeardownDrain();
     _ReleaseInteropBackBuffers();
 
@@ -1123,9 +1235,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         }
         else
         {
-            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, NewFormat, presenterFlags);
-            if (SUCCEEDED(fgResult))
-                _presenterResizeOwed = false;
+            fgResult = _ResizePresenter(BufferCount, Width, Height, NewFormat, presenterFlags);
         }
     }
 
@@ -1386,8 +1496,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         return drainResult;
     }
 
-    if (_OwnsOverlay())
-        MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    _ReleaseOverlayForResize();
     _ResetTeardownDrain();
     _ReleaseInteropBackBuffers();
 
@@ -1407,9 +1516,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         }
         else
         {
-            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, Format, presenterFlags);
-            if (SUCCEEDED(fgResult))
-                _presenterResizeOwed = false;
+            fgResult = _ResizePresenter(BufferCount, Width, Height, Format, presenterFlags);
         }
     }
 

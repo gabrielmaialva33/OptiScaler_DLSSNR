@@ -116,13 +116,20 @@ static void CreateRenderTargetDx12(ID3D12Device* device, IDXGISwapChain* pSwapCh
 
 static void CleanupRenderTargetDx12(bool clearQueue)
 {
-    if (!_isInited || !_dx12Device || State::Instance().isShuttingDown)
+    if (State::Instance().isShuttingDown)
         return;
 
+    // The swapchain's buffers go whatever the init state says. A present on another thread can take them
+    // (CreateRenderTargetDx12) after a cleanup released them and before it cleared _isInited; returning on
+    // that state first then kept them for good, and the swapchain refused every ResizeBuffers after
+    // (Generation Zero with DLSS-G on the D3D11 bridge, 2026-09-29).
     for (UINT i = 0; i < NUM_BACK_BUFFERS; ++i)
     {
         SAFE_RELEASE(g_mainRenderTargetResource[i]);
     }
+
+    if (!_isInited || !_dx12Device)
+        return;
 
     LOG_TRACE("clearQueue: {}", clearQueue);
 

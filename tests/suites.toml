@@ -116,7 +116,7 @@ summary = "The synthesized-motion estimator (FidelityFX optical flow port) on a 
 [bridge-lifetime]
 tier = "host"
 timeout = 300
-summary = "Production D3D11/D3D12 swapchain and upscaler fence waits, initialization, failed submissions, resize preflight, ownership and retirement under scripted COM/Win32 fakes."
+summary = "Production D3D11/D3D12 swapchain and upscaler fence waits, initialization, failed submissions, resize preflight, a refused presenter resize and its recovery, the D3D12 overlay's render-target release, ownership and retirement under scripted COM/Win32 fakes."
 
 [vulkan-query-readiness]
 tier = "host"
