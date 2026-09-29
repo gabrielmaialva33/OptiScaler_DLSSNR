@@ -1143,6 +1143,107 @@ On `synth-fg-dlssg`, not yet compiled or run by the author of this section; host
 - **Text.** The menu's input tooltip and three help texts, their pt-BR entries, the `[FrameGen]` comments in
   `OptiScaler.ini`, and `Config.md`.
 
+### First run (2026-09-29): a resize froze the picture
+
+Generation Zero on this workstation's 4090, build `8009f920`, `FGInput=synthesized`, `FGOutput=dlssg`, NR at
+present, Streamline 2.14.1 from `<game>/OptiScaler/streamline/`, `LogLevel=1`. The log is kept at
+`~/.local/state/dlss5/deployments/local-gz-logs-20260929/gz-8009f920-dlssg-0749.log`.
+
+**It worked until the second resize.**
+- `07:49:29`: DLSS-G's swapchain is created (`buffers 2`, `Max supported interpolations: 1`). The game's
+  `SetFullscreenState(TRUE)` is emulated.
+- `07:49:30`: `DLSS-G interpolation state changed from disabled to enabled`. About 125 fps base by the user's
+  reading, Velocity and Depth tags `eOk`, `Dispatch Ok` on every frame.
+- `07:49:39`: focus lost. `DLSS-G disabled: window not focused`, the game leaves fullscreen and resizes to
+  3440x1418. `fg 0, real 0`: this resize succeeded.
+- `07:49:47.012`: focus back, and interpolation is enabled again on the next present. At `.013` the game asks
+  for fullscreen, and at `.020` it resizes to 3440x1440.
+- `07:49:47.094`: `WrappedIDXGISwapChain4::ResizeBuffers ... result: 887A0001`, inside Streamline's resize, so
+  `fg 887A0001, real 887A0001`. Streamline adds `PFunResizeBuffersBefore failed Invalid call`.
+- From `07:49:47.347`, on every frame: `slHookGetBuffer: proxyBuffer is NULL!`, and the bridge logs
+  `Present frame 595` 979 times. No `LocalPresent` line appears after `07:49:47.037`: Streamline's present
+  returned S_OK and never presented again. The picture was frozen until the game exited at `07:50:00`.
+
+**Cause.** A reference to the real swapchain's buffers was still held when DLSS-G resized it. vkd3d-proton refuses
+`ResizeBuffers` while any buffer holds a public reference (`dxgi_vk_swap_chain_ChangeProperties`, "Public
+ref-counts must be 0"). The holder was the D3D12 overlay's render targets. The bridge's resize cleaned the
+overlay from the game thread, while Streamline's present thread was drawing it:
+- `Dx11wDx12SC::ResizeBuffers` called `MenuOverlayDx::CleanupRenderTarget(true, ...)` after its drain and
+  before the presenter's `ResizeBuffers` (`with_dx12/dx11_with_dx12_sc.cpp:1107` at `8009f920`; the same in
+  `ResizeBuffers1`, `:1390`, and `_ResizePresenterToMatch`, `:969`).
+- With DLSS-G interpolating, Streamline presents from a thread of its own. Each present goes through the
+  wrapped real swapchain's `LocalPresent`, and so through `MenuOverlayDx::Present`
+  (`wrapped/wrapped_swapchain.cpp:515`). Nothing in the menu overlay serialises the two threads.
+- The log places the overlap exactly. Frames 593 and 594 were presented at `07:49:47.037`, between the bridge
+  resize at `.020` and FG's resize hook at `.041`. Frame 593 drew with the render targets in place. Frame 594
+  found them gone, and logged `CreateRenderTargetDx12 done!` at `.037925`, which takes a reference on both
+  buffers again.
+- Frame 594 also found the overlay still initialised. There is no `D3D12CommandQueue captured` and no
+  `BackendRendererUserData == nullptr` before it, although a full cleanup is always followed by both, as at
+  `07:49:39.418`. So the cleanup had released the render targets and had not yet cleared `_isInited` or shut
+  ImGui down: it was inside `ImGui_ImplDX12_Shutdown`.
+- The cleanup then cleared `_isInited` over the new references. The later cleanup in
+  `WrappedIDXGISwapChain4::ResizeBuffers` (`wrapped_swapchain.cpp:917`) is the one that would have released
+  them. It returned first because of that same state (`menu/menu_overlay_dx.cpp:117`, the old guard). So the
+  real resize was refused.
+- DLSS-G's resize hook had already dropped its proxy buffers, and rebuilds them only on a resize that
+  succeeds. Its Present then does nothing and still returns S_OK, so the bridge's Present recovery, which reacts
+  to 887A0001 from Present, never fired.
+
+**Why DLSS-G and not FSR-FG, and not the first resize.** At `07:49:39` DLSS-G had turned itself off for the lost
+focus. Streamline then presents on the calling thread, and nothing ran concurrently with the cleanup. At
+`07:49:47` interpolation had been re-enabled 8 ms before the resize, and two queued presents landed inside it.
+FSR-FG's pacing thread can race the same cleanup in principle, and nothing here proves it cannot. That it never
+has may be timing: the bridge's drain waits on the present queue that DLSS-G's present thread also waits on,
+which may line the two up. That last point is inferred, not measured.
+
+**Fix** (branch `synth-fg-dlssg-resize`):
+1. **The bridge no longer cleans the overlay of a frame generation presenter** (`_ReleaseOverlayForResize`).
+   - That overlay belongs to the real swapchain inside the backend. `WrappedIDXGISwapChain4::ResizeBuffers`
+     releases it inside the backend's resize, after Streamline's `flushAll`, which is where upstream's native
+     D3D12 path releases it.
+   - Frame generation is still paused there, as the old cleanup did.
+   - The plain presenter's overlay is still cleaned by the bridge, because the bridge draws it on its own
+     thread.
+2. **`CleanupRenderTargetDx12` releases the buffers whatever the init state says** (`menu_overlay_dx.cpp`,
+   upstream-owned; the guard moved below the release loop). A race that re-creates them can no longer turn into
+   a permanent reference. The same move also stops a handle change from keeping render targets of the old
+   swapchain.
+3. **A refused resize is retried, and remembered** (`_ResizePresenter`, `_RetryRefusedPresenterResize`).
+   - A presenter `ResizeBuffers` refused with 887A0001 is tried once more at once: the backend's own cleanup
+     inside the first attempt clears a holder that only lost a race.
+   - Any failure leaves the resize owed, so the game's next resize reaches the presenter even at the size it
+     already has.
+   - Any failure also arms three resizes of the presenter alone at its own size, one per present. The hidden
+     swapchain still matches that size, because a refused presenter leaves it untouched.
+   - One error line is logged when the attempts are spent.
+   - Falling back to a plain presenter when every attempt fails was not built. It would mean replacing a
+     swapchain the game holds in flight.
+
+Tests are in `bridge-lifetime`: `refusedResizeCases`, and the overlay unit that replays this interleaving
+against the production `CreateRenderTargetDx12` and `CleanupRenderTargetDx12`. Eight mutations each fail a case;
+see that suite's README.
+
+**The `RSYNC` errors.** Every frame logs `rsync.cpp:660 setDynamicMFGParams failed with status 1`: 370 of them in
+this log. `NvAPI_D3D_SetReflexSync ... failed error -3` appears twice, at the first present and at a flush. That
+error is `NVAPI_NO_IMPLEMENTATION`: dxvk-nvapi does not implement `SetReflexSync`. Streamline's pacing calls it
+by itself, and there is no `DLSSGOptions` field or flag to turn it off (`external/streamline/sl_dlss_g.h`).
+Interpolation and pacing worked with it failing, so it is log noise. OptiScaler cannot avoid triggering it
+without changing what it asks of DLSS-G on Windows, where the call succeeds. The only lever is cosmetic: demote
+or rate-limit those two lines in the Streamline log callback when running on Wine
+(`proxies/Streamline_Proxy.h:684-692`). That was not done here.
+
+**To verify in-game**, same setup:
+- Alt+Tab out and back while DLSS-G is interpolating, several times. Then toggle fullscreen from the game's
+  options.
+- Wanted in the log: every `Dx11wDx12SC ResizeBuffers results: fg 0, real 0`; no `proxyBuffer is NULL`; and
+  `LocalPresent` continuing after each resize.
+- `the presenter refused ResizeBuffers ... Trying once more` may appear. It is acceptable only when it is
+  followed by `fg 0`.
+- `refused ... more resizes at its own size` means the retries were spent. Keep that log.
+- The menu (Home) must still draw after each resize. On a frame generation presenter its render targets are now
+  released only inside the backend's resize.
+
 ## Open questions
 
 - How FSR's interpolator behaves with flat depth: its disocclusion and inpainting assume real depth.

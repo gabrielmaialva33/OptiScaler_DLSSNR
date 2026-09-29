@@ -627,3 +627,43 @@ Before any run:
   One `WaitForUIAllocator ... waitResult 102` appeared at FG activation and did not recur.
 - **Left open:** the user saw the crosshair and HUD smear under FG when the camera moves; NR off makes no
   difference. See `synthesized-motion.md` for the per-pixel refinement that addresses it.
+
+## The resize contract with a frame-generation presenter (2026-09-29)
+
+Generation Zero with DLSS-G on this bridge froze after a resize. The log, the cause and the evidence are in
+`synthesized-frame-generation.md`, "DLSS-G output", "First run". In short: the bridge released the overlay's render
+targets from the game thread, and Streamline's present thread re-created them in the middle of that. The later
+release inside the real swapchain's resize then skipped them, and vkd3d-proton refused DLSS-G's `ResizeBuffers`.
+Streamline had already let its proxy buffers go, and never presented again.
+
+What a resize now does, in order:
+
+1. **The drain**, unchanged.
+2. **The overlay, by presenter** (`_ReleaseOverlayForResize`).
+   - Plain presenter: `MenuOverlayDx::CleanupRenderTarget`, as before. The bridge draws that overlay itself, on
+     this thread.
+   - Frame-generation presenter: frame generation is paused, and the render targets are left alone. They are the
+     real swapchain's, drawn from the backend's present path. `WrappedIDXGISwapChain4::ResizeBuffers` releases
+     them inside the backend's resize, after the backend has stopped presenting. `_PresenterDrawsOverlay` is the
+     one predicate for "who draws the overlay"; `Present` uses it too.
+3. **The interop buffers and the synthesized pair**, unchanged.
+4. **The presenter** (`_ResizePresenter`).
+   - A refusal (887A0001) is retried once, at once.
+   - Any failure leaves the resize owed, which defeats `IsSame`. It also arms `kRefusedResizeRetries` (3)
+     resizes of the presenter alone at its own size, one per present (`_RetryRefusedPresenterResize`, through
+     `_ResizePresenterToMatch`).
+   - A presenter that took the resize clears both.
+5. **The hidden swapchain**, only after the presenter took the resize, as before.
+
+The Present-time attempts exist because a DLSS-G presenter whose resize failed returns S_OK from Present and
+shows nothing. `_RecoverPresenter` reacts only to a Present that fails, so it can never see this state.
+
+`menu/menu_overlay_dx.cpp` changed too. `CleanupRenderTargetDx12` releases the buffers before it checks the init
+state, so a render target re-created by another thread during a cleanup is still released by the next one.
+That is an upstream file, and this is a fork change to it.
+
+Tests: `bridge-lifetime`, `refusedResizeCases` and the overlay unit.
+
+Not proven without a game:
+- that Streamline rebuilds its proxy buffers on the retried resize;
+- that the menu still draws after each resize on a frame-generation presenter.
