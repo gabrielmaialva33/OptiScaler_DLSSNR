@@ -8,6 +8,9 @@ outside the NR module (see [Where the code goes](#where-the-code-goes)); the not
 it builds on the present host and on [synthesized-motion.md](synthesized-motion.md).
 **The HUD (step 4)** is designed in [The HUD: near depth and a UI layer](#the-hud-near-depth-and-a-ui-layer)
 (2026-09-28, branch `fg-hud-depth-ui`), which also corrects what this note first planned for it.
+**The UI layer's own mask** (recall of outlines, thin elements and panels, and a feathered margin for the band)
+is in [The HUD layer's own mask: recall and a margin](#the-hud-layers-own-mask-recall-and-a-margin) (2026-09-29,
+branch `synth-hud-layer-recall`).
 **The DLSS-G output** (`FGOutput=dlssg` beside FSR-FG) is in [DLSS-G output](#dlss-g-output) (2026-09-28,
 branch `synth-fg-dlssg`): designed and written from code, not yet measured in a game.
 
@@ -955,6 +958,155 @@ game-vector field's depth priority (top middle) and the disocclusion mask (botto
   marks fade over about 1.5 s. Neither is a fault.
 - **Configuration:** Generation Zero on the D3D11 bridge (`FGInput=synthesized`, `SynthesizedMotion=true`)
   is the title that showed the smear. Also PCSX2 on D3D12, for the late layer after DLSS-NR's pass.
+
+## The HUD layer's own mask: recall and a margin
+
+Written 2026-09-29, before the code, on branch `synth-hud-layer-recall`, against `0914ca4f`.
+
+**What was seen.** Generation Zero, FSR-FG, `SynthesizedHudDepth=true` and `SynthesizedHudLayer=true`: the HUD
+still smears while the camera turns.
+
+**Why, from [Built and measured](#built-and-measured-2026-09-28).** The layer's alpha is the strict mask, and
+the strict mask marks little of what smears:
+- about a third of the crosshair and of the floating text, and none of the panel;
+- never a 1 px outline or drop shadow. The 3x3 still core of such a pixel always reaches the moving scene;
+- nothing of an element with no stroke 3 px thick. A thin crosshair or a compass tick with a 1 px shadow has no
+  pixel whose 3x3 is still, so it gets no mark at all. Generation Zero's HUD is mostly such elements.
+
+The layer also leaves the band beside each element to the interpolator, by design ("What it does not fix: the
+band", above). So the unmarked outlines and the band are exactly what FSR drags.
+
+**What the research converged on.** Lossless Scaling's UI detection, Qualcomm's US11587208B2 and the CVPR 2023
+D-map work do the same three things:
+1. find static pixels with a test over several frames;
+2. grow and feather that mask so that it covers the smear band around each element;
+3. show the real frame's pixels there.
+
+### Two masks, one per fix
+
+- **Depth (Fix A) keeps the strict mask, unchanged.** A false positive there is a pixel FSR treats as near: it
+  wins every vector collision and occludes its neighbours, so moving scenery gets pinned. Precision is what
+  matters for it, and it has it (100.00% within 1 px on every overlay sequence).
+- **The layer (Fix B) gets a mask of its own, a superset of the strict one.** A false positive there shows the
+  base frame's pixel in generated frames. For a static pixel that is what interpolation would show anyway. The
+  cost is local judder, not a pinned object, so the layer can take much more.
+
+### The layer's mask, in three steps
+
+1. **Seeds**, per pixel. A pixel is a seed while all of these hold:
+   - it has been still for at least K = 8 frames in a row. Still means its luma changed by less than 0.012
+     from the frame before. A count of still frames is the "|I_t - I_{t-k}| small for k = 1, 2, 4" test in
+     cumulative form. Eight still frames bound the change against every one of the last eight frames, at one
+     8-bit channel of state instead of three frames of luma history;
+   - it has contrast: 0.15 against a 4-neighbour, the strict rule's figure;
+   - **the scene moves on all four axis sides within R.** R is about a sixth of the frame's height (120 px at
+     720p, 240 px at 1440p), read from a tile map (below). That is the strict rule's own reach of 24 px, made
+     large enough to span a panel;
+   - **two perpendicular orientations of static structure** within the surrounding 5x5 tiles, about 20 px:
+     horizontal and vertical edges, or both diagonals;
+   - **the camera moves**: at least half of the textured tiles are moving, from 256 tiles sampled over the frame.
+
+   A seed stays one for 90 frames (1.5 s, the strict decay) while it stays still, and drops at once when it
+   changes. **There is no still core.** The core is what kept outlines and thin elements out.
+2. **Growth through still pixels.** A geodesic distance from the nearest seed, carried in the state and
+   advanced 2 px a frame through pixels still for K frames, up to G = 48 px. It reaches the pixels no seed test
+   can take:
+   - 1 px outlines and drop shadows;
+   - stroke interiors and flat panel fills;
+   - the long straight edges of frames and bars, from their seeded corners.
+
+   It stops at anything that moves: the scene, and a translucent panel's fill. The layer's core is then the
+   maximum of the strict mask and the grown set, so the layer covers everything the depth marks.
+3. **The band.** The layer's alpha is the core dilated and feathered. It is 1 within M/2 px of the core, then
+   falls linearly to 0 at M + 1 px.
+   - M is `[FrameGen] SynthesizedHudMargin`, in pixels, 0 to 24, and is only used with `SynthesizedHudLayer`.
+   - FSR's band is half the motion wide on each side ("What goes wrong at the HUD", above). A margin of M
+     covers the band fully up to M px of motion per base frame, and partly up to 2M.
+   - The default is chosen from the harness below. The in-game speed that matters has not been measured.
+
+**Why the test is not "one side moving is enough".** It was the first proposal, and it seeds:
+- the static background beside every moving object, as in the harness's `object` sequence, where the
+  camera is still and one patch moves;
+- every straight scenery edge that runs along the motion. That is the aperture problem: strafe along a wall,
+  and its skirting line stays still on screen while the wall around it moves.
+
+Each seed then holds a ring of moving scenery. Four sides, two orientations and a moving camera answer both:
+- the patch has motion on one side only, and with a still camera the camera gate is closed anyway;
+- the skirting line has one orientation only;
+- HUD elements have both: crosshair arms, glyph strokes, the corners of frames and panels;
+- rain or water around a still object in a still scene moves on every side, but the camera gate is shut.
+
+### Where it runs
+
+- **The detect pass gets a second permutation.** `SynthOverlay_DetectLayer` is compiled from the same source
+  with `SYNTH_OVERLAY_LAYER=1`, and runs only with the layer on. With the layer off the pass is today's bytecode
+  and nothing new is allocated, so the depth-only default costs and produces exactly what it did.
+- **A tile map.** Each 8x8 thread group writes one RGBA8 texel per frame:
+  - the share of its pixels that moved (luma change above 0.02, the strict rule's figure);
+  - the share that is textured (4-neighbour contrast above 0.04);
+  - the orientations of its static structure.
+
+  The next frame reads it, so the side scan, the orientation test and the camera gate are a frame late. The
+  camera turns continuously, and a seed already holds for 1.5 s, so the lag costs one frame when motion starts.
+- **The per-pixel state** is one RGBA8 texel: still frames, hold, grown distance. It is a ping-pong pair
+  beside the strict rule's, advanced by the same confirm and abandon.
+- **The rule is a header**, `precompile/static_overlay_layer.h`, as `static_overlay_rule.h` is. The shader and a
+  host test run the same decisions. `static_overlay_rule.h` and DLSS-NR's pass are not touched, so NR's bytecode
+  stays byte-identical by construction.
+- **The layer pass does the band.** It keeps its place (after DLSS-NR's pass on native D3D12, on the copy list
+  on the bridge). It reads the core with an apron into group-shared memory and runs a separable max filter:
+  16x16 groups, at most 26 KB of group-shared memory at the 24 px cap, which is under D3D12's 32 KB. A group
+  whose apron holds no core skips the filter.
+- **Memory**, with the layer on only, at 3440x1440: about 40 MB for the state pair, 5 MB for the core, and
+  under 1 MB for the tiles.
+
+### Risks
+
+- **The judder ring.** In a generated frame the band shows the base frame's background. Around each element,
+  a ring up to M px wide moves at the base rate instead of smearing, and the feather blends two positions of
+  the background. That is Lossless Scaling's trade. It is also why M is a key and 0 turns the band off.
+- **A false seed holds a ring of scenery.** It needs static structure with two orientations, moving scenery on
+  four sides within R, and a moving camera. Under translation a far object between near moving ones can have
+  all of that. So can a third-person character that the camera orbits, but the strict rule already marks that
+  as near today.
+- **Growth leaks into flat regions** touching the HUD, such as sky, up to G px. Holding a flat region changes
+  nothing; the band around the leak holds whatever moves beside it.
+- **Translucent panels.** Their fill is never still, so it is never in the core. Only the opaque border and
+  text are, plus the band. A uniformly tinted interior interpolates correctly with the scene's vectors; its
+  edge is what the band is for.
+- **A fast small object crossing the layer** vanishes there in generated frames, as with every held pixel.
+- **Onset.** A HUD element that just appeared or changed needs K frames still before it seeds or grows. Its
+  neighbours' band covers part of it meanwhile.
+- **Proton is not a D3D12 validator.** So, by the rules rather than by what ran here:
+  - the UAV stores are to R8_UNORM and R8G8B8A8_UNORM, which every D3D12 device supports;
+  - the previous state and tiles are read through SRVs;
+  - there are no constant-buffer views, only root constants;
+  - group-shared memory stays under 32 KB;
+  - the root signature grows to 24 root constants, 5 SRVs and 7 UAVs. The old detect bytecode binds a subset
+    of that, which is legal.
+
+### Tests
+
+- **`tests/synth-motion-d3d12`.**
+  - The `hud_*` sequences gain two elements: a 1 px hollow frame with a 1 px drop shadow, and a translucent
+    panel with an opaque 1 px border and outlined text.
+  - Every overlay pixel is classed as stroke, outline or fill.
+  - Reported per element and part: the strict mask's recall, which is also the old layer's alpha, next to the
+    new core's and the new alpha's.
+  - The band: mean alpha in rings 1-2, 3-4, 5-8, 9-16 and 17-24 px from the nearest element.
+  - The smear set under the half-vector model: background pixels whose sample at q + v/2 or q - v/2 lands on the
+    overlay. Its coverage, and the held background outside it, per frame.
+  - A sweep of M from the read-back core, on the CPU. The GPU alpha must equal the CPU dilation at the default
+    margin.
+  - Judged: not one core or alpha pixel on the pans, the object, static, cut and abandon; the layer's rgb is the
+    frame; its alpha is at least the strict mask; the core's precision; recall floors; smear-set coverage.
+  - GPU time with the layer off and on.
+- **`tests/fg-synth-policy`** runs the header on the CPU over fixtures the harness has no room for:
+  - a glyph and a 1 px frame over a pan, seeded and grown;
+  - sand beside a swaying coat, and a concave gap between legs;
+  - a straight edge along the motion;
+  - a still scene with rain;
+  - a moving patch over a still scene.
 
 ## DLSS-G output
 
