@@ -74,6 +74,8 @@ a follow-up if the flag alone is not enough.
   exactly as now.
 - The held texture is allocated on the transition to held and released/parked on hold-off; it is
   rebuilt if the output's size/format changes while held (same rule as the guide clones).
+- The held texture is one mip of one slice. An output with more (2026-09-29, wilsjo2's `3b845f76`) is
+  copied by its first subresource with CopyTextureRegion; CopyResource between the two was invalid.
 - Inert when NR is off.
 - Passthrough unaffected (the freeze is on the encode's source, ahead of the passthrough branch).
 

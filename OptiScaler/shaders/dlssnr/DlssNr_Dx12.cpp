@@ -3270,6 +3270,31 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (hold)
         {
             const D3D12_RESOURCE_DESC td = target->GetDesc();
+
+            // The held copy is one mip of one slice. CopyResource needs both sides identical, so an output
+            // with mips or array slices is copied by its first subresource instead -- the one the pass
+            // reads and writes. A single-subresource output keeps the whole-resource copy it always had.
+            const auto copyHeld = [&](ID3D12Resource* dst, ID3D12Resource* src)
+            {
+                if (td.MipLevels <= 1 && td.DepthOrArraySize <= 1)
+                {
+                    cmdList->CopyResource(dst, src);
+                    return;
+                }
+
+                D3D12_TEXTURE_COPY_LOCATION to {};
+                to.pResource = dst;
+                to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                to.SubresourceIndex = 0;
+
+                D3D12_TEXTURE_COPY_LOCATION from {};
+                from.pResource = src;
+                from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                from.SubresourceIndex = 0;
+
+                cmdList->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+            };
+
             const bool needCapture = !g_nr.heldActive || g_nr.heldColor == nullptr ||
                                      (unsigned int) td.Width != g_nr.heldWidth || td.Height != g_nr.heldHeight ||
                                      td.Format != g_nr.heldFormat;
@@ -3288,7 +3313,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
                     Barrier(cmdList, g_nr.heldColor, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                             D3D12_RESOURCE_STATE_COPY_DEST);
-                    cmdList->CopyResource(g_nr.heldColor, target);
+                    copyHeld(g_nr.heldColor, target);
                     Barrier(cmdList, g_nr.heldColor, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
                     Barrier(cmdList, target, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -3303,7 +3328,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             {
                 // Held: restore the frozen frame onto the live output before the encode reads it.
                 Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-                cmdList->CopyResource(target, g_nr.heldColor);
+                copyHeld(target, g_nr.heldColor);
                 Barrier(cmdList, target, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
 
