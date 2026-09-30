@@ -1278,7 +1278,10 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
         if (isUpscale)
             pre.emplace(InCmdList, InParameters, feature != NVSDK_NGX_Feature_RayReconstruction);
 
+        // The legacy menu is held back until the neural pass has run (IFeature_Dx12::DeferMenuRender).
+        IFeature_Dx12::DeferMenuRender = true;
         optiResult = TryEvaluateOptiFeature(InCmdList, InFeatureHandle, InParameters, InCallback);
+        IFeature_Dx12::DeferMenuRender = false;
         preUpscaleDeclined = pre.has_value() && pre->Declined();
     }
 
@@ -1286,6 +1289,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
     if (optiResult == NVSDK_NGX_Result_Success && isUpscale)
         DlssNr::EvaluateAfterUpscale(InCmdList, InParameters, nullptr, preUpscaleDeclined,
                                      feature == NVSDK_NGX_Feature_RayReconstruction);
+
+    // The menu last, over the pass's output.
+    IFeature_Dx12::RenderDeferredMenu(InCmdList);
 
     return optiResult;
 }

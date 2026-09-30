@@ -263,25 +263,54 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     // imgui
     if (!Config::Instance()->OverlayMenu.value_or_default() && _frameCount > 30)
     {
-        if (Imgui != nullptr && Imgui.get() != nullptr)
+        if (DeferMenuRender)
         {
-            if (Imgui->IsHandleDifferent())
-            {
-                Imgui.reset();
-            }
-            else
-                Imgui->Render(InCommandList, paramOutput);
+            _deferredMenuFeature = this;
+            _deferredMenuOutput = paramOutput;
         }
         else
         {
-            if (Imgui == nullptr || Imgui.get() == nullptr)
-                Imgui = std::make_unique<Menu_Dx12>(GetForegroundWindow(), Device);
+            RenderLegacyMenu(InCommandList, paramOutput);
         }
     }
 
     InParameters->Set(NVSDK_NGX_Parameter_Output, paramOutput);
 
     return evalResult;
+}
+
+void IFeature_Dx12::RenderLegacyMenu(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InOutput)
+{
+    if (Imgui != nullptr && Imgui.get() != nullptr)
+    {
+        if (Imgui->IsHandleDifferent())
+        {
+            Imgui.reset();
+        }
+        else
+            Imgui->Render(InCommandList, InOutput);
+    }
+    else
+    {
+        // The window IsHandleDifferent compares against. Created with GetForegroundWindow(), a foreground
+        // window that was not the game's made the two disagree every frame, so the menu was destroyed and
+        // rebuilt forever and never drawn.
+        Imgui = std::make_unique<Menu_Dx12>(Util::GetProcessWindow(), Device);
+    }
+}
+
+void IFeature_Dx12::RenderDeferredMenu(ID3D12GraphicsCommandList* InCommandList)
+{
+    auto feature = _deferredMenuFeature;
+    auto output = _deferredMenuOutput;
+
+    _deferredMenuFeature = nullptr;
+    _deferredMenuOutput = nullptr;
+
+    if (feature == nullptr || output == nullptr || InCommandList == nullptr)
+        return;
+
+    feature->RenderLegacyMenu(InCommandList, output);
 }
 
 std::optional<double> IFeature_Dx12::ReadUpscalerTime(void* commandQueueVoid)

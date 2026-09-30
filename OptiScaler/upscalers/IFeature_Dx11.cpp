@@ -300,7 +300,7 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
         else
         {
             if (Imgui == nullptr || Imgui.get() == nullptr)
-                Imgui = std::make_unique<Menu_Dx11>(GetForegroundWindow(), Device);
+                Imgui = std::make_unique<Menu_Dx11>(Util::GetProcessWindow(), Device); // as IsHandleDifferent
         }
     }
 

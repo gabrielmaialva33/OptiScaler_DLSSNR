@@ -8,6 +8,9 @@
 #include <imgui/imgui_impl_dx12.h>
 #include <imgui/imgui_impl_win32.h>
 
+#include <utility>
+#include <vector>
+
 long frameCounter = 0;
 static int const SRV_HEAP_SIZE = 64;
 
@@ -40,6 +43,34 @@ struct ImGui_ImplDX12_Data
 
 static DescriptorHeapAllocator g_pd3dSrvDescHeapAlloc;
 
+// Render targets replaced after a size or format change. The command lists that used them may still be
+// queued on the caller's queue, so they are released only after enough further menu frames.
+static std::vector<std::pair<ID3D12Resource*, long>> g_retiredRenderTargets;
+
+static void RetireRenderTarget(ID3D12Resource*& resource)
+{
+    if (resource != nullptr)
+        g_retiredRenderTargets.emplace_back(resource, frameCounter);
+
+    resource = nullptr;
+}
+
+static void ReleaseRetiredRenderTargets()
+{
+    // frameCounter advances twice per Render, so 32 is 16 menu frames.
+    constexpr long safeDistance = 32;
+
+    std::erase_if(g_retiredRenderTargets,
+                  [](const std::pair<ID3D12Resource*, long>& entry)
+                  {
+                      if (frameCounter - entry.second < safeDistance)
+                          return false;
+
+                      entry.first->Release();
+                      return true;
+                  });
+}
+
 bool Menu_Dx12::Render(ID3D12GraphicsCommandList* pCmdList, ID3D12Resource* outTexture)
 {
     if (Config::Instance()->OverlayMenu.value_or_default())
@@ -49,6 +80,7 @@ bool Menu_Dx12::Render(ID3D12GraphicsCommandList* pCmdList, ID3D12Resource* outT
         return false;
 
     frameCounter++;
+    ReleaseRetiredRenderTargets();
 
     // if (!IsVisible())
     //	return true;
@@ -73,7 +105,11 @@ bool Menu_Dx12::Render(ID3D12GraphicsCommandList* pCmdList, ID3D12Resource* outT
         HRESULT hr = _device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&initInfo.CommandQueue));
         IM_ASSERT(SUCCEEDED(hr));
 
-        initInfo.NumFramesInFlight = 2;
+        // The menu is recorded into the upscaler caller's command list and executes on that caller's queue,
+        // which can be several frames behind (DLSS5-Feeder keeps three in flight). With 2 the backend
+        // reused, and when the menu first opened and its vertex buffers grew, released buffers the GPU was
+        // still reading: a page fault on a freed resource and a removed device. 8 outlives such a queue.
+        initInfo.NumFramesInFlight = 8;
         initInfo.RTVFormat = outDesc.Format;
         initInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
         initInfo.SrvDescriptorHeap = _srvDescHeap;
@@ -267,8 +303,8 @@ void Menu_Dx12::CreateRenderTarget(const D3D12_RESOURCE_DESC& InDesc)
 
         if (InDesc.Width != rtDesc.Width || InDesc.Height != rtDesc.Height || InDesc.Format != rtDesc.Format)
         {
-            SAFE_RELEASE(_renderTargetResource[0]);
-            SAFE_RELEASE(_renderTargetResource[1]);
+            RetireRenderTarget(_renderTargetResource[0]);
+            RetireRenderTarget(_renderTargetResource[1]);
         }
         else
             return;

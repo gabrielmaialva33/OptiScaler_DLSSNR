@@ -43,7 +43,21 @@ class IFeature_Dx12 : public virtual IFeature
     virtual bool InitInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) = 0;
     virtual bool EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) = 0;
 
+    // Records the legacy (OverlayMenu=false) ImGui menu into the output.
+    void RenderLegacyMenu(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InOutput);
+
+  private:
+    // The legacy menu draw Evaluate handed to RenderDeferredMenu, on the same thread and evaluate.
+    static inline thread_local IFeature_Dx12* _deferredMenuFeature = nullptr;
+    static inline thread_local ID3D12Resource* _deferredMenuOutput = nullptr;
+
   public:
+    // Set by the NGX D3D12 evaluate entry around OptiScaler's own upscaler. While it is set, Evaluate
+    // does not draw the legacy menu; the entry draws it with RenderDeferredMenu after DLSS-NR has run,
+    // so the neural pass, which rewrites the whole output, does not put the menu through the model.
+    static inline thread_local bool DeferMenuRender = false;
+    static void RenderDeferredMenu(ID3D12GraphicsCommandList* InCommandList);
+
     bool Init(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters);
     bool Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters);
 
