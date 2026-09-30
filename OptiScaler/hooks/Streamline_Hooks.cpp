@@ -19,6 +19,15 @@
 #include <magic_enum.hpp>
 #include "detours/detours.h"
 #include <atomic>
+#include <mutex>
+
+// Detours allows one transaction in flight per process. Every hook*/unhook* below runs its own
+// DetourTransactionBegin...Commit from inside the LoadLibrary hook, as Streamline's plugin manager maps
+// each sl.*.dll, and nothing serialised them: two overlapping made DetourTransactionCommit fail with
+// ERROR_INVALID_OPERATION (0x10DD), "Failed to hook DLSS: 10DD", and Streamline gave up on its plugins
+// ("DLSS options will be disabled"). Held across each Begin...Commit in this file and nothing else, so it
+// is always the innermost lock. Transactions in other files are not covered.
+static std::mutex g_detoursTransactionMutex;
 
 static bool IsSL1AndDLSSGActive()
 {
@@ -1803,6 +1812,7 @@ void StreamlineHooks::hkcommon_slSetParameters_sl1(void* params)
         // It's flipped, 0 -> set void*, 7 -> get void*
         o_setVoid = (PFN_setVoid) vtable[0];
 
+        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
@@ -1902,6 +1912,7 @@ void StreamlineHooks::unhookInterposer()
 {
     LOG_FUNC();
 
+    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2044,6 +2055,7 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
             if (o_slInit != nullptr)
             {
                 LOG_TRACE("Hooking v2");
+                std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
                 DetourTransactionBegin();
                 DetourUpdateThread(GetCurrentThread());
 
@@ -2136,6 +2148,7 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
             if (o_slInit_sl1 || o_slSetTag_sl1 || o_slSetConstants_interposer_sl1 || o_slEvaluateFeature_sl1)
             {
                 LOG_TRACE("Hooking v1");
+                std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
                 DetourTransactionBegin();
                 DetourUpdateThread(GetCurrentThread());
 
@@ -2176,6 +2189,7 @@ void StreamlineHooks::unhookDlss()
 {
     LOG_FUNC();
 
+    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2212,6 +2226,7 @@ void StreamlineHooks::hookDlss(HMODULE slDlss)
     if (o_dlss_slGetPluginFunction != nullptr)
     {
         LOG_TRACE("Hooking slGetPluginFunction in sl.dlss");
+        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
@@ -2232,6 +2247,7 @@ void StreamlineHooks::unhookDlssg()
 {
     LOG_FUNC();
 
+    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2265,6 +2281,7 @@ void StreamlineHooks::hookDlssg(HMODULE slDlssg)
     if (o_dlssg_slGetPluginFunction != nullptr)
     {
         LOG_TRACE("Hooking slGetPluginFunction in sl.dlssg");
+        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
@@ -2285,6 +2302,7 @@ void StreamlineHooks::unhookLocalDlssg()
 {
     LOG_FUNC();
 
+    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2316,6 +2334,7 @@ void StreamlineHooks::hookLocalDlssg(HMODULE slDlssg)
     if (o_local_dlssg_slGetPluginFunction != nullptr)
     {
         LOG_TRACE("Hooking slGetPluginFunction in local sl.dlssg");
+        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
@@ -2331,6 +2350,7 @@ void StreamlineHooks::unhookReflex()
 {
     LOG_FUNC();
 
+    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2367,6 +2387,7 @@ void StreamlineHooks::hookReflex(HMODULE slReflex)
     if (o_reflex_slGetPluginFunction != nullptr)
     {
         LOG_TRACE("Hooking slGetPluginFunction in sl.reflex");
+        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
@@ -2387,6 +2408,7 @@ void StreamlineHooks::unhookPcl()
 {
     LOG_FUNC();
 
+    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2423,6 +2445,7 @@ void StreamlineHooks::hookPcl(HMODULE slPcl)
     if (o_pcl_slGetPluginFunction != nullptr)
     {
         LOG_TRACE("Hooking slGetPluginFunction in sl.pcl");
+        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
@@ -2443,6 +2466,7 @@ void StreamlineHooks::unhookCommon()
 {
     LOG_FUNC();
 
+    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2481,6 +2505,7 @@ void StreamlineHooks::hookCommon(HMODULE slCommon)
     if (o_common_slGetPluginFunction != nullptr)
     {
         LOG_TRACE("Hooking slGetPluginFunction in sl.common");
+        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
