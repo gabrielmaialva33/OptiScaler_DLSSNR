@@ -4628,6 +4628,12 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
             {
                 // What the model last saw is not the frame that follows once it runs again.
                 g_resetOnReturn = true;
+
+                // The FG hook still owns this flip, so the wrapped swapchain's entry keeps standing down
+                // and the status line does not count every present twice.
+                if (fgHook)
+                    g_lastFgFlip = g_presentFlip;
+
                 ReportSkipOnce(refusal);
                 ReportRuntimeStatus(false, refusal);
                 return;
