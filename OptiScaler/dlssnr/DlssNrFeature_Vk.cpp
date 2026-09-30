@@ -1030,6 +1030,13 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &mvScaleX);
     params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &mvScaleY);
 
+    // Zero or not finite is as good as absent, as on D3D12.
+    if (!std::isfinite(mvScaleX) || mvScaleX == 0.0f)
+        mvScaleX = 1.0f;
+
+    if (!std::isfinite(mvScaleY) || mvScaleY == 0.0f)
+        mvScaleY = 1.0f;
+
     // The game asking the upscaler to forget its history -- a cut, a teleport, a load. Same omission
     // as the D3D12 path had: the model's history was only ever reset by things that happened to us,
     // never by anything that happened in the game.

@@ -4951,10 +4951,14 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, &frame.MotionSubrectBaseX);
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, &frame.MotionSubrectBaseY);
 
-    if (params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &frame.MvScaleX) != NVSDK_NGX_Result_Success)
+    // A scale that was set but is zero or not finite is as good as absent: handed to the model it
+    // collapses every vector to nothing or poisons them with NaN.
+    if (params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &frame.MvScaleX) != NVSDK_NGX_Result_Success ||
+        !std::isfinite(frame.MvScaleX) || frame.MvScaleX == 0.0f)
         frame.MvScaleX = 1.0f;
 
-    if (params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &frame.MvScaleY) != NVSDK_NGX_Result_Success)
+    if (params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &frame.MvScaleY) != NVSDK_NGX_Result_Success ||
+        !std::isfinite(frame.MvScaleY) || frame.MvScaleY == 0.0f)
         frame.MvScaleY = 1.0f;
 
     // What the game says about its own exposure. Logged, used for nothing yet.
