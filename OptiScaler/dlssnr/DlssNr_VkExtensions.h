@@ -102,4 +102,32 @@ inline bool ListHas(const char* const* list, uint32_t count, const char* needle)
     return false;
 }
 
+// VK_KHR_buffer_device_address and VK_EXT_buffer_device_address must not be enabled together
+// (VUID-VkDeviceCreateInfo-ppEnabledExtensionNames-03328). OptiScaler's spoofing adds the EXT one on NVIDIA
+// and kDevice adds the KHR one the model names, so both could reach vkCreateDevice. When both are listed,
+// the one the game did not ask for goes: the EXT, unless the game asked for the EXT itself, and then the KHR.
+// Returns whether anything was removed.
+inline bool DropConflictingBufferDeviceAddress(std::vector<const char*>& names, const char* const* gameList,
+                                               uint32_t gameCount)
+{
+    const char* const khr = VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME;
+    const char* const ext = VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME;
+
+    if (!ListHas(names.data(), (uint32_t) names.size(), khr) || !ListHas(names.data(), (uint32_t) names.size(), ext))
+        return false;
+
+    const bool gameAskedExt = ListHas(gameList, gameCount, ext);
+    const bool gameAskedKhr = ListHas(gameList, gameCount, khr);
+
+    // The game asked for both: its own conflict, not ours to rewrite.
+    if (gameAskedExt && gameAskedKhr)
+        return false;
+
+    const std::string drop = gameAskedExt ? khr : ext;
+    const auto before = names.size();
+    std::erase_if(names, [&drop](const char* name) { return name != nullptr && drop == name; });
+
+    return names.size() != before;
+}
+
 } // namespace DlssNr::VkExt

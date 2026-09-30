@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Nineteen suites. All but `nr-invariants` build real production code with local fakes under
+**Host tier.** Twenty-two suites. All but `nr-invariants` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
@@ -92,6 +92,9 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   resource release.
 - `nr-timing-boundary` — timing metadata and UI boundary, and where the timing
   markers sit.
+- `nr-vk-extensions` — the Vulkan device-extension merge the NR hook hands `vkCreateDevice`,
+  compiled against the real Vulkan headers: `VK_KHR_` and `VK_EXT_buffer_device_address` never
+  leave it together, and the one the game asked for is the one kept.
 - `nr-zero-guides` — zero depth and motion for a host with no engine buffers, and the
   two-heap clear contract.
 

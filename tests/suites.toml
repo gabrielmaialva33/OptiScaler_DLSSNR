@@ -31,7 +31,7 @@ summary = "Zero depth/motion for a caller with no engine buffers, and the two-he
 [nr-present-host]
 tier = "host"
 timeout = 300
-summary = "What the present host builds and when: tiny frames, resizes, the pass switched off."
+summary = "What the present host builds and when: tiny frames, resizes, the pass switched off, HDR swapchains declined."
 
 [nr-uimask-rule]
 tier = "host"
@@ -82,6 +82,11 @@ summary = "Pass-settings codec and the four-point Config round trip for the mast
 tier = "host"
 timeout = 300
 summary = "Command-list submission lifetime model that gates resource release."
+
+[nr-vk-extensions]
+tier = "host"
+timeout = 300
+summary = "The NR Vulkan device-extension merge, compiled against the real Vulkan headers: KHR and EXT buffer_device_address never leave it together."
 
 [nr-shutdown]
 tier = "host"

@@ -227,7 +227,14 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
             LOG_WARN("DLSS-NR Vulkan: the native path is not possible on this device -- the model's kernels "
                      "cannot be loaded without the extensions listed as NOT AVAILABLE");
 
-        if (!added.empty())
+        const bool dropped = DlssNr::VkExt::DropConflictingBufferDeviceAddress(
+            nrExtensions.names, pCreateInfo->ppEnabledExtensionNames, pCreateInfo->enabledExtensionCount);
+
+        if (dropped)
+            LOG_INFO("DLSS-NR Vulkan: the KHR and EXT buffer_device_address extensions may not be enabled "
+                     "together; kept the one the game asked for, or the KHR one");
+
+        if (!added.empty() || dropped)
         {
             localCreteInfo.ppEnabledExtensionNames = nrExtensions.names.data();
             localCreteInfo.enabledExtensionCount = (uint32_t) nrExtensions.names.size();
