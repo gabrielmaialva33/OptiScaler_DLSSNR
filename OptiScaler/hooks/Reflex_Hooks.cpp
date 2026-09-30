@@ -567,6 +567,10 @@ bool ReflexHooks::updateTimingData()
 // For updating information about Reflex hooks
 void ReflexHooks::update(bool fgActive, bool isVulkan)
 {
+    static float lastFps = 0;
+    static bool lastReflexLimitsFps = State::Instance().reflexLimitsFps;
+    static LowLatencyMode lastLowLatencyMode = fakenvapi::getCurrentMode();
+
     // We can still use just the markers to limit the fps with Reflex disabled
     // But need to fallback in case a game stops sending them for some reason
     _updatesWithoutMarker++;
@@ -575,6 +579,16 @@ void ReflexHooks::update(bool fgActive, bool isVulkan)
 
     if (_updatesWithoutMarker > 20 || !_inited)
     {
+        // The Reflex limit lives in the driver's sleep mode. Handing pacing back to FrameLimit without
+        // clearing it left the old interval in force -- a 4x DLSS-G output cap kept applying to real
+        // frames after FG was turned off.
+        if (State::Instance().reflexLimitsFps)
+        {
+            lastFps = 0;
+            lastReflexLimitsFps = false;
+            setFPSLimit(0);
+        }
+
         State::Instance().reflexLimitsFps = false;
         return;
     }
@@ -611,10 +625,6 @@ void ReflexHooks::update(bool fgActive, bool isVulkan)
     //{
     //    State::Instance().reflexLimitsFps = false;
     //}
-
-    static float lastFps = 0;
-    static bool lastReflexLimitsFps = State::Instance().reflexLimitsFps;
-    static LowLatencyMode lastLowLatencyMode = fakenvapi::getCurrentMode();
 
     // Reset required when toggling Reflex
     if (State::Instance().reflexLimitsFps != lastReflexLimitsFps)
