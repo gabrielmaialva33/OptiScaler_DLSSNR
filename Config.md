@@ -721,6 +721,10 @@ LoggingEnabled=auto
 ; Log file, if undefined log_xess_xxxx.log file in current folder
 ;LogFile=./CyberXess.log
 
+; Custom log filename; if it exists on start, the previous run is renamed to <name>.previous.log
+; Default (auto) is OptiScaler.log in current folder
+;LogFileName=./OptiScaler.log
+
 ; Verbosity level of file logs
 ; 0 = Trace / 1 = Debug / 2 = Info / 3 = Warning / 4 = Error
 ; Default (auto) is 2 = Info

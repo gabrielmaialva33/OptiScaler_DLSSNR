@@ -2,6 +2,7 @@
 #include "Logger.h"
 #include "Config.h"
 #include <iostream>
+#include <filesystem>
 
 #include "spdlog/async.h"
 #include "spdlog/sinks/basic_file_sink.h"
@@ -114,8 +115,17 @@ void PrepareLogger()
 
             if (Config::Instance()->LogToFile.value_or_default())
             {
-                auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
-                    Config::Instance()->LogFileName.value_or_default(), true);
+                auto logPath = std::filesystem::path(Config::Instance()->LogFileName.value_or_default());
+                std::error_code ec;
+                if (std::filesystem::exists(logPath, ec))
+                {
+                    auto prevPath = logPath.parent_path() / (logPath.stem().wstring() + L".previous.log");
+                    std::filesystem::remove(prevPath, ec);
+                    ec.clear();
+                    std::filesystem::rename(logPath, prevPath, ec);
+                }
+
+                auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logPath.wstring(), true);
                 file_sink->set_level(spdlog::level::level_enum::trace);
 #ifdef LOG_ASYNC
                 file_sink->set_pattern("%H:%M:%S.%f\t%L\t%v");
