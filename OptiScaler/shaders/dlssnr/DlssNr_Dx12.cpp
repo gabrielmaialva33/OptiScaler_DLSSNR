@@ -7418,7 +7418,9 @@ bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** 
     *depth = clone.depth;
     *motion = clone.motion;
     *frame = clone.frame;
-    frame->GuideState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    // The owned copies rest in NON_PIXEL_SHADER_RESOURCE, whatever the game's barrier override says.
+    frame->DepthState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    frame->MotionState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     return true;
 }
 
