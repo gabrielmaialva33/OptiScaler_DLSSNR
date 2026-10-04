@@ -4,6 +4,7 @@
 #include <Logger.h>
 #include <State.h>
 #include <Util.h>
+#include <nvapi/fakenvapi.h>
 #include <proxies/NVNGX_Proxy.h>
 
 #include <format>
@@ -104,7 +105,20 @@ const Snapshot& Describe(const std::filesystem::path& modelPath)
     if (ec)
         s.modelBytes = 0;
 
+    std::error_code timeError;
+    const auto mtime = std::filesystem::last_write_time(modelPath, timeError);
+    const auto modelIdentity = std::format("file-bytes={};mtime={};version={}.{}.{}.{}", s.modelBytes,
+                                           timeError ? 0 : mtime.time_since_epoch().count(), s.modelVersion[0],
+                                           s.modelVersion[1], s.modelVersion[2], s.modelVersion[3]);
+
     s.loadedModel = ModulePath(GetModuleHandleW(L"nvngx_dlssnr.dll"));
+
+    const auto nvapiModule = GetModuleHandleW(L"nvapi64.dll");
+    const auto nvapiPath = ModulePath(nvapiModule);
+    const bool isFakenvapi = fakenvapi::isUsingAsMainNvapi();
+    const auto nvapiText =
+        nvapiModule != nullptr ? (nvapiPath.empty() ? "(loaded, path unknown)" : nvapiPath.string()) : "(none loaded)";
+    const auto nvapiStatus = isFakenvapi ? "OptiScaler substituted fakenvapi" : "native/runtime NVAPI";
 
     // Under Proton the number is the wine loader's own Windows-branch build, not the Linux driver's
     // version (615.71.09 ships 32.0.16.1691); see DriverFromLoaderVersion.
@@ -115,10 +129,11 @@ const Snapshot& Describe(const std::filesystem::path& modelPath)
                                 : std::format(" (driver {})", driver);
     LOG_INFO("DLSS-NR NGX: loader {} version {}{}; it {}", s.loaderPath.empty() ? "(none)" : s.loaderPath.string(),
              VersionText(s.loaderVersion), driverText, PeScan::Describe(s.route));
-    LOG_INFO("DLSS-NR NGX: model {} version {}, {} bytes; {}", modelPath.string(), VersionText(s.modelVersion),
-             s.modelBytes,
+    LOG_INFO("DLSS-NR NGX: model {} version {}, {} bytes, identity {}; {}", modelPath.string(),
+             VersionText(s.modelVersion), s.modelBytes, modelIdentity,
              s.loadedModel.empty() ? std::string("not loaded in this process yet")
                                    : std::format("already loaded from {}", s.loadedModel.string()));
+    LOG_INFO("DLSS-NR NGX: nvapi {}; {}", nvapiText, nvapiStatus);
 
     if (PeScan::KnownFaultingPairing(s.route, s.modelVersion))
         LOG_WARN("DLSS-NR NGX: this loader creates feature 18 itself and model {} is one it was measured faulting "
