@@ -3,6 +3,7 @@
 #include "DlssNrFeature_Vk.h"
 
 #include "DlssNr.h"
+#include "DlssNr_Enlarge.h"
 #include "DlssNr_ExposureScan.h"
 #include "DlssNr_GpuTiming.h"
 #include "DlssNr_ModelLog.h"
@@ -687,18 +688,29 @@ void RenderMenu(Config* config, float menuResScale)
         {
             const bool reduced = DlssNr::WorkingScale() < 0.999f;
 
+            // "+ DLSS" (Transfer 2) is D3D12 only: native Vulkan does not offer it, and an ini that asks for it
+            // there is shown as asked, with a line saying what runs instead (design/dlss-enlargement.md).
+            const auto& apiState = State::Instance();
+            const bool nativeVk = vulkan || (apiState.api == API::Vulkan &&
+                                             (!apiState.currentFeature || !apiState.currentFeature->IsWithDx12()));
+
             if (!reduced)
                 ImGui::BeginDisabled();
 
+            // Index and value through one table (DlssNr_Enlarge.h): index 2 is still Transfer 3, as before 2
+            // existed; anything the shader does not know runs Classic, and shows as it.
             static const char* enlargeNames[] = { Localization::Label("Classic"),
                                                   Localization::Label("Matched residual"),
-                                                  Localization::Label("Matched residual, sharp") };
-            // Index 2 is Transfer 3; anything the shader does not know runs Classic, and shows as it.
+                                                  Localization::Label("Matched residual, sharp"),
+                                                  Localization::Label("Matched residual + DLSS") };
+            static_assert(IM_ARRAYSIZE(enlargeNames) == Enlarge::kMenuEntries);
             const uint32_t transfer = config->DlssNrTransfer.value_or_default();
-            int enlarge = transfer == 1 ? 1 : transfer == 3 ? 2 : 0;
+            int enlarge = Enlarge::MenuIndex(transfer);
+            const int offered =
+                nativeVk && transfer != Enlarge::kTransferDlss ? Enlarge::kMenuEntries - 1 : Enlarge::kMenuEntries;
 
-            if (ImGui::Combo(Localization::Label("Enlargement"), &enlarge, enlargeNames, IM_ARRAYSIZE(enlargeNames)))
-                config->DlssNrTransfer = enlarge == 2 ? 3u : (uint32_t) enlarge;
+            if (ImGui::Combo(Localization::Label("Enlargement"), &enlarge, enlargeNames, offered))
+                config->DlssNrTransfer = Enlarge::MenuTransfer(enlarge);
 
             if (!reduced)
                 ImGui::EndDisabled();
@@ -715,9 +727,68 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nMatched residual, sharp is the same, with the model's difference enlarged by"
                        "\na sharper filter (Catmull-Rom, held to its neighbours so it cannot ring), so"
                        "\nmore of the fine structure the model drew at the small size survives."
-                       "\n\nNo effect at 100% or above: there is no residual to carry and all three are"
+                       "\n\nMatched residual + DLSS hands the model's difference to a private DLSS Super"
+                       "\nResolution, which builds it up over frames and so can return detail finer"
+                       "\nthan the small raster holds. D3D12 only, and it needs nvngx_dlss.dll. Where it"
+                       "\ncannot run -- native Vulkan, before the upscaler, no real depth and motion,"
+                       "\nwhile it starts -- Matched residual runs, and the line below says why."
+                       "\n\nNo effect at 100% or above: there is no residual to carry and all four are"
                        "\nidentical (supersampling brings its answer down to frame size before this)."
-                       "\n\nFrom hhkbble's multi-pass work on this fork.");
+                       "\n\nFrom hhkbble's multi-pass work on this fork; the DLSS enlargement is wilsjo2's.");
+
+            // While "+ DLSS" is selected: what the resolve was last sent, and why.
+            if (transfer == Enlarge::kTransferDlss)
+            {
+                const auto status = DlssNr::EnlargeStatus();
+                const char* line = Localization::Tr("Waiting for the first frame.");
+
+                switch (nativeVk ? Enlarge::Why::Vulkan : status.why)
+                {
+                case Enlarge::Why::NotYet:
+                case Enlarge::Why::NotSelected:
+                    break;
+                case Enlarge::Why::Vulkan:
+                    line = Localization::Tr("D3D12 only: native Vulkan runs Matched residual.");
+                    break;
+                case Enlarge::Why::FullSize:
+                    line = Localization::Tr("The model runs at full size or above: nothing to enlarge, Matched "
+                                            "residual runs.");
+                    break;
+                case Enlarge::Why::BeforeUpscale:
+                    line = Localization::Tr("Before the upscaler: Matched residual runs.");
+                    break;
+                case Enlarge::Why::NoGuides:
+                    line = Localization::Tr("No real depth and motion here: Matched residual runs.");
+                    break;
+                case Enlarge::Why::GuidesUnmatched:
+                    line = Localization::Tr("The guides could not be brought to the model's size: Matched residual "
+                                            "runs.");
+                    break;
+                case Enlarge::Why::ModelView:
+                    line = Localization::Tr("Debug view shows the model output: Matched residual runs.");
+                    break;
+                case Enlarge::Why::WarmingUp:
+                    line = Localization::Tr("Starting DLSS: Matched residual until it is ready.");
+                    break;
+                case Enlarge::Why::Failed:
+                    line = Localization::Tr("DLSS failed (see the log): Matched residual until Retry.");
+                    break;
+                case Enlarge::Why::Running:
+                    line = Localization::Tr("Running: DLSS enlarges the model's edit.");
+                    break;
+                }
+
+                ImGui::TextDisabled("%s", line);
+
+                // The failure is held for the session; this is the way back, and it is only drawn when there is
+                // a failure to clear.
+                if (!nativeVk && status.why == Enlarge::Why::Failed)
+                {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton(Localization::Label("Retry###nrEnlargeRetry")))
+                        DlssNr::RetryAfterFailure();
+                }
+            }
         }
 
         ImGui::SeparatorText(Localization::Tr("How much of it lands"));

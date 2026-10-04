@@ -500,11 +500,14 @@ ScanTrim=auto
 ScanMeter=auto
 
 ; How a model running below full resolution is enlarged: 0 classic, 1 matched residual,
-; 3 matched residual with a sharp enlargement (2 is reserved).
+; 2 matched residual + DLSS, 3 matched residual with a sharp enlargement.
 ; Matched residual carries only the model's edit onto the full-size frame's proxy, avoiding
 ; the shrink's blur being treated as an edit. 3 enlarges that edit with Catmull-Rom instead of
-; bilinear, clamped to its neighbours. No effect at full resolution or above.
-; 0, 1 or 3 - Default (auto) is 1 (matched residual)
+; bilinear, clamped to its neighbours. 2 enlarges it with a private DLSS Super Resolution that
+; accumulates it over frames; D3D12 and the D3D12 bridges only, it needs nvngx_dlss.dll, and it runs
+; as 1 on native Vulkan, before the upscaler, without real depth and motion, and while DLSS starts.
+; No effect at full resolution or above.
+; 0, 1, 2 or 3 - Default (auto) is 1 (matched residual)
 Transfer=auto
 
 ; Freeze the input NR works on for comparing live NR settings on the same frame.
