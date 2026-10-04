@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Twenty-three suites. All but `nr-invariants` build real production code with local fakes under
+**Host tier.** Twenty-four suites. All but `nr-invariants` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
@@ -61,6 +61,11 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   header over fixtures: a glyph and a 1 px frame over a pan are taken whole, and a swaying silhouette, a moving
   patch, rain and a straight edge along a pan are not.
 - `nr-before-upscale` — pre-upscale boundary functions against strict host fakes.
+- `nr-cadence` — model cadence (`dlssnr/design/model-cadence.md`): the production scheduler (age
+  in presents the pass ran at, the held reset, forced model frames, every refusal with its reason, off
+  allocating nothing) and the production per-pixel rules -- the header the shader includes -- over
+  synthetic sequences: a still scene carried exactly, integer and sub-pixel pans, an occluder
+  restarting the chain, no match no fill, UI protection. Source guards on the pass. No GPU, no shader.
 - `nr-dispatch` — composition constants, descriptor slots and partial initialization cleanup.
 - `nr-gpu-timing` — portable timing validation, plus the duplicate-execution
   guard at the submission boundary.

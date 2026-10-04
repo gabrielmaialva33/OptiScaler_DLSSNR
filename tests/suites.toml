@@ -98,6 +98,11 @@ tier = "host"
 timeout = 300
 summary = "Timing metadata and UI boundary, plus placement of the timing markers."
 
+[nr-cadence]
+tier = "host"
+timeout = 300
+summary = "Model cadence: the production scheduler (age in presents the pass ran at, held reset, forced model frames, every refusal and its reason, off allocates nothing) and the production per-pixel rules over synthetic sequences (still scene exact, pans, an occluder restarting the chain, no match no fill), plus source guards on the pass."
+
 [nr-gpu-timing-d3d12]
 tier = "wine"
 timeout = 1800
