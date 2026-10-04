@@ -28,7 +28,7 @@ class DlssNr_DetailStats_Dx12 : public Shader_Dx12
     static bool Available();
 
     DlssNr_DetailStats_Dx12(std::string name, ID3D12Device* device);
-    ~DlssNr_DetailStats_Dx12() override;
+    ~DlssNr_DetailStats_Dx12();
 
     bool Record(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* output, ID3D12Resource* prevOutput,
                 ID3D12Resource* input, ID3D12Resource* prevInput, ID3D12Resource* proxy, uint32_t width,

@@ -1765,6 +1765,12 @@
     <ClInclude Include="dlssnr\DlssNr_PrivateSr.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_DetailStats.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\dlssnr\DlssNr_DetailStats_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClCompile Include="misc\Localization.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1796,6 +1802,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="dlssnr\DlssNr_PrivateSr.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="shaders\dlssnr\DlssNr_DetailStats_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

@@ -13,6 +13,13 @@
 //                output's b minus the input's (+ is warmer, toward yellow)
 //   (x + 192, y) shadows: the share of pixels whose input is in the shadows, their input level, their output level (both
 //                summed and divided by the pixels measured, like the rest), and the share the model crushed
+//
+// Precompiled like dlssnr.hlsl: editing this alone changes nothing. From this directory (dxc under
+// the msvc-wine prefix on Linux, never while a build is using it):
+//   dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect dlssnr_detail_stats.hlsl -Fo DlssNr_DetailStats_Shader.cso
+//   python3 ../../shader_tools/create_header.py DlssNr_DetailStats_Shader.cso DlssNr_DetailStats_Shader.h DlssNr_DetailStats_cso
+// DlssNr_DetailStats_Dx12.cpp picks the header up through __has_include; without it the pass reports itself
+// unavailable and the menu hides the button.
 
 #ifdef VK_MODE
 [[vk::binding(0, 0)]]

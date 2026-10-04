@@ -113,11 +113,71 @@ void TestMeasurementAggregation()
     assert(cmp.find("detail +25.0%") != std::string::npos);
 }
 
+void TestReduceGridWeightedTiles()
+{
+    std::vector<float> grid(kGridRowFloats * kGridTiles, 0.0f);
+
+    // Tile 0 at (0, 0): 100 pixels, detailBand = 0.10f
+    float* row0 = grid.data();
+    float* a0 = row0;
+    float* b0 = row0 + kGridTiles * 4;
+    a0[1] = 0.10f;  // detailBand
+    b0[3] = 100.0f; // pixels measured
+
+    // Tile 1 at (1, 0): 300 pixels, detailBand = 0.20f
+    float* a1 = row0 + 4;
+    float* b1 = row0 + (1 + kGridTiles) * 4;
+    a1[1] = 0.20f;  // detailBand
+    b1[3] = 300.0f; // pixels measured
+
+    // All other tiles have n = 0 (b[3] = 0.0f)
+    const auto stats = ReduceGrid(grid.data());
+    assert(Finite(stats));
+
+    // Weighted mean: (100 * 0.10 + 300 * 0.20) / 400 = 70 / 400 = 0.175f
+    // If it were unweighted (0.10 + 0.20) / 2 = 0.150f
+    assert(std::fabs(stats.detailBand - 0.175f) < 1e-5f);
+}
+
+void TestRejectionOfInvalidAndMovingSamples()
+{
+    Accumulator acc;
+
+    // 1. NaN sample rejection
+    Stats nanSample {};
+    nanSample.detailBand = NAN;
+    acc.Add(nanSample);
+    assert(acc.Count() == 0);
+
+    // 2. Inf sample rejection
+    Stats infSample {};
+    infSample.detailBand = INFINITY;
+    acc.Add(infSample);
+    assert(acc.Count() == 0);
+
+    // 3. Motion rejection (inputChange > kMotionLimit 0.001f)
+    Stats movingSample {};
+    movingSample.detailBand = 0.05f;
+    movingSample.inputChange = 0.005f;
+    acc.Add(movingSample);
+    assert(acc.Count() == 0);
+
+    // 4. Valid still sample accepted
+    Stats stillSample {};
+    stillSample.detailBand = 0.05f;
+    stillSample.inputBand = 0.03f;
+    stillSample.inputChange = 0.0005f;
+    acc.Add(stillSample);
+    assert(acc.Count() == 1);
+}
+
 int main()
 {
     TestReduceGridEmpty();
     TestReduceGridUniform();
+    TestReduceGridWeightedTiles();
+    TestRejectionOfInvalidAndMovingSamples();
     TestMeasurementAggregation();
-    std::printf("PASS: detail stats reduction and measurement aggregation\n");
+    std::printf("PASS: detail stats reduction, weighted tiles, motion/NaN rejection and measurement aggregation\n");
     return 0;
 }

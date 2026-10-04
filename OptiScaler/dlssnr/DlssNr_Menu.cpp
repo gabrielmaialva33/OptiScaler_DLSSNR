@@ -1816,16 +1816,26 @@ void RenderMenu(Config* config, float menuResScale)
             }
             else
             {
-                if (ImGui::Button(Localization::Label("Measure detail")))
-                    DlssNr::StartMeasureDetail();
+                if (DlssNr::DetailMeasureAvailable())
+                {
+                    if (ImGui::Button(Localization::Label("Measure detail")))
+                        DlssNr::StartMeasureDetail();
 
-                HelpMarker("Measures NR's output on the scene on screen at the current settings for 60 evaluations, "
-                           "against the game's own frame (ideally with Hold frame on):\n"
-                           "  - Detail: fine band detail added (sigma ~1.2 px vs ~3 px)\n"
-                           "  - Flicker: frame-to-frame output change beyond input change\n"
-                           "  - Colour: saturation change and warmth shift\n"
-                           "  - Shadows: darkening and crushed share\n"
-                           "Results are compared against the previous measurement.");
+                    HelpMarker(
+                        "Measures NR's output on the scene on screen at the current settings for 60 evaluations, "
+                        "against the game's own frame (ideally with Hold frame on):\n"
+                        "  - Detail: fine band detail added (sigma ~1.2 px vs ~3 px)\n"
+                        "  - Flicker: frame-to-frame output change beyond input change\n"
+                        "  - Colour: saturation change and warmth shift\n"
+                        "  - Shadows: darkening and crushed share\n"
+                        "Results are compared against the previous measurement.");
+                }
+
+                if (mStatus.initFailed)
+                {
+                    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s",
+                                       Localization::Tr("Measure detail: failed to initialize compute pass"));
+                }
             }
 
             if (mStatus.latest.samples > 0)

@@ -1,0 +1,22 @@
+Measure detail (in-game detail and stability stats)
+=====================================================
+
+Project:  OptiScaler fork / DLSS-NR scene calibration by janblade
+Source:   janblade commits 28daeebf and db065ec2
+Licence:  GNU General Public License v3.0, the licence of OptiScaler itself
+
+What is derived from it:
+The detail measurement and scene calibration compute pass structure:
+  * The 64x64 reduction grid layout (4 float4 texels per tile) and CPU-side
+    hierarchical tile reduction math (`ReduceGrid`);
+  * The fine-band detail frequency extraction, output-vs-input difference,
+    raw high-frequency energy, frame-to-frame temporal stability (flicker)
+    measurement, chroma saturation ratio, warmth balance, and shadow darkening;
+  * The D3D12 ring readback buffer architecture with asynchronous CPU mapping
+    avoiding pipeline stalls.
+
+Files:
+  * OptiScaler/dlssnr/DlssNr_DetailStats.h
+  * OptiScaler/shaders/dlssnr/DlssNr_DetailStats_Dx12.h
+  * OptiScaler/shaders/dlssnr/DlssNr_DetailStats_Dx12.cpp
+  * OptiScaler/shaders/dlssnr/precompile/dlssnr_detail_stats.hlsl

@@ -19,6 +19,10 @@ constexpr unsigned kGridColumns = 4;                               // 4 texels p
 constexpr unsigned kGridRowFloats = kGridTiles * kGridColumns * 4; // 1024 floats per row
 constexpr unsigned kMeasureEvaluations = 60;                       // ~1 second of frames at 60 fps
 
+constexpr float kShoulderThreshold = 1.0f;
+constexpr float kFloorThreshold = 0.05f;
+constexpr float kMotionLimit = 0.001f; // max input change before frame counts as moved
+
 // One measured evaluation reduced over the whole frame.
 struct Stats
 {
@@ -225,7 +229,8 @@ class Accumulator
     void Reset() { _samples.clear(); }
     void Add(const Stats& s)
     {
-        if (Finite(s))
+        // Reject non-finite metrics or frames where the input moved (camera/scene in motion)
+        if (Finite(s) && s.inputChange <= kMotionLimit)
             _samples.push_back(s);
     }
 
@@ -242,7 +247,8 @@ class Accumulator
 
         double sumDetailOut = 0, sumDetailIn = 0, sumRaw = 0;
         double sumFlickerOut = 0, sumFlickerIn = 0;
-        double sumSat = 0, sumWarmth = 0, sumDark = 0, sumCrush = 0;
+        double sumChromaOut = 0, sumChromaIn = 0, sumWarmth = 0;
+        double sumShadowIn = 0, sumShadowOut = 0, sumCrush = 0;
 
         for (const auto& s : _samples)
         {
@@ -251,9 +257,11 @@ class Accumulator
             sumRaw += s.detailRaw;
             sumFlickerOut += s.outputChange;
             sumFlickerIn += s.inputChange;
-            sumSat += s.Saturation();
+            sumChromaOut += s.chromaOut;
+            sumChromaIn += s.chromaIn;
             sumWarmth += s.warmth;
-            sumDark += s.ShadowDarkening();
+            sumShadowIn += s.shadowIn;
+            sumShadowOut += s.shadowOut;
             sumCrush += s.crushed;
         }
 
@@ -265,9 +273,11 @@ class Accumulator
         m.flickerOut = static_cast<float>(sumFlickerOut * inv);
         m.flickerIn = static_cast<float>(sumFlickerIn * inv);
         m.flicker = std::max(m.flickerOut - m.flickerIn, 0.0f);
-        m.saturation = static_cast<float>(sumSat * inv);
+
+        // Ratio of means (matching janblade), not mean of ratios
+        m.saturation = sumChromaIn > 1e-6 ? static_cast<float>(sumChromaOut / sumChromaIn - 1.0) : 0.0f;
         m.warmth = static_cast<float>(sumWarmth * inv);
-        m.shadowDarkening = static_cast<float>(sumDark * inv);
+        m.shadowDarkening = sumShadowIn > 1e-6 ? static_cast<float>(1.0 - sumShadowOut / sumShadowIn) : 0.0f;
         m.crushed = static_cast<float>(sumCrush * inv);
         return m;
     }

@@ -452,6 +452,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\dlssnr\precompile\DlssNr_PeripheryColour_Shader.h" />
     <ClInclude Include="shaders\dlssnr\precompile\DlssNr_PeripheryGuides_Shader.h" />
     <ClInclude Include="shaders\dlssnr\precompile\DlssNr_PeripheryUnpack_Shader.h" />
+    <ClInclude Include="shaders\dlssnr\DlssNr_DetailStats_Dx12.h" />
+    <ClInclude Include="dlssnr\DlssNr_DetailStats.h" />
     <ClInclude Include="shaders\synth_motion\SynthMotion_Dx12.h" />
     <ClInclude Include="shaders\synth_motion\SynthMotion_Handoff.h" />
     <ClInclude Include="shaders\synth_motion\SynthMotionNvofa_Dx12.h" />
@@ -902,6 +904,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="shaders\dlssnr\DlssNr_GuideMatch_Dx12.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_Cadence_Dx12.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_Periphery_Dx12.cpp" />
+    <ClCompile Include="shaders\dlssnr\DlssNr_DetailStats_Dx12.cpp" />
     <ClCompile Include="shaders\synth_motion\SynthMotion_Dx12.cpp" />
     <ClCompile Include="shaders\synth_motion\SynthMotionNvofa_Dx12.cpp" />
     <ClCompile Include="shaders\synth_motion\SynthOverlay_Dx12.cpp" />

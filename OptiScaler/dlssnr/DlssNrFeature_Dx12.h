@@ -6,6 +6,7 @@
 #include "DlssNr_PreUpscale.h"
 #include "DlssNr_Chain.h"
 #include "DlssNr_Enlarge.h"
+#include "DlssNr_DetailStats.h"
 #include <memory>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
@@ -385,6 +386,7 @@ Enlarge::Status EnlargeStatus();
 struct DetailMeasureStatus
 {
     bool running = false;
+    bool initFailed = false;
     float progress = 0.0f;
     unsigned samples = 0;
     unsigned total = 60;
@@ -400,6 +402,7 @@ struct DetailMeasureStatus
 
 void StartMeasureDetail();
 void CancelMeasureDetail();
+bool DetailMeasureAvailable();
 DetailMeasureStatus GetDetailMeasureStatus();
 
 // Writes a run of consecutive frames, each as the upscaler produced it and again after the model's edit.
