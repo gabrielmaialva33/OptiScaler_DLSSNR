@@ -417,6 +417,10 @@ class StreamlineProxy
         if (_isD3D12Inited)
             return true;
 
+        // Refused once for a cause the user can fix: every later attempt fails quietly, without a second message.
+        if (_dlssgRefused)
+            return false;
+
         if (!StreamlineProxy::LoadStreamline())
             return false;
 
@@ -527,8 +531,11 @@ class StreamlineProxy
 
                     MessageBoxW(NULL, reasonMsg, L"DLSS-G Not Supported", MB_ICONWARNING | MB_OK);
 
-                    Config::Instance()->FGNvngxReplacement.set_volatile_value(FGNvngxReplacement::None);
-                    State::Instance().activeFgNvngx = FGNvngxReplacement::None;
+                    // Not inited: the DLSS-G output refuses to create its swapchain, as for any failed init, and
+                    // the ini keeps what the user chose.
+                    _dlssgRefused = true;
+                    State::EnableChecks(owner);
+                    return false;
                 }
                 else
                 {
@@ -668,6 +675,7 @@ class StreamlineProxy
     inline static bool _isInited = false;
     inline static bool _isD3D11Inited = false;
     inline static bool _isD3D12Inited = false;
+    inline static bool _dlssgRefused = false;
     inline static bool _isD3D12Requested = false;
 
     // Interposer
