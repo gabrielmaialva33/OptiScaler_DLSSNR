@@ -385,6 +385,14 @@ void Refusal_NamesWhatTheUserCanChangeLeast()
     assert(Refusal(in) == Reason::DriverProxy);
     in.requested = Requested(1);
     assert(Refusal(in) == Reason::Off);
+    // The replace curve is one click away: it is named after what the user can do little about, and before
+    // frame generation, which it sits beside.
+    Inputs replace = Running(2);
+    replace.reversibleReplace = true;
+    replace.frameGeneration = true;
+    assert(Refusal(replace) == Reason::ReversibleReplace);
+    replace.gameGuides = false;
+    assert(Refusal(replace) == Reason::NoGameGuides);
     ++g_cases;
 }
 

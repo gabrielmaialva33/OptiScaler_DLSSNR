@@ -166,8 +166,7 @@ Each refusal is logged once on change (`DLSS-NR cadence: ...`) and shown under t
 | frame generation | frame times alternate long and short. neural-upstream measured DLSS-G unable to pace through 8.9/13.9 ms alternation, with stutter and flashes growing with the multiplier and the cadence; the same work with the effect at zero showed the same artefact, so it is pacing, not image. `CadenceWithFrameGen=true` opts in. Detected as OptiScaler's own FG active and unpaused, the game's DLSS-G through NGX (`dlssgDetectedInterpolationCount`), or a DLSS-G mode set through Streamline |
 | no cadence shader | the bytecode header is optional (`__has_include`); without it the pass reports itself unavailable |
 | no counted presents | `State::frameCount` advances only in the wrapped swapchain's present, and some routes never present through it (`DlssNr_Enlarge.h`, `CreationCrossed`). With the counter at 0 every call after the first read as a second call in one present: the cadence never carried and said so under the wrong reason. Counting calls instead would lose that guard, so it is refused by name |
-| reversible replace modes | ReversibleMode 2 (Neutwo replace) and 4 (Hybrid replace): the model output replaces the frame directly through asymptotic inverse curves. Carrying an edit in proxy space and decoding highlights creates massive luminance explosions (>100x), flashing on carried frames (reproduced in Addendum A) |
-| low frame rate | rendered frame rate drops below 25 fps. Resumes above 28 fps sustained for 1.0 s (Addendum B) |
+| reversible replace modes, under HDR | ReversibleMode 2 (Neutwo replace) and 4 (Hybrid replace) on an HDR buffer: the resolve replaces the frame with the model's answer decoded through the curve's inverse and skips the ratio composition and its guard, so a carried edit pushed to the proxy's ceiling decodes without bound (Addendum A). SDR (passthrough) is unaffected. The surfaces are kept: composed against replace is a one-click A/B |
 | surfaces could not be built | allocation failed |
 
 ## Not ported, on purpose
@@ -217,70 +216,56 @@ Before anyone calls it a win:
 
 ---
 
-## Addendum A: Highlight Flashing under Reversible Replace Modes (Reproduced)
+## Addendum A: highlights under the replace modes (HDR)
 
-Discovered by janblade (commit `289287c9`): under replace curves (`ReversibleMode = 2` Neutwo replace,
-`ReversibleMode = 4` Hybrid replace), the resolve decodes the model output $y$ directly through the curve's
-inverse ($x = 	ext{Neutwo}^{-1}(y) = y / \sqrt{1 - y^2}$ in HDR) and completely skips the ratio composition
-and highlight guard (`dlssnr.hlsl:1198-1205`, "no ratio, no highlight guard").
+From janblade's fork (github.com/janblade/OptiScaler-F5-DLSSNR-Multipass, commit `289287c9`, GPL-3.0), which
+saw a white flash on every reused frame under replace curves. A worked example, not an in-game reproduction.
 
-In the sRGB-encoded proxy space where the carry operates, values near the highlight ceiling are close to 1.0:
-- If last frame's encoded proxy was $0.97$ and the model answered $0.99$, the carried edit is $+0.02$.
-- If the current frame's proxy is already a highlight at $0.99$, adding the carried edit produces
-  $o = 0.99 + 0.02 = 1.01$, clamped to $1.0$ by `CadenceSynthesize`.
-- When decoded through $	ext{NeutwoDecode}(1.0)$ (clamped at $0.999999$), the decoded light value diverges
-  to **$707.11 	imes 	ext{WhitePoint}$**!
-- Because the replace mode skips the ratio composition and the $2	imes$ MaxRatio highlight guard entirely,
-  this result is unbounded. Highlights flash violently to hundreds of times their brightness on carried frames.
+Under `ReversibleMode` 2 or 4 on an HDR buffer the resolve takes the model's answer and decodes it through the
+curve's inverse, with none of the ratio composition and none of its guard (`dlssnr.hlsl:1198-1205`). The carry
+works in the proxy texture's encoded values, near 1.0 at a highlight:
 
-**Decision & Resolution:**
-Cadence relies fundamentally on ratio composition in linear space (`Ratio composition, not a delta`,
-"Design notes worth knowing" in README). In replace modes under HDR, that ratio composition is bypassed.
-Model cadence therefore explicitly refuses execution when `isHdrBuffer && (ReversibleMode == 2 || ReversibleMode == 4)`
-with `Reason::ReversibleReplace`. Under SDR (passthrough), replace modes use `modelDirect` without inverse
-curves and remain supported. Surfaces are retained (`ReleasesSurfaces = false`) since switching between composed
-and replace is a single-click A/B toggle.
+- last model frame: proxy 0.97, answer 0.99, so the carried edit is +0.02;
+- this frame the proxy is already 0.99, so the carried answer is 1.01, clamped to 1.0 by `CadenceSynthesize`
+  (`tests/nr-cadence/rule.cpp` drives the production function through exactly this and asserts 1.0);
+- Neutwo's inverse of the clamped 0.999999 is about 707 x WhitePoint (mode 2); Hybrid's (`HybridDecode`,
+  mode 4) is about 177 x. Nothing after it bounds the value.
 
----
+Still pixels carry exactly; only a highlight that moved or brightened reaches the ceiling, which is what the
+fork saw. The cadence refuses `isHdrBuffer && (ReversibleMode == 2 || ReversibleMode == 4)` as
+`ReversibleReplace`. Under SDR the replace modes take the model's output directly, with no inverse, and still
+carry. The fork fixed it in the shader instead (landing each change as a difference or a ratio, whichever moves
+the pixel less); that needs a bytecode rebuild and a measurement, and is not done here.
 
-## Addendum B: Low Frame Rate Gate (Evaluated and Discarded)
+## Addendum B: a low frame rate gate, tried and removed
 
-An experimental low frame rate gate was evaluated to run the model every frame below 25 fps.
-Testing and simulation against real runtime cadence behavior proved this approach fundamentally flawed:
+A gate that ran the model every frame below 25 fps (resuming above 28 fps held for 1 s, after janblade's
+`0431f330`) was written and taken out on review, 2026-10-04. Each of these was shown against the production
+scheduler header in a review simulation; the figures are that simulation's, not a game's:
 
-1. **Self-defeating feedback loop:** Cadence increases frame rate (e.g. from 20 fps to 46.5 fps at N=4).
-   When the gate trips and forces every frame through the model, frame rate drops back to 20 fps, preventing
-   the recovery threshold (28 fps) from ever being reached. In simulation, it locked out 1000 of 1000 frames.
-2. **Phase jitter susceptibility:** Cadence inherently produces alternating frame times (e.g. 30 ms carried,
-   48 ms model frame; real average 25.6 fps). An exponential moving average is pulled down by the slower frame,
-   falsely tripping the gate.
-3. **Transient stalls:** A single hitch or garbage collection pause (e.g. 120 ms) permanently latches the lockout.
-   As observed by janblade (`0df40796`), a dual-threshold hysteresis lock "latches forever".
+1. It measured its own effect. Refusing runs the model every frame, which is the slower rate, and the resume
+   threshold was judged on that rate: at cadence 4, with a 50 ms model frame and 12 ms carried ones (46.5 fps
+   carrying, 20 fps without), it refused 1000 frames of 1000.
+2. It was seeded from one sample, the slow first model frame, and tripped on the second call.
+3. It kept updating while the cadence was off or refused, so a user at 22 fps who switched cadence on was
+   refused before it ever ran.
+4. One hitch latched it: a single 120 ms frame, in the 32/22 fps case, for good.
+5. A time-weighted average reads low on the alternation cadence itself produces: 30/48 ms frames (a true
+   25.6 fps) were refused 599 times in 600.
+6. There was no way to switch it off. janblade's own was (`DetailReuseMinFps=0`), and his `0df40796` notes
+   that a second, higher resume level "latches for ever".
 
-For these reasons, the low frame rate gate was completely removed.
+A future gate needs a signal the gate itself does not change, a timed retry rather than a resume threshold,
+a reset when the cadence is off, and a key to disable it.
 
----
+## Addendum C: a fast-motion gate, not built
 
-## Addendum C: High-Motion Invalidation Gate (MotionGuard Architecture)
-
-In janblade's implementation (`0df40796`), a GPU coverage pass measured the fraction of the screen with invalid or unmappable detail (`1.0 - trust`), holding detail reuse off if $> 10\%$ of the screen moved too fast to track until $0.3 \text{ s}$ of calm returned.
-
-**Equivalent Signal in Our Pipeline:**
-In `dlssnr_cadence_rule.h:347-350`, the acceptance coefficient:
-$$w = \frac{\sum w_k \cdot \text{tapW}_k}{\sum \text{tapW}_k} \cdot \text{saturate}(2 \cdot w_{\text{centre}}) \cdot w_{\text{edge}}$$
-already measures per-pixel confidence across depth consistency, color gates, and frame boundaries. The term $1.0 - w$ is the exact mathematical equivalent: when the camera whips or fast motion occurs, $w \to 0$ over large sections of the frame.
-
-**Proposed GPU Counting & Readback Mechanism:**
-1. **GPU Atomic Reduction:**
-   - A compute reduction pass (or atomic accumulation at the tail of `CadenceSynthesize`) evaluates $w < 0.5$ (or sums $1.0 - w$) using `InterlockedAdd` into a single 4-byte UAV buffer.
-2. **Asynchronous Non-Stalling Readback:**
-   - Maintain a 4-slot ring of 4-byte readback buffers.
-   - At frame $N$, copy the atomic result to readback buffer slot $N \pmod 4$.
-   - The CPU reads back slot $N-2$, checking `DlssNr::Submission::Completed(fence)` first. If the GPU has not finished, the CPU never waits (`no GPU wait`), holding the previous frame's reading.
-3. **Temporal Hysteresis:**
-   - If the rejected pixel count exceeds $10\%$ of total frame pixels, engage `Reason::FastMotion`.
-   - Maintain full model execution until rejection remains $\le 10\%$ for $0.3 \text{ s}$ ($300 \text{ ms}$) continuously. A single threshold with temporal debounce prevents latching deadlocks in noisy scenes.
-   - *Status:* Specification complete; shader integration deferred pending dedicated bytecode regeneration pass.
+janblade's `0df40796` holds detail reuse off while more than 10 % of the picture has no detail to move, until
+readings stay calm for 0.3 s. The equivalent signal here is `1 - w`, the carry's acceptance
+(`dlssnr_cadence_rule.h`). It only exists where `Carry` runs, which is on carried frames: once a gate forced
+model frames, nothing new would be measured and the held reading would keep it closed -- Addendum B's latch
+again. A design needs a measure taken on model frames too (the motion vectors' magnitude, say) before any
+counter, readback or threshold is worth building.
 
 ## Attribution
 
