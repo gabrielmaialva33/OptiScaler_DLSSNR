@@ -5577,12 +5577,6 @@ Enlarge::Status EnlargeStatus()
 
 struct PresentTemporal
 {
-    ID3D12Resource* depth = nullptr;
-    ID3D12Resource* motion = nullptr;
-    DlssNrFrameInfo frame {};
-    unsigned long long capturedAt = 0;
-    unsigned long long renderSeq = 0;
-    bool valid = false;
 };
 
 struct PresentGuideClone
@@ -5597,6 +5591,16 @@ struct PresentGuideClone
     bool readTracked = false;
     uint32_t width = 0;
     uint32_t height = 0;
+
+    DXGI_FORMAT sourceDepthFormat = DXGI_FORMAT_UNKNOWN;
+    uint64_t sourceDepthWidth = 0;
+    uint32_t sourceDepthHeight = 0;
+    D3D12_RESOURCE_FLAGS sourceDepthFlags = D3D12_RESOURCE_FLAG_NONE;
+
+    DXGI_FORMAT sourceMotionFormat = DXGI_FORMAT_UNKNOWN;
+    uint64_t sourceMotionWidth = 0;
+    uint32_t sourceMotionHeight = 0;
+    D3D12_RESOURCE_FLAGS sourceMotionFlags = D3D12_RESOURCE_FLAG_NONE;
 };
 
 static PresentGuideClone g_presentGuideClones[DlssNr::PresentGuides::kRingSize];
@@ -5662,11 +5666,6 @@ static ID3D12Resource* CreatePresentGuideClone(ID3D12Device* device, ID3D12Resou
     return nullptr;
 }
 
-// Written on the render thread (the upscaler's evaluate) and read on the present thread, so every
-// access holds g_nrMutex -- including the parking, which feeds the same retired list Dispatch trims.
-// g_temporalValid mirrors `valid` for the routing checks that run on every present and must not
-// wait for a Dispatch to finish recording just to learn which route owns the frame.
-static PresentTemporal g_temporal;
 static std::atomic<bool> g_temporalValid { false };
 
 // When the D3D12 present hook last ran, for Auto. Auto hands the pass to the present hook once the
@@ -5732,6 +5731,9 @@ static void ReleasePresentTemporal()
 static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                             const DlssNrFrameInfo& frame)
 {
+    if (g_nr.failed)
+        return;
+
     ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
     ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
 
@@ -5764,14 +5766,16 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
     static std::set<AllocFailKey> s_failedAllocs;
 
     const void* const devId = static_cast<const void*>(device);
+
+    std::lock_guard<std::mutex> nrLock(g_nrMutex);
+    TickNrRetired();
+
     if (s_failedAllocs.contains({ devId, depthDesc.Format, depthDesc.Width, depthDesc.Height }) ||
         s_failedAllocs.contains({ devId, motionDesc.Format, motionDesc.Width, motionDesc.Height }))
     {
         device->Release();
         return;
     }
-
-    std::lock_guard<std::mutex> nrLock(g_nrMutex);
 
     const auto isReadInFlight = [](void* token) -> bool
     {
@@ -5799,17 +5803,21 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
 
     if (clone.depth != nullptr)
     {
-        const auto have = clone.depth->GetDesc();
-        if (clone.deviceIdentity != devId || have.Width != depthDesc.Width || have.Height != depthDesc.Height ||
-            have.Format != TypedGuideFormat(depthDesc.Format) || have.Flags != D3D12_RESOURCE_FLAG_NONE)
+        if (clone.deviceIdentity != devId || clone.sourceDepthFormat != depthDesc.Format ||
+            clone.sourceDepthWidth != depthDesc.Width || clone.sourceDepthHeight != depthDesc.Height ||
+            clone.sourceDepthFlags != depthDesc.Flags)
+        {
             ParkNrClone(clone.depth, clone.writeUsage, clone.tracked);
+        }
     }
     if (clone.motion != nullptr)
     {
-        const auto have = clone.motion->GetDesc();
-        if (clone.deviceIdentity != devId || have.Width != motionDesc.Width || have.Height != motionDesc.Height ||
-            have.Format != TypedGuideFormat(motionDesc.Format) || have.Flags != D3D12_RESOURCE_FLAG_NONE)
+        if (clone.deviceIdentity != devId || clone.sourceMotionFormat != motionDesc.Format ||
+            clone.sourceMotionWidth != motionDesc.Width || clone.sourceMotionHeight != motionDesc.Height ||
+            clone.sourceMotionFlags != motionDesc.Flags)
+        {
             ParkNrClone(clone.motion, clone.writeUsage, clone.tracked);
+        }
     }
 
     if (clone.depth == nullptr)
@@ -5822,14 +5830,38 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
 
     if (clone.depth == nullptr || clone.motion == nullptr)
     {
-        s_failedAllocs.insert({ devId, depthDesc.Format, depthDesc.Width, depthDesc.Height });
-        s_failedAllocs.insert({ devId, motionDesc.Format, motionDesc.Width, motionDesc.Height });
-        LOG_ERROR("DLSS-NR present guides: clone allocation failed on device {:p} for depth format {}/{}x{}; "
-                  "present route will use neutral guides",
-                  devId, (int) depthDesc.Format, (uint32_t) depthDesc.Width, depthDesc.Height);
+        if (clone.depth == nullptr)
+            s_failedAllocs.insert({ devId, depthDesc.Format, depthDesc.Width, depthDesc.Height });
+        else
+        {
+            clone.depth->Release();
+            clone.depth = nullptr;
+        }
+
+        if (clone.motion == nullptr)
+            s_failedAllocs.insert({ devId, motionDesc.Format, motionDesc.Width, motionDesc.Height });
+        else
+        {
+            clone.motion->Release();
+            clone.motion = nullptr;
+        }
+
+        LOG_ERROR("DLSS-NR present guides: clone allocation failed on device {:p}; present route will use neutral "
+                  "guides",
+                  devId);
         g_presentGuideRing.InvalidateSlot(slot);
         return;
     }
+
+    clone.sourceDepthFormat = depthDesc.Format;
+    clone.sourceDepthWidth = depthDesc.Width;
+    clone.sourceDepthHeight = depthDesc.Height;
+    clone.sourceDepthFlags = depthDesc.Flags;
+
+    clone.sourceMotionFormat = motionDesc.Format;
+    clone.sourceMotionWidth = motionDesc.Width;
+    clone.sourceMotionHeight = motionDesc.Height;
+    clone.sourceMotionFlags = motionDesc.Flags;
 
     // Submission tracking before ANY barrier or recording on this list (Correction 4)
     clone.tracked = DlssNr::Submission::Track(cmdList, clone.writeUsage);
@@ -5884,7 +5916,8 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
 
     ++g_renderSeq; // Count render frame at successful CaptureTemporal (Correction 5b)
 
-    g_presentGuideRing.CommitRecord(slot, clone.width, clone.height, frame.DepthInverted, &clone.writeUsage, &clone);
+    g_presentGuideRing.CommitRecord(slot, clone.width, clone.height, frame.DepthInverted, NowMs(), &clone.writeUsage,
+                                    &clone);
     g_temporalValid = true;
 }
 
@@ -6355,36 +6388,66 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     ID3D12Resource* motion = nullptr;
     DlssNrFrameInfo frame {};
 
-    // Pick from the owned guide snapshot ring: newest capture completed on CPU without cross-queue waits
-    const size_t pickedSlot = g_presentGuideRing.PickForPresent(
-        [](void* token) -> bool
-        {
-            if (token == nullptr)
-                return false;
-            return DlssNr::Submission::Completed(*static_cast<DlssNr::Submission::Usage*>(token));
-        });
+    // Pick from the owned guide snapshot ring: newest capture completed on CPU or submitted on same queue
+    const auto nowMs = NowMs();
+    const auto isEligible = [queue](void* token) -> bool
+    {
+        if (token == nullptr)
+            return false;
+        auto& writeUsage = *static_cast<DlssNr::Submission::Usage*>(token);
+        // RenoDX same-queue rule (present_path.hpp:96-100):
+        // If write was submitted on the SAME queue as present, queue order guarantees completion.
+        if (queue != nullptr && DlssNr::Submission::SubmittedOnlyOn(writeUsage, queue))
+            return true;
+        // Cross-queue or unsubmitted: requires CPU completion proof
+        return DlssNr::Submission::Completed(writeUsage);
+    };
 
-    bool temporalValid = false;
-    unsigned long long temporalSeq = 0;
+    const size_t pickedSlot = g_presentGuideRing.PickForPresent(isEligible, nowMs);
+
+    DlssNr::Submission::Usage savedReadUsage {};
+    bool savedReadTracked = false;
+    size_t trackedSlot = DlssNr::PresentGuides::kRingSize;
 
     if (pickedSlot < DlssNr::PresentGuides::kRingSize)
     {
-        auto& clone = g_presentGuideClones[pickedSlot];
-        clone.readTracked = DlssNr::Submission::Track(list, clone.readUsage);
-        if (clone.readTracked)
+        const auto seq = g_presentGuideRing.GetSlot(pickedSlot).sequence;
+        if (seq == g_nrLastEnhancedSeq)
         {
+            // Already enhanced this capture! Skip present, do NOT track read (Correction 1)
+            ++g_presentSkips;
+            nrLock.unlock();
+            DropPresentList(slot);
+            backbuffer->Release();
+            device->Release();
+            return;
+        }
+
+        auto& clone = g_presentGuideClones[pickedSlot];
+        savedReadUsage = clone.readUsage;
+        savedReadTracked = clone.readTracked;
+        const bool tracked = DlssNr::Submission::Track(list, clone.readUsage);
+        if (tracked)
+        {
+            clone.readTracked = true;
+            trackedSlot = pickedSlot;
             depth = clone.depth;
             motion = clone.motion;
             frame = clone.frame;
             frame.GuideState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             temporalValid = (depth != nullptr && motion != nullptr);
-            temporalSeq = g_presentGuideRing.GetSlot(pickedSlot).sequence;
+            temporalSeq = seq;
         }
         else
         {
+            // Track refused: restore saved usage and do NOT overwrite readTracked with false
+            clone.readUsage = savedReadUsage;
             temporalValid = false;
         }
     }
+
+    if (temporalValid)
+        g_nrLastEnhancedSeq = temporalSeq;
 
     nrLock.unlock();
 
@@ -6427,18 +6490,6 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         frame.Reset = cfg.DlssNrZeroGuideReset.value_or_default();
         frame.ResetIsPolicy = frame.Reset;
     }
-
-    if (temporalValid && temporalSeq == g_nrLastEnhancedSeq)
-    {
-        ++g_presentSkips;
-        DropPresentList(slot);
-        backbuffer->Release();
-        device->Release();
-        return;
-    }
-
-    if (temporalValid)
-        g_nrLastEnhancedSeq = temporalSeq;
 
     ++g_presentRuns;
     g_sameBbStreak = (backbuffer == g_lastEnhancedBb) ? g_sameBbStreak + 1 : 0;
@@ -6509,6 +6560,12 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
 
     if (g_nr.failed)
     {
+        if (trackedSlot < DlssNr::PresentGuides::kRingSize)
+        {
+            std::lock_guard<std::mutex> lock(g_nrMutex);
+            g_presentGuideClones[trackedSlot].readUsage = savedReadUsage;
+            g_presentGuideClones[trackedSlot].readTracked = savedReadTracked;
+        }
         DropPresentList(slot);
         SettlePresentMotion(false);
         backbuffer->Release();
@@ -6532,7 +6589,14 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     Barrier(list, backbuffer, D3D12_RESOURCE_STATE_COPY_DEST, bbState);
     Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    SettlePresentMotion(SubmitPresentList(queue, slot));
+    const bool executed = SubmitPresentList(queue, slot);
+    SettlePresentMotion(executed);
+    if (!executed && trackedSlot < DlssNr::PresentGuides::kRingSize)
+    {
+        std::lock_guard<std::mutex> lock(g_nrMutex);
+        g_presentGuideClones[trackedSlot].readUsage = savedReadUsage;
+        g_presentGuideClones[trackedSlot].readTracked = savedReadTracked;
+    }
 
     if (cfg.DlssNrPresentSync.value_or_default() && g_presentList.fenceValue[slot] != 0 &&
         g_presentList.fence->GetCompletedValue() < g_presentList.fenceValue[slot])
@@ -7304,7 +7368,8 @@ void SynthMotionGuide::Release()
     _reportedFailure = false;
 }
 
-bool CapturedPresentGuides(ID3D12Resource** depth, ID3D12Resource** motion, DlssNrFrameInfo* frame)
+bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** depth, ID3D12Resource** motion,
+                           DlssNrFrameInfo* frame, ID3D12CommandQueue* queue)
 {
     if (depth == nullptr || motion == nullptr || frame == nullptr)
         return false;
@@ -7313,13 +7378,17 @@ bool CapturedPresentGuides(ID3D12Resource** depth, ID3D12Resource** motion, Dlss
     // replaced capture is parked, not released.
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
 
-    const size_t pickedSlot = g_presentGuideRing.PickForPresent(
-        [](void* token) -> bool
-        {
-            if (token == nullptr)
-                return false;
-            return DlssNr::Submission::Completed(*static_cast<DlssNr::Submission::Usage*>(token));
-        });
+    const auto isEligible = [queue](void* token) -> bool
+    {
+        if (token == nullptr)
+            return false;
+        auto& writeUsage = *static_cast<DlssNr::Submission::Usage*>(token);
+        if (queue != nullptr && DlssNr::Submission::SubmittedOnlyOn(writeUsage, queue))
+            return true;
+        return DlssNr::Submission::Completed(writeUsage);
+    };
+
+    const size_t pickedSlot = g_presentGuideRing.PickForPresent(isEligible, NowMs());
 
     if (pickedSlot >= DlssNr::PresentGuides::kRingSize)
         return false;
@@ -7327,6 +7396,13 @@ bool CapturedPresentGuides(ID3D12Resource** depth, ID3D12Resource** motion, Dlss
     auto& clone = g_presentGuideClones[pickedSlot];
     if (clone.depth == nullptr || clone.motion == nullptr)
         return false;
+
+    if (cmdList != nullptr)
+    {
+        const bool tracked = DlssNr::Submission::Track(cmdList, clone.readUsage);
+        if (tracked)
+            clone.readTracked = true;
+    }
 
     *depth = clone.depth;
     *motion = clone.motion;
@@ -8058,25 +8134,32 @@ void Shutdown()
     std::lock_guard<std::mutex> preLock(g_preMutex);
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
 
+    const bool pendingClones = std::any_of(
+        std::begin(g_presentGuideClones), std::end(g_presentGuideClones),
+        [](const auto& clone)
+        {
+            return clone.depth != nullptr && ((clone.tracked && !DlssNr::Submission::Ready(clone.writeUsage)) ||
+                                              (clone.readTracked && !DlssNr::Submission::Ready(clone.readUsage)));
+        });
+
     if (g_tracked)
     {
         TickNrRetired();
         const bool pendingRetired =
             std::any_of(g_nrRetired.begin(), g_nrRetired.end(), [](const NrRetired& retired)
                         { return retired.tracked && !DlssNr::Submission::Ready(retired.usage); });
-        const bool pendingClones = std::any_of(
-            std::begin(g_presentGuideClones), std::end(g_presentGuideClones),
-            [](const auto& clone)
-            {
-                return clone.depth != nullptr && ((clone.tracked && !DlssNr::Submission::Ready(clone.writeUsage)) ||
-                                                  (clone.readTracked && !DlssNr::Submission::Ready(clone.readUsage)));
-            });
         if (!DlssNr::Submission::Ready(g_usage) || pendingRetired || pendingClones)
         {
             LOG_INFO("DLSS-NR shutdown: retained all objects because tracked recordings are unsealed, pending or "
                      "unknown; no unsafe release");
             return;
         }
+    }
+    else if (pendingClones)
+    {
+        LOG_INFO("DLSS-NR shutdown: retained guide clones because tracked present recordings are unsealed or pending; "
+                 "no unsafe release");
+        return;
     }
 
     std::vector<NrEnlarger*> enlargers;

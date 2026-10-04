@@ -20,6 +20,7 @@ void Prune(Usage& usage);
 
 // Completion observed so far, NOT permission to destroy: a list may execute again.
 bool Completed(const Usage& usage);
+bool SubmittedOnlyOn(const Usage& usage, ID3D12CommandQueue* queue);
 bool Active();
 const char* LastRefusal();
 

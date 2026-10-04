@@ -86,7 +86,8 @@ DlssNrFrameInfo PresentFrameDefaults(bool reset);
 //
 // The resources belong to the capture and outlive the call only until the next one. A caller uses
 // them inside the recording it is building and does not store them.
-bool CapturedPresentGuides(ID3D12Resource** depth, ID3D12Resource** motion, DlssNrFrameInfo* frame);
+bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** depth, ID3D12Resource** motion,
+                           DlssNrFrameInfo* frame, ID3D12CommandQueue* queue = nullptr);
 
 // The pass, over a frame no upscaler was asked for.
 //

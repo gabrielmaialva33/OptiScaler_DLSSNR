@@ -7,21 +7,23 @@ Depth and motion are copied via mip-0 `CopyTextureRegion` on the game's evaluate
 transitioning the game's buffers from their arrival states to `COPY_SOURCE` and back. Submissions are tracked
 via independent per-slot usage objects (`clone.writeUsage` at evaluate, `clone.readUsage` at present),
 leaving 1-pass NR completely unburdened by global multi-pass submission locks (Decision A).
-Present selections require CPU completion proof without GPU cross-queue waits (avoiding the DLSS-G deadlock cycle).
-Captures older than `kPresentGuideMaxAge` (4 frames) are dropped as stale in favor of neutral zero guides.
+Present selections use the RenoDX same-queue rule (`SubmittedOnlyOn(writeUsage, queue)`) to bypass CPU completion
+proof when evaluate and present execute on the identical queue, preserving frame-exact temporal alignment.
+Cross-queue captures require CPU completion proof without GPU cross-queue waits (avoiding DLSS-G deadlocks).
+Captures older than `kPresentGuideMaxAgeMs` (250 ms) are dropped as stale in favor of neutral zero guides.
 
-**VRAM overhead:** 4 sets of 2 textures (depth + motion vectors) at render resolution allocate 8 textures in total,
-costing ~118 MB at 1440p.
+**VRAM overhead:** 4 sets of 2 textures (depth + motion vectors) at render resolution allocate 8 textures in total
+(~118 MB at 1440p with R32 depth, up to ~177 MB with D32S8 depth).
 
-**Queue identity & single-queue latency (Decision B):** RenoDX bypasses completion waits when evaluate and present
-execute on the identical queue (`present_path.hpp:96-100`). In this tree, `DlssNr::Submission` does not expose queue
-identity or cross-queue matching across recorded lists. Completion proof (`Submission::Completed(writeUsage)`) is
-therefore required unconditionally; in single-queue GPU-bound titles, this delays guide consumption by 1 or 2 frames
-compared to RenoDX's same-queue fast path.
+**Queue identity & same-queue execution (Decision B):** RenoDX bypasses completion waits when evaluate and present
+execute on the identical queue (`present_path.hpp:96-100`). `DlssNr::Submission` exposes queue identity via
+`SubmittedOnlyOn(usage, queue)`. If the copy was submitted on the present queue, hardware order guarantees the write
+finishes before the present read, eliminating 1-2 frames of guide latency. When the copy came from a different queue,
+`Submission::Completed(writeUsage)` is enforced.
 
 **What remains unproven:**
 - Game-specific motion vector transformations during post-processing, and 4K bandwidth overhead of two guide copies per frame.
-- Depth planar copy: for typeless depth formats with stencil planes (`R32G8X24_TYPELESS`, `R24G8_TYPELESS`), copying subresource 0 directly to `R32_FLOAT` via `CopyTextureRegion` works under Proton/vkd3d-proton, but native Windows Direct3D 12 may reject cross-format planar copy without explicit planar subresource indexing (precisa de uma rodada no PC do Rafael).
+- Depth planar copy: for typeless depth formats with stencil planes (`R32G8X24_TYPELESS`, `R24G8_TYPELESS`), copying subresource 0 directly to `R32_FLOAT` via `CopyTextureRegion` works under Proton/vkd3d-proton, but native Windows Direct3D 12 may reject cross-format planar copy without explicit planar subresource indexing (needs validation on Rafael's PC under native Windows).
 Item 5 continues to govern the broader dispatch pipeline.
 
 Update 2026-09-23: **implemented.** `3e1b3960` (the D3D12 present-time pass and temporal capture,

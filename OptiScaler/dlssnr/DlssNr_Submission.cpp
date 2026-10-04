@@ -259,6 +259,27 @@ bool Completed(const Usage& usage)
     return any;
 }
 
+bool SubmittedOnlyOn(const Usage& usage, ID3D12CommandQueue* queue)
+{
+    if (queue == nullptr)
+        return false;
+    std::lock_guard lock(stateMutex);
+    const size_t qIndex = FindQueue(queue);
+    if (qIndex >= queues.size())
+        return false;
+
+    bool any = false;
+    for (const auto& e : usage.epochs)
+    {
+        if (!e)
+            continue;
+        any = true;
+        if (!Detail::IsSubmittedOnlyOn(*e, qIndex))
+            return false;
+    }
+    return any;
+}
+
 GpuTiming::Detail::Certificate TimingCertificate(const Usage& usage)
 {
     std::lock_guard lock(stateMutex);

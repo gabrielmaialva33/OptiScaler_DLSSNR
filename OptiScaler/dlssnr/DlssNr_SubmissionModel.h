@@ -51,6 +51,23 @@ template <typename Completed> bool IsReady(const Epoch& e, Completed completed)
     return e.sealed && IsComplete(e, completed);
 }
 
+inline bool IsSubmittedOnlyOn(const Epoch& e, size_t targetQueue)
+{
+    if (!e.submitted || e.unknown || e.pending != 0)
+        return false;
+    bool foundTarget = false;
+    for (size_t q = 0; q < MaxQueues; ++q)
+    {
+        if (e.fences[q] != 0)
+        {
+            if (q != targetQueue)
+                return false;
+            foundTarget = true;
+        }
+    }
+    return foundTarget;
+}
+
 class Model
 {
     std::array<std::shared_ptr<Epoch>, MaxEpochs> epochs {};

@@ -15,12 +15,13 @@ namespace DlssNr::PresentGuides
 // Four capture sets (RenoDX kPresentGuideSets): the newest, one the game may be copying into,
 // one a present on the GPU may still read, and one a present read last.
 constexpr size_t kRingSize = 4;
-// Drop captures older than this window as stale (RenoDX kPresentGuideMaxAge).
-constexpr uint64_t kPresentGuideMaxAge = 4;
+// Drop captures older than 250 ms as stale (RenoDX kPresentGuideMaxAgeMs / present_path.hpp:155-168).
+constexpr int64_t kPresentGuideMaxAgeMs = 250;
 
 struct Slot
 {
     uint64_t sequence = 0;
+    int64_t capturedAtMs = 0;
     uint32_t width = 0;
     uint32_t height = 0;
     bool depthInverted = false;
@@ -29,7 +30,7 @@ struct Slot
     void* readToken = nullptr;  // pointer to present submission tracking usage
 };
 
-template <typename WriteCompletedPredicate, typename ReadInFlightPredicate> class Ring
+template <typename WriteEligiblePredicate, typename ReadInFlightPredicate> class Ring
 {
     Slot _slots[kRingSize] {};
     size_t _lastReadIndex = kRingSize; // index of the slot present last read
@@ -67,12 +68,14 @@ template <typename WriteCompletedPredicate, typename ReadInFlightPredicate> clas
         return best;
     }
 
-    void CommitRecord(size_t index, uint32_t w, uint32_t h, bool depthInverted, void* writeToken, void* readToken)
+    void CommitRecord(size_t index, uint32_t w, uint32_t h, bool depthInverted, int64_t nowMs, void* writeToken,
+                      void* readToken)
     {
         if (index >= kRingSize)
             return;
 
         _slots[index].sequence = _nextSequence++;
+        _slots[index].capturedAtMs = nowMs;
         _slots[index].width = w;
         _slots[index].height = h;
         _slots[index].depthInverted = depthInverted;
@@ -87,15 +90,16 @@ template <typename WriteCompletedPredicate, typename ReadInFlightPredicate> clas
         {
             _slots[index].recorded = false;
             _slots[index].sequence = 0;
+            _slots[index].capturedAtMs = 0;
             _slots[index].writeToken = nullptr;
             _slots[index].readToken = nullptr;
         }
     }
 
-    // Selects the newest capture whose evaluate submission is completed on the CPU.
-    // Never performs a GPU cross-queue wait. Rejects captures older than kPresentGuideMaxAge.
-    // If no recorded capture is completed and fresh, returns kRingSize (caller uses neutral zero guides).
-    size_t PickForPresent(WriteCompletedPredicate isWriteCompleted)
+    // Selects the newest capture whose evaluate submission is eligible (either submitted on the same queue,
+    // or completed on CPU). Never performs a GPU cross-queue wait. Rejects captures older than kPresentGuideMaxAgeMs.
+    // If no recorded capture is eligible and fresh, returns kRingSize (caller uses neutral zero guides).
+    size_t PickForPresent(WriteEligiblePredicate isEligible, int64_t nowMs)
     {
         size_t newestCompleted = kRingSize;
         uint64_t highestSeq = 0;
@@ -105,12 +109,12 @@ template <typename WriteCompletedPredicate, typename ReadInFlightPredicate> clas
             if (!_slots[i].recorded)
                 continue;
 
-            if (isWriteCompleted(_slots[i].writeToken))
-            {
-                // Discard stale captures
-                if (_nextSequence > 1 && (_nextSequence - 1) - _slots[i].sequence >= kPresentGuideMaxAge)
-                    continue;
+            // Discard stale captures
+            if (nowMs > 0 && _slots[i].capturedAtMs > 0 && (nowMs - _slots[i].capturedAtMs) > kPresentGuideMaxAgeMs)
+                continue;
 
+            if (isEligible(_slots[i].writeToken))
+            {
                 if (_slots[i].sequence > highestSeq)
                 {
                     highestSeq = _slots[i].sequence;
