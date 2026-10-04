@@ -4,7 +4,8 @@ Run `python3 tests/nr-dispatch/run.py`. The runner compiles the production class
 constructor, `DispatchPass`, destructor and the scratch generation against strict host D3D12 fakes
 with ASan/UBSan. The constants layout is the real shared header.
 
-Checks 145 dispatches across the 48-slot ring: exact uploaded bytes, isolation between slots,
+Checks 145 dispatches across the 64-slot ring (`DLSSNR_NUM_OF_HEAPS`; `fakes.h` spells it once as
+`kRing` and `cases.h` holds the two equal): exact uploaded bytes, isolation between slots,
 dispatch dimensions, optional SRV/UAV stand-ins, invalid inputs, and one map/CBV per buffer
 instead of per dispatch. Exercises allocation failure, Map failure and a null mapping at
 every slot, plus root/pipeline/heap failure and a null device. Each acquired mapping/resource

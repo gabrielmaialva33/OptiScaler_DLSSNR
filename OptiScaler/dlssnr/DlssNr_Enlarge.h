@@ -71,8 +71,9 @@ struct Decision
 {
     uint32_t transfer = kTransferMatched; // what the resolve is sent
     Why why = Why::NotYet;
-    bool keep = false;     // the private SR should exist: build it if missing, keep it if built
-    bool evaluate = false; // the private SR runs this frame
+    bool keep = false;     // an SR that exists stays; false releases it
+    bool build = false;    // none exists and this frame could use one: build it (it runs from a later frame)
+    bool evaluate = false; // the SR runs this frame
 };
 
 // Below the frame on one axis and above it on neither. The working scale is uniform, so this is "scale
@@ -85,40 +86,54 @@ constexpr bool BelowFrame(uint32_t width, uint32_t height, uint32_t workWidth, u
 constexpr Decision Decide(const Inputs& in)
 {
     if (in.configured != kTransferDlss)
-        return { in.configured, Why::NotSelected, false, false };
+        return { in.configured, Why::NotSelected, false, false, false };
 
     if (in.vulkan)
-        return { kTransferMatched, Why::Vulkan, false, false };
+        return { kTransferMatched, Why::Vulkan, false, false, false };
 
     if (!BelowFrame(in.width, in.height, in.workWidth, in.workHeight))
-        return { kTransferMatched, Why::FullSize, false, false };
+        return { kTransferMatched, Why::FullSize, false, false, false };
 
-    // From here on the SR is wanted for this configuration, so a frame that cannot use it keeps it idle
-    // rather than releasing it: a title that alternates routes would otherwise rebuild it every frame.
+    // From here on the SR is wanted for this configuration, so a frame that cannot use it keeps an existing
+    // one idle rather than releasing it -- a title that alternates routes would otherwise rebuild it every
+    // frame -- but builds none: on the before-upscale stage, say, it might never run at all.
+    const bool usable = in.state != State::Failed;
+
     if (in.beforeUpscale)
-        return { kTransferMatched, Why::BeforeUpscale, in.state != State::Failed, false };
+        return { kTransferMatched, Why::BeforeUpscale, usable, false, false };
 
     if (!in.realGuides)
-        return { kTransferMatched, Why::NoGuides, in.state != State::Failed, false };
+        return { kTransferMatched, Why::NoGuides, usable, false, false };
 
     if (!in.guidesUsable)
-        return { kTransferMatched, Why::GuidesUnmatched, in.state != State::Failed, false };
+        return { kTransferMatched, Why::GuidesUnmatched, usable, false, false };
 
     if (in.debugView == 2)
-        return { kTransferMatched, Why::ModelView, in.state != State::Failed, false };
+        return { kTransferMatched, Why::ModelView, usable, false, false };
 
     switch (in.state)
     {
     case State::Failed:
-        return { kTransferMatched, Why::Failed, false, false };
+        return { kTransferMatched, Why::Failed, false, false, false };
     case State::Missing:
+        return { kTransferMatched, Why::WarmingUp, true, true, false };
     case State::Waiting:
-        return { kTransferMatched, Why::WarmingUp, true, false };
+        return { kTransferMatched, Why::WarmingUp, true, false, false };
     case State::Ready:
         break;
     }
 
-    return { kTransferDlss, Why::Running, true, true };
+    return { kTransferDlss, Why::Running, true, false, true };
+}
+
+// Whether a feature created on one frame may be evaluated on this one. Never on the frame it was created:
+// creating and evaluating in one command list is what hung the GPU when the model did it. A later present
+// when the counter runs (it is the wrapped swapchain's, and some routes never present through it); on a
+// route with no counted present, two NR frames later rather than the model's one. Where submissions are
+// tracked the caller also waits for the creation's recording to have completed.
+constexpr bool CreationCrossed(uint64_t createdPresent, uint64_t present, uint64_t createdFrame, uint64_t frame)
+{
+    return createdPresent != 0 && present != 0 ? present > createdPresent : frame > createdFrame + 1;
 }
 
 // The native Vulkan resolve has no private SR, and its shader would read a plain answer as a carrier if it

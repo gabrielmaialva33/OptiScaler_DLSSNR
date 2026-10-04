@@ -67,6 +67,8 @@ experiment.
 | `DlssNr_NgxInfo.h/.cpp` | the `DLSS-NR NGX:` line at the first build (loader, its build, whether it routes feature 18 itself, the model) and the 616.64 pairing check; `design/ngx-driver-616.md` |
 | `DlssNr_PeScan.h` | header-only byte scans both of those act on: the model's caller-path import slots, the loader's feature-18 table; tested by `tests/nr-model-loader` |
 | `DlssNr_PresentColour.h` | which presented frames the present hosts decline: HDR10/PQ, scRGB and other non-sRGB swapchains, until the hosts convert them; `design/nr-present-hook.md` |
+| `DlssNr_Enlarge.h` | Transfer 2's rules as pure functions: what the resolve is sent and why, the Vulkan 2 -> 1 mapping, the menu's index table, when the private SR's history resets; `design/dlss-enlargement.md`, tested by `tests/nr-enlarge` |
+| `DlssNr_PrivateSr.h/.cpp` | Transfer 2's private DLSS Super Resolution, the NGX half: its own parameter table and handle through `NVNGXProxy`, created and evaluated with wilsjo2's parameters |
 | `shaders/dlssnr/DlssNr_Dx12.h/.cpp` | the pass: forwarder loading, feature lifetime, the evaluate path, encode/resolve orchestration, capture |
 | `shaders/dlssnr/DlssNr_Common.h` | the constant buffer, shared by the host and the shader |
 | `shaders/dlssnr/precompile/dlssnr.hlsl` | **the live shader**: encode (scale and sRGB-encode with a soft knee), area downsample, resolve (RenoDX's two-branch composition, OkLab hue correction, AP1 clamp, the guard) |

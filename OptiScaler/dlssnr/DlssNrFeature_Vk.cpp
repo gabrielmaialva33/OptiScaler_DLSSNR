@@ -7,6 +7,7 @@
 #include <Util.h>
 #include <NVNGX_Parameter.h>
 #include <dlssnr/DlssNr_Consumers.h>
+#include <dlssnr/DlssNr_Enlarge.h>
 #include <dlssnr/DlssNr_ModelLog.h>
 #include <dlssnr/DlssNr_WorkingScale.h>
 
@@ -1096,7 +1097,9 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     encode.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
     encode.ColourStrength = cfg.DlssNrColourStrength.value_or_default();
     encode.MaxRatio = cfg.DlssNrMaxRatio.value_or_default();
-    encode.Transfer = cfg.DlssNrTransfer.value_or_default();
+    // Transfer 2's private DLSS is D3D12 only. Sent as is, the shader would decode this path's plain answer as
+    // the carrier that DLSS writes; it runs matched residual instead (design/dlss-enlargement.md).
+    encode.Transfer = Enlarge::VulkanTransfer(cfg.DlssNrTransfer.value_or_default());
     encode.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
     encode.GuideWidth = guideWidth;
     encode.GuideHeight = guideHeight;

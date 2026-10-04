@@ -1,7 +1,9 @@
+static_assert(DLSSNR_NUM_OF_HEAPS == kRing, "the fakes' ring must be the production ring");
+
 // Fill every ring slot once, so the next pass over the ring is all hits.
 void PrimeRing(DlssNr_Dx12& shader, ID3D12GraphicsCommandList& cmd, ID3D12Resource& source, ID3D12Resource& target)
 {
-    for (unsigned i = 0; i < 48; ++i)
+    for (unsigned i = 0; i < kRing; ++i)
     {
         DlssNrConstants constants {};
         constants.Width = 16;
@@ -62,10 +64,10 @@ void ReshapingRetiresDescriptors()
 
         // The source stands in for all five reads, so all five move with it. The two writes name
         // target, which did not change, and must stay reused.
-        assert(after.srv == 48 * 5);
+        assert(after.srv == kRing * 5);
         assert(after.uav == 0);
 
-        for (unsigned slot = 0; slot < 48; ++slot)
+        for (unsigned slot = 0; slot < kRing; ++slot)
             for (unsigned i = 0; i < 5; ++i)
                 assert(device.srvs[slot][i] == (ViewRecord { &source, DXGI_FORMAT_UNKNOWN, 0, true }));
         (void) mutation.what;
@@ -92,7 +94,7 @@ void ScratchAllocationRetiresDescriptors()
     ++g_nrScratchGeneration; // what CreateScratch does on every successful allocation
 
     const auto after = Revisit(shader, device, cmd, source, target);
-    assert(after.srv == 48 * 5 && after.uav == 48 * 2);
+    assert(after.srv == kRing * 5 && after.uav == kRing * 2);
 
     // And it settles again afterwards rather than staying invalidated.
     assert(Revisit(shader, device, cmd, source, target).srv == 0);
@@ -112,7 +114,7 @@ void SaturatedGenerationStopsReuse()
 
     PrimeRing(shader, cmd, source, target);
     const auto after = Revisit(shader, device, cmd, source, target);
-    assert(after.srv == 48 * 5 && after.uav == 48 * 2);
+    assert(after.srv == kRing * 5 && after.uav == kRing * 2);
 
     g_nrScratchGeneration = saved;
 }
@@ -125,7 +127,7 @@ int main()
     {
         DlssNr_Dx12 shader("test", &device);
         assert(shader.IsInit());
-        assert(device.resources.size() == 48 && device.cbvWrites == 48);
+        assert(device.resources.size() == kRing && device.cbvWrites == kRing);
         for (unsigned frame = 0; frame < 145; ++frame)
         {
             DlssNrConstants constants {};
@@ -139,9 +141,9 @@ int main()
             assert(std::memcmp(cmd.recorded.back().data(), &constants, sizeof(constants)) == 0);
             assert(cmd.groups.back() ==
                    (std::array<UINT, 3> { (constants.Width + 7) / 8, (constants.Height + 7) / 8, 1 }));
-            const unsigned slot = frame % 48;
-            // Contents, every frame, reused or not. The ring is 48 slots and `full` alternates on
-            // `frame`, so a slot always comes back to the same bindings and from frame 48 on every
+            const unsigned slot = frame % kRing;
+            // Contents, every frame, reused or not. The ring is kRing slots and `full` alternates on
+            // `frame`, so a slot always comes back to the same bindings and from frame kRing on every
             // view is a hit -- which is exactly when a cache that reused the wrong descriptor would
             // still be holding the right one by luck if only counts were checked.
             const ViewRecord expectedSrv[5] = {
@@ -161,15 +163,16 @@ int main()
             for (unsigned i = 0; i < 2; ++i)
                 assert(device.uavs[slot][i] == expectedUav[i]);
             // Writing this pass must not change another slot's constants.
-            for (unsigned i = 0; i < 48 && i <= frame; ++i)
+            for (unsigned i = 0; i < kRing && i <= frame; ++i)
             {
-                const unsigned latest = i + (frame - i) / 48 * 48;
+                const unsigned latest = i + (frame - i) / kRing * kRing;
                 assert(device.resources[i]->bytes == cmd.recorded[latest]);
             }
         }
-        // 145 dispatches, 48 ring slots, bindings that never move: only the first pass over the ring
-        // writes any view. Before descriptor reuse this was 145 * 5 and 145 * 2.
-        assert(device.cbvWrites == 48 && device.srvWrites == 48 * 5 && device.uavWrites == 48 * 2);
+        // 145 dispatches, kRing ring slots (more than two passes over it), bindings that never move:
+        // only the first pass over the ring writes any view. Before descriptor reuse this was 145 * 5 and
+        // 145 * 2.
+        assert(device.cbvWrites == kRing && device.srvWrites == kRing * 5 && device.uavWrites == kRing * 2);
         for (const auto& buffer : device.resources)
             assert(buffer->maps == 1 && buffer->unmaps == 0 && buffer->releases == 0);
         DlssNrConstants constants {};
@@ -184,7 +187,7 @@ int main()
     // Every partial-allocation/map boundary must clean up exactly what it acquired.
     for (unsigned failure = 0; failure < 3; ++failure)
     {
-        for (int slot = 0; slot < 48; ++slot)
+        for (int slot = 0; slot < static_cast<int>(kRing); ++slot)
         {
             ID3D12Device broken;
             if (failure == 0)
@@ -225,6 +228,7 @@ int main()
     ScratchAllocationRetiresDescriptors();
     SaturatedGenerationStopsReuse();
 
-    std::cout << "PASS: production dispatch, 145 passes, isolated ring slots, fixed CBVs, 148 initialization "
-                 "failures, descriptor reuse retired by 6 reshapes, by allocation and by saturation\n";
+    std::cout << "PASS: production dispatch, 145 passes over a " << kRing << "-slot ring, isolated ring slots, fixed "
+                 "CBVs, " << 3 * kRing + 4 << " initialization failures, descriptor reuse retired by 6 reshapes, by "
+                 "allocation and by saturation\n";
 }

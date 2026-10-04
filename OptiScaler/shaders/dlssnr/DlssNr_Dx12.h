@@ -44,7 +44,11 @@
 // have left six frames, spending exactly the headroom the previous note set aside. Forty-eight
 // restores eight frames at five dispatches. If a sixth is ever added, raise this with it rather than
 // spending the margin again.
-#define DLSSNR_NUM_OF_HEAPS 48
+//
+// Transfer 2 added two (dlssnr/design/dlss-enlargement.md): the carrier and the unit exposure its private
+// DLSS reads. The calibration grid has since gone, so a frame now records at most six -- meter, encode,
+// downsample, carrier, exposure, resolve -- and sixty-four keeps ten frames between a slot's reuses.
+#define DLSSNR_NUM_OF_HEAPS 64
 
 class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
 {

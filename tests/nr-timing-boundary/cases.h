@@ -3,8 +3,10 @@ int main() {
     Config cfg;
     DlssNrPassSnapshot passes;
     auto make=[&](const char* stage="after", unsigned w=3440, unsigned h=1440, float scale=1.0f,
-                  bool reset=false, bool capture=false, bool hdr=true, unsigned format=10) {
-        return TimingMetadata(cfg,passes,42,17,stage,2293,960,w,h,unsigned(w*scale),unsigned(h*scale),scale,reset,capture,hdr,format);
+                  bool reset=false, bool capture=false, bool hdr=true, unsigned format=10,
+                  uint32_t effective=1, const char* enlarge="not-selected") {
+        return TimingMetadata(cfg,passes,42,17,stage,2293,960,w,h,unsigned(w*scale),unsigned(h*scale),scale,reset,capture,hdr,format,
+                              effective,enlarge);
     };
     auto a=make(), b=make();
     assert(a.settingsGeneration==b.settingsGeneration && a.contractHash==b.contractHash); ++cases;
@@ -27,6 +29,13 @@ int main() {
     auto sdr=make("after",3440,1440,1,false,false,false,28);
     assert(sdr.contractHash!=hidden.contractHash); ++cases;
     assert(a.modelWidth==3440 && a.settingsGeneration<hidden.settingsGeneration); ++cases;
+    // Transfer 2: its warm-up (sent 1) and its running DLSS (sent 2) are different contracts, and the same
+    // effective transfer with a different reason is too -- the private SR's cost sits in outside_model_ms.
+    auto warming=make("after",3440,1440,0.5f,false,false,true,10,1,"warming-up");
+    auto running=make("after",3440,1440,0.5f,false,false,true,10,2,"dlss-sr");
+    auto failed=make("after",3440,1440,0.5f,false,false,true,10,1,"failed");
+    assert(warming.contractHash!=running.contractHash && warming.contractHash!=failed.contractHash);
+    assert(running.settingsGeneration>warming.settingsGeneration && running.modelWidth==1720); ++cases;
 
     using DlssNr::RenderGpuTiming;
     ImGui::Clear(); RenderGpuTiming(&cfg,true);
@@ -47,6 +56,6 @@ int main() {
     assert(ImGui::Contains("not the current frame") && !ImGui::Contains("ms per frame")); ++cases;
     ImGui::toggle=0; ImGui::Clear(); RenderGpuTiming(&cfg,false);
     assert(!cfg.settings.Enabled && ImGui::sliderCalls==0 && !ImGui::Contains("Last confirmed")); ++cases;
-    assert(cases==16);
+    assert(cases==17);
     std::printf("PASS %d timing boundary metadata/UI cases\n",cases);
 }

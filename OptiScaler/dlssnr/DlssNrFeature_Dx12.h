@@ -4,6 +4,7 @@
 #include <mutex>
 #include "DlssNr_PreUpscale.h"
 #include "DlssNr_Chain.h"
+#include "DlssNr_Enlarge.h"
 #include <memory>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
@@ -342,6 +343,10 @@ bool RunningAfterRayReconstruction();
 bool ObservedRayReconstructionRoute();
 unsigned int ActivePassCount();
 const char* MultipassStatus();
+
+// Transfer 2: what the D3D12 resolve was last sent, and why (design/dlss-enlargement.md). For the menu's
+// status line while "Matched residual + DLSS" is selected. Why::NotYet until the first dispatch.
+Enlarge::Status EnlargeStatus();
 
 // What the white point meter last settled on, or 0 when it is not running. For the menu.
 
