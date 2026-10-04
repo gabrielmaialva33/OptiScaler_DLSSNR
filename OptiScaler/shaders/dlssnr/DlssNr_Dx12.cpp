@@ -5602,6 +5602,15 @@ struct PresentGuideClone
 };
 
 static PresentGuideClone g_presentGuideClones[DlssNr::PresentGuides::kRingSize];
+// The bridge's last captured-guides read, until its recording executes or is abandoned.
+struct BridgeGuideRead
+{
+    bool valid = false;
+    size_t slot = 0;
+    DlssNr::Submission::Usage usage {};
+    bool tracked = false;
+};
+static BridgeGuideRead g_bridgeRead;
 static DlssNr::PresentGuides::Ring g_presentGuideRing;
 
 // Creates a dedicated guide clone for the present snapshot ring matching the donor description
@@ -7389,6 +7398,9 @@ bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** 
     // replaced capture is parked, not released.
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
 
+    // One recording, one read: the previous one has executed or been abandoned by now.
+    g_bridgeRead = {};
+
     const auto isEligible = [queue](void* token) -> bool
     {
         if (token == nullptr)
@@ -7405,15 +7417,18 @@ bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** 
         return false;
 
     auto& clone = g_presentGuideClones[pickedSlot];
-    if (clone.depth == nullptr || clone.motion == nullptr)
+    if (clone.depth == nullptr || clone.motion == nullptr || cmdList == nullptr)
         return false;
 
-    if (cmdList != nullptr)
-    {
-        const bool tracked = DlssNr::Submission::Track(cmdList, clone.readUsage);
-        if (tracked)
-            clone.readTracked = true;
-    }
+    // The read is tracked before it is handed out, or the copy is not handed out: an untracked read could be
+    // overwritten by the next capture while the bridge's list still reads it. What Track changed is kept so
+    // AbandonCapturedGuides can undo it when the bridge drops its recording without executing it.
+    const auto savedUsage = clone.readUsage;
+    const bool savedTracked = clone.readTracked;
+    if (!DlssNr::Submission::Track(cmdList, clone.readUsage))
+        return false;
+    clone.readTracked = true;
+    g_bridgeRead = { true, pickedSlot, savedUsage, savedTracked };
 
     *depth = clone.depth;
     *motion = clone.motion;
@@ -7422,6 +7437,19 @@ bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** 
     frame->DepthState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     frame->MotionState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     return true;
+}
+
+// The bridge abandoned the recording its captured guides were read in: the read never executes, so the slot's
+// read usage goes back to what it was before that Track, or the slot would count as being read for good.
+void AbandonCapturedGuides()
+{
+    std::lock_guard<std::mutex> nrLock(g_nrMutex);
+    if (!g_bridgeRead.valid)
+        return;
+    auto& clone = g_presentGuideClones[g_bridgeRead.slot];
+    clone.readUsage = g_bridgeRead.usage;
+    clone.readTracked = g_bridgeRead.tracked;
+    g_bridgeRead = {};
 }
 
 DlssNrFrameInfo PresentFrameDefaults(bool reset)
