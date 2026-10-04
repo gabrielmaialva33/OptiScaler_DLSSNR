@@ -142,3 +142,8 @@ summary = "The real MFG byte signatures and the real scanner matcher against syn
 tier = "host"
 timeout = 300
 summary = "The NR model loaders' byte-level decisions against synthetic PE64 images (the model's GetModuleFileNameW/A import slots, the NGX loader's feature-18 table), the 616.64 faulting-pairing predicate and driver numbering; the direct runtime held to the forwarder's parameter writes, model calls and fault filter; and, when present on the machine, the real wine _nvngx.dll and nvngx_dlssnr.dll. Runs no model and no NGX."
+
+[sl-log-repeat]
+tier = "host"
+timeout = 120
+summary = "The Streamline log repeat filter against the real setDynamicMFGParams line on a fake clock: one line per 10 s with the folded count, new sites at once, a bounded table that fails open."

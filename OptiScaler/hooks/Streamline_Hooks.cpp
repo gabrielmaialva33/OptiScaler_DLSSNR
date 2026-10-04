@@ -9,6 +9,7 @@
 #include <misc/IdentifyGpu.h>
 #include <hooks/Reflex_Hooks.h>
 #include <framegen/dlssg/MfgUnlock.h>
+#include "Streamline_LogRepeat.h"
 #include <menu/menu_overlay_base.h>
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <proxies/KernelBase_Proxy.h>
@@ -65,6 +66,18 @@ static void PatchSL1PluginJson(nlohmann::json& configJson)
         configJson["external"]["hws"]["required"] = false;
 }
 
+// Both callbacks share one filter: a game that loads both interfaces still has one log
+static StreamlineLogRepeat::Filter streamlineRepeats;
+
+// Empty for a line written for the first time, else how many repeats it stands for
+static std::string StreamlineRepeatSuffix(const StreamlineLogRepeat::Decision& decision)
+{
+    if (decision.folded == 0)
+        return {};
+
+    return std::format(" (repeated {} more times since the previous line, not written)", decision.folded);
+}
+
 char* StreamlineHooks::trimStreamlineLog(const char* msg)
 {
     char* result = (char*) malloc(strlen(msg) + 1);
@@ -90,20 +103,26 @@ void StreamlineHooks::streamlineLogCallback(sl::LogType type, const char* msg)
     char* trimmed_msg = trimStreamlineLog(msg);
     if (trimmed_msg != nullptr)
     {
-        switch (type)
+        const auto decision = streamlineRepeats.Observe(trimmed_msg, StreamlineLogRepeat::Clock::now());
+        const std::string repeats = StreamlineRepeatSuffix(decision);
+
+        if (decision.write)
         {
-        case sl::LogType::eWarn:
-            LOG_WARN("{}", trimmed_msg);
-            break;
-        case sl::LogType::eInfo:
-            LOG_INFO("{}", trimmed_msg);
-            break;
-        case sl::LogType::eError:
-            LOG_ERROR("{}", trimmed_msg);
-            break;
-        case sl::LogType::eCount:
-            LOG_ERROR("{}", trimmed_msg);
-            break;
+            switch (type)
+            {
+            case sl::LogType::eWarn:
+                LOG_WARN("{}{}", trimmed_msg, repeats);
+                break;
+            case sl::LogType::eInfo:
+                LOG_INFO("{}{}", trimmed_msg, repeats);
+                break;
+            case sl::LogType::eError:
+                LOG_ERROR("{}{}", trimmed_msg, repeats);
+                break;
+            case sl::LogType::eCount:
+                LOG_ERROR("{}{}", trimmed_msg, repeats);
+                break;
+            }
         }
 
         free(trimmed_msg);
@@ -604,20 +623,26 @@ void StreamlineHooks::streamlineLogCallback_sl1(sl1::LogType type, const char* m
 
     if (trimmed_msg != nullptr)
     {
-        switch (type)
+        const auto decision = streamlineRepeats.Observe(trimmed_msg, StreamlineLogRepeat::Clock::now());
+        const std::string repeats = StreamlineRepeatSuffix(decision);
+
+        if (decision.write)
         {
-        case sl1::LogType::eLogTypeWarn:
-            LOG_WARN("{}", trimmed_msg);
-            break;
-        case sl1::LogType::eLogTypeInfo:
-            LOG_INFO("{}", trimmed_msg);
-            break;
-        case sl1::LogType::eLogTypeError:
-            LOG_ERROR("{}", trimmed_msg);
-            break;
-        case sl1::LogType::eLogTypeCount:
-            LOG_ERROR("{}", trimmed_msg);
-            break;
+            switch (type)
+            {
+            case sl1::LogType::eLogTypeWarn:
+                LOG_WARN("{}{}", trimmed_msg, repeats);
+                break;
+            case sl1::LogType::eLogTypeInfo:
+                LOG_INFO("{}{}", trimmed_msg, repeats);
+                break;
+            case sl1::LogType::eLogTypeError:
+                LOG_ERROR("{}{}", trimmed_msg, repeats);
+                break;
+            case sl1::LogType::eLogTypeCount:
+                LOG_ERROR("{}{}", trimmed_msg, repeats);
+                break;
+            }
         }
 
         free(trimmed_msg);

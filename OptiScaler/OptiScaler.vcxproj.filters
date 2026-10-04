@@ -536,6 +536,9 @@
     <ClInclude Include="hooks\Streamline_Hooks.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="hooks\Streamline_LogRepeat.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="proxies\IGDExt_Proxy.h">
       <Filter>Header Files</Filter>
     </ClInclude>

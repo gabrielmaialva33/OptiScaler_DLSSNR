@@ -28,7 +28,7 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `vulkan-query-readiness`, `mfg-pattern` and `fg-synth-policy` |
+| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `vulkan-query-readiness`, `mfg-pattern`, `fg-synth-policy` and `sl-log-repeat` |
 | `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Twenty-two suites. All but `nr-invariants` build real production code with local fakes under
+**Host tier.** Twenty-three suites. All but `nr-invariants` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
@@ -50,6 +50,9 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   or GPU synchronization coverage.
 - `mfg-pattern` — the real MFG byte signatures and scanner matcher against synthetic
   buffers. Runs no patcher and touches no DLL.
+- `sl-log-repeat` — the Streamline log repeat filter against the real `setDynamicMFGParams` line
+  on a fake clock: one line per 10 s with the folded count, new sites at once, a bounded table that
+  fails open. Runs no Streamline and no callback.
 - `fg-synth-policy` — synthesized FG's decisions (fast-motion response on incoherent motion
   and its cap, low-fps floor, duplicate-present advice, which HUD fix runs for which output), the
   motion statistics they are made from, and the NR/FG motion handoff, from the production headers,
