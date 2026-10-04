@@ -142,6 +142,11 @@ feature** — a better answer to "what does the frame look like when the model o
 That is settled by looking at images at a fixed scale, not by comparing milliseconds, and this note
 should not be cited as an argument against evaluating it on those terms.
 
+The mode is now in this tree as `Transfer=2`, "Matched residual + DLSS", on those terms:
+[dlss-enlargement.md](dlss-enlargement.md). Its private SR runs after the model's end marker, so it is
+counted in `outside_model_ms` and in the total, and the timing contract names it (`effective_transfer=`,
+`enlarge=`).
+
 ## How to reproduce
 
 Set `[DlssNr] GpuTiming=true` and `GpuTimingInterval=30`; on a Ray Reconstruction title also

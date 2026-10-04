@@ -1,4 +1,8 @@
 #include "OptiScaler/shaders/dlssnr/DlssNr_Common.h"
+
+// The descriptor ring's size, as DLSSNR_NUM_OF_HEAPS says it (cases.h holds the two equal). The fakes come
+// before the header that defines the macro, so the number is spelled here once.
+constexpr unsigned kRing = 64;
 #include <array>
 #include <cassert>
 #include <cstring>
@@ -140,9 +144,9 @@ struct ID3D12Device
     bool failRoot = false, failPipeline = false, failHeaps = false;
     unsigned creates = 0, cbvWrites = 0, srvWrites = 0, uavWrites = 0;
     std::vector<std::unique_ptr<ID3D12Resource>> resources;
-    std::array<D3D12_CONSTANT_BUFFER_VIEW_DESC, 48> cbvs {};
-    std::array<std::array<ViewRecord, 5>, 48> srvs {};
-    std::array<std::array<ViewRecord, 2>, 48> uavs {};
+    std::array<D3D12_CONSTANT_BUFFER_VIEW_DESC, kRing> cbvs {};
+    std::array<std::array<ViewRecord, 5>, kRing> srvs {};
+    std::array<std::array<ViewRecord, 2>, kRing> uavs {};
     HRESULT CreateCommittedResource(const CD3DX12_HEAP_PROPERTIES*, int, const D3D12_RESOURCE_DESC* desc, int, void*,
                                     ID3D12Resource** output)
     {

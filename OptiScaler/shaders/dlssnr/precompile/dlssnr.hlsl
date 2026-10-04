@@ -23,7 +23,7 @@ cbuffer Params : register(b0)
     float gCompareSplit; // where the wipe cuts, 0..1
     float gCompareZoom;  // side by side: 1 fits the frame, 2 fills the half
     uint  gCompareSwap;  // put the edited frame on the other side
-    uint  gTransfer;     // 0 classic, 1 matched residual, 3 matched residual with a sharp enlargement
+    uint  gTransfer;     // 0 classic, 1 matched residual, 2 matched residual + DLSS, 3 matched residual, sharp
     float gDebugScale;   // what the debug views are scaled by, held still while the meter moves
     uint  gReversibleMode; // 0 knee, 1 Neutwo+composed, 2 Neutwo+replace, 3 hybrid+composed, 4 hybrid+replace
     uint  gApplyModel;     // 0 output the clean frame (pass still runs), 1 apply the model's edit
@@ -706,6 +706,40 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         return;
     }
 
+    // Transfer 2's carrier (dlssnr/design/dlss-enlargement.md): the model's edit at the working size, in the
+    // space the resolve takes it in, as a signal a private DLSS Super Resolution can enlarge. 0.5 is no change;
+    // the signed compression keeps darkening representable, and the 1/64 scale lifts small edits clear of the
+    // RGBA16F step near 0.5, where a unit scale rounds them away. gSource is the model's input, gModel its
+    // answer, both at this dispatch's size.
+    //
+    // wilsjo2's (OptiScaler-DLSSNR-PreSR-Multipass v0.8.91, GPL-3.0), his mode 9. Changed: where the answer is
+    // empty -- the resolve's emptyModel test -- the carrier is neutral, so DLSS is not handed "black minus the
+    // proxy" to spread around a pixel the resolve would have left untouched.
+    if (gMode == 5)
+    {
+        float3 source = gSource.Load(int3(id.xy, 0)).rgb;
+        float3 answer = gModel.Load(int3(id.xy, 0)).rgb;
+
+        if (gPassthrough == 0)
+        {
+            source = SrgbToLinear(source);
+            answer = SrgbToLinear(answer);
+        }
+
+        const float3 none = float3(0.0, 0.0, 0.0);
+        const float3 d = all(answer <= 1e-5) ? none : SanitizeFinite3(answer - source, none);
+        gTarget[id.xy] = float4(0.5 + 0.5 * d / (1.0 / 64.0 + abs(d)), 1.0);
+        return;
+    }
+
+    // The exposure Transfer 2's DLSS is handed: one texel holding 1, so the carrier passes through unscaled.
+    // wilsjo2's mode 7.
+    if (gMode == 6)
+    {
+        gTarget[id.xy] = float4(1.0, 1.0, 1.0, 1.0);
+        return;
+    }
+
     if (gMode == 0)
     {
         float4 source = gSource.Load(int3(id.xy, 0));
@@ -817,7 +851,9 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // The model's own answer, kept before the matched-residual block below can rewrite `model`, so the
     // replace decode uses what the model returned rather than the residual reconstruction.
     float3 modelDirect = model;
-    const bool emptyModel = all(modelDirect <= 1e-5);
+    // Under Transfer 2 the model slot holds a carrier, where 0.5 is "no change"; the carrier encode already
+    // made an empty answer neutral, so there is nothing to test here.
+    const bool emptyModel = gTransfer != 2 && all(modelDirect <= 1e-5);
     float4 originalSample = gCompareMode == 1 ? gOriginal.SampleLevel(gLinear, cmpUv, 0)
                                               : gOriginal.Load(int3(id.xy, 0));
 
@@ -863,6 +899,16 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     }
 
     float3 edit = model - proxy;
+
+    // Transfer 2: the edit is not a difference of two samples, it is what the private DLSS made of the carrier
+    // at the frame's size. The clamp keeps the inverse off its poles, which DLSS can ring past; at 0.999 an edit
+    // is 15.6, and the cube scaling below bounds it anyway. wilsjo2's decode (GPL-3.0), unchanged.
+    if (gTransfer == 2)
+    {
+        const float3 neutral = float3(0.5, 0.5, 0.5);
+        const float3 carrier = clamp(2.0 * SanitizeFinite3(modelSample.rgb, neutral) - 1.0, -0.999, 0.999);
+        edit = (1.0 / 64.0) * carrier / (1.0 - abs(carrier));
+    }
 
     // Coring was tried here and removed: the per-frame churn's amplitude overlaps the real detail's,
     // so an amplitude threshold cannot separate them -- it only relocated the noise to the threshold.
@@ -924,7 +970,9 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     gSource.GetDimensions(proxyW, proxyH);
     const bool modelRanSmall = proxyW != gWidth || proxyH != gHeight || gForceResidual != 0;
 
-    if ((gTransfer == 1 || gTransfer == 3) && modelRanSmall)
+    // Transfer 2 always takes this path: its edit came from the private DLSS, and the model slot holds no
+    // picture that Classic could compose.
+    if (((gTransfer == 1 || gTransfer == 3) && modelRanSmall) || gTransfer == 2)
     {
         // Saturated, because that is what the encode does and this has to reproduce it exactly.
         //
@@ -955,14 +1003,18 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         proxyLuma = dot(proxy, kLuma);
 
         // Transfer 3 changes one thing: how the edit was enlarged. The model's output and its input share
-        // the working size, so one texel grid serves both. (2 is left alone: upstream's multi-pass PR
-        // gives it another meaning.)
+        // the working size, so one texel grid serves both. (2 enlarged its edit with DLSS, above.)
         if (gTransfer == 3)
             edit = SharpEditAt(cmpUv, proxyW, proxyH);
 
         // At the same rate there is no residual to carry: the model's own picture is already at the
         // frame's resolution, and P + (m - p) collapses to m exactly.
         model = CubeScaleResidual(fullProxy, fullProxy + edit);
+
+        // The replace decodes take the model's picture; under Transfer 2 that is this reconstruction, the
+        // carrier being no picture at all. wilsjo2's, as the decode above.
+        if (gTransfer == 2)
+            modelDirect = model;
     }
 
     // The composition. The model's answer is not treated as a difference to add onto the frame -- it

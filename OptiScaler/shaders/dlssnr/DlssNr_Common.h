@@ -40,7 +40,9 @@ enum DlssNrMode : uint32_t
     DlssNrMode_Resolve = 1,    // proxy + the model's answer + the untouched copy -> the edited frame
     DlssNrMode_Downsample = 2, // the proxy -> a smaller proxy, when the model works below full size
     DlssNrMode_Meter = 3,      // the exposure texture -> tile (0,0), for the white point
-    DlssNrMode_Calibrate = 4   // the untouched frame -> a grid of tile peak luminances
+    DlssNrMode_Calibrate = 4,  // the untouched frame -> a grid of tile peak luminances
+    DlssNrMode_Carrier = 5,    // Transfer 2: proxy + answer -> the edit, as the carrier DLSS enlarges
+    DlssNrMode_UnitTexel = 6   // Transfer 2: one texel of 1.0, the exposure that DLSS is handed
 };
 
 // The meter's grid. 64 x 64 tiles over the whole frame, whatever its size.
@@ -228,7 +230,9 @@ struct alignas(256) DlssNrConstants
     uint32_t CompareSwap;
 
     // How a model that worked below the frame's size is brought back. 0 classic, 1 matched residual,
-    // 3 matched residual with a sharp enlargement (dlssnr/design/sharp-residual.md).
+    // 3 matched residual with a sharp enlargement (dlssnr/design/sharp-residual.md), 2 matched residual
+    // with the edit enlarged by a private DLSS SR, in which case the model slot holds that SR's output, a
+    // carrier, not a picture (dlssnr/design/dlss-enlargement.md). The host sends 2 only on frames the SR ran.
     //
     // Classic composes the model's own low-resolution picture against the full-resolution frame, so
     // the two disagree by the blur the downsample introduced as well as by the edit -- and the

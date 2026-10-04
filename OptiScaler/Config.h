@@ -381,8 +381,10 @@ class Config
     CustomOptional<float> DlssNrMaxRatio { 2.0f };
 
     // How a model that worked below the frame's size is brought back. 0 classic, 1 matched
-    // residual, 3 matched residual with a sharp (Catmull-Rom) enlargement of the edit; 2 is left free
-    // because upstream's multi-pass PR uses it. Only has an effect when Model resolution is under 100%.
+    // residual, 3 matched residual with a sharp (Catmull-Rom) enlargement of the edit, 2 matched residual
+    // with the edit enlarged by a private DLSS Super Resolution -- the meaning upstream's multi-pass PR
+    // gives it. 2 is D3D12 and its bridges only; native Vulkan, and any frame its DLSS cannot run on, get 1
+    // (dlssnr/design/dlss-enlargement.md). Only has an effect when Model resolution is under 100%.
     CustomOptional<uint32_t> DlssNrTransfer { 1 };
 
     // Measure the white point from the frame instead of taking it from the slider. On a frame the

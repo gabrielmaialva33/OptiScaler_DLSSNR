@@ -108,6 +108,11 @@ tier = "host"
 timeout = 300
 summary = "Model cadence: the production scheduler (age in presents the pass ran at, held reset, forced model frames, every refusal and its reason, off allocates nothing) and the production per-pixel rules over synthetic sequences (still scene exact, pans, an occluder restarting the chain, no match no fill), plus source guards on the pass."
 
+[nr-enlarge]
+tier = "host"
+timeout = 300
+summary = "Transfer 2 (private DLSS SR enlargement): the decision table, the carrier through FP16, the NGX adapter against a recording core, and production's plan/enlarge/retire/retry sliced out of DlssNr_Dx12.cpp against D3D12 fakes that chain every barrier. No GPU or NGX."
+
 [nr-gpu-timing-d3d12]
 tier = "wine"
 timeout = 1800

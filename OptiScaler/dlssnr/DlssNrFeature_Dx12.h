@@ -5,6 +5,7 @@
 #include <mutex>
 #include "DlssNr_PreUpscale.h"
 #include "DlssNr_Chain.h"
+#include "DlssNr_Enlarge.h"
 #include <memory>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
@@ -266,6 +267,10 @@ void RenderMenu(::Config* config, float menuResScale);
 // Clears the session failure latch, so a failure caused by transient thrash does not cost a restart.
 void RetryAfterFailure();
 
+// Clears Transfer 2's failure alone and rebuilds its private DLSS, leaving the model, its history and the
+// settling gates as they are (design/dlss-enlargement.md). RetryAfterFailure does this as well.
+void RetryEnlargement();
+
 // Asks the model whether it will work on Direct3D 11 at all, once, and logs the answer.
 //
 // The bridge exists because of a claim nobody tested: "the model refuses on DX11, it answers
@@ -369,6 +374,10 @@ struct PeripheryState
 };
 
 PeripheryState PeripheryStatus();
+
+// Transfer 2: what the D3D12 resolve was last sent, and why (design/dlss-enlargement.md). For the menu's
+// status line while "Matched residual + DLSS" is selected. Why::NotYet until the first dispatch.
+Enlarge::Status EnlargeStatus();
 
 // What the white point meter last settled on, or 0 when it is not running. For the menu.
 

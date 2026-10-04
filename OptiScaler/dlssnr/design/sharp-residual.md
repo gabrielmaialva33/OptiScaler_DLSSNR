@@ -4,7 +4,8 @@ Status: **implemented, opt-in, not yet measured in a game.** `Transfer=3`. The d
 
 **Why 3 and not 2:** upstream's open multi-pass PR (optiscaler/OptiScaler#1158) already gives
 `[DlssNr] Transfer=2` another meaning, "private DLSS SR matched residual". Taking 2 here would make
-the same ini line mean two things in two builds.
+the same ini line mean two things in two builds. That mode has since been ported with the same
+number: see [dlss-enlargement.md](dlss-enlargement.md).
 
 ## Where this came from
 
