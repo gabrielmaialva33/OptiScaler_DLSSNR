@@ -1429,6 +1429,9 @@ void ParkNrDetailStats(DlssNr_DetailStats_Dx12*& detailStats)
     g_nrRetired.push_back(r);
 }
 
+void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESOURCE_STATES from,
+             D3D12_RESOURCE_STATES to);
+
 struct DetailMeasureSession
 {
     std::mutex mutex;
@@ -1496,45 +1499,6 @@ static void DetailMeasureCopy(ID3D12GraphicsCommandList* cmdList, ID3D12Device* 
     Barrier(cmdList, from, D3D12_RESOURCE_STATE_COPY_SOURCE, fromState);
     Barrier(cmdList, copy, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     readable = true;
-}
-
-void StartMeasureDetail()
-{
-    std::lock_guard<std::mutex> lock(g_detailMeasure.mutex);
-    g_detailMeasure.wanted = true;
-    g_detailMeasure.cancelRequested = false;
-    g_detailMeasure.running = false;
-    g_detailMeasure.samplesCollected = 0;
-    g_detailMeasure.currentCopy = 0;
-    g_detailMeasure.hasPreviousFrame = false;
-    g_detailMeasure.slot = 0;
-    for (bool& p : g_detailMeasure.slotPending)
-        p = false;
-    g_detailMeasure.accumulator.Reset();
-    g_detailMeasure.status.running = true;
-    g_detailMeasure.status.initFailed = false;
-    g_detailMeasure.status.progress = 0.0f;
-    g_detailMeasure.status.samples = 0;
-}
-
-void CancelMeasureDetail()
-{
-    std::lock_guard<std::mutex> lock(g_detailMeasure.mutex);
-    g_detailMeasure.wanted = false;
-    g_detailMeasure.cancelRequested = true;
-    g_detailMeasure.status.running = false;
-}
-
-bool DetailMeasureAvailable()
-{
-    return DlssNr_DetailStats_Dx12::Available() && !Config::Instance()->DlssNrUseProxy.value_or_default() &&
-           Config::Instance()->DlssNrEnabled.value_or_default() && DlssNr::IsRunning();
-}
-
-DetailMeasureStatus GetDetailMeasureStatus()
-{
-    std::lock_guard<std::mutex> lock(g_detailMeasure.mutex);
-    return g_detailMeasure.status;
 }
 
 void ParkAltSurfaces()
@@ -7718,6 +7682,45 @@ void RequestCapture(unsigned int frames)
 
 bool CaptureInProgress() { return g_capture.isActive(); }
 
+void StartMeasureDetail()
+{
+    std::lock_guard<std::mutex> lock(g_detailMeasure.mutex);
+    g_detailMeasure.wanted = true;
+    g_detailMeasure.cancelRequested = false;
+    g_detailMeasure.running = false;
+    g_detailMeasure.samplesCollected = 0;
+    g_detailMeasure.currentCopy = 0;
+    g_detailMeasure.hasPreviousFrame = false;
+    g_detailMeasure.slot = 0;
+    for (bool& p : g_detailMeasure.slotPending)
+        p = false;
+    g_detailMeasure.accumulator.Reset();
+    g_detailMeasure.status.running = true;
+    g_detailMeasure.status.initFailed = false;
+    g_detailMeasure.status.progress = 0.0f;
+    g_detailMeasure.status.samples = 0;
+}
+
+void CancelMeasureDetail()
+{
+    std::lock_guard<std::mutex> lock(g_detailMeasure.mutex);
+    g_detailMeasure.wanted = false;
+    g_detailMeasure.cancelRequested = true;
+    g_detailMeasure.status.running = false;
+}
+
+bool DetailMeasureAvailable()
+{
+    return DlssNr_DetailStats_Dx12::Available() && !Config::Instance()->DlssNrUseProxy.value_or_default() &&
+           Config::Instance()->DlssNrEnabled.value_or_default() && IsRunning();
+}
+
+DetailMeasureStatus GetDetailMeasureStatus()
+{
+    std::lock_guard<std::mutex> lock(g_detailMeasure.mutex);
+    return g_detailMeasure.status;
+}
+
 void Shutdown()
 {
     std::lock_guard<std::mutex> preLock(g_preMutex);
@@ -7865,17 +7868,25 @@ void Shutdown()
         g_detailMeasure.pass = nullptr;
     }
 
-    if (g_detailMeasure.prevOutput != nullptr)
+    for (auto& outRes : g_detailMeasure.outputs)
     {
-        g_detailMeasure.prevOutput->Release();
-        g_detailMeasure.prevOutput = nullptr;
+        if (outRes != nullptr)
+        {
+            outRes->Release();
+            outRes = nullptr;
+        }
     }
 
-    if (g_detailMeasure.prevInput != nullptr)
+    for (auto& inRes : g_detailMeasure.inputs)
     {
-        g_detailMeasure.prevInput->Release();
-        g_detailMeasure.prevInput = nullptr;
+        if (inRes != nullptr)
+        {
+            inRes->Release();
+            inRes = nullptr;
+        }
     }
+    g_detailMeasure.outputReadable[0] = g_detailMeasure.outputReadable[1] = false;
+    g_detailMeasure.inputReadable[0] = g_detailMeasure.inputReadable[1] = false;
 
     if (g_nr.superDown != nullptr)
     {
