@@ -449,6 +449,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrWhitePointTrim.set_from_config(readFloat("DlssNr", "WhitePointTrim"));
             DlssNrAutoCapture.set_from_config(readBool("DlssNr", "AutoCapture"));
             DlssNrWhitePointScale.set_from_config(readFloat("DlssNr", "WhitePointScale"));
+            DlssNrKernelProfile.set_from_config(readBool("DlssNr", "KernelProfile"));
             {
                 const std::lock_guard lock(_dlssNrPassSettingsMutex);
                 DlssNrGpuTiming.set_from_config(DlssNr::PassConfig::Bool(ini.GetValue("DlssNr", "GpuTiming")));
@@ -1417,6 +1418,8 @@ bool Config::SaveIni()
         ini.SetValue("DlssNr", "ScanExposure", GetBoolValue(Instance()->DlssNrScanExposure.value_for_config()).c_str());
         ini.SetValue("DlssNr", "WhitePointScale",
                      GetFloatValue(Instance()->DlssNrWhitePointScale.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "KernelProfile",
+                     GetBoolValue(Instance()->DlssNrKernelProfile.value_for_config()).c_str());
         {
             auto* config = Instance();
             const std::lock_guard lock(config->_dlssNrPassSettingsMutex);

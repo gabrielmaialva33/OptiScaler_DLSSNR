@@ -38,9 +38,11 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Twenty-six suites. All but `nr-invariants` build real production code with local fakes under
+**Host tier.** Twenty-seven suites. All but `nr-invariants` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
+- `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit_1d,
+  etc.), FP8 variant identification, sample timing aggregation and p95 calculations.
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
   ownership and deferred release against scripted COM/Win32 fakes, and which FG input and output
   the bridge is built for. Also a refused presenter resize and its recovery, and the D3D12 overlay's

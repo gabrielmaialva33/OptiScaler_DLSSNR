@@ -580,6 +580,10 @@ CompareTags=auto
 ; Size multiplier for the comparison labels shown by CompareTags.
 ; 0.5 to 5.0 - Default (auto) is 1.5
 TagScale=auto
+
+; Samples 3 consecutive evaluations out of every 240, profiling GPU time per kernel group and logging the breakdown.
+; true or false - Default (auto) is false
+KernelProfile=auto
 ```
 
 Use the in-game NR panel to capture and edit scan anchors. `UseProxy` selects an

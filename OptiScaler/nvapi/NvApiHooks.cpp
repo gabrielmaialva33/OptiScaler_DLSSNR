@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "NvApiHooks.h"
 #include <NvApiDriverSettings.h>
+#include <dlssnr/DlssNr_KernelProfile.h>
 
 #include "State.h"
 #include <Config.h>
@@ -16,6 +17,48 @@
 #ifdef LOG_ALL_DRS_GET_CALLS
 #include <magic_enum.hpp>
 #endif
+
+namespace
+{
+static decltype(&NvAPI_D3D12_CreateCuFunction) o_CreateCuFunction = nullptr;
+static decltype(&NvAPI_D3D12_DestroyCuFunction) o_DestroyCuFunction = nullptr;
+static decltype(&NvAPI_D3D12_LaunchCuKernelChain) o_LaunchCuKernelChain = nullptr;
+
+NvAPI_Status __cdecl hkNvAPI_D3D12_CreateCuFunction(ID3D12Device* pDevice, NVDX_ObjectHandle hModule,
+                                                    const char* functionName, NVDX_ObjectHandle* pFunction)
+{
+    if (!o_CreateCuFunction)
+        return NVAPI_ERROR;
+    const auto status = o_CreateCuFunction(pDevice, hModule, functionName, pFunction);
+    if (status == NVAPI_OK && pFunction && *pFunction && functionName)
+        DlssNr::KernelProfile::Profiler::Instance().RegisterFunction(*pFunction, functionName);
+    return status;
+}
+
+NvAPI_Status __cdecl hkNvAPI_D3D12_DestroyCuFunction(ID3D12Device* pDevice, NVDX_ObjectHandle hFunction)
+{
+    if (hFunction)
+        DlssNr::KernelProfile::Profiler::Instance().UnregisterFunction(hFunction);
+    return o_DestroyCuFunction ? o_DestroyCuFunction(pDevice, hFunction) : NVAPI_ERROR;
+}
+
+NvAPI_Status __cdecl hkNvAPI_D3D12_LaunchCuKernelChain(ID3D12GraphicsCommandList* pCommandList,
+                                                       const NVAPI_CU_KERNEL_LAUNCH_PARAMS* pKernels, NvU32 numKernels)
+{
+    if (!o_LaunchCuKernelChain)
+        return NVAPI_ERROR;
+    auto& prof = DlssNr::KernelProfile::Profiler::Instance();
+    const auto status = o_LaunchCuKernelChain(pCommandList, pKernels, numKernels);
+    if (status == NVAPI_OK && pCommandList && pKernels && numKernels > 0 && prof.Recording(pCommandList))
+    {
+        std::vector<const void*> handles(numKernels);
+        for (NvU32 i = 0; i < numKernels; ++i)
+            handles[i] = pKernels[i].hFunction;
+        prof.Launched(pCommandList, handles.data(), numKernels);
+    }
+    return status;
+}
+} // namespace
 
 NvAPI_Status __stdcall NvApiHooks::hkNvAPI_GPU_GetArchInfo(NvPhysicalGpuHandle hPhysicalGpu,
                                                            NV_GPU_ARCH_INFO* pGpuArchInfo)
@@ -249,6 +292,25 @@ void* __stdcall NvApiHooks::hkNvAPI_QueryInterface(unsigned int InterfaceId)
         {
             o_NvAPI_DRS_GetSetting = reinterpret_cast<decltype(&NvAPI_DRS_GetSetting)>(functionPointer);
             return &hkNvAPI_DRS_GetSetting;
+        }
+
+        if (Config::Instance()->DlssNrKernelProfile.value_or_default())
+        {
+            if (InterfaceId == 0xe2436e22) // NvAPI_D3D12_CreateCuFunction
+            {
+                o_CreateCuFunction = reinterpret_cast<decltype(&NvAPI_D3D12_CreateCuFunction)>(functionPointer);
+                return (void*) &hkNvAPI_D3D12_CreateCuFunction;
+            }
+            if (InterfaceId == 0xdf295ea6) // NvAPI_D3D12_DestroyCuFunction
+            {
+                o_DestroyCuFunction = reinterpret_cast<decltype(&NvAPI_D3D12_DestroyCuFunction)>(functionPointer);
+                return (void*) &hkNvAPI_D3D12_DestroyCuFunction;
+            }
+            if (InterfaceId == 0x24973538) // NvAPI_D3D12_LaunchCuKernelChain
+            {
+                o_LaunchCuKernelChain = reinterpret_cast<decltype(&NvAPI_D3D12_LaunchCuKernelChain)>(functionPointer);
+                return (void*) &hkNvAPI_D3D12_LaunchCuKernelChain;
+            }
         }
     }
 

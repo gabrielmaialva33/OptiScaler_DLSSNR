@@ -1,6 +1,6 @@
 # ViT Skip: Bypassing the Neural Rendering ViT Bottleneck on Alternating Frames
 
-Status: **design note; not yet implemented.** Proposes a staged implementation: Step 1 implements an NvAPI CUDA kernel profiler to measure execution breakdown on local hardware; Step 2 evaluates skipping the Vision Transformer (ViT) bottleneck kernels on alternate frames.
+Status: **Step 1 implemented on D3D12 behind `[DlssNr] KernelProfile=true`, off by default.** Step 2 (ViT bottleneck skip) remains a design proposal pending profiling evidence.
 
 ---
 
@@ -91,16 +91,18 @@ Once kernel timings confirm that `cc_vit_1d_*` accounts for $\sim 18-22\%$ of to
 
 ---
 
-## 7. Test plan
+## 7. Implementation status and test plan
 
-1. **Host unit test (`tests/nr-vit-skip`):**
-   Simulate NvAPI kernel launch stream against synthetic signature buffers, verifying:
-   - Correct detection of ViT entry/exit markers;
-   - Clean shutdown on malformed sequences;
-   - Enforced full evaluation on reset.
-2. **In-game benchmarking:**
-   - Execute Step 1 (profiler) in *Crimson Desert* and *The Witcher 3*. Compare execution percentages of `swin_*` vs `vit_1d_*`.
-   - If viable, activate Step 2 and test specifically for dark-scene flash artifacts under Proton.
+### Step 1 (Implemented)
+- `OptiScaler/dlssnr/DlssNr_KernelProfile.h`: manages query heaps, classifies kernel names by prefix, detects `_fp8` variants, and aggregates GPU timings.
+- Hooked in `OptiScaler/nvapi/NvApiHooks.cpp` behind `[DlssNr] KernelProfile=true`.
+- Zero overhead when disabled: hooks remain uninstalled and no queries/heaps are created.
+- Host test suite: `tests/nr-kernel-profile` verifying classification rules, `_fp8` detection, and statistical report generation.
+
+### What remains to be measured
+- Capture live profiling logs on the local RTX 4090 and on Rafael's RTX 3060 in *Crimson Desert* and *The Witcher 3*.
+- Determine whether `vit_1d_*` accounts for $\sim 20\%$ of execution time on both Ada (FP8) and Ampere (FP16).
+- Verify whether `dxvk-nvapi` on Linux introduces any timing distortion between timestamp queries and CUDA kernel launches.
 
 ---
 
