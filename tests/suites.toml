@@ -167,7 +167,13 @@ summary = "The Streamline log repeat filter against the real setDynamicMFGParams
 tier = "host"
 timeout = 120
 summary = "DLSS-NR NvAPI CUDA kernel classification by prefix, FP8 variant detection, and timing aggregation."
+
 [nr-detail-measure]
 tier = "host"
 timeout = 120
 summary = "The Measure detail CPU tile reduction and statistical aggregation (flicker, detail, saturation, shadows)."
+
+[nr-present-guides]
+tier = "host"
+timeout = 120
+summary = "Present-time guide snapshot ring selection, completion tracking, and cross-queue deadlock avoidance."
