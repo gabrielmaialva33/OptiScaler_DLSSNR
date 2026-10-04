@@ -106,8 +106,9 @@ enlarged with bilinear. The menu shows a status line with the reason while 2 is 
 ## Lifetime
 
 - **Never created and evaluated in one command list.** The creation frame is sent Transfer 1 and the
-  first evaluation waits for a later present (`CreationFrameGate`), and, where submissions are
-  tracked, for the creation's recording to have completed.
+  first evaluation waits for a later present (`Enlarge::CreationCrossed`; on a route whose presents
+  are not counted, two NR frames, one more than the model waits), and, where submissions are tracked,
+  for the creation's recording to have completed. A recording the tracker refuses creates nothing.
 - **Never freed under the GPU.** The feature, its parameter table and its five textures (carrier,
   enlarged output, exposure, private depth and motion) are one bundle, parked as one entry in the
   retirement list and released when its last recording is done, NGX first. The NGX release happens

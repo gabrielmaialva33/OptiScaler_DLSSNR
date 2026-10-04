@@ -258,6 +258,8 @@ Debug view shows the model output: Matched residual runs.	A visualização de di
 Starting DLSS: Matched residual until it is ready.	Iniciando o DLSS: Resíduo correspondente até ele ficar pronto.
 DLSS failed (see the log): Matched residual until Retry.	O DLSS falhou (veja o log): Resíduo correspondente até Tentar novamente.
 Running: DLSS enlarges the model's edit.	Rodando: o DLSS amplia a edição do modelo.
+The model is below a third of the frame, further than DLSS enlarges: Matched residual runs.	O modelo está abaixo de um terço do quadro, além do que o DLSS amplia: roda Resíduo correspondente.
+The driver proxy runs the model without the resolve: nothing is enlarged.	O proxy do driver roda o modelo sem a resolução: nada é ampliado.
 Stops generating frames while the base frame rate is below this,\nand resumes once it recovers. 0 is off. Not a frame rate target:\nabove the game's base frame rate, frame generation never runs	Para de gerar quadros enquanto o FPS base estiver abaixo disto\ne volta quando ele se recupera. 0 desliga. Não é uma meta de FPS:\nacima do FPS base do jogo, a geração de quadros nunca roda
 nvngx.dll_dlssnr.dll is missing	nvngx.dll_dlssnr.dll está faltando
 nvngx.dll_dlssnr.dll would not load	nvngx.dll_dlssnr.dll não carregou

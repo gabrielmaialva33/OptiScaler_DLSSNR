@@ -736,13 +736,16 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nidentical (supersampling brings its answer down to frame size before this)."
                        "\n\nFrom hhkbble's multi-pass work on this fork; the DLSS enlargement is wilsjo2's.");
 
-            // While "+ DLSS" is selected: what the resolve was last sent, and why.
-            if (transfer == Enlarge::kTransferDlss)
+            // While "+ DLSS" is selected and the pass runs: what the resolve was last sent, and why. With the pass
+            // off or not running, the panel above already says why, and the last reason would be a stale one.
+            const bool proxyRoute = config->DlssNrUseProxy.value_or_default();
+
+            if (transfer == Enlarge::kTransferDlss && enabled && (nativeVk || DlssNr::IsRunning()))
             {
                 const auto status = DlssNr::EnlargeStatus();
                 const char* line = Localization::Tr("Waiting for the first frame.");
 
-                switch (nativeVk ? Enlarge::Why::Vulkan : status.why)
+                switch (nativeVk || proxyRoute ? Enlarge::Why::NotYet : status.why)
                 {
                 case Enlarge::Why::NotYet:
                 case Enlarge::Why::NotSelected:
@@ -753,6 +756,10 @@ void RenderMenu(Config* config, float menuResScale)
                 case Enlarge::Why::FullSize:
                     line = Localization::Tr("The model runs at full size or above: nothing to enlarge, Matched "
                                             "residual runs.");
+                    break;
+                case Enlarge::Why::TooSmall:
+                    line = Localization::Tr("The model is below a third of the frame, further than DLSS enlarges: "
+                                            "Matched residual runs.");
                     break;
                 case Enlarge::Why::BeforeUpscale:
                     line = Localization::Tr("Before the upscaler: Matched residual runs.");
@@ -778,15 +785,21 @@ void RenderMenu(Config* config, float menuResScale)
                     break;
                 }
 
+                if (nativeVk)
+                    line = Localization::Tr("D3D12 only: native Vulkan runs Matched residual.");
+                else if (proxyRoute)
+                    line =
+                        Localization::Tr("The driver proxy runs the model without the resolve: nothing is enlarged.");
+
                 ImGui::TextDisabled("%s", line);
 
                 // The failure is held for the session; this is the way back, and it is only drawn when there is
-                // a failure to clear.
-                if (!nativeVk && status.why == Enlarge::Why::Failed)
+                // a failure to clear. It rebuilds the private DLSS alone, not the model or its history.
+                if (!nativeVk && !proxyRoute && status.why == Enlarge::Why::Failed)
                 {
                     ImGui::SameLine();
                     if (ImGui::SmallButton(Localization::Label("Retry###nrEnlargeRetry")))
-                        DlssNr::RetryAfterFailure();
+                        DlssNr::RetryEnlargement();
                 }
             }
         }

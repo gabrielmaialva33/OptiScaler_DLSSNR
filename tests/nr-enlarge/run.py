@@ -71,8 +71,10 @@ assert 'float3 fullProxy = gPassthrough != 0' in matched
 # --- Dispatch has the shape host.cpp drives. ------------------------------------------------------------------
 
 dispatch = between(renderer, 'bool DlssNr_Dx12::Dispatch(', '\nnamespace DlssNr\n{')
-plan_at = once(dispatch, 'PlanEnlarge(cfg.DlssNrTransfer.value_or_default(), cfg.DlssNrDebugView.value_or_default()',
-               'Dispatch plans once')
+plans = list(re.finditer(r'const auto enlargePlan =\s*PlanEnlarge\(\s*useProxy \? DlssNr::Enlarge::kTransferMatched : '
+                         r'cfg\.DlssNrTransfer\.value_or_default\(\),', dispatch))
+assert len(plans) == 1 and dispatch.count('PlanEnlarge(') == 1, 'Dispatch plans once, from the key, matched on the proxy'
+plan_at = plans[0].start()
 assert plan_at < dispatch.index('timing.SetMetadata(')
 once(dispatch, 'enlargePlan.transfer, DlssNr::Enlarge::Token(enlargePlan.why)));', 'timing contract')
 once(dispatch, 'resolveParams.Transfer = enlargePlan.transfer;', 'resolve transfer')
@@ -99,7 +101,9 @@ shutdown = between(renderer, 'void Shutdown()\n{', '\n} // namespace DlssNr')
 assert shutdown.index('g_nrRetired.clear();') < shutdown.index('delete enlarger;')
 assert 'enlargers.push_back(g_enlarge.live);' in shutdown
 retry = between(renderer, 'void RetryAfterFailure()', 'Enlarge::Status EnlargeStatus()')
-assert 'ParkNrEnlarger(g_enlarge.live);' in retry and 'g_enlarge.failed = false;' in retry
+assert retry.count('ParkNrEnlarger(g_enlarge.live);') == 2 and retry.count('g_enlarge.failed = false;') == 2
+narrow = between(retry, 'void RetryEnlargement()', '}')
+assert 'g_nr.' not in narrow and 'Extent' not in narrow, 'the enlargement Retry reaches past the enlargement'
 
 # --- Native Vulkan maps 2 to 1, and the menu goes through the header's table. --------------------------------
 
@@ -108,8 +112,10 @@ once(vulkan, 'encode.Transfer = Enlarge::VulkanTransfer(cfg.DlssNrTransfer.value
 once(menu, 'int enlarge = Enlarge::MenuIndex(transfer);', 'menu index')
 once(menu, 'config->DlssNrTransfer = Enlarge::MenuTransfer(enlarge);', 'menu write')
 once(menu, 'Localization::Label("Matched residual + DLSS")', 'menu entry')
-status = between(menu, 'if (transfer == Enlarge::kTransferDlss)', 'ImGui::SeparatorText(Localization::Tr("How much')
+status = between(menu, 'if (transfer == Enlarge::kTransferDlss && enabled && (nativeVk || DlssNr::IsRunning()))',
+                 'ImGui::SeparatorText(Localization::Tr("How much')
 assert 'DlssNr::EnlargeStatus()' in status and 'Retry###nrEnlargeRetry' in status
+assert 'DlssNr::RetryEnlargement();' in status and 'RetryAfterFailure' not in status
 assert status.index('status.why == Enlarge::Why::Failed') < status.index('Retry###nrEnlargeRetry')
 whys = re.findall(r'^\s+(\w+),?\s*(?://.*)?$', between(rules, 'enum class Why : uint8_t\n{', '};'), re.M)
 for why in whys:

@@ -266,6 +266,10 @@ void RenderMenu(::Config* config, float menuResScale);
 // Clears the session failure latch, so a failure caused by transient thrash does not cost a restart.
 void RetryAfterFailure();
 
+// Clears Transfer 2's failure alone and rebuilds its private DLSS, leaving the model, its history and the
+// settling gates as they are (design/dlss-enlargement.md). RetryAfterFailure does this as well.
+void RetryEnlargement();
+
 // Asks the model whether it will work on Direct3D 11 at all, once, and logs the answer.
 //
 // The bridge exists because of a claim nobody tested: "the model refuses on DX11, it answers

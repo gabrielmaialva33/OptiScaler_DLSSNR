@@ -87,6 +87,22 @@ void DecisionTable()
         Expect(in, 1, Why::FullSize, false, false, false);
     }
 
+    // Below a third of the frame is past DLSS's own range (Ultra Performance), and is let go: the pass's floor of
+    // a quarter, and one axis short. A third exactly runs.
+    for (auto [w, h] : { std::pair { 860u, 360u }, std::pair { 1146u, 480u }, std::pair { 1720u, 479u } })
+    {
+        in = Runnable();
+        in.workWidth = w;
+        in.workHeight = h;
+        Expect(in, 1, Why::TooSmall, false, false, false);
+    }
+    in = Runnable();
+    in.workWidth = 1147;
+    in.workHeight = 480;
+    Expect(in, 2, Why::Running, true, false, true);
+    assert(WithinDlssRange(3440, 1440, 1147, 480) && !WithinDlssRange(3440, 1440, 1146, 480));
+    ++cases;
+
     // Below on one axis and equal on the other is still below.
     in = Runnable();
     in.workWidth = 3440;

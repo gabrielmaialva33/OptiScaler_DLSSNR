@@ -102,7 +102,9 @@ struct State
 struct NVNGXProxy
 {
     inline static bool inited = true;
+    inline static uint64_t shutdowns = 0;
     static bool IsDx12Inited() { return inited; }
+    static uint64_t Dx12Shutdowns() { return shutdowns; }
     static DlssNr::PrivateSr::AllocateParameters D3D12_AllocateParameters() { return &Ngx::Allocate; }
     static DlssNr::PrivateSr::DestroyParameters D3D12_DestroyParameters() { return inited ? &Ngx::Destroy : nullptr; }
     static DlssNr::PrivateSr::CreateFeature D3D12_CreateFeature() { return inited ? &Ngx::Create : nullptr; }
@@ -146,6 +148,7 @@ struct DlssNr_UiMask_Dx12
 struct DlssNr_GuideMatch_Dx12
 {
     inline static bool available = true;
+    inline static bool fail = false;
     inline static unsigned dispatches = 0;
     inline static unsigned lastOutWidth = 0, lastOutHeight = 0, lastDepthWidth = 0, lastMotionWidth = 0;
     static bool Available() { return available; }
@@ -162,6 +165,8 @@ struct DlssNr_GuideMatch_Dx12
         assert(StateOf(outMotion) == D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         assert(outDepth->format == DXGI_FORMAT_R32_FLOAT && outMotion->format == DXGI_FORMAT_R32G32_FLOAT);
         assert(outDepth->width == outWidth && outMotion->height == outHeight);
+        if (fail)
+            return false;
         ++dispatches;
         lastOutWidth = outWidth;
         lastOutHeight = outHeight;

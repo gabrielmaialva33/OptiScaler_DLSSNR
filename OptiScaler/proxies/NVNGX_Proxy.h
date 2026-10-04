@@ -424,6 +424,10 @@ class NVNGXProxy
     inline static bool _dx12Inited = false;
     inline static bool _vulkanInited = false;
 
+    // How many times the D3D12 core has been shut down. Every feature created on it is gone after one, so an
+    // owner that kept a handle (DLSS-NR's private SR) compares this rather than calling into a new core with it.
+    inline static uint64_t _dx12Shutdowns = 0;
+
     static NVSDK_NGX_Result ShutdownDx12Device(ID3D12Device* device)
     {
         // The private device-specific entry dereferences device; the SDK's null-device
@@ -827,9 +831,17 @@ class NVNGXProxy
         return _dx12Inited;
     }
 
-    static void SetDx12Inited(bool value) { _dx12Inited = value; }
+    static void SetDx12Inited(bool value)
+    {
+        if (_dx12Inited && !value)
+            ++_dx12Shutdowns;
+
+        _dx12Inited = value;
+    }
 
     static bool IsDx12Inited() { return _dx12Inited; }
+
+    static uint64_t Dx12Shutdowns() { return _dx12Shutdowns; }
 
     static PFN_D3D12_Init_ProjectID D3D12_Init_ProjectID() { return _module.D3D12_Init_ProjectID; }
 

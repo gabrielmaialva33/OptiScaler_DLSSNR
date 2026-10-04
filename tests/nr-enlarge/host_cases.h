@@ -154,6 +154,7 @@ void Fresh()
     pass.fail = false;
     g_tracked = false;
     DlssNr_GuideMatch_Dx12::available = true;
+    DlssNr_GuideMatch_Dx12::fail = false;
     DlssNr_GuideMatch_Dx12::dispatches = 0;
 }
 
@@ -321,12 +322,12 @@ void RebuiltForAnotherShape()
         void (*apply)(Spec&);
     };
     const Change changes[] = {
-        { [](Spec& s) { s.workWidth = 1146, s.workHeight = 480; } },
-        { [](Spec& s) { s.workWidth = 1146, s.workHeight = 480, s.depthInverted = false; } },
-        { [](Spec& s) { s.workWidth = 1146, s.workHeight = 480, s.depthInverted = false, s.dev = &otherDevice; } },
+        { [](Spec& s) { s.workWidth = 1290, s.workHeight = 540; } },
+        { [](Spec& s) { s.workWidth = 1290, s.workHeight = 540, s.depthInverted = false; } },
+        { [](Spec& s) { s.workWidth = 1290, s.workHeight = 540, s.depthInverted = false, s.dev = &otherDevice; } },
         { [](Spec& s)
           {
-              s.workWidth = 1146, s.workHeight = 480, s.depthInverted = false, s.dev = &otherDevice, s.width = 2560,
+              s.workWidth = 1290, s.workHeight = 540, s.depthInverted = false, s.dev = &otherDevice, s.width = 2560,
               s.height = 1080;
           } }
     };
@@ -386,6 +387,25 @@ void GuideCases()
     o = Run(small);
     assert(o.sent == 2 && ResetOfLastEvaluate() == 1);
     ++cases;
+
+    // A resample that fails at run time falls back on that frame and is then held on the bundle: the plan says
+    // so instead of planning a run that falls back on every frame, until the bundle is rebuilt.
+    DlssNr_GuideMatch_Dx12::fail = true;
+    o = Run(small);
+    assert(o.plan.evaluate && o.sent == 1 && DlssNr::EnlargeStatus().why == Why::GuidesUnmatched);
+    for (int i = 0; i < 3; ++i)
+    {
+        o = Run(small);
+        assert(o.plan.why == Why::GuidesUnmatched && !o.plan.evaluate && o.sent == 1 && g_enlarge.live != nullptr);
+    }
+    DlssNr_GuideMatch_Dx12::fail = false;
+    o = Run(small);
+    assert(o.plan.why == Why::GuidesUnmatched);
+    DlssNr::RetryEnlargement();
+    Run(small);
+    o = Run(small);
+    assert(o.sent == 2 && !g_enlarge.live->guidesFailed);
+    ++cases;
 }
 
 void FailureHoldsUntilRetry()
@@ -420,7 +440,8 @@ void FailureHoldsUntilRetry()
     assert(o.sent == 2);
     ++cases;
 
-    // A create refused (no nvngx_dlss.dll), or a core that is not there: failed, with nothing left half-built.
+    // A create refused (no nvngx_dlss.dll), or a scratch allocation refused: failed, with nothing left half-built.
+    // A core that is not up is waited for instead, with nothing allocated (CoreShutDownByTheGame has the shutdown).
     for (int which = 0; which < 3; ++which)
     {
         Fresh();
@@ -431,6 +452,12 @@ void FailureHoldsUntilRetry()
         if (which == 2)
             g_failScratchAt = static_cast<int>(g_scratch.size()) + 1;
         o = Run(Spec {});
+        if (which == 1)
+        {
+            assert(o.sent == 1 && !g_enlarge.failed && g_enlarge.live == nullptr);
+            assert(DlssNr::EnlargeStatus().why == Why::WarmingUp && Ngx::driver.Count("allocate") == 0);
+            continue;
+        }
         assert(o.sent == 1 && g_enlarge.failed && g_enlarge.live == nullptr);
         assert(Ngx::driver.Count("evaluate") == 0 && DlssNr::EnlargeStatus().why == Why::Failed);
         assert(Ngx::driver.Count("create") == (which == 0 ? 1u : 0u));
@@ -568,6 +595,63 @@ void SharedRetirementList()
     ++cases;
 }
 
+// The game shuts the NGX core down (applying settings, say) and every feature goes with it. The bundle is let go
+// without a call into the core that follows; while the core is down nothing is built and nothing fails; once
+// it is back the next frame builds again.
+void CoreShutDownByTheGame()
+{
+    Fresh();
+    Run(Spec {});
+    auto o = Run(Spec {});
+    assert(o.sent == 2);
+    const auto evaluates = Ngx::driver.Count("evaluate");
+
+    ++NVNGXProxy::shutdowns;
+    NVNGXProxy::inited = false;
+    o = Run(Spec {});
+    assert(o.plan.why == Why::WarmingUp && o.plan.build && o.sent == 1 && g_enlarge.live == nullptr);
+    assert(!g_enlarge.failed && DlssNr::EnlargeStatus().why == Why::WarmingUp);
+    assert(Ngx::driver.Count("evaluate") == evaluates && Ngx::driver.Count("create") == 1);
+    for (int i = 0; i < 40; ++i)
+        TickNrRetired();
+    assert(g_nrRetired.empty() && Ngx::driver.Count("release") == 0 && Ngx::driver.Count("destroy") == 0);
+
+    NVNGXProxy::inited = true;
+    o = Run(Spec {});
+    assert(o.plan.build && Ngx::driver.Count("create") == 2);
+    o = Run(Spec {});
+    assert(o.sent == 2 && ResetOfLastEvaluate() == 1);
+
+    // The same shutdown with the core straight back up (Init again before the next frame): still dropped.
+    ++NVNGXProxy::shutdowns;
+    o = Run(Spec {});
+    assert(o.plan.build && Ngx::driver.Count("create") == 3 && Ngx::driver.Count("release") == 0);
+    ++cases;
+}
+
+// The enlargement's own Retry rebuilds its DLSS and touches nothing of the model's.
+void RetryIsNarrow()
+{
+    Fresh();
+    Run(Spec {});
+    Ngx::driver.evaluateResult = NVSDK_NGX_Result_FAIL_InvalidParameter;
+    Run(Spec {});
+    assert(g_enlarge.failed);
+    Ngx::driver.evaluateResult = NVSDK_NGX_Result_Success;
+    g_nr.reset = false;
+    const auto preResets = g_preExtent.resets, postResets = g_postExtent.resets;
+    DlssNr::RetryEnlargement();
+    assert(!g_enlarge.failed && !g_nr.reset && g_preExtent.resets == preResets && g_postExtent.resets == postResets);
+    auto o = Run(Spec {});
+    assert(o.plan.build);
+    o = Run(Spec {});
+    assert(o.sent == 2);
+
+    // The last case that builds: retire and release the bundle, so none is left live when the process ends.
+    Fresh();
+    ++cases;
+}
+
 void VulkanNeverBuilds()
 {
     // The D3D12 plan is never asked on native Vulkan, which maps 2 to 1 itself; the rule still refuses it.
@@ -604,6 +688,8 @@ int main()
     TrackedSubmissions();
     ProcessExit();
     SharedRetirementList();
+    CoreShutDownByTheGame();
+    RetryIsNarrow();
     VulkanNeverBuilds();
     std::printf("PASS: %d Transfer 2 host cases on production's plan, enlarge, retirement and retry: build on one "
                 "frame and run from a later one, inert for 0/1/3, guides, resets, hold, failure until Retry, release "

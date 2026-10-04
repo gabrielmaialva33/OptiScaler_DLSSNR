@@ -45,6 +45,7 @@ enum class Why : uint8_t
     NotSelected,     // Transfer is not 2
     Vulkan,          // native Vulkan has no private SR
     FullSize,        // the model works at or above the frame's size: nothing to enlarge
+    TooSmall,        // the model is below a third of the frame: further than DLSS enlarges (Ultra Performance)
     BeforeUpscale,   // before the upscaler there is no frame-sized edit to make
     NoGuides,        // the caller has no real depth and motion (zero guides)
     GuidesUnmatched, // the guides are not at the working size and this build cannot resample them
@@ -76,6 +77,14 @@ struct Decision
     bool evaluate = false; // the SR runs this frame
 };
 
+// DLSS Super Resolution's own range ends at Ultra Performance, a third of the output per axis. Below that
+// nothing says it creates or what it returns, and the pass's floor is a quarter. Refused here, a reason the
+// menu can show, rather than a creation that fails and holds until Retry. A measurement can lift it.
+constexpr bool WithinDlssRange(uint32_t width, uint32_t height, uint32_t workWidth, uint32_t workHeight)
+{
+    return 3ull * workWidth >= width && 3ull * workHeight >= height;
+}
+
 // Below the frame on one axis and above it on neither. The working scale is uniform, so this is "scale
 // below 1" without trusting a rounded float: at 0.999 a small frame rounds back to its own size.
 constexpr bool BelowFrame(uint32_t width, uint32_t height, uint32_t workWidth, uint32_t workHeight)
@@ -93,6 +102,9 @@ constexpr Decision Decide(const Inputs& in)
 
     if (!BelowFrame(in.width, in.height, in.workWidth, in.workHeight))
         return { kTransferMatched, Why::FullSize, false, false, false };
+
+    if (!WithinDlssRange(in.width, in.height, in.workWidth, in.workHeight))
+        return { kTransferMatched, Why::TooSmall, false, false, false };
 
     // From here on the SR is wanted for this configuration, so a frame that cannot use it keeps an existing
     // one idle rather than releasing it -- a title that alternates routes would otherwise rebuild it every
@@ -237,6 +249,8 @@ constexpr const char* Token(Why why)
         return "vulkan";
     case Why::FullSize:
         return "full-size";
+    case Why::TooSmall:
+        return "too-small";
     case Why::BeforeUpscale:
         return "before-upscale";
     case Why::NoGuides:

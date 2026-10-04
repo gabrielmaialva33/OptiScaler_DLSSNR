@@ -1118,15 +1118,27 @@ struct NrEnlarger
     uint64_t lastFrame = 0; // the pass's dispatch counter at the last evaluation; 0 before the first
     std::chrono::steady_clock::time_point lastTime {};
 
+    // The driver core's shutdown count when the feature was made. A game that shuts NGX down (and often
+    // starts it again, applying settings) takes every feature with it; a handle from before is not one to
+    // evaluate or release in the core that follows.
+    uint64_t coreShutdowns = 0;
+
+    // The guide resample failed on this bundle: say so until it is rebuilt, rather than planning a run and
+    // falling back on every frame.
+    bool guidesFailed = false;
+
     NrEnlarger() = default;
     NrEnlarger(const NrEnlarger&) = delete;
     NrEnlarger& operator=(const NrEnlarger&) = delete;
 
+    bool CoreGone() const { return coreShutdowns != NVNGXProxy::Dx12Shutdowns(); }
+
     // The feature first, then what it read and wrote. No NGX call while the process exits: the core may
     // already be gone, so the handle and its table are left to the process, as OptiScaler's own DLSS does.
+    // Nor into a core that was shut down since the feature was made: the feature went with it.
     ~NrEnlarger()
     {
-        if (State::Instance().isShuttingDown)
+        if (State::Instance().isShuttingDown || CoreGone())
             feature.Abandon();
         else
             feature.Release(PrivateSrApi());
@@ -2176,7 +2188,7 @@ void PublishEnlarge(uint32_t transfer, DlssNr::Enlarge::Why why)
 
 // What the resolve is sent this frame, decided before the timing contract is written so a sample says which
 // enlargement it measured. Retires a bundle that is not this frame's -- another size, depth direction or
-// device -- or that this configuration no longer wants.
+// device, or a feature the game took down with the NGX core -- or that this configuration no longer wants.
 DlssNr::Enlarge::Decision PlanEnlarge(uint32_t configured, uint32_t debugView, const DlssNrFrameInfo& frame,
                                       ID3D12Device* device, bool beforeUpscale, bool guidesUsable, unsigned int width,
                                       unsigned int height, unsigned int workWidth, unsigned int workHeight,
@@ -2185,8 +2197,16 @@ DlssNr::Enlarge::Decision PlanEnlarge(uint32_t configured, uint32_t debugView, c
     namespace Enlarge = DlssNr::Enlarge;
     const DlssNr::PrivateSr::Shape shape { workWidth, workHeight, width, height, frame.DepthInverted };
 
-    if (g_enlarge.live != nullptr && (g_enlarge.live->feature.Built() != shape || g_enlarge.live->device != device))
+    if (g_enlarge.live != nullptr && g_enlarge.live->CoreGone())
+        LOG_INFO("DLSS-NR enlargement: the game shut the NGX core down, and the private DLSS with it; it is "
+                 "dropped without a call and built again");
+
+    if (g_enlarge.live != nullptr &&
+        (g_enlarge.live->feature.Built() != shape || g_enlarge.live->device != device || g_enlarge.live->CoreGone()))
         ParkNrEnlarger(g_enlarge.live);
+
+    if (g_enlarge.live != nullptr && g_enlarge.live->guidesFailed)
+        guidesUsable = false;
 
     auto state = Enlarge::State::Missing;
 
@@ -2263,6 +2283,15 @@ void BuildEnlarger(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, con
     if (g_tracked && !RetiredCapacity())
         return;
 
+    // A core the game has shut down is waited for, not failed: a game that applies settings starts it again,
+    // and the bundle is built on the next frame that finds it up. A core that is up and lacks an entry point
+    // is a failure.
+    if (!NVNGXProxy::IsDx12Inited())
+    {
+        PublishEnlarge(DlssNr::Enlarge::kTransferMatched, DlssNr::Enlarge::Why::WarmingUp);
+        return;
+    }
+
     const auto api = PrivateSrApi();
 
     if (!api.Complete())
@@ -2274,6 +2303,7 @@ void BuildEnlarger(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, con
 
     auto* bundle = new NrEnlarger();
     bundle->device = device;
+    bundle->coreShutdowns = NVNGXProxy::Dx12Shutdowns();
 
     // Tracked before anything is allocated: a recording the tracker refuses is not a creation, and leaves
     // nothing behind to retire (it is asked again on the next frame).
@@ -2383,8 +2413,10 @@ ID3D12Resource* EnlargeEdit(DlssNr_Dx12& pass, ID3D12GraphicsCommandList* cmdLis
 
     if (depth == nullptr || motion == nullptr)
     {
-        // Not a failure of DLSS: this frame's guides could not be brought to the working size. The frame it
-        // misses breaks the run, so its history starts over when it next runs.
+        // Not a failure of DLSS: the guides could not be brought to the working size. Held on the bundle, so the
+        // plan says so from the next frame until it is rebuilt (a resize, Retry) instead of planning a run that
+        // falls back every frame. Its history starts over when it next runs.
+        e.guidesFailed = true;
         PublishEnlarge(Enlarge::kTransferMatched, Enlarge::Why::GuidesUnmatched);
         return nullptr;
     }
@@ -3562,16 +3594,15 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // Transfer 2 (design/dlss-enlargement.md): what the resolve is sent this frame, decided before the timing
     // contract so a sample says which enlargement it measured. Any other Transfer passes through unchanged and
-    // touches nothing. The driver proxy never reaches the resolve.
+    // touches nothing. The driver proxy never reaches the resolve, so it is planned as matched residual, which
+    // builds nothing and lets go of a private DLSS built before it was switched on.
     const auto enlargePlan =
-        useProxy ? DlssNr::Enlarge::Decision {}
-                 : PlanEnlarge(cfg.DlssNrTransfer.value_or_default(), cfg.DlssNrDebugView.value_or_default(), frame,
-                               device, beforeUpscale,
-                               DlssNr::Enlarge::Guides(false, DlssNr_GuideMatch_Dx12::Available(), workWidth,
-                                                       workHeight, depthBaseX, depthBaseY, guideWidth, guideHeight,
-                                                       motionBaseX, motionBaseY, motionWidth,
-                                                       motionHeight) != DlssNr::Enlarge::GuideSource::None,
-                               width, height, workWidth, workHeight, observedFrame, g_frames);
+        PlanEnlarge(useProxy ? DlssNr::Enlarge::kTransferMatched : cfg.DlssNrTransfer.value_or_default(),
+                    cfg.DlssNrDebugView.value_or_default(), frame, device, beforeUpscale,
+                    DlssNr::Enlarge::Guides(false, DlssNr_GuideMatch_Dx12::Available(), workWidth, workHeight,
+                                            depthBaseX, depthBaseY, guideWidth, guideHeight, motionBaseX, motionBaseY,
+                                            motionWidth, motionHeight) != DlssNr::Enlarge::GuideSource::None,
+                    width, height, workWidth, workHeight, observedFrame, g_frames);
 
     bool timingMetadataReady = !timingEnabled;
     if (timingEnabled)
@@ -4641,6 +4672,13 @@ void RetryAfterFailure()
     g_nr.reset = true;
 
     // Transfer 2 starts over too: its private DLSS is rebuilt from nothing on the next frame that wants it.
+    ParkNrEnlarger(g_enlarge.live);
+    g_enlarge.failed = false;
+}
+
+void RetryEnlargement()
+{
+    std::lock_guard<std::mutex> nrLock(g_nrMutex);
     ParkNrEnlarger(g_enlarge.live);
     g_enlarge.failed = false;
 }
