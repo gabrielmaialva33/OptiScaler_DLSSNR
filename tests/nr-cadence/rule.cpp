@@ -258,8 +258,9 @@ void Rules_CatmullRomIsExactAtTexelsAndNeverRings()
         const float3 at = CadenceResidualCatmullRom(x, 20.3f, m.P);
         assert(at.x >= -0.2f && at.x <= 0.3f && at.z >= -0.1f && at.z <= 0.1f); // no overshoot beside the step
     }
-    assert(MaxAbs(CadenceResidual(float3(std::numeric_limits<float>::quiet_NaN(), 0.5f, 0.5f), float3(0.5f, 0.5f, 0.5f)),
-                  float3(0, 0, 0)) == 0.0f);
+    assert(
+        MaxAbs(CadenceResidual(float3(std::numeric_limits<float>::quiet_NaN(), 0.5f, 0.5f), float3(0.5f, 0.5f, 0.5f)),
+               float3(0, 0, 0)) == 0.0f);
     ++g_cases;
 }
 
@@ -296,7 +297,7 @@ void StillScene_CarriesTheModelAnswerExactly()
 
 struct PanError
 {
-    float exactMax = 0.0f;  // where the carry has everything it needs
+    float exactMax = 0.0f; // where the carry has everything it needs
     float exactMean = 0.0f;
     float inPlaceMean = 0.0f; // the same pixels with the edit reused where it was, unmoved
     float frameMean = 0.0f;   // the whole frame, entering edge included
@@ -359,8 +360,8 @@ void SubPixelPan_CarriesWithinInterpolationError()
 {
     const auto e = CarriedPan(0.5f, 0.25f, 3);
     assert(e.exactCount > W * H / 2);
-    assert(e.exactMax < 0.005f);   // measured 0.0016: Catmull-Rom over a smooth edit
-    assert(e.exactMean < 2e-4f);   // measured 2.4e-5
+    assert(e.exactMax < 0.005f); // measured 0.0016: Catmull-Rom over a smooth edit
+    assert(e.exactMean < 2e-4f); // measured 2.4e-5
     assert(e.inPlaceMean > 10.0f * e.exactMean);
     assert(e.frameMean < 0.01f);
     ++g_cases;
@@ -535,6 +536,35 @@ void UiProtection_KeepsTheFrameUnderTheInterface()
     assert(MaxAbs(out.At(60, 30), plain.At(60, 30)) == 0.0f);
     ++g_cases;
 }
+
+void ReversibleReplace_HighlightFlashDemonstration()
+{
+    // Under Neutwo replace (ReversibleMode = 2), the output is NeutwoDecode(modelDirect).
+    // NeutwoDecode(y) = y / sqrt(1 - y^2), which diverges as y -> 1.
+    // For a highlight with linear light = 6.0, NeutwoEncode(6.0) = 6.0 / sqrt(37) = 0.98639.
+    // If a small carried edit (+0.01762 from a neighbouring edge) lands on this highlight,
+    // the proxy sum becomes 0.98639 + 0.01762 = 1.00401 (clamped to 1.0).
+    // In NeutwoDecode, clamping just below 1.0 (0.999999) yields light = 707.11!
+    // This represents a 117.8x brightness explosion, which the resolve's 2x guard clips
+    // to exactly 12.0 (2x the pixel) on carried frames, causing severe visual flashes.
+    const auto neutwoEncode = [](float x) { return x / std::sqrt(x * x + 1.0f); };
+    const auto neutwoDecode = [](float y)
+    {
+        y = std::max(y, 0.0f);
+        float m = std::min(y, 0.999999f);
+        return m <= 1e-6f ? m : m / std::sqrt(std::max(1.0f - m * m, 1e-8f));
+    };
+
+    const float light = 6.0f;
+    const float proxy = neutwoEncode(light);
+    const float midEdit = neutwoEncode(0.5f * 1.05f) - neutwoEncode(0.5f); // +0.01762
+    const float carriedProxy = std::min(proxy + midEdit, 1.0f);
+    const float decoded = neutwoDecode(carriedProxy);
+    const float ratio = decoded / light;
+
+    assert(ratio > 50.0f); // decodes to 707.11, over 117x the base light
+    ++g_cases;
+}
 } // namespace
 
 int main()
@@ -550,7 +580,8 @@ int main()
     Occluder_UncoveredPixelsGetNoModelHistory();
     NoMatch_NoFill();
     UiProtection_KeepsTheFrameUnderTheInterface();
-    if (g_cases != 11)
+    ReversibleReplace_HighlightFlashDemonstration();
+    if (g_cases != 12)
         return 2;
     std::printf("PASS %d rule cases over synthetic sequences: still scene exact, integer pan exact and sub-pixel pan "
                 "within interpolation, chain off the picture, occluder restarts the chain, no match no fill, UI kept\n",

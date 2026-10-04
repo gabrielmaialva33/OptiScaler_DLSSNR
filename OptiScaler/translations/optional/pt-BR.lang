@@ -404,3 +404,5 @@ not with the driver proxy (UseProxy)	não com o proxy do driver (UseProxy)
 this build has no pack/unpack shader	esta compilação não tem o shader de compactação/descompactação
 the pack/unpack pass could not be built or run on this device	o passe de compactação/descompactação não pôde ser criado ou executado neste dispositivo
 Peripheral compression is running: Matched residual runs.	A compressão periférica está ativa: usa Resíduo correspondente.
+The model runs every frame: model cadence does not run with replace curves.	O modelo roda em todo quadro: a cadência do modelo não roda com curvas de substituição.
+The model runs every frame: frame rate is below 25 fps.	O modelo roda em todo quadro: a taxa de quadros está abaixo de 25 fps.

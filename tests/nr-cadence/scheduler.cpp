@@ -133,11 +133,11 @@ void Cadence_DroppedCallShiftsThePatternAndNeverFlipsIt()
     // the last model frame, so there is no global parity to flip.
     Driver d;
     const auto in = Running(2);
-    d.Frame(in, Shape());    // 1 M
-    d.Frame(in, Shape());    // 2 c
+    d.Frame(in, Shape());          // 1 M
+    d.Frame(in, Shape());          // 2 c
     d.Frame(in, Shape(), true, 2); // 4 M
-    d.Frame(in, Shape());    // 5 c
-    d.Frame(in, Shape());    // 6 M
+    d.Frame(in, Shape());          // 5 c
+    d.Frame(in, Shape());          // 6 M
     assert(d.pattern == "McMcM");
     ++g_cases;
 }
@@ -202,21 +202,21 @@ void Changes_ForceAModelFrameAndDropTheEdit()
         auto after = d.Frame(in, s); // the new shape has its own edit now
         assert(!after.runModel && after.chainStart);
     };
-    expectChanged([](Signature& s) { s.workWidth = 1720; });                          // working size
-    expectChanged([](Signature& s) { s.width = 2560; });                              // frame size
-    expectChanged([](Signature& s) { s.format = 26; });                               // colour format
-    expectChanged([](Signature& s) { s.route = Route(false, true, false); });         // after RR
-    expectChanged([](Signature& s) { s.route = Route(false, false, true); });         // present route
-    expectChanged([](Signature& s) { s.settings = Mix(s.settings, 2u); });            // what the model reads
-    expectChanged([](Signature& s) { s.feature += 1; });                              // a rebuilt feature
+    expectChanged([](Signature& s) { s.workWidth = 1720; });                  // working size
+    expectChanged([](Signature& s) { s.width = 2560; });                      // frame size
+    expectChanged([](Signature& s) { s.format = 26; });                       // colour format
+    expectChanged([](Signature& s) { s.route = Route(false, true, false); }); // after RR
+    expectChanged([](Signature& s) { s.route = Route(false, false, true); }); // present route
+    expectChanged([](Signature& s) { s.settings = Mix(s.settings, 2u); });    // what the model reads
+    expectChanged([](Signature& s) { s.feature += 1; });                      // a rebuilt feature
     ++g_cases;
 }
 
 void Settings_HashSeparatesWhatTheModelReads()
 {
     // The renderer folds each model-affecting value in; any single change must move the hash.
-    auto fold = [](uint32_t preset, uint32_t style, float intensity, float structure, float tone, float skin,
-                   bool mask, uint32_t passes)
+    auto fold = [](uint32_t preset, uint32_t style, float intensity, float structure, float tone, float skin, bool mask,
+                   uint32_t passes)
     {
         uint64_t h = Mix(kMixSeed, passes);
         h = Mix(h, preset);
@@ -265,7 +265,7 @@ void SecondCallInOnePresent_StandsDownForItAndTheNext()
 {
     Driver d;
     const auto in = Running(2);
-    d.Frame(in, Shape()); // present 1, M
+    d.Frame(in, Shape());                      // present 1, M
     auto same = d.Frame(in, Shape(), true, 0); // present 1 again
     assert(same.runModel && same.reason == Reason::SamePresent && !same.handChain);
     // That second model frame stores nothing: the next present runs the model too.
@@ -325,6 +325,8 @@ void Refusals_EachRunTheModelWithTheirOwnReason()
           "frame generation is active" },
         { "hold", [](Inputs& i) { i.hold = true; }, Reason::FrameHold, false, "Hold frame" },
         { "capture", [](Inputs& i) { i.capture = true; }, Reason::Capture, false, "capture" },
+        { "reversible replace", [](Inputs& i) { i.reversibleReplace = true; }, Reason::ReversibleReplace, true,
+          "replace curves" },
         { "no surfaces", [](Inputs& i) { i.surfaces = false; }, Reason::NoSurfaces, false, "could not be allocated" },
     };
     std::set<std::string> said;
@@ -403,6 +405,55 @@ void Status_TextsAreDistinctAndCadenceSpecific()
     ++g_cases;
 }
 
+void LowFrameRate_LocksOutUntilRecoveredWithHysteresis()
+{
+    Driver d;
+    const auto in = Running(2);
+    // Warm up at 60 fps (16 ms steps)
+    d.Frame(in, Shape(), true, 1, 16);
+    d.Frame(in, Shape(), true, 1, 16);
+    assert(d.pattern == "Mc");
+
+    // Drop to 20 fps (50 ms steps) -> smoothed FPS drops below 25 fps
+    for (int i = 0; i < 20; ++i)
+        d.Frame(in, Shape(), true, 1, 50);
+
+    // Should now refuse with LowFrameRate
+    const auto lowDecision = d.Frame(in, Shape(), true, 1, 50);
+    assert(lowDecision.runModel && lowDecision.reason == Reason::LowFrameRate);
+    assert(!BuildsSurfaces(Reason::LowFrameRate) && !ReleasesSurfaces(Reason::LowFrameRate));
+    assert(std::strcmp(Describe(Reason::LowFrameRate, 2), "The model runs every frame: frame rate is below 25 fps.") ==
+           0);
+
+    // Recover to 33 fps (30 ms steps) -> FPS is >= 28 fps, but requires 1.0 s (1000 ms) sustained
+    for (int i = 0; i < 15; ++i)
+    {
+        const auto mid = d.Frame(in, Shape(), true, 1, 30);
+        assert(mid.runModel && mid.reason == Reason::LowFrameRate);
+    }
+
+    // Advance until 1000 ms of sustained >= 28 fps elapses
+    int framesUntilResumed = 0;
+    while (framesUntilResumed < 50)
+    {
+        framesUntilResumed++;
+        const auto dec = d.Frame(in, Shape(), true, 1, 30);
+        if (dec.reason != Reason::LowFrameRate)
+        {
+            // First resumed frame must be NoEdit (to store fresh edit)
+            assert(dec.runModel && dec.reason == Reason::NoEdit);
+            break;
+        }
+    }
+    assert(framesUntilResumed > 0);
+
+    // Next frame carries
+    const auto carried = d.Frame(in, Shape(), true, 1, 30);
+    assert(!carried.runModel && carried.reason == Reason::Carried);
+
+    ++g_cases;
+}
+
 void TapScale_FollowsTheWorkingSize()
 {
     assert(TapScale(3440, 3440) == 1.0f);
@@ -434,8 +485,9 @@ int main()
     FrameGeneration_RunsWhenOptedIn();
     Refusal_NamesWhatTheUserCanChangeLeast();
     Status_TextsAreDistinctAndCadenceSpecific();
+    LowFrameRate_LocksOutUntilRecoveredWithHysteresis();
     TapScale_FollowsTheWorkingSize();
-    if (g_cases != 18)
+    if (g_cases != 19)
         return 2; // a runner that exercises nothing must fail loudly
     std::printf("PASS %d scheduler cases: off allocates nothing, age in presents the pass ran at, held reset, forced "
                 "model frames, every refusal with its reason\n",

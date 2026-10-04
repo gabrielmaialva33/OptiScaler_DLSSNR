@@ -166,6 +166,8 @@ Each refusal is logged once on change (`DLSS-NR cadence: ...`) and shown under t
 | frame generation | frame times alternate long and short. neural-upstream measured DLSS-G unable to pace through 8.9/13.9 ms alternation, with stutter and flashes growing with the multiplier and the cadence; the same work with the effect at zero showed the same artefact, so it is pacing, not image. `CadenceWithFrameGen=true` opts in. Detected as OptiScaler's own FG active and unpaused, the game's DLSS-G through NGX (`dlssgDetectedInterpolationCount`), or a DLSS-G mode set through Streamline |
 | no cadence shader | the bytecode header is optional (`__has_include`); without it the pass reports itself unavailable |
 | no counted presents | `State::frameCount` advances only in the wrapped swapchain's present, and some routes never present through it (`DlssNr_Enlarge.h`, `CreationCrossed`). With the counter at 0 every call after the first read as a second call in one present: the cadence never carried and said so under the wrong reason. Counting calls instead would lose that guard, so it is refused by name |
+| reversible replace modes | ReversibleMode 2 (Neutwo replace) and 4 (Hybrid replace): the model output replaces the frame directly through asymptotic inverse curves. Carrying an edit in proxy space and decoding highlights creates massive luminance explosions (>100x), flashing on carried frames (reproduced in Addendum A) |
+| low frame rate | rendered frame rate drops below 25 fps. Resumes above 28 fps sustained for 1.0 s (Addendum B) |
 | surfaces could not be built | allocation failed |
 
 ## Not ported, on purpose
@@ -212,6 +214,57 @@ Before anyone calls it a win:
    - A run on Rafael's native-Windows PC before calling it done: Proton is not a D3D12 validator, and
      this pass adds descriptors, a 256-byte constant buffer view and typed UAV stores into the model's
      output format.
+
+---
+
+## Addendum A: Highlight Flashing under Reversible Replace Modes (Reproduced)
+
+Under replace curves (`ReversibleMode = 2` Neutwo replace, `ReversibleMode = 4` Hybrid replace), the resolve decodes the model output $y$ directly through the curve's inverse:
+$$x = \text{Neutwo}^{-1}(y) = \frac{y}{\sqrt{1 - y^2}}$$
+
+Because $\text{Neutwo}^{-1}(y)$ possesses a vertical asymptote as $y \to 1.0$, small delta edits added in the proxy space explode when applied to highlight pixels:
+- For linear highlight light $= 6.0$, $\text{NeutwoEncode}(6.0) = \frac{6.0}{\sqrt{37}} = 0.98639$.
+- If a modest carried edit (+0.01762, corresponding to a $+5\%$ change on mid-grey) lands on this highlight from an adjacent edge, the carried proxy sum becomes $0.98639 + 0.01762 = 1.00401$ (clamped to $1.0$).
+- When decoded through $\text{NeutwoDecode}$ (clamped just below $1.0$ at $0.999999$), the decoded light value shoots to **$707.11$** — a **$117.8\times$ brightness explosion**!
+- In the resolve, the $2\times$ MaxRatio highlight guard clamps this to $12.0$ ($2\times$ the original light). Consequently, highlight pixels violently strobe between normal ($6.0$) on model frames and doubled ($12.0$) on carried frames.
+
+**Decision & Resolution:**
+Cadence relies fundamentally on ratio composition in linear space (`Ratio composition, not a delta`, README §4). In replace modes, the ratio composition is completely bypassed. Rather than adding complex domain-switching approximations into the inner shader loop, model cadence explicitly refuses execution when `ReversibleMode == 2 || ReversibleMode == 4` with `Reason::ReversibleReplace`, releasing cadence scratch surfaces and informing the player in the UI.
+
+---
+
+## Addendum B: Low Frame Rate Gate (25 FPS cutoff with 1.0s Hysteresis)
+
+At low frame rates ($< 25 \text{ fps}$), the spatial displacement between consecutive real frames expands significantly. Reprojection errors and motion disocclusions grow proportionally larger, causing carried frames to exhibit conspicuous ghosting trails around moving characters.
+
+**Design:**
+- The scheduler tracks rendered frame interval using an exponential moving average smoothed over $\sim 0.5 \text{ s}$ ($\alpha = 1.0 - e^{-\Delta t / 0.5}$).
+- When smoothed framerate drops below $25.0 \text{ fps}$ ($\Delta t > 40.0 \text{ ms}$), the gate trips to `Reason::LowFrameRate` and runs the model every frame.
+- To prevent rapid oscillation (flicker) when hovering near the boundary, recovery requires sustaining $\ge 28.0 \text{ fps}$ continuously for at least $1.0 \text{ s}$ ($1000 \text{ ms}$) before resuming carried frames.
+- Surfaces are retained during low-FPS lockouts (since framerate drops are transient in combat or dense scenes), avoiding expensive $130 \text{ MB}$ reallocations.
+
+---
+
+## Addendum C: High-Motion Invalidation Gate (MotionGuard Architecture)
+
+In janblade's implementation (`0df40796`), a GPU coverage pass measured the fraction of the screen with invalid or unmappable detail (`1.0 - trust`), holding detail reuse off if $> 10\%$ of the screen moved too fast to track until $0.3 \text{ s}$ of calm returned.
+
+**Equivalent Signal in Our Pipeline:**
+In `dlssnr_cadence_rule.h:347-350`, the acceptance coefficient:
+$$w = \frac{\sum w_k \cdot \text{tapW}_k}{\sum \text{tapW}_k} \cdot \text{saturate}(2 \cdot w_{\text{centre}}) \cdot w_{\text{edge}}$$
+already measures per-pixel confidence across depth consistency, color gates, and frame boundaries. The term $1.0 - w$ is the exact mathematical equivalent: when the camera whips or fast motion occurs, $w \to 0$ over large sections of the frame.
+
+**Proposed GPU Counting & Readback Mechanism:**
+1. **GPU Atomic Reduction:**
+   - A compute reduction pass (or atomic accumulation at the tail of `CadenceSynthesize`) evaluates $w < 0.5$ (or sums $1.0 - w$) using `InterlockedAdd` into a single 4-byte UAV buffer.
+2. **Asynchronous Non-Stalling Readback:**
+   - Maintain a 4-slot ring of 4-byte readback buffers.
+   - At frame $N$, copy the atomic result to readback buffer slot $N \pmod 4$.
+   - The CPU reads back slot $N-2$, checking `DlssNr::Submission::Completed(fence)` first. If the GPU has not finished, the CPU never waits (`no GPU wait`), holding the previous frame's reading.
+3. **Temporal Hysteresis:**
+   - If the rejected pixel count exceeds $10\%$ of total frame pixels, engage `Reason::FastMotion`.
+   - Maintain full model execution until rejection remains $\le 10\%$ for $0.3 \text{ s}$ ($300 \text{ ms}$) continuously. A single threshold with temporal debounce prevents latching deadlocks in noisy scenes.
+   - *Status:* Specification complete; shader integration deferred pending dedicated bytecode regeneration pass.
 
 ## Attribution
 
