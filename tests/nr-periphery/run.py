@@ -61,6 +61,21 @@ for anchor in ('const float x0 = ((float) id.x * (float) srcW) / (float) gWidth;
                'gTarget[id.xy] = float4(acc / area,'):
     check(anchor in mode2, f'mode 2 of dlssnr.hlsl no longer reads "{anchor}"; re-transcribe Mode2 in test.cpp')
 
+# test.cpp transcribes the three passes' CSMain arithmetic (PackedColour, the guide read, UnpackedAt); these are
+# the shader lines it transcribes, so a change of convention in either (a +0.5, a uv) fails here.
+for anchor in ('const float x0 = PeripheryUnpack((float) id.x, gAxisX);',
+               'const float x1 = PeripheryUnpack((float) id.x + 1.0f, gAxisX);',
+               'const float3 rgb = PeripheryAreaAverage(x0, x1, y0, y1, (int) gNativeWidth, (int) gNativeHeight);',
+               'const float nx = PeripheryUnpack((float) id.x + 0.5f, gAxisX);',
+               'PeripheryGuideTexel(nx, (float) gNativeWidth, (int) gDepthBaseX, (int) gDepthWidth)',
+               'gMotion.Load(int3(motionAt, 0)) * float2(gMotionScaleX, gMotionScaleY);',
+               'PeripheryPackMotion(nx, motion.x, gAxisX)',
+               'const float2 native = (float2(id.xy) + 0.5f) * float2(gNativeWidth, gNativeHeight) / float2(gOutWidth, '
+               'gOutHeight);',
+               'const float2 packed = float2(PeripheryPack(native.x, gAxisX), PeripheryPack(native.y, gAxisY));',
+               'const float2 uv = packed / float2(gModelWidth, gModelHeight);'):
+    check(anchor in hlsl, f'dlssnr_periphery.hlsl no longer reads "{anchor}"; re-transcribe it in test.cpp')
+
 # 3. The shader is the three passes the C++ loads, under the names the build comment gives them.
 for define, stem in (('PERIPHERY_COLOUR', 'DlssNr_PeripheryColour'), ('PERIPHERY_GUIDES', 'DlssNr_PeripheryGuides'),
                      ('PERIPHERY_UNPACK', 'DlssNr_PeripheryUnpack')):

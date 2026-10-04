@@ -34,7 +34,10 @@ void Check(bool ok, const char* what, int line)
 
 #define CHECK(expr) Check((expr), #expr, __LINE__)
 
-bool Near(double a, double b, double tolerance) { return std::isfinite(a) && std::isfinite(b) && std::fabs(a - b) <= tolerance; }
+bool Near(double a, double b, double tolerance)
+{
+    return std::isfinite(a) && std::isfinite(b) && std::fabs(a - b) <= tolerance;
+}
 
 // The image the colour pack reads: one channel, row-major, loads already clamped by the header.
 std::vector<float> g_image;
@@ -105,6 +108,31 @@ float PackedColour(int i, int j, const PeripheryAxis& ax, const PeripheryAxis& a
     return PeripheryAreaAverage(x0, x1, y0, y1, nativeW, nativeH);
 }
 
+// A Texture2D SampleLevel through a linear-clamp sampler at (u, v), over a w x h raster: texel centres at +0.5.
+float SampleBilinear(const std::vector<float>& tex, int w, int h, float u, float v)
+{
+    const float x = u * (float) w - 0.5f;
+    const float y = v * (float) h - 0.5f;
+    const float x0 = std::floor(x), y0 = std::floor(y);
+    const float fx = x - x0, fy = y - y0;
+    const auto at = [&](int i, int j)
+    { return tex[(size_t) std::clamp(j, 0, h - 1) * (size_t) w + (size_t) std::clamp(i, 0, w - 1)]; };
+    const int i = (int) x0, j = (int) y0;
+    return (at(i, j) * (1.0f - fx) + at(i + 1, j) * fx) * (1.0f - fy) +
+           (at(i, j + 1) * (1.0f - fx) + at(i + 1, j + 1) * fx) * fy;
+}
+
+// What the unpack writes for uniform-grid texel (q, r): the shader's CSMain for PERIPHERY_UNPACK, transcribed;
+// run.py holds the shader's lines to these.
+float UnpackedAt(const std::vector<float>& packed, int q, int r, const Layout& l, int gridW, int gridH)
+{
+    const float nx = ((float) q + 0.5f) * (float) l.nativeW / (float) gridW;
+    const float ny = ((float) r + 0.5f) * (float) l.nativeH / (float) gridH;
+    const float u = PeripheryPack(nx, ShaderAxis(l.x)) / (float) l.modelW;
+    const float v = PeripheryPack(ny, ShaderAxis(l.y)) / (float) l.modelH;
+    return SampleBilinear(packed, (int) l.modelW, (int) l.modelH, u, v);
+}
+
 void FillRandom(int w, int h, unsigned seed)
 {
     std::mt19937 rng(seed);
@@ -172,9 +200,9 @@ void Extents()
         CHECK(!r.active && r.modelW == 0);
 
     // Every refusal says something the menu can show.
-    for (const char* reason : { kReasonOff, kReasonFrame, kReasonSupersampling, kReasonRange, kReasonCompression,
-                                kReasonTooSmall, kReasonOneTexel, kReasonBeforeUpscale, kReasonUseProxy,
-                                kReasonNoShader, kReasonPassFailed })
+    for (const char* reason :
+         { kReasonOff, kReasonFrame, kReasonSupersampling, kReasonRange, kReasonCompression, kReasonTooSmall,
+           kReasonOneTexel, kReasonBeforeUpscale, kReasonUseProxy, kReasonNoShader, kReasonPassFailed })
         CHECK(reason != nullptr && std::strlen(reason) > 8 && std::strchr(reason, '%') == nullptr);
 }
 
@@ -188,10 +216,10 @@ struct Case
 };
 
 const Case kCases[] = {
-    { 3840, 2160, 1.0f, 80, 90 },  { 3440, 1440, 1.0f, 80, 90 }, { 3440, 1440, 0.5f, 80, 90 },
-    { 1920, 1080, 0.5f, 80, 90 },  { 1921, 1081, 0.85f, 80, 90 }, { 1279, 719, 1.0f, 80, 90 },
-    { 2001, 1001, 0.7f, 70, 85 },  { 2560, 1440, 0.75f, 50, 75 }, { 3440, 1440, 1.0f, 90, 95 },
-    { 1365, 767, 0.66f, 60, 80 },  { 4095, 2047, 1.0f, 20, 60 },
+    { 3840, 2160, 1.0f, 80, 90 }, { 3440, 1440, 1.0f, 80, 90 },  { 3440, 1440, 0.5f, 80, 90 },
+    { 1920, 1080, 0.5f, 80, 90 }, { 1921, 1081, 0.85f, 80, 90 }, { 1279, 719, 1.0f, 80, 90 },
+    { 2001, 1001, 0.7f, 70, 85 }, { 2560, 1440, 0.75f, 50, 75 }, { 3440, 1440, 1.0f, 90, 95 },
+    { 1365, 767, 0.66f, 60, 80 }, { 4095, 2047, 1.0f, 20, 60 },
 };
 
 void AxisProperties(const Axis& a, const Case& c)
@@ -294,8 +322,8 @@ void Identity()
     {
         uint32_t native, model, region, base;
     };
-    for (const Guide& g : { Guide { 3440, 1720, 2293, 0 }, Guide { 3840, 2688, 1920, 0 }, Guide { 3440, 1720, 2293, 16 },
-                            Guide { 2560, 1152, 1707, 0 } })
+    for (const Guide& g : { Guide { 3440, 1720, 2293, 0 }, Guide { 3840, 2688, 1920, 0 },
+                            Guide { 3440, 1720, 2293, 16 }, Guide { 2560, 1152, 1707, 0 } })
     {
         const PeripheryAxis u = ShaderAxis(Uniform(g.native, g.model));
         int differ = 0;
@@ -322,8 +350,9 @@ void Identity()
     }
 
     // The colour pack over a uniform axis is mode 2, the downsample, on a random image.
-    for (const auto& [nw, nh, mw, mh] : { std::array<int, 4> { 347, 211, 173, 105 }, std::array<int, 4> { 300, 200, 150, 100 },
-                                          std::array<int, 4> { 333, 177, 267, 141 } })
+    for (const auto& [nw, nh, mw, mh] :
+         { std::array<int, 4> { 347, 211, 173, 105 }, std::array<int, 4> { 300, 200, 150, 100 },
+           std::array<int, 4> { 333, 177, 267, 141 } })
     {
         FillRandom(nw, nh, 7u + (unsigned) nw);
         const PeripheryAxis ax = ShaderAxis(Uniform((uint32_t) nw, (uint32_t) mw));
@@ -331,7 +360,8 @@ void Identity()
         double worst = 0.0;
         for (int j = 0; j < mh; ++j)
             for (int i = 0; i < mw; ++i)
-                worst = std::max(worst, (double) std::fabs(PackedColour(i, j, ax, ay, nw, nh) - Mode2(i, j, nw, nh, mw, mh)));
+                worst = std::max(worst,
+                                 (double) std::fabs(PackedColour(i, j, ax, ay, nw, nh) - Mode2(i, j, nw, nh, mw, mh)));
         CHECK(worst < 1e-4);
     }
 }
@@ -392,6 +422,80 @@ void ColourFilter()
     {
         const PeripheryAxis ax = ShaderAxis(worst.x);
         CHECK(PeripheryUnpack(1.0f, ax) - PeripheryUnpack(0.0f, ax) < PERIPHERY_MAX_SPAN - 1);
+    }
+}
+
+// --- Pack, then unpack: what the resolve is handed ------------------------------------------------------
+
+void RoundTrip()
+{
+    // A quarter of 3440x1440 at 100: in the band the pack is a whole-texel copy and the unpack lands on texel
+    // centres, so the resolve gets the frame itself there -- any half-texel slip in either direction's
+    // convention would blend neighbours instead.
+    {
+        const int w = 860, h = 360;
+        const Layout l = Build(On(), w, h, 1.0f);
+        CHECK(l.active);
+        FillRandom(w, h, 23u);
+        const std::vector<float> frame = g_image;
+        std::vector<float> packed((size_t) l.modelW * l.modelH);
+        for (uint32_t j = 0; j < l.modelH; ++j)
+            for (uint32_t i = 0; i < l.modelW; ++i)
+                packed[(size_t) j * l.modelW + i] =
+                    PackedColour((int) i, (int) j, ShaderAxis(l.x), ShaderAxis(l.y), w, h);
+
+        double worstBand = 0.0;
+        for (int r = 0; r < h; ++r)
+        {
+            for (int q = 0; q < w; ++q)
+            {
+                const bool inX = q > l.x.bandCenter - l.x.halfBand + 1 && q + 1 < l.x.bandCenter + l.x.halfBand - 1;
+                const bool inY = r > l.y.bandCenter - l.y.halfBand + 1 && r + 1 < l.y.bandCenter + l.y.halfBand - 1;
+                if (inX && inY)
+                    worstBand = std::max(
+                        worstBand, (double) std::fabs(UnpackedAt(packed, q, r, l, w, h) - frame[(size_t) r * w + q]));
+            }
+        }
+        CHECK(worstBand < 1e-4);
+    }
+
+    // A smooth frame at 100 and at 50: the unpacked proxy is within two percent of what the uniform path's
+    // downsample hands the resolve everywhere but the outermost packed texel. There a clamped bilinear read
+    // returns the average of a whole edge footprint (4 frame pixels at 100, 8 at 50), so the error is bounded
+    // by half that footprint times the frame's gradient -- softer, not displaced.
+    for (const float scale : { 1.0f, 0.5f })
+    {
+        const int w = 860, h = 360;
+        const Layout l = Build(On(), w, h, scale);
+        CHECK(l.active);
+        g_imageWidth = w;
+        g_image.assign((size_t) w * h, 0.0f);
+        for (int r = 0; r < h; ++r)
+            for (int q = 0; q < w; ++q)
+                g_image[(size_t) r * w + q] = 0.5f + 0.25f * std::sin(q * 0.05f) + 0.25f * std::cos(r * 0.04f);
+
+        std::vector<float> packed((size_t) l.modelW * l.modelH);
+        for (uint32_t j = 0; j < l.modelH; ++j)
+            for (uint32_t i = 0; i < l.modelW; ++i)
+                packed[(size_t) j * l.modelW + i] =
+                    PackedColour((int) i, (int) j, ShaderAxis(l.x), ShaderAxis(l.y), w, h);
+
+        const int gridW = (int) Grid(w, scale), gridH = (int) Grid(h, scale);
+        const double footprint = 1.0 / (l.x.scale * l.x.edgeSlope[0]);                   // frame pixels per edge texel
+        const double borderBound = (0.25 * 0.05 + 0.25 * 0.04) * footprint * 0.5 + 0.01; // gradient x half of it
+        double worstInside = 0.0, worstBorder = 0.0;
+        for (int r = 0; r < gridH; ++r)
+        {
+            for (int q = 0; q < gridW; ++q)
+            {
+                const double d = std::fabs(UnpackedAt(packed, q, r, l, gridW, gridH) - Mode2(q, r, w, h, gridW, gridH));
+                const double nx = (q + 0.5) * w / gridW, ny = (r + 0.5) * h / gridH;
+                const bool border = nx < footprint || nx > w - footprint || ny < footprint || ny > h - footprint;
+                (border ? worstBorder : worstInside) = std::max(border ? worstBorder : worstInside, d);
+            }
+        }
+        CHECK(worstInside < 0.02);
+        CHECK(worstBorder < borderBound);
     }
 }
 
@@ -464,6 +568,7 @@ int main()
     Mapping();
     Identity();
     ColourFilter();
+    RoundTrip();
     Motion();
     Constants();
 
@@ -474,8 +579,8 @@ int main()
     }
 
     std::printf("PASS: %d checks -- extents and refusals, inverse, monotone, smooth joins, whole-texel centre, the "
-                "uniform path (guide reads and mode 2), the area filter's weights and conservation, motion in "
-                "frame pixels\n",
+                "uniform path (guide reads and mode 2), the area filter's weights and conservation, pack then "
+                "unpack, motion in frame pixels\n",
                 g_checks);
     return 0;
 }

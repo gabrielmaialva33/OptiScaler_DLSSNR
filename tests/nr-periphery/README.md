@@ -26,6 +26,11 @@ Cases (`test.cpp`):
 - **The colour pack's filter.** A constant frame packs to the same constant (the weights sum to one);
   the packed texels, weighted by their footprints, sum to the frame (nothing gained or lost); the edge
   footprint is bounded by `1 / (scale x k^2)` and the loop's span.
+- **Pack, then unpack.** The colour pack followed by the shader's unpack (a clamped bilinear read at
+  `Pack(native) / model`), transcribed: at 100 the band comes back as the frame, texel for texel, which
+  pins both passes' pixel-centre conventions; a smooth frame comes back within two percent of the uniform
+  path's downsample everywhere but the outermost packed texel, where the error is bounded by half an edge
+  footprint times the gradient.
 - **Motion.** Zero stays zero; unchanged in the band at 100, halved there at 50; shrunk toward `k^2`
   at the edge; finite with an end off the frame. And the frame-pixel scale that wilsjo2's v0.8.91
   got wrong: Cyberpunk's 2293 game scale against a 2293 render width is 3440 frame pixels, so a
@@ -33,8 +38,8 @@ Cases (`test.cpp`):
 - **Constants.** `PeripheryConstants` is 256 bytes; `MakeConstants` copies the layout.
 
 Text guards (`run.py`): `PeripheryConstants` and the HLSL `cbuffer Params` are one ordered list;
-`PeripheryAxis` is sixteen plain floats; mode 2 of `dlssnr.hlsl` still reads the way `test.cpp`
-transcribes it; the shader has the three passes the C++ loads, under the names its build comment gives;
+`PeripheryAxis` is sixteen plain floats; mode 2 of `dlssnr.hlsl` and the three passes' own lines still
+read the way `test.cpp` transcribes them; the shader has the three passes the C++ loads, under the names its build comment gives;
 the PeripheralWarp attribution and `Licenses/PeripheralWarp_LICENSE.txt` are there.
 
 Each guard was shown to fail before the suite was registered: a linear shoulder, the raw game scale,
