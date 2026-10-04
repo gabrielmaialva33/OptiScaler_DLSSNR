@@ -9,6 +9,7 @@
 #include <proxies/KernelBase_Proxy.h>
 #include <hooks/Streamline_Hooks.h>
 #include <framegen/dlssg/MfgUnlock.h>
+#include <magic_enum.hpp>
 
 #include <sl.h>
 #include <sl_pcl.h>
@@ -491,19 +492,56 @@ class StreamlineProxy
         auto initResult = StreamlineProxy::Init()(pref, sl::kSDKVersion);
 
         sl::AdapterInfo adapterInfo {};
-        if (StreamlineProxy::IsFeatureSupported()(sl::kFeatureDLSS_G, adapterInfo) != sl::Result::eOk)
+        auto dlssgSupportedResult = StreamlineProxy::IsFeatureSupported()(sl::kFeatureDLSS_G, adapterInfo);
+        if (dlssgSupportedResult != sl::Result::eOk)
         {
+            LOG_WARN("Streamline DLSS-G IsFeatureSupported returned: {}", magic_enum::enum_name(dlssgSupportedResult));
+
             if (State::Instance().activeFgNvngx == FGNvngxReplacement::None)
             {
-                Config::Instance()->FGNvngxReplacement = FGNvngxReplacement::Nukems;
-                Config::Instance()->SaveIni();
+                if (dlssgSupportedResult == sl::Result::eErrorOSDisabledHWS ||
+                    dlssgSupportedResult == sl::Result::eErrorDriverOutOfDate ||
+                    dlssgSupportedResult == sl::Result::eErrorOSOutOfDate)
+                {
+                    const wchar_t* reasonMsg = nullptr;
+                    if (dlssgSupportedResult == sl::Result::eErrorOSDisabledHWS)
+                    {
+                        reasonMsg =
+                            L"You've tried to use DLSS-G, but Hardware-accelerated GPU scheduling (HAGS) is "
+                            L"disabled.\n\n"
+                            L"Please enable 'Hardware-accelerated GPU scheduling' in Windows Settings > Graphics "
+                            L"settings, "
+                            L"then restart your PC.\n\nRunning without DLSS-G for this session.";
+                    }
+                    else if (dlssgSupportedResult == sl::Result::eErrorDriverOutOfDate)
+                    {
+                        reasonMsg =
+                            L"You've tried to use DLSS-G, but your graphics driver is out of date.\n\n"
+                            L"Please update your NVIDIA graphics driver.\n\nRunning without DLSS-G for this session.";
+                    }
+                    else
+                    {
+                        reasonMsg = L"You've tried to use DLSS-G, but your operating system is out of date.\n\n"
+                                    L"Please update Windows.\n\nRunning without DLSS-G for this session.";
+                    }
 
-                MessageBoxW(NULL,
-                            L"You've tried to use real DLSSG, but it's not supported\n"
-                            "Opti will try to use a replacement, restart the game",
-                            L"No DLSSG Support", MB_ICONWARNING | MB_OK);
+                    MessageBoxW(NULL, reasonMsg, L"DLSS-G Not Supported", MB_ICONWARNING | MB_OK);
 
-                std::exit(1);
+                    Config::Instance()->FGNvngxReplacement.set_volatile_value(FGNvngxReplacement::None);
+                    State::Instance().activeFgNvngx = FGNvngxReplacement::None;
+                }
+                else
+                {
+                    Config::Instance()->FGNvngxReplacement = FGNvngxReplacement::Nukems;
+                    Config::Instance()->SaveIni();
+
+                    MessageBoxW(NULL,
+                                L"You've tried to use real DLSSG, but it's not supported\n"
+                                "Opti will try to use a replacement, restart the game",
+                                L"No DLSSG Support", MB_ICONWARNING | MB_OK);
+
+                    std::exit(1);
+                }
             }
             else
             {
