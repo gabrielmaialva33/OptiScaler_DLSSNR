@@ -204,13 +204,15 @@ CI runs clang-format **22** over `OptiScaler/` excluding `external/`, `OptiScale
 upstream). Style is in `.clang-format`: LLVM base, Allman braces, 4-space indent, 120 columns,
 `SortIncludes: false`, `Type* ptr` pointer alignment.
 
-**Use the `clang-format` on `PATH`** (22.x), which is the version CI pins. The Arch `clang20` binary
-at `/usr/lib/llvm20/bin/clang-format` was the pin before that and now disagrees with CI in the other
+**Use clang-format 22**, the version CI pins, and **not the one on `PATH`**: Arch moved that to 23.x
+(23.1.1 as of 2026-10-04), and 23 flags upstream's own 22-formatted code (the `EnumConfig<FGInput>`
+table in `State.h`). Get 22 through `uvx --from 'clang-format==22.*' clang-format`. The Arch `clang20`
+binary at `/usr/lib/llvm20/bin/clang-format` was the pin before that and disagrees with CI in the other
 direction: it flags upstream's 22-formatted `Config.h` and `NVNGX_Proxy.h`.
 
 ```bash
 for f in $(fd -e cpp -e h . OptiScaler --exclude include --exclude external --exclude precompile); do
-    clang-format --dry-run --Werror "$f" >/dev/null 2>&1 || echo "$f"
+    uvx -q --from 'clang-format==22.*' clang-format --dry-run --Werror "$f" >/dev/null 2>&1 || echo "$f"
 done
 ```
 
