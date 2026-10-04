@@ -3,6 +3,7 @@
 #include "DlssNrFeature_Vk.h"
 
 #include "DlssNr.h"
+#include "DlssNr_Cadence.h"
 #include "DlssNr_ExposureScan.h"
 #include "DlssNr_GpuTiming.h"
 #include "DlssNr_ModelLog.h"
@@ -94,6 +95,15 @@ static void RenderGpuTiming(Config* config, bool nativeVulkan)
                        static_cast<unsigned long long>(sample.metadata.settingsGeneration),
                        static_cast<unsigned long long>(sample.metadata.evaluationId),
                        static_cast<unsigned long long>(sample.runId), sample.sampleInterval);
+    // Model cadence (design/model-cadence.md): which kind of frame the sample is. A carried frame's zero model
+    // time is by design, not a measurement of the model.
+    if (sample.metadata.carried)
+        ImGui::TextWrapped(Localization::Tr("A carried frame of model cadence %u: no model call, so no model time."),
+                           sample.metadata.cadence);
+    else if (sample.metadata.cadence > 1)
+        ImGui::TextWrapped(Localization::Tr("A model frame of model cadence %u. With an interval that is a multiple "
+                                            "of the cadence, every sample is the same kind of frame."),
+                           sample.metadata.cadence);
     ImGui::TextWrapped(Localization::Tr("This is one historical sample, not the current frame or an average. "
                                         "Use matching contracts in the INFO log for comparisons."));
 }
@@ -284,6 +294,59 @@ static void RenderPassControls(Config* config, bool vulkan)
     if (changed)
         config->SetDlssNrPassOverrides(pass, sparse);
     ImGui::PopID();
+}
+
+// Model cadence (design/model-cadence.md): the model on one frame in N, its edit carried in between. It runs
+// after the D3D12 model call; native Vulkan has none, the driver proxy returns before the resolve, and a build
+// without its shader cannot run it, so none of them is offered the control -- a cadence saved in the ini that
+// does nothing here gets one line saying so instead. The frame-generation opt-in exists only for a cadence
+// above 1, and so does the status line.
+static void RenderCadenceControls(Config* config, bool nativeVulkan)
+{
+    if (nativeVulkan)
+        return;
+
+    const uint32_t configured = DlssNr::Cadence::Requested(config->DlssNrCadence.value_or_default());
+    const bool proxy = config->DlssNrUseProxy.value_or_default();
+
+    if (proxy || !DlssNr::CadenceAvailable())
+    {
+        if (configured > 1)
+            ImGui::TextDisabled(
+                "%s", Localization::Tr(DlssNr::Cadence::Describe(
+                          proxy ? DlssNr::Cadence::Reason::DriverProxy : DlssNr::Cadence::Reason::Unavailable, 1)));
+        return;
+    }
+
+    ImGui::SeparatorText(Localization::Tr("Model cadence"));
+
+    const char* cadenceNames[] = { Localization::Tr("Every frame"), Localization::Tr("Every 2nd frame"),
+                                   Localization::Tr("Every 3rd frame"), Localization::Tr("Every 4th frame") };
+    int cadence = static_cast<int>(configured) - 1;
+    if (ImGui::Combo(Localization::Label("Model cadence###nrCadence"), &cadence, cadenceNames,
+                     IM_ARRAYSIZE(cadenceNames)))
+        config->DlssNrCadence = static_cast<uint32_t>(std::clamp(cadence, 0, 3) + 1);
+
+    HelpMarker("Runs the model on one frame in N and carries its edit along the game's motion onto the frames in"
+               "\nbetween. It buys frame rate and costs stability in motion: detail can pop each time the model"
+               "\nruns again, and what a moving object uncovers can ghost, or show the plain frame, until then."
+               "\nFrame times alternate long and short. A still scene looks as it does with every frame."
+               "\n\nIt needs the game's own depth and motion, so it stands down before the upscaler, on frames"
+               "\nwithout them, with Hold frame or a capture, and while frame generation is active unless allowed"
+               "\nbelow. Off costs nothing.");
+
+    if (configured <= 1)
+        return;
+
+    bool withFrameGen = config->DlssNrCadenceWithFrameGen.value_or_default();
+    if (ImGui::Checkbox(Localization::Label("Allow with frame generation###nrCadenceFrameGen"), &withFrameGen))
+        config->DlssNrCadenceWithFrameGen = withFrameGen;
+
+    HelpMarker("Off by default. Frame generation interpolates between frames whose cost alternates, and DLSS-G"
+               "\nwas measured unable to pace through that: stutter and flashes that grow with the multiplier and"
+               "\nthe cadence. Turn it on to measure it, not to play.");
+
+    ImGui::TextWrapped("%s", Localization::Tr(DlssNr::CadenceStatus()));
 }
 
 void RenderMenu(Config* config, float menuResScale)
@@ -910,6 +973,8 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nmore flicker in the input before letting go.");
             }
         }
+
+        RenderCadenceControls(config, nativeVulkan);
 
         ImGui::SeparatorText(Localization::Tr("Colour"));
 

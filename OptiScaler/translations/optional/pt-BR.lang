@@ -333,3 +333,35 @@ Upscalers	Upscalers
 V-Sync	V-Sync
 XeFG Settings	Configurações do XeFG
 fakenvapi	fakenvapi
+
+# 2026-10-04: model cadence (dlssnr/design/model-cadence.md): the control, its help, the GPU timing
+# kind line and the status line under the control (DlssNr::Cadence::Describe).
+Model cadence	Cadência do modelo
+Every frame	Todo quadro
+Every 2nd frame	A cada 2 quadros
+Every 3rd frame	A cada 3 quadros
+Every 4th frame	A cada 4 quadros
+Allow with frame generation	Permitir com geração de quadros
+Runs the model on one frame in N and carries its edit along the game's motion onto the frames in\nbetween. It buys frame rate and costs stability in motion: detail can pop each time the model\nruns again, and what a moving object uncovers can ghost, or show the plain frame, until then.\nFrame times alternate long and short. A still scene looks as it does with every frame.\n\nIt needs the game's own depth and motion, so it stands down before the upscaler, on frames\nwithout them, with Hold frame or a capture, and while frame generation is active unless allowed\nbelow. Off costs nothing.	Roda o modelo em um quadro a cada N e leva a edição dele, seguindo o movimento do jogo, aos quadros\nintermediários. Ganha taxa de quadros e custa estabilidade em movimento: detalhes podem saltar\ncada vez que o modelo roda de novo, e o que um objeto em movimento revela pode deixar rastro, ou\nmostrar o quadro sem edição, até lá. Os tempos de quadro alternam entre longos e curtos. Uma cena\nparada fica como fica com todo quadro.\n\nPrecisa da profundidade e do movimento do próprio jogo, então se desativa antes do upscaler, em\nquadros sem eles, com Congelar quadro ou uma captura, e enquanto a geração de quadros estiver ativa,\na menos que seja permitido abaixo. Desligado não custa nada.
+Off by default. Frame generation interpolates between frames whose cost alternates, and DLSS-G\nwas measured unable to pace through that: stutter and flashes that grow with the multiplier and\nthe cadence. Turn it on to measure it, not to play.	Desligado por padrão. A geração de quadros interpola entre quadros de custo alternado, e o DLSS-G\nfoi medido incapaz de manter o ritmo assim: engasgos e clarões que crescem com o multiplicador e\ncom a cadência. Ligue para medir, não para jogar.
+A carried frame of model cadence %u: no model call, so no model time.	Um quadro carregado da cadência do modelo %u: sem chamada ao modelo, portanto sem tempo de modelo.
+A model frame of model cadence %u. With an interval that is a multiple of the cadence, every sample is the same kind of frame.	Um quadro do modelo da cadência do modelo %u. Com um intervalo múltiplo da cadência, toda amostra é do mesmo tipo de quadro.
+Running the model every 4th frame; the frames between carry its last edit.	O modelo roda a cada 4 quadros; os quadros intermediários levam sua última edição.
+Running the model every 3rd frame; the frames between carry its last edit.	O modelo roda a cada 3 quadros; os quadros intermediários levam sua última edição.
+Running the model every 2nd frame; the frame between carries its last edit.	O modelo roda a cada 2 quadros; o quadro intermediário leva sua última edição.
+The model runs this frame: no edit is stored to carry.	O modelo roda neste quadro: não há edição guardada para levar.
+The model runs this frame: a history reset is pending.	O modelo roda neste quadro: há um reinício de histórico pendente.
+The model runs this frame: its size, format, route or settings changed.	O modelo roda neste quadro: seu tamanho, formato, rota ou ajustes mudaram.
+The model runs this frame: the pass did not run for a while.	O modelo roda neste quadro: o passe ficou um tempo sem rodar.
+The model runs every frame: the pass ran more than once in one present.	O modelo roda em todo quadro: o passe rodou mais de uma vez em um present.
+Off: the model runs every frame.	Desligado: o modelo roda em todo quadro.
+The model runs every frame: model cadence is not available on native Vulkan.	O modelo roda em todo quadro: a cadência do modelo não está disponível no Vulkan nativo.
+The model runs every frame: model cadence does not run with the driver proxy.	O modelo roda em todo quadro: a cadência do modelo não roda com o proxy do driver.
+The model runs every frame: this build has no model cadence shader.	O modelo roda em todo quadro: esta compilação não tem o shader da cadência do modelo.
+The model runs every frame: model cadence does not run before the upscaler.	O modelo roda em todo quadro: a cadência do modelo não roda antes do upscaler.
+The model runs every frame: this frame has no game depth and motion to carry the edit with.	O modelo roda em todo quadro: este quadro não tem profundidade e movimento do jogo para levar a edição.
+The model runs every frame: frame generation is active (see Allow with frame generation).	O modelo roda em todo quadro: a geração de quadros está ativa (veja Permitir com geração de quadros).
+The model runs every frame while Hold frame is on.	O modelo roda em todo quadro enquanto Congelar quadro estiver ligado.
+The model runs every frame while a capture is running.	O modelo roda em todo quadro enquanto uma captura estiver em andamento.
+The model runs every frame: the model cadence surfaces could not be allocated.	O modelo roda em todo quadro: as superfícies da cadência do modelo não puderam ser alocadas.
+Waiting for the pass to run.	Aguardando o passe rodar.

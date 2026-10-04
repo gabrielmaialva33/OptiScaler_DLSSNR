@@ -10,7 +10,11 @@ one/master defaults, every optional field, live inheritance, explicit overrides,
 field/pass clearing, active-pass selection, retained inactive settings and disabling then
 reenabling individual tuning. Four more cover the two controls the model itself makes inert: the
 per-pass preset is not drawn once the model reports one weight set (`DlssNr::ModelLog`,
-faked here), and skin structure is drawn disabled, taking no click, while the auto mask is off. Source guards reject direct master writes and check both
+faked here), and skin structure is drawn disabled, taking no click, while the auto mask is off. Twelve
+more cover model cadence's control (`dlssnr/design/model-cadence.md`): nothing on native Vulkan; with
+the driver proxy or a build without its shader, no control and one line only when a cadence is
+configured; the combo writes 1..4; the frame-generation opt-in and the status line only above a
+cadence of 1; a hand-edited out-of-range value reads as off. Source guards reject direct master writes and check both
 new runtime translation units are registered exactly once in the project and filters.
 This complements the real Config transaction/codec and real ImGui hash suites. It does
 not render pixels or exercise the actual Windows Config, renderer, NGX or GPU.
@@ -29,6 +33,10 @@ not render pixels or exercise the actual Windows Config, renderer, NGX or GPU.
 | At least one explicit field | Inherit-all button removes only the selected pass's overrides |
 | Lowered count or individual off | Inactive overrides retained, never silently deleted |
 | Renderer restart/refusal/waiting | Actual renderer status shown; requested count is never described as completed work |
+| Model cadence, native Vulkan | Nothing |
+| Model cadence, driver proxy or no shader | No control; one line saying why, only when a cadence above 1 is configured |
+| Model cadence 1 (off) | The combo only |
+| Model cadence 2..4 | The combo, the frame-generation opt-in, the renderer's cadence status |
 
 The Model section continues to edit master values through short Config setters. The
 renderer may rebuild after changes; no Config lock is held over retry or renderer calls.

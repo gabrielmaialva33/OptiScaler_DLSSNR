@@ -1,4 +1,7 @@
 #include <dlssnr/DlssNr_PassSettings.h>
+#include <dlssnr/DlssNr_Cadence.h>
+#include <algorithm>
+#include <map>
 #include <cassert>
 #include <string>
 #include <unordered_map>
@@ -42,12 +45,17 @@ void SeparatorText(const char*) {}
 void TextUnformatted(const char*) {}
 template<class...T> void Text(const char*, T...) {}
 template<class...T> void TextWrapped(const char*, T...) {}
-void Reset() { assert(stack.empty() && disabled.empty()); shown.clear(); shownDisabled.clear(); actions.clear(); edited = false; }
+std::vector<std::string> texts;
+template<class...T> void TextDisabled(const char* f, T... v) { std::string s = f; ((s += std::string("|") + v), ...); texts.push_back(s); }
+void Reset() { assert(stack.empty() && disabled.empty()); shown.clear(); shownDisabled.clear(); actions.clear(); texts.clear(); edited = false; }
 bool Saw(const std::string& id) { return std::find(shown.begin(),shown.end(),id)!=shown.end(); }
 }
-struct OptionalBool { bool value = false; bool value_or_default() const { return value; } };
+struct OptionalBool { bool value = false; bool value_or_default() const { return value; } OptionalBool& operator=(bool v) { value = v; return *this; } };
+struct OptionalU32 { uint32_t value = 1; uint32_t value_or_default() const { return value; } OptionalU32& operator=(uint32_t v) { value = v; return *this; } };
 struct Config {
  OptionalBool DlssNrUseProxy;
+ OptionalU32 DlssNrCadence;
+ OptionalBool DlssNrCadenceWithFrameGen;
  DlssNrResolvedPassSettings master;
  DlssNr::PassConfig::Overrides overrides;
  DlssNrPassSnapshot snapshot;
@@ -67,4 +75,7 @@ namespace DlssNr {
 void HelpMarker(const char*) {}
 unsigned ActivePassCount() { return 0; }
 const char* MultipassStatus() { return "Restart required"; }
+bool cadenceAvailable = true;
+bool CadenceAvailable() { return cadenceAvailable; }
+const char* CadenceStatus() { return DlssNr::Cadence::Describe(DlssNr::Cadence::Reason::Carried, 2); }
 }
