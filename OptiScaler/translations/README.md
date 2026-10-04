@@ -15,7 +15,10 @@ and restart to return to English. The optional directory can safely remain in pl
 
 The pack covers the DLSS Neural Rendering panel, synthesized frame generation's settings, the
 section headers and menu shell already routed through `Localization`, and the status and failure
-reasons the NR panel shows. The rest of upstream's menu is untouched and stays in English: routing
+reasons the NR panel shows. Since upstream's menu redesign (merged 2026-10-04) the shell is translated
+in a few central places rather than at each call site: `SectionTitle` and `ScopedCard` (every section
+and card title), the sidebar's tab and group names, and the Custom tab picker. The sidebar widens to
+fit the longest translated name. The rest of upstream's menu is untouched and stays in English: routing
 its strings would change most of `menu_common.cpp`, an upstream file, and every merge from
 `optiscaler/master` would conflict on it. Dynamic diagnostic text absent from the dictionary also
 falls back to English. This is not a runtime language switcher.

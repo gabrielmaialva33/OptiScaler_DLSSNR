@@ -21,7 +21,9 @@ width/precision stars, lengths, percent literals and the shipped Portuguese pack
 
 Before compiling, `run.py` also checks that every literal the two menus send through `Tr`, or
 through the NR menu's `HelpMarker`, has an entry, so text added to the menu cannot silently stay
-in English. A string whose `%` is not a printf directive cannot be in the pack at all (the parser
+in English. The redesigned menu translates its shell centrally, so the literals passed to
+`SectionTitle`, `ScopedCard` and `SeparatorWithHelpMarker` and the names in the Custom tab picker
+are added to the label set, and the sidebar's tab and group names are checked like `Tr` text. A string whose `%` is not a printf directive cannot be in the pack at all (the parser
 rejects the whole file); reword it (`50%.` became `half size` in one tooltip).
 
 A separate executable compiles production `Localization.cpp` with only DLL-path/logging/PCH

@@ -332,6 +332,10 @@ static void DrawCardTitle(const char* label)
 // Used instead of ImGui::SeparatorText. The first one in a card becomes the title of the card
 static void SectionTitle(const char* label)
 {
+    // Translated here rather than at every call site, so the optional language pack covers every
+    // section and card title without touching each of upstream's lines
+    label = Localization::Label(label);
+
     if (!ScopedCard::TryTitle(label))
         ImGui::SeparatorText(label);
 }
@@ -373,7 +377,7 @@ ScopedCard::ScopedCard(const char* title)
 
     if (title != nullptr)
     {
-        DrawCardTitle(title);
+        DrawCardTitle(Localization::Label(title));
         _hasTitle = true;
     }
 }
@@ -6523,7 +6527,7 @@ void MenuCommon::RenderQuirksSettings(RenderMenuContext& ctx)
     // QUIRKS -----------------------------
     if (state.detectedQuirks.size() > 0)
     {
-        SectionTitle(Localization::Label("Active Quirks"));
+        SectionTitle("Active Quirks");
 
         for (const auto& quirk : state.detectedQuirks)
         {
@@ -6651,7 +6655,7 @@ void MenuCommon::RenderAdvancedSettings(RenderMenuContext& ctx)
     // BARRIERS -----------------------------
     if (ScopedCard::Shows("barriers"))
     {
-        ScopedCard card { Localization::Label("Resource Barriers") };
+        ScopedCard card { "Resource Barriers" };
 
         if (ImGui::BeginTable("barriers", 2, ImGuiTableFlags_SizingStretchSame))
         {
@@ -6680,7 +6684,7 @@ void MenuCommon::RenderAdvancedSettings(RenderMenuContext& ctx)
     // HOTFIXES -----------------------------
     if (ScopedCard::Shows("root_signatures") && state.api == DX12)
     {
-        ScopedCard card { Localization::Label("Root Signatures") };
+        ScopedCard card { "Root Signatures" };
 
         if (ImGui::BeginTable("rootSignatures", 2, ImGuiTableFlags_SizingStretchSame))
         {
@@ -6700,7 +6704,7 @@ void MenuCommon::RenderLoggingSettings(RenderMenuContext& ctx)
     auto config = ctx.config;
 
     // LOGGING -----------------------------
-    SectionTitle(Localization::Label("Logging"));
+    SectionTitle("Logging");
 
     if (config->LogToConsole.value_or_default() || config->LogToFile.value_or_default() ||
         config->LogToNGX.value_or_default())
@@ -7198,7 +7202,7 @@ void MenuCommon::RenderFpsOverlaySettings(RenderMenuContext& ctx)
     auto config = ctx.config;
 
     // FPS OVERLAY -----------------------------
-    SectionTitle(Localization::Label("FPS Overlay"));
+    SectionTitle("FPS Overlay");
     {
         ScopedID sectionId { "FPS Overlay" };
 
@@ -7271,7 +7275,7 @@ void MenuCommon::RenderUpscalerInputsSettings(RenderMenuContext& ctx)
     auto config = ctx.config;
 
     // UPSCALER INPUTS -----------------------------
-    SectionTitle(Localization::Label("Upscaler Inputs"));
+    SectionTitle("Upscaler Inputs");
     {
         ScopedID sectionId { "Upscaler Inputs" };
 
@@ -7360,7 +7364,7 @@ void MenuCommon::RenderVsyncSettings(RenderMenuContext& ctx)
     if (state.swapchainApi != Vulkan)
     {
         // V-SYNC -----------------------------
-        SectionTitle(Localization::Label("V-Sync Settings"));
+        SectionTitle("V-Sync Settings");
         {
             ScopedID sectionId { "V-Sync Settings" };
 
@@ -7488,7 +7492,7 @@ void MenuCommon::RenderApiAndTextureSettings(RenderMenuContext& ctx)
         // MIPMAP BIAS & Anisotropy -----------------------------
         if (ScopedCard::Shows("mipmap"))
         {
-            ScopedCard card { Localization::Label("Mipmap Bias") };
+            ScopedCard card { "Mipmap Bias" };
             ScopedID sectionId { "Mipmap Bias" };
             if (config->MipmapBiasOverride.has_value() && _mipBias == 0.0f)
                 _mipBias = config->MipmapBiasOverride.value();
@@ -7605,7 +7609,7 @@ void MenuCommon::RenderApiAndTextureSettings(RenderMenuContext& ctx)
 
         if (ScopedCard::Shows("anisotropy"))
         {
-            ScopedCard card { Localization::Label("Anisotropic Filtering") };
+            ScopedCard card { "Anisotropic Filtering" };
             ScopedID sectionId { "Anisotropic Filtering" };
             ImGui::PushItemWidth(65.0f * menuResScale);
 
@@ -7665,7 +7669,7 @@ void MenuCommon::RenderKeybindSettings(RenderMenuContext& ctx)
 {
     auto config = ctx.config;
 
-    SectionTitle(Localization::Label("Keybinds"));
+    SectionTitle("Keybinds");
     {
         ScopedID sectionId { "Keybinds" };
 
@@ -7691,7 +7695,7 @@ void MenuCommon::RenderInputFixSettings(RenderMenuContext& ctx)
 {
     auto config = ctx.config;
 
-    SectionTitle(Localization::Label("Keyboard Input Fix"));
+    SectionTitle("Keyboard Input Fix");
     {
         ScopedID sectionId { "Keyboard Input Fix" };
 
@@ -8265,7 +8269,7 @@ void MenuCommon::RenderCustomTabSettings(RenderMenuContext& ctx)
                 if (tableOpen)
                     ImGui::EndTable();
 
-                ImGui::TextDisabled("%s", box.tab);
+                ImGui::TextDisabled("%s", Localization::Tr(box.tab));
                 tableOpen = ImGui::BeginTable(box.tab, 2, ImGuiTableFlags_SizingStretchSame);
                 lastTab = box.tab;
             }
@@ -8277,7 +8281,7 @@ void MenuCommon::RenderCustomTabSettings(RenderMenuContext& ctx)
                 ImGui::TableNextColumn();
 
                 ImGui::PushID(box.id);
-                changed |= ImGui::Checkbox(box.name, &on);
+                changed |= ImGui::Checkbox(Localization::Label(box.name), &on);
                 ImGui::PopID();
             }
 
@@ -8343,7 +8347,15 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
 
     // Space kept free below for the frametime graph and the buttons
     const float footerHeight = FooterHeight();
-    const float sidebarWidth = 120.0f * menuResScale;
+    // Never narrower than the original 120, and wide enough for the longest name: a translated one, or
+    // a long tab, would otherwise run under the edge. The label is drawn 10 in from the item's left
+    float labelsWidth = 0.0f;
+    for (const Tab& tab : tabs)
+    {
+        labelsWidth = std::max(labelsWidth, ImGui::CalcTextSize(Localization::Tr(tab.label)).x + 10.0f * menuResScale);
+        labelsWidth = std::max(labelsWidth, ImGui::CalcTextSize(Localization::Tr(tab.group)).x);
+    }
+    const float sidebarWidth = std::max(120.0f * menuResScale, labelsWidth + 2.0f * style.WindowPadding.x);
     const float tabHeight = ImGui::GetFrameHeight() * 1.35f;
 
     // Sidebar -----------------------------
@@ -8363,7 +8375,7 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
                 if (lastGroup != nullptr)
                     ImGui::Dummy(ImVec2(0.0f, style.ItemSpacing.y));
 
-                ImGui::TextDisabled("%s", tabs[i].group);
+                ImGui::TextDisabled("%s", Localization::Tr(tabs[i].group));
                 lastGroup = tabs[i].group;
             }
 
@@ -8385,7 +8397,7 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
 
             drawList->AddText(
                 ImVec2(rectMin.x + 10.0f * menuResScale, rectMin.y + (tabHeight - ImGui::GetTextLineHeight()) * 0.5f),
-                ImGui::GetColorU32(ImGuiCol_Text), tabs[i].label);
+                ImGui::GetColorU32(ImGuiCol_Text), Localization::Tr(tabs[i].label));
         }
 
         // Compact state of the upscaler and FG pinned to the bottom of the sidebar

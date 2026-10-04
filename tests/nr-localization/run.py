@@ -19,6 +19,24 @@ with tempfile.TemporaryDirectory(prefix="nr-localization-") as temp:
         labels.extend(label_pattern.findall((ROOT / relative).read_text()))
     assert len(labels) >= 60, "ZERO/LOW COVERAGE: expected actual production menu label call sites"
 
+    # The redesigned menu translates in a few central places instead of at each call site: every
+    # section and card title (SectionTitle, ScopedCard, SeparatorWithHelpMarker) and every card name in
+    # the Custom tab picker go through Label; the sidebar's tab and group names, and the picker's tab
+    # headings, through Tr. Their literals are collected here so a title added upstream cannot stay in
+    # English unnoticed.
+    menu_source = (ROOT / "OptiScaler/menu/menu_common.cpp").read_text()
+    literal = r'("(?:\\.|[^"\\])*")'
+    central_labels = []
+    for pattern in (r'\bSectionTitle\(' + literal, r'\bScopedCard card \{ ' + literal, r'\bScopedCard card\(' + literal,
+                    r'\bSeparatorWithHelpMarker\(\s*' + literal):
+        central_labels.extend(re.findall(pattern, menu_source))
+    menu_boxes = re.findall(r'\{ "[a-z_0-9]+", ' + literal + r', ' + literal, menu_source)
+    menu_tabs = re.findall(r'\{ ("(?:MAIN|SYSTEM|ADVANCED)"), ' + literal, menu_source)
+    assert len(central_labels) >= 30 and len(menu_boxes) >= 30 and len(menu_tabs) >= 8, \
+        "ZERO/LOW COVERAGE: the menu's central title, card and tab tables were not found"
+    labels.extend(central_labels + [name for _, name in menu_boxes])
+    central_text = [tab for tab, _ in menu_boxes] + [part for pair in menu_tabs for part in pair]
+
     # Drift guard for display text: every literal the two menus send through Tr, or through the NR
     # menu's HelpMarker (which calls Tr), has an entry. Labels are checked in cases.cpp.
     def c_text(literals):
@@ -36,6 +54,9 @@ with tempfile.TemporaryDirectory(prefix="nr-localization-") as temp:
             text = c_text(literals)
             if re.search(r"[A-Za-z]{2}", text) and text not in pack_keys:
                 missing.append(f"{relative}: {text[:80]!r}")
+    for literals in central_text:
+        if c_text(literals) not in pack_keys:
+            missing.append(f"OptiScaler/menu/menu_common.cpp (tab or group name): {c_text(literals)[:80]!r}")
     assert not missing, "pt-BR pack lacks display text:\n" + "\n".join(missing)
     (Path(temp) / "menu-labels.h").write_text(
         "static const char* menuLabels[] = {\n" + ",\n".join(labels) + "\n};\n")

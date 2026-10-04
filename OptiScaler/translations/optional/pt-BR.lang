@@ -283,3 +283,53 @@ Kaiser2	Kaiser2
 Kaiser3	Kaiser3
 MAGIC	MAGIC
 x	x
+# 2026-10-04: the redesigned menu's tabs, groups, card and section titles, and the Custom tab picker.
+MAIN	PRINCIPAL
+SYSTEM	SISTEMA
+ADVANCED	AVANÇADO
+Custom	Personalizada
+Upscaling	Upscaling
+Neural Rendering	Renderização neural
+Frame Gen	Geração de quadros
+Latency & FPS	Latência e FPS
+Textures	Texturas
+Compatibility	Compatibilidade
+Menu	Menu
+Help / Status	Ajuda / Status
+Accent Colour	Cor de destaque
+Background Colour	Cor de fundo
+Custom Tab	Aba personalizada
+DLSSG Settings	Configurações do DLSSG
+Detected	Detectado
+FSR Common Settings	Configurações comuns do FSR
+FSR FG Settings	Configurações do FSR FG
+FSR-FG Inputs	Entradas do FSR-FG
+Frame Generation	Geração de quadros
+Frame Generation (Enabler + FFX)	Geração de quadros (Enabler + FFX)
+Frame Generation (FSR-FG Inputs)	Geração de quadros (entradas do FSR-FG)
+Frame Generation (FSR3-FG via Nukem's DLSSG)	Geração de quadros (FSR3-FG via DLSSG do Nukem)
+Frame Generation (FSR3-MFG via DLSS Enabler)	Geração de quadros (FSR3-MFG via DLSS Enabler)
+Frame Generation (FSRFG via FFX)	Geração de quadros (FSRFG via FFX)
+Frame Generation (Streamline FG Inputs)	Geração de quadros (entradas de FG do Streamline)
+Framerate	Taxa de quadros
+Hooks / Config	Hooks / Configuração
+Init Flags	Flags de inicialização
+Init Flags (active)	Flags de inicialização (ativas)
+Low Latency	Baixa latência
+Nvngx FG replacement	Substituição do FG Nvngx
+OptiFG Settings	Configurações do OptiFG
+Output Scaling	Output Scaling
+Per shader GPU times	Tempos de GPU por shader
+Plugins / Startup	Plugins / Inicialização
+Reprojection Settings	Configurações da reprojeção
+Shaders / Limits	Shaders / Limites
+Sharpness	Nitidez
+Spoofing / Hooking	Spoofing / Hooks
+Streamline FG Inputs	Entradas de FG do Streamline
+System	Sistema
+Theme and Color	Tema e cores
+Upscale Ratio Override	Substituição da proporção de upscale
+Upscalers	Upscalers
+V-Sync	V-Sync
+XeFG Settings	Configurações do XeFG
+fakenvapi	fakenvapi
