@@ -73,6 +73,7 @@ experiment.
 | `shaders/dlssnr/precompile/DlssNr_Shader.h` | that shader compiled, as bytes |
 | `shaders/dlssnr/DlssNr_Stabilizer_Dx12.h/.cpp`, `precompile/dlssnr_stabilizer.hlsl` | the output stabilizer, off by default; `design/output-stabilizer.md` |
 | `shaders/dlssnr/DlssNr_GuideMatch.h`, `DlssNr_GuideMatch_Dx12.h/.cpp`, `precompile/dlssnr_guides.hlsl` | below the frame's size: depth and motion point-resampled to the model's working size, and the motion-vector scale for the texture handed over; the bytecode header is optional (`__has_include`); `design/reduced-scale-guides.md` |
+| `shaders/dlssnr/DlssNr_Periphery.h`, `DlssNr_Periphery_Dx12.h/.cpp`, `precompile/dlssnr_periphery_warp.h`, `precompile/dlssnr_periphery.hlsl` | peripheral compression, off by default: the model's input packed denser in the centre than at the edges, the guides packed with it, the answer unpacked onto the uniform grid before the resolve; D3D12 only; the three bytecode headers are optional (`__has_include`); `design/peripheral-compression.md` |
 
 ### Editing the shader
 
@@ -103,6 +104,13 @@ their upstream licence text before any build is distributed.
 
 What is not theirs: the OkLab matrices are Bjorn Ottosson's published constants, and the AP1, sRGB
 and PQ transforms are standard colour science.
+
+Peripheral compression's mapping -- the rational radius curve, its inverse and the per-axis budget split --
+is **PeripheralWarp's, by Yuri Grib (BeliyG3)** (https://github.com/BeliyG3/optimizer-fps-dlss5, MIT),
+ported verbatim through **wilsjo2's** OptiScaler-DLSSNR-PreSR-Multipass v0.8.91 (GPL-3.0), whose integration
+-- packing the colour, depth and motion, unpacking the answer -- is the shape this one follows, and whose
+extent and validity rules are ported too. `Licenses/PeripheralWarp_LICENSE.txt` carries the MIT text and
+says which parts are theirs.
 
 The output stabilizer's gate -- the 3x3 input box held against an anchor from when the pixel last moved
 -- is **taken from DLSS5-Feeder's `feed_hold12.h` by Jean-Laurent Rouzies**

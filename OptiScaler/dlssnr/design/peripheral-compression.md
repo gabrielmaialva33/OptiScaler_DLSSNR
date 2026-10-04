@@ -94,11 +94,16 @@ Everything below the encode changes size; nothing about the frame does.
 
 ## Settings
 
-| Key | Default | Meaning |
-|---|---|---|
-| `PeripheryCompression` | false | the whole feature |
-| `PeripheryCenter` | 80 | full-density centre band, percent of each axis |
-| `PeripheryWork` | 90 | packed extent before the working scale, percent of each axis |
+| Key | Menu | Default | Meaning |
+|---|---|---|---|
+| `PeripheryCompression` | Peripheral compression | false | the whole feature |
+| `PeripheryCenter` | Centre band | 80 | full-density centre band, percent of each axis (10 to 96) |
+| `PeripheryWork` | Packed extent | 90 | packed extent before the working scale, percent of each axis (55 to 99) |
+
+The controls sit under Model resolution, are hidden on native Vulkan, and the two sliders commit on
+release. A status line says what the pass did on its last dispatch: active with the packed size, or
+not active and why. `DebugView=4` ("Packed model input", offered only while the setting is on) shows the
+model's packed input through the proxy view; without the periphery it is view 1.
 
 The same two numbers serve both axes. wilsjo2 offers per-axis values, a centre offset and a budget
 shift; v1 has none of them, so there is one quantity per control and no control that edits another's
@@ -106,10 +111,10 @@ value. `BuildAxis` still takes an offset and a shift (it is ported verbatim) and
 
 **Validity**, each failure stated in the menu and logged once on change:
 
-- the centre is at least 10 and below the work extent, and the work extent is below 100;
+- the centre band is at least 10 and below the packed extent, and the packed extent is below 100;
 - **compression at least 0.5**, i.e. `2 x Work >= 100 + Center`. BeliyG3 calls below that "may visibly
-  alias" (`docs/CONFIG.md`); it also bounds the colour pack's footprint at 4 px per packed pixel per
-  unit of working scale. A floor in v1, to be revisited once there is a measurement;
+  alias" (`docs/CONFIG.md`); it also bounds the colour pack's footprint at 4 frame pixels per packed
+  pixel at Model resolution 100, 16 at 25. A floor in v1, to be revisited once there is a measurement;
 - the packed model at least a quarter of the frame on each axis;
 - at least one raw work texel on each side of the band.
 
@@ -178,8 +183,14 @@ Packed model input debug view, to see what the model was shown. Then Divinity on
 
 ```
 DLSS-NR periphery: active, model 3096x1296 for a 3440x1440 frame (uniform grid 3440x1440; centre 80, work 90, compression 0.50; 81 percent of the grid's pixels)
+DLSS-NR working size: 3096x1296 at scale 1.00 (4.01 Mpx), frame 3440x1440 -- packed by peripheral compression
+DLSS-NR periphery guides: depth and motion packed to 3096x1296; the game's vectors to frame pixels by 3440.0 x 1440.0 (game scale 2293.0 x 960.0 against 2293x960, render size, low-resolution vectors), then both ends through the mapping
+DLSS-NR model motion scale 1.0 x 1.0: ... motion texture 3096x1296 (packed, vectors in packed pixels), model 3096x1296
 DLSS-NR periphery: not active -- supersampling (Model resolution above 100) is not supported with peripheral compression
 ```
+
+The third line is the one that shows the motion fix: with DLSS Quality and Ray Reconstruction off the
+render size is below the frame's, and the frame-pixel scale must be the frame's width, not the game's.
 
 ## Not done in v1
 

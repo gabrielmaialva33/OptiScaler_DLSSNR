@@ -11,12 +11,14 @@
 #include <Config.h>
 #include <State.h>
 #include <menu/menu_common.h>
+#include <shaders/dlssnr/DlssNr_Periphery.h>
 
 #include <imgui/imgui.h>
 
 #include <string>
 #include <unordered_map>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 
@@ -36,6 +38,103 @@ static void HelpMarker(const char* tip)
         ImGui::TextUnformatted(Localization::Tr(tip));
         ImGui::PopTextWrapPos();
         ImGui::EndTooltip();
+    }
+}
+
+// Whether peripheral compression ran on a recent dispatch. The status is written only while the setting is on
+// and carries its age, so a pass that stopped running (NR off, a native Vulkan game) does not read as active.
+static bool PeripheryRunning(Config* config, DlssNr::PeripheryState* out = nullptr)
+{
+    const auto status = DlssNr::PeripheryStatus();
+    if (out != nullptr)
+        *out = status;
+    return config->DlssNrPeripheryCompression.value_or_default() && status.seen && status.active &&
+           std::chrono::steady_clock::now() - status.at < std::chrono::seconds(1);
+}
+
+// Peripheral compression (design/peripheral-compression.md), under Model resolution. D3D12 only: a native Vulkan
+// game never reads these keys, so nothing is shown there (DEVELOPMENT.md rule 2). The two sliders commit on
+// release, as Model resolution does: a new work extent is a new packed size, and that rebuilds the model.
+static void RenderPeriphery(Config* config)
+{
+    namespace P = DlssNr::Periphery;
+
+    const auto& state = State::Instance();
+    const bool nativeVulkan = DlssNr::IsRunningVk() || (state.api == API::Vulkan &&
+                                                        (!state.currentFeature || !state.currentFeature->IsWithDx12()));
+    if (nativeVulkan)
+        return;
+
+    bool periphery = config->DlssNrPeripheryCompression.value_or_default();
+    if (ImGui::Checkbox(Localization::Label("Peripheral compression"), &periphery))
+        config->DlssNrPeripheryCompression = periphery;
+
+    HelpMarker("Experimental. The model's input is packed denser in the centre than at the edges, so at the"
+               "\nsame cost the centre keeps full detail and the edges give some up. Its answer is unpacked"
+               "\nbefore it is composed; the frame itself is untouched."
+               "\n\nThe defaults, 80 and 90, cost what a Model resolution of 90 costs, so that is the"
+               "\ncomparison to make, not 100. Matched residual is used at full model resolution too;"
+               "\nClassic blurs colour at the edges here."
+               "\n\nD3D12, after the upscaler or at present. Not above Model resolution 100 and not with the"
+               "\ndriver proxy. Moving a slider restarts the model's history; a new packed size rebuilds it"
+               "\nafter a moment.");
+
+    if (!periphery)
+        return;
+
+    static int pendingCenter = -1;
+    static int pendingWork = -1;
+
+    int center = pendingCenter >= 0 ? pendingCenter : (int) config->DlssNrPeripheryCenter.value_or_default();
+    if (ImGui::SliderInt(Localization::Label("Centre band"), &center, (int) P::kCenterMin, (int) P::kCenterMax, "%d%%"))
+        pendingCenter = center;
+
+    if (ImGui::IsItemDeactivatedAfterEdit() && pendingCenter >= 0)
+    {
+        config->DlssNrPeripheryCenter = (uint32_t) std::clamp(pendingCenter, (int) P::kCenterMin, (int) P::kCenterMax);
+        pendingCenter = -1;
+    }
+
+    HelpMarker("How much of each axis, around the middle, the model sees at full density.");
+
+    int work = pendingWork >= 0 ? pendingWork : (int) config->DlssNrPeripheryWork.value_or_default();
+    if (ImGui::SliderInt(Localization::Label("Packed extent"), &work, (int) P::kWorkMin, (int) P::kWorkMax, "%d%%"))
+        pendingWork = work;
+
+    if (ImGui::IsItemDeactivatedAfterEdit() && pendingWork >= 0)
+    {
+        config->DlssNrPeripheryWork = (uint32_t) std::clamp(pendingWork, (int) P::kWorkMin, (int) P::kWorkMax);
+        pendingWork = -1;
+    }
+
+    HelpMarker("How much of each axis the model's input spans, before Model resolution. Everything past the"
+               "\ncentre is squeezed into the rest, to no less than half its size: this has to be at least"
+               "\nhalfway between the centre band and 100.");
+
+    DlssNr::PeripheryState status {};
+    const bool running = PeripheryRunning(config, &status);
+
+    if (running)
+    {
+        const double share =
+            status.gridWidth != 0 && status.gridHeight != 0
+                ? 100.0 * status.modelWidth * status.modelHeight / ((double) status.gridWidth * status.gridHeight)
+                : 100.0;
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.9f, 0.5f, 1.0f));
+        ImGui::TextWrapped(Localization::Tr("Active: the model works at %ux%u for a %ux%u frame, %.0f percent of the "
+                                            "pixels it would work on without it."),
+                           status.modelWidth, status.modelHeight, status.frameWidth, status.frameHeight, share);
+        ImGui::PopStyleColor();
+    }
+    else if (status.seen && !status.active && std::chrono::steady_clock::now() - status.at < std::chrono::seconds(1))
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+        ImGui::TextWrapped(Localization::Tr("Not active: %s."), Localization::Tr(status.reason));
+        ImGui::PopStyleColor();
+    }
+    else
+    {
+        ImGui::TextDisabled("%s", Localization::Tr("Waiting for the pass to run."));
     }
 }
 
@@ -681,11 +780,15 @@ void RenderMenu(Config* config, float menuResScale)
                    "\nmeasured 25 times an RTX 4090's per-pixel cost. Moving the slider replaces"
                    "\nit; Auto puts it back.");
 
+        RenderPeriphery(config);
+
         // Meaningful only when the model runs BELOW the frame's size. At 100% -- and above, where
         // supersampling composites its down-legged answer at native -- the residual collapses to the
         // model's own picture and the two modes are identical, so the control says so by going grey.
         {
-            const bool reduced = DlssNr::WorkingScale() < 0.999f;
+            // Peripheral compression composes a packed-and-unpacked answer even at 100, through the residual.
+            const bool packed = PeripheryRunning(config);
+            const bool reduced = DlssNr::WorkingScale() < 0.999f || packed;
 
             if (!reduced)
                 ImGui::BeginDisabled();
@@ -718,6 +821,10 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nNo effect at 100% or above: there is no residual to carry and all three are"
                        "\nidentical (supersampling brings its answer down to frame size before this)."
                        "\n\nFrom hhkbble's multi-pass work on this fork.");
+
+            if (packed && DlssNr::WorkingScale() >= 0.999f)
+                ImGui::TextDisabled("%s", Localization::Tr("Peripheral compression is running, so this applies at "
+                                                           "full model resolution too."));
         }
 
         ImGui::SeparatorText(Localization::Tr("How much of it lands"));
@@ -1584,18 +1691,27 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nright of it is the frame the model edited.");
         }
 
+        // The last entry only while peripheral compression is switched on: without it there is no packed input,
+        // and DebugView 4 shows what 1 shows.
         static const char* debugNames[] = { Localization::Label("Off"),
                                             Localization::Label("Proxy (what the model sees)"),
                                             Localization::Label("Model output (raw)"),
-                                            Localization::Label("Difference (amplified)") };
+                                            Localization::Label("Difference (amplified)"),
+                                            Localization::Label("Packed model input") };
+        const bool packedView = config->DlssNrPeripheryCompression.value_or_default();
         int debugView = (int) config->DlssNrDebugView.value_or_default();
-        if (ImGui::Combo(Localization::Label("Debug view"), &debugView, debugNames, IM_ARRAYSIZE(debugNames)))
+        if (ImGui::Combo(Localization::Label("Debug view"), &debugView, debugNames,
+                         packedView ? IM_ARRAYSIZE(debugNames) : IM_ARRAYSIZE(debugNames) - 1))
             config->DlssNrDebugView = (uint32_t) debugView;
 
         HelpMarker("Proxy is the picture handed to the model -- if that looks wrong, the white point"
                    "\nis wrong and nothing downstream can be judged."
                    "\n\nDifference shows what the model actually changed, amplified twenty times and"
                    "\ncentred on grey. A flat grey frame there means it is doing nothing.");
+
+        if (packedView && debugView == 4)
+            ImGui::TextDisabled("%s", Localization::Tr("Packed model input: what the model was handed, edges squeezed, "
+                                                       "stretched over the frame."));
 
         ImGui::PopItemWidth();
     }
