@@ -6,6 +6,7 @@
 #include "DlssNr_PreUpscale.h"
 #include "DlssNr_Chain.h"
 #include "DlssNr_Enlarge.h"
+#include "DlssNr_DetailStats.h"
 #include <memory>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
@@ -380,6 +381,30 @@ PeripheryState PeripheryStatus();
 Enlarge::Status EnlargeStatus();
 
 // What the white point meter last settled on, or 0 when it is not running. For the menu.
+
+// "Measure detail": in-game detail and temporal stability metrics across 60 evaluations on a still scene.
+struct DetailMeasureStatus
+{
+    bool running = false;
+    bool initFailed = false;
+    const char* endReason = nullptr; // a literal: why the last run ended without a result
+    float progress = 0.0f;
+    unsigned samples = 0;
+    unsigned total = 60;
+    DetailStats::Measurement latest {};
+    DetailStats::Measurement previous {};
+    bool hasPrevious = false;
+    std::string detailWords;
+    std::string flickerWords;
+    std::string colourWords;
+    std::string shadowWords;
+    std::string compareWords;
+};
+
+void StartMeasureDetail();
+void CancelMeasureDetail();
+bool DetailMeasureAvailable();
+DetailMeasureStatus GetDetailMeasureStatus();
 
 // Writes a run of consecutive frames, each as the upscaler produced it and again after the model's edit.
 // The pair is a control: same frames, same run, one variable.

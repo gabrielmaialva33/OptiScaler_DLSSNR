@@ -148,6 +148,11 @@ if (precompile / 'DlssNr_Cadence_Shader.cso').exists():
     targets.append(('DlssNr_Cadence_Shader.cso', 'DlssNr_Cadence_Shader.h', 'DlssNr_Cadence_cso', b'DXBC'))
 elif (precompile / 'DlssNr_Cadence_Shader.h').exists():
     fail('DlssNr_Cadence_Shader.h is committed without DlssNr_Cadence_Shader.cso beside it')
+# Detail stats (detail-measure.md). Optional bytecode like cadence: without the bytecode the pass is unavailable.
+if (precompile / 'DlssNr_DetailStats_Shader.cso').exists():
+    targets.append(('DlssNr_DetailStats_Shader.cso', 'DlssNr_DetailStats_Shader.h', 'DlssNr_DetailStats_cso', b'DXBC'))
+elif (precompile / 'DlssNr_DetailStats_Shader.h').exists():
+    fail('DlssNr_DetailStats_Shader.h is committed without DlssNr_DetailStats_Shader.cso beside it')
 # Peripheral compression's three passes (peripheral-compression.md). Optional bytecode like the guide resample's:
 # none of the six files is a supported state (the feature says "unavailable"); any one of them commits to all
 # six, because DlssNr_Periphery_Dx12.cpp loads the three headers together and a .cso without its header, or a
