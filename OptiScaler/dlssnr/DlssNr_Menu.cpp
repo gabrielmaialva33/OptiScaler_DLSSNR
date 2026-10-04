@@ -291,7 +291,10 @@ void RenderMenu(Config* config, float menuResScale)
 
     // DLSS Neural Rendering -----------------------------
     ImGui::Spacing();
-    if (auto ch = ScopedCollapsingHeader(Localization::Label("DLSS Neural Rendering")); ch.IsHeaderOpen())
+    // Open by default: since the menu redesign this panel has a tab of its own, and a tab that opens on
+    // a single closed header is one click for nothing
+    if (auto ch = ScopedCollapsingHeader(Localization::Label("DLSS Neural Rendering"), ImGuiTreeNodeFlags_DefaultOpen);
+        ch.IsHeaderOpen())
     {
         ScopedIndent indent {};
         ImGui::Spacing();

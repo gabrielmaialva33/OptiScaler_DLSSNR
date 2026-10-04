@@ -64,7 +64,7 @@ enum class Upscaler
 
     DLSS, // "dlss", used for the DLSS upscaler backend
 
-    DLSS_on12, // "dlss_12", DLSS run on the D3D12 side of the D3D11 bridge
+    DLSS_on12, // DX12 dlss using interops
 
     DLSSD, // "dlssd", used for the DLSS-D/Ray Reconstruction upscaler+denoiser backend
     Reset
@@ -267,13 +267,18 @@ template <typename T> std::string EnumToCode(T value)
     return "";
 }
 
+constexpr char ToLower(char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; }
+
 // String Code to Enum
 template <typename T> T CodeToEnum(std::string_view code)
 {
-    for (const auto& pair : EnumConfig<T>::mapping)
+    for (const auto& [value, mappedCode] : EnumConfig<T>::mapping)
     {
-        if (pair.second == code)
-            return pair.first;
+        if (std::ranges::equal(mappedCode, code, std::ranges::equal_to {}, ToLower, ToLower))
+        {
+            return value;
+        }
     }
+
     return EnumConfig<T>::default_value;
 }

@@ -42,6 +42,19 @@ enum class FGInput : uint32_t
     ForceXeLL, // Do not expose this option
 };
 
+template <> struct EnumConfig<FGInput>
+{
+    static constexpr auto default_value = FGInput::NoFG;
+
+    static constexpr std::pair<FGInput, std::string_view> mapping[] = {
+        { FGInput::NoFG, "NoFG" },           { FGInput::Upscaler, "Upscaler" },
+        { FGInput::DLSSG, "DLSSG" },         { FGInput::NvngxFG, "NvngxFG" },
+        { FGInput::FSRFG, "FSRFG" },         { FGInput::FSRFG30, "FSRFG30" },
+        { FGInput::XeFG, "XeFG" },           { FGInput::Synthesized, "Synthesized" },
+        { FGInput::ForceXeLL, "ForceXeLL" },
+    };
+};
+
 enum class FGOutput : uint32_t
 {
     NoFG,
@@ -49,6 +62,19 @@ enum class FGOutput : uint32_t
     DLSSG,
     XeFG,
     Reprojection
+};
+
+template <> struct EnumConfig<FGOutput>
+{
+    static constexpr auto default_value = FGOutput::NoFG;
+
+    static constexpr std::pair<FGOutput, std::string_view> mapping[] = {
+        { FGOutput::NoFG, "NoFG" },
+        { FGOutput::FSRFG, "FSRFG" },
+        { FGOutput::DLSSG, "DLSSG" },
+        { FGOutput::XeFG, "XeFG" },
+        { FGOutput::Reprojection, "Reprojection" },
+    };
 };
 
 enum class FGNvngxReplacement : uint32_t
