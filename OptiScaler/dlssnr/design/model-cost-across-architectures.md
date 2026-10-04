@@ -49,15 +49,24 @@ one. A 3060 is roughly three to four times slower than a 4090 at general compute
 term's 2.6x sits comfortably inside that. **25x on the per-pixel term does not.** Whatever separates
 these two runs, it is not "one card is slower".
 
-### The hypothesis, named as a hypothesis
+### Its precondition, confirmed statically (update 2026-10-04)
 
-Ada (sm_89) has FP8 tensor cores. Ampere (sm_86) does not. If the model runs an FP8 path on Ada and
-falls back to FP16 or worse on Ampere, the signature is exactly this shape: the arithmetic term
-explodes while the launch-and-occupancy term barely moves.
+Ada (sm_89) and Blackwell (sm_120) have native FP8 tensor cores. Ampere (sm_86) does not.
+Static binary analysis of the shipping model (`nvngx_dlssnr.dll`, sha256 `6eb209e7...3927`)
+performed by extracting the fatbins and disassembling with `cuobjdump -sass` confirmed:
 
-**Nothing here establishes that.** It is a hypothesis that fits, and it was not tested. It could also
-be a driver path, a kernel selection, or something the model does that has nothing to do with
-numeric format. What is measured is the shape; the cause is guessed.
+| Architecture | Total SASS Instructions | FP8 QMMA (E4M3) | FP16 HMMA |
+|---|---|---|---|
+| sm_75 (Turing) | 1,698,608 | 0 | 149,984 (HMMA.1688) |
+| sm_86 (Ampere) | 1,328,392 | 0 | 74,992 (HMMA.16816) |
+| sm_89 (Ada) | 477,760 | 19,952 | 35,536 |
+| sm_120 (Blackwell) | 487,424 | 19,952 | 35,088 |
+
+The precondition is confirmed statically: Ada and Blackwell ship a separate FP8 network (19,952 tensor ops),
+while Ampere has zero FP8 instructions and runs an FP16 fallback network with 2.8x more total SASS
+instructions.
+
+**Caution & scope:** static SASS instruction counts confirm the presence of distinct binary networks (native FP8 vs FP16 fallback) compiled into the binary, but static counts alone are not dynamic execution cost. They do not explain the full 25x disparity on their own, and say nothing about runtime loop trip counts or bandwidth bottlenecks. Dynamic execution cost is measured at runtime via `[DlssNr] KernelProfile` (`DlssNr_KernelProfile.h`).
 
 ## Frame generation does not exist there at all
 

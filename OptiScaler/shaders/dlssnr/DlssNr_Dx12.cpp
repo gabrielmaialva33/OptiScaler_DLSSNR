@@ -51,6 +51,7 @@
 #include <framegen/IFGFeature_Dx12.h>
 #include "DlssNr_Periphery.h"
 #include "DlssNr_Periphery_Dx12.h"
+#include <dlssnr/DlssNr_KernelProfile.h>
 #include "DlssNr_DetailStats_Dx12.h"
 #include <dlssnr/DlssNr_DetailStats.h>
 
@@ -4774,6 +4775,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
     else
     {
+        const bool profileKernels = cfg.DlssNrKernelProfile.value_or_default();
+        if (profileKernels)
+            DlssNr::KernelProfile::Profiler::Instance().Begin(cmdList, true);
+
         timing.ModelBegin();
 
         // Preserve the single/master call and anchor. Each extra layer has independent history.
@@ -4787,6 +4792,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                autoMaskForChain ? 1 : 0, modelMvScaleX, modelMvScaleY);
 
         timing.ModelEnd();
+
+        if (profileKernels)
+        {
+            auto& kernelProfiler = DlssNr::KernelProfile::Profiler::Instance();
+            kernelProfiler.End(cmdList);
+            for (const auto& rep : kernelProfiler.TakeReports())
+                LOG_INFO("{}", rep);
+        }
 
         if (chainEnabled && (isLogFrame || result != 1))
             LOG_INFO(

@@ -163,6 +163,10 @@ tier = "host"
 timeout = 120
 summary = "The Streamline log repeat filter against the real setDynamicMFGParams line on a fake clock: one line per 10 s with the folded count, new sites at once, a bounded table that fails open."
 
+[nr-kernel-profile]
+tier = "host"
+timeout = 120
+summary = "DLSS-NR NvAPI CUDA kernel classification by prefix, FP8 variant detection, and timing aggregation."
 [nr-detail-measure]
 tier = "host"
 timeout = 120

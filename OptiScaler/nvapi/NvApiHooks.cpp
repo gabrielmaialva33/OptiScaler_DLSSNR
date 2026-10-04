@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "NvApiHooks.h"
 #include <NvApiDriverSettings.h>
+#include <dlssnr/DlssNr_KernelProfile.h>
 
 #include "State.h"
 #include <Config.h>
@@ -250,6 +251,8 @@ void* __stdcall NvApiHooks::hkNvAPI_QueryInterface(unsigned int InterfaceId)
             o_NvAPI_DRS_GetSetting = reinterpret_cast<decltype(&NvAPI_DRS_GetSetting)>(functionPointer);
             return &hkNvAPI_DRS_GetSetting;
         }
+
+        return DlssNr::KernelProfile::WrapNvapi(InterfaceId, functionPointer);
     }
 
     // LOG_DEBUG("counter: {} functionPointer: {:X}", qiCounter, (size_t)functionPointer);

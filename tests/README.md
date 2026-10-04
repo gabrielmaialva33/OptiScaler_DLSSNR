@@ -41,6 +41,8 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 **Host tier.** Twenty-seven suites. All but `nr-invariants` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
+- `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit,
+  etc.), FP8 variant identification, and per-window timing aggregation (mean and maximum).
 - `nr-detail-measure` — the "Measure detail" CPU tile reduction and statistical aggregation (detail added,
   Laplacian raw, flicker beyond native, OkLab chroma/warmth, and shadow darkening/crush), delta comparisons
   and textual metric generation.

@@ -634,6 +634,10 @@ class Config
     // Higher means highlights sit lower on the curve and the model treats them as less extreme.
     CustomOptional<float> DlssNrWhitePointScale { 1.0f };
 
+    // Kernel-variant census and per-group GPU timing of the DLSS-NR model (design/vit-skip.md).
+    // Samples 3 consecutive evaluations out of every 240, logging execution breakdown.
+    CustomOptional<bool> DlssNrKernelProfile { false };
+
     // --- end DLSS 5 Neural Rendering -------------------------------------------------------------
 
     // DLSS
