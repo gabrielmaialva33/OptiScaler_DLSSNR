@@ -181,6 +181,10 @@ struct DlssNr_Cadence_Dx12
 {
 };
 
+struct DlssNr_DetailStats_Dx12
+{
+};
+
 struct NrState
 {
     void (*release)(void*) = nullptr;

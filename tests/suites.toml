@@ -162,3 +162,8 @@ summary = "The NR model loaders' byte-level decisions against synthetic PE64 ima
 tier = "host"
 timeout = 120
 summary = "The Streamline log repeat filter against the real setDynamicMFGParams line on a fake clock: one line per 10 s with the folded count, new sites at once, a bounded table that fails open."
+
+[nr-detail-measure]
+tier = "host"
+timeout = 120
+summary = "The Measure detail CPU tile reduction and statistical aggregation (flicker, detail, saturation, shadows)."

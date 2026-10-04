@@ -51,6 +51,8 @@
 #include <framegen/IFGFeature_Dx12.h>
 #include "DlssNr_Periphery.h"
 #include "DlssNr_Periphery_Dx12.h"
+#include "DlssNr_DetailStats_Dx12.h"
+#include <dlssnr/DlssNr_DetailStats.h>
 
 namespace
 {
@@ -1238,6 +1240,7 @@ struct NrRetired
     DlssNr_UiMask_Dx12* uiMask = nullptr;
     DlssNr_Cadence_Dx12* cadence = nullptr;
     NrEnlarger* enlarger = nullptr;
+    DlssNr_DetailStats_Dx12* detailStats = nullptr;
 };
 
 std::vector<NrRetired> g_nrRetired;
@@ -1373,6 +1376,7 @@ void TickNrRetired()
         delete retired.stabilizer;
         delete retired.uiMask;
         delete retired.cadence;
+        delete retired.detailStats;
 
         if (retired.enlarger != nullptr)
             enlargers.push_back(retired.enlarger);
@@ -1409,6 +1413,20 @@ void ForgetCalibration()
     g_nr.calibSteadiness = 0.0f;
     g_nr.calibUsable = false;
     g_nr.calibWhy = "measuring...";
+}
+
+void ParkNrDetailStats(DlssNr_DetailStats_Dx12*& detailStats)
+{
+    if (!detailStats)
+        return;
+
+    NrRetired r;
+    r.tracked = g_tracked;
+    if (g_tracked)
+        r.usage = g_usage;
+    r.detailStats = detailStats;
+    detailStats = nullptr;
+    g_nrRetired.push_back(r);
 }
 
 void ParkAltSurfaces()
@@ -5211,6 +5229,92 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                   NgxResultName((unsigned int) result));
     }
 
+    // "Measure detail": in-game detail and temporal stability metrics across 60 evaluations on a still scene
+    if (wrote && DlssNr_DetailStats_Dx12::Available())
+    {
+        std::lock_guard<std::mutex> measureLock(g_detailMeasure.mutex);
+        if (g_detailMeasure.running)
+        {
+            if (g_detailMeasure.pass == nullptr)
+                g_detailMeasure.pass = new DlssNr_DetailStats_Dx12("DLSS-NR detail stats", device);
+
+            if (g_detailMeasure.prevOutput == nullptr)
+                g_detailMeasure.prevOutput = CreateScratch(device, desc.Format, width, height);
+
+            if (g_detailMeasure.prevInput == nullptr)
+                g_detailMeasure.prevInput = CreateScratch(device, desc.Format, width, height);
+
+            if (g_detailMeasure.pass != nullptr && g_detailMeasure.pass->IsInit() &&
+                g_detailMeasure.prevOutput != nullptr && g_detailMeasure.prevInput != nullptr)
+            {
+                // First check previous completed slots for readback without CPU stall
+                for (uint32_t s = 0; s < DLSSNR_DETAIL_STATS_SLOTS; ++s)
+                {
+                    if (g_detailMeasure.slotPending[s] &&
+                        (!g_tracked || DlssNr::Submission::Completed(g_detailMeasure.slotUsage[s])))
+                    {
+                        DlssNr::DetailStats::Stats st {};
+                        if (g_detailMeasure.pass->Readback(s, st))
+                        {
+                            g_detailMeasure.accumulator.Add(st);
+                            g_detailMeasure.samplesCollected++;
+                            g_detailMeasure.status.samples = g_detailMeasure.samplesCollected;
+                            g_detailMeasure.status.progress =
+                                (float) g_detailMeasure.samplesCollected / (float) DetailMeasureSession::kTarget;
+                        }
+                        g_detailMeasure.slotPending[s] = false;
+                    }
+                }
+
+                if (g_detailMeasure.samplesCollected < DetailMeasureSession::kTarget)
+                {
+                    const uint32_t currentSlot = g_detailMeasure.slot;
+                    g_detailMeasure.slot = (g_detailMeasure.slot + 1) % DLSSNR_DETAIL_STATS_SLOTS;
+
+                    if (g_detailMeasure.pass->Record(cmdList, target, g_detailMeasure.prevOutput, g_nr.colorCopy,
+                                                     g_detailMeasure.prevInput, modelInput, width, height, paperWhite,
+                                                     currentSlot))
+                    {
+                        if (g_tracked)
+                            DlssNr::Submission::Track(cmdList, g_detailMeasure.slotUsage[currentSlot]);
+                        g_detailMeasure.slotPending[currentSlot] = true;
+
+                        // Save current frames for the next evaluation's delta
+                        cmdList->CopyResource(g_detailMeasure.prevOutput, target);
+                        cmdList->CopyResource(g_detailMeasure.prevInput, g_nr.colorCopy);
+                    }
+                }
+                else
+                {
+                    // Measurement complete: compute aggregate stats
+                    const auto finalMeasurement = g_detailMeasure.accumulator.Finish(width, height);
+                    if (g_detailMeasure.status.latest.samples > 0)
+                    {
+                        g_detailMeasure.status.previous = g_detailMeasure.status.latest;
+                        g_detailMeasure.status.hasPrevious = true;
+                    }
+                    g_detailMeasure.status.latest = finalMeasurement;
+                    g_detailMeasure.status.detailWords = finalMeasurement.DetailWords();
+                    g_detailMeasure.status.flickerWords = finalMeasurement.FlickerWords();
+                    g_detailMeasure.status.colourWords = finalMeasurement.ColourWords();
+                    g_detailMeasure.status.shadowWords = finalMeasurement.ShadowWords();
+                    g_detailMeasure.status.compareWords = finalMeasurement.Compare(g_detailMeasure.status.previous);
+                    g_detailMeasure.status.running = false;
+                    g_detailMeasure.running = false;
+
+                    LOG_INFO("DLSS-NR measure detail: {} | {} | {} | {}", g_detailMeasure.status.detailWords,
+                             g_detailMeasure.status.flickerWords, g_detailMeasure.status.colourWords,
+                             g_detailMeasure.status.shadowWords);
+
+                    // Retire scratch resources safely to free VRAM
+                    ParkNrDetailStats(g_detailMeasure.pass);
+                    ParkNrResource(g_detailMeasure.prevOutput);
+                    ParkNrResource(g_detailMeasure.prevInput);
+                }
+            }
+        }
+    }
+
     hdrRead.Restore();
 
     depthCloneRead.Restore();
@@ -7462,6 +7566,52 @@ void RequestCapture(unsigned int frames)
 
 bool CaptureInProgress() { return g_capture.isActive(); }
 
+struct DetailMeasureSession
+{
+    std::mutex mutex;
+    bool running = false;
+    unsigned samplesCollected = 0;
+    static constexpr unsigned kTarget = 60;
+    uint32_t slot = 0;
+    DlssNr_DetailStats_Dx12* pass = nullptr;
+    ID3D12Resource* prevOutput = nullptr;
+    ID3D12Resource* prevInput = nullptr;
+    DlssNr::Submission::Usage slotUsage[DLSSNR_DETAIL_STATS_SLOTS] {};
+    bool slotPending[DLSSNR_DETAIL_STATS_SLOTS] {};
+    DlssNr::DetailStats::Accumulator accumulator;
+    DlssNr::DetailMeasureStatus status;
+};
+
+static DetailMeasureSession g_detailMeasure;
+
+void StartMeasureDetail()
+{
+    std::lock_guard<std::mutex> lock(g_detailMeasure.mutex);
+    g_detailMeasure.running = true;
+    g_detailMeasure.samplesCollected = 0;
+    g_detailMeasure.accumulator.Reset();
+    g_detailMeasure.status.running = true;
+    g_detailMeasure.status.progress = 0.0f;
+    g_detailMeasure.status.samples = 0;
+}
+
+void CancelMeasureDetail()
+{
+    std::lock_guard<std::mutex> lock(g_detailMeasure.mutex);
+    g_detailMeasure.running = false;
+    g_detailMeasure.status.running = false;
+    g_detailMeasure.accumulator.Reset();
+    ParkNrDetailStats(g_detailMeasure.pass);
+    ParkNrResource(g_detailMeasure.prevOutput);
+    ParkNrResource(g_detailMeasure.prevInput);
+}
+
+DetailMeasureStatus GetDetailMeasureStatus()
+{
+    std::lock_guard<std::mutex> lock(g_detailMeasure.mutex);
+    return g_detailMeasure.status;
+}
+
 void Shutdown()
 {
     std::lock_guard<std::mutex> preLock(g_preMutex);
@@ -7600,6 +7750,24 @@ void Shutdown()
     {
         delete g_nr.periphery;
         g_nr.periphery = nullptr;
+    }
+
+    if (g_detailMeasure.pass != nullptr)
+    {
+        delete g_detailMeasure.pass;
+        g_detailMeasure.pass = nullptr;
+    }
+
+    if (g_detailMeasure.prevOutput != nullptr)
+    {
+        g_detailMeasure.prevOutput->Release();
+        g_detailMeasure.prevOutput = nullptr;
+    }
+
+    if (g_detailMeasure.prevInput != nullptr)
+    {
+        g_detailMeasure.prevInput->Release();
+        g_detailMeasure.prevInput = nullptr;
     }
 
     if (g_nr.superDown != nullptr)

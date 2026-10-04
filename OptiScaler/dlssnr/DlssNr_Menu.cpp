@@ -1801,6 +1801,48 @@ void RenderMenu(Config* config, float menuResScale)
                    "\ndrift and confound the comparison."
                    "\n\nHide the menu and it stays held. Untoggle to resume.");
 
+        // "Measure detail" (D3D12 only, under Compare)
+        if (!nativeVulkan)
+        {
+            const auto mStatus = DlssNr::GetDetailMeasureStatus();
+            if (mStatus.running)
+            {
+                char progressText[64];
+                snprintf(progressText, sizeof(progressText), "Measuring detail (%u of %u)...", mStatus.samples,
+                         mStatus.total);
+                ImGui::ProgressBar(mStatus.progress, ImVec2(-FLT_MIN, 0.0f), progressText);
+                if (ImGui::SmallButton(Localization::Label("Cancel##measureDetail")))
+                    DlssNr::CancelMeasureDetail();
+            }
+            else
+            {
+                if (ImGui::Button(Localization::Label("Measure detail")))
+                    DlssNr::StartMeasureDetail();
+
+                HelpMarker("Measures NR's output on the scene on screen at the current settings for 60 evaluations, "
+                           "against the game's own frame (ideally with Hold frame on):\n"
+                           "  - Detail: fine band detail added (sigma ~1.2 px vs ~3 px)\n"
+                           "  - Flicker: frame-to-frame output change beyond input change\n"
+                           "  - Colour: saturation change and warmth shift\n"
+                           "  - Shadows: darkening and crushed share\n"
+                           "Results are compared against the previous measurement.");
+            }
+
+            if (mStatus.latest.samples > 0)
+            {
+                ImGui::TextWrapped("%s", mStatus.detailWords.c_str());
+                ImGui::TextWrapped("%s", mStatus.flickerWords.c_str());
+                ImGui::TextWrapped("%s", mStatus.colourWords.c_str());
+                ImGui::TextWrapped("%s", mStatus.shadowWords.c_str());
+                if (mStatus.hasPrevious && !mStatus.compareWords.empty())
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.8f, 1.0f, 1.0f));
+                    ImGui::TextWrapped("%s", mStatus.compareWords.c_str());
+                    ImGui::PopStyleColor();
+                }
+            }
+        }
+
         static const char* compareNames[] = { Localization::Label("Off"), Localization::Label("Side by side"),
                                               Localization::Label("Wipe") };
         int compare = (int) config->DlssNrCompare.value_or_default();

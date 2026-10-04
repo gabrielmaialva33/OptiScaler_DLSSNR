@@ -38,9 +38,12 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Twenty-six suites. All but `nr-invariants` build real production code with local fakes under
+**Host tier.** Twenty-seven suites. All but `nr-invariants` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
+- `nr-detail-measure` — the "Measure detail" CPU tile reduction and statistical aggregation (detail added,
+  Laplacian raw, flicker beyond native, OkLab chroma/warmth, and shadow darkening/crush), delta comparisons
+  and textual metric generation.
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
   ownership and deferred release against scripted COM/Win32 fakes, and which FG input and output
   the bridge is built for. Also a refused presenter resize and its recovery, and the D3D12 overlay's
