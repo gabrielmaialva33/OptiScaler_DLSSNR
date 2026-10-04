@@ -2974,7 +2974,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const bool scanInverted = cfg.DlssNrScanInverted.value_or_default();
     const float scanTrim = cfg.DlssNrScanTrim.value_or_default();
     const bool holdFrame = cfg.DlssNrHoldFrame.value_or_default();
-    const bool reversibleMode = cfg.DlssNrReversibleMode.value_or_default();
+    const uint32_t reversibleMode = cfg.DlssNrReversibleMode.value_or_default();
 
     // The two comparison controls, said out loud when they move.
     //

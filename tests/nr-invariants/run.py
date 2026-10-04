@@ -276,6 +276,26 @@ if cbv_sites == 0:
 if len(failures) == before:
     print(f'PASS: {cbv_sites} constant-buffer views sized by sizeof(T) are all over alignas(256) structs')
 
+# A setting read into a bool keeps only "set or not". DlssNr_Dx12.cpp read ReversibleMode (0..4) that way from
+# 8d81082c to 2026-10-04, so the encode was handed 1 for every mode and never ran Hybrid while the resolve
+# decoded Hybrid. Every `bool x = cfg.DlssNrKey.value_or_default()` must read a bool key.
+before = len(failures)
+config_types = dict((name, kind) for kind, name in
+                    re.findall(r'CustomOptional<([^>]+)>\s+(DlssNr\w+)\b', (root / 'OptiScaler/Config.h').read_text()))
+bool_reads = 0
+for path in sorted((root / 'OptiScaler/shaders/dlssnr').glob('*.cpp')) + sorted((root / 'OptiScaler/dlssnr').glob('*.cpp')):
+    text = path.read_text(errors='replace')
+    for match in re.finditer(r'\bbool\s+\w+\s*=\s*cfg\.(DlssNr\w+)\.value_or_default\(\)', text):
+        bool_reads += 1
+        kind = config_types.get(match.group(1))
+        if kind != 'bool':
+            line = text.count('\n', 0, match.start()) + 1
+            fail(f'{path.relative_to(root)}:{line}: {match.group(1)} is CustomOptional<{kind}> but is read into a bool')
+if bool_reads == 0:
+    fail('found no bool read of a DlssNr setting; the scan no longer matches the code')
+if len(failures) == before:
+    print(f'PASS: {bool_reads} DlssNr settings read into a bool are all bool settings')
+
 if failures:
     for message in failures:
         print(f'FAIL: {message}')
