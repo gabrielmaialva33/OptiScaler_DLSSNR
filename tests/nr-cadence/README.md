@@ -53,7 +53,10 @@ fits a 256-byte view; every register is a root-signature slot and every unused o
 descriptor; the shader defines every hook the rule header reads; the bytecode is included only behind
 `__has_include`; the pass is built in one place, behind the scheduler's answer, and dispatched only by
 decisions a running cadence makes; the refusals are wired to the inputs the design note names; only
-`GatherFrame` marks guides as the game's; the pass is parked and freed with the rest; it is registered
+`GatherFrame` marks guides as the game's; the pass is parked and freed with the rest; under peripheral
+compression the carry reads the packed vectors at scale 1, as the model does, rather than converting
+them a second time from the game's units (which carried every edit too far, and was caught only in
+review when the two features met); it is registered
 in the project; the licence ships and the rules carry their attribution.
 
 ## What it does not prove

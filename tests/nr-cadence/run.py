@@ -83,6 +83,18 @@ gather = renderer[renderer.index('DlssNrFrameInfo GatherFrame('):]
 assert gather.index('frame.GameGuides = true;') < gather.index('\n}\n')
 # Parked, never freed under the GPU, and freed with the rest.
 assert 'delete retired.cadence;' in renderer and 'delete r.cadence;' in renderer
+# Under peripheral compression the vectors the carry reads are the packed ones the model is handed, already in
+# packed working pixels: their scale is 1 for both, never a second conversion from the game's units, which
+# carries every edit too far. Both readers decide on the same flag, set before either reads it.
+packed_set = renderer.index('guidesPacked = true;')
+cadence_frame = renderer[renderer.index('DlssNr_Cadence_Dx12::Frame cadenceFrame {};'):]
+cadence_frame = cadence_frame[:cadence_frame.index('cadenceFrame.scale =')]
+for axis in 'XY':
+    carry = re.search(rf'cadenceFrame\.mvToWork{axis}\s*=\s*([^;]*);', cadence_frame)
+    model = re.search(rf'const float guideMvScale{axis}ToWork\s*=\s*([^;]*);', renderer)
+    assert carry and re.match(r'guidesPacked\s*\?\s*1\.0f\s*:', carry.group(1)), f'cadence mvToWork{axis}'
+    assert model and re.match(r'guidesPacked\s*\?\s*1\.0f\s*:', model.group(1)), f'model guideMvScale{axis}ToWork'
+    assert packed_set < model.start() < renderer.index('DlssNr_Cadence_Dx12::Frame cadenceFrame {};')
 
 # Registered in the project, once each.
 project = read('OptiScaler.vcxproj')
@@ -99,7 +111,8 @@ assert 'Copyright (c) 2026 Yuri Grib (BeliyG3)' in licence and 'MIT License' in 
 assert 'BeliyG3' in rule and 'Licenses/OptimizerFps_LICENSE.txt' in rule
 
 print('PASS: cadence constants == cbuffer, registers == root signature, every rule hook defined, optional bytecode, '
-      'off allocates and dispatches nothing, refusals wired, registered, attributed', flush=True)
+      'off allocates and dispatches nothing, refusals wired, packed vectors at scale 1, registered, attributed',
+      flush=True)
 
 # --- The production headers, compiled ---------------------------------------------------------------------------
 
