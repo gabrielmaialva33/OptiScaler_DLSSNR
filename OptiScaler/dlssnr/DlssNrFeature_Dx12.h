@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d12.h>
+#include <chrono>
 #include <mutex>
 #include "DlssNr_PreUpscale.h"
 #include "DlssNr_Chain.h"
@@ -342,6 +343,25 @@ bool RunningAfterRayReconstruction();
 bool ObservedRayReconstructionRoute();
 unsigned int ActivePassCount();
 const char* MultipassStatus();
+
+// What peripheral compression did on the last D3D12 dispatch (design/peripheral-compression.md), for the
+// menu's status line. reason is a string literal: "active", or why not.
+struct PeripheryState
+{
+    bool seen = false; // a dispatch has evaluated the setting
+    bool active = false;
+    const char* reason = "";
+    unsigned int modelWidth = 0; // the packed extent the model works at
+    unsigned int modelHeight = 0;
+    unsigned int gridWidth = 0; // the uniform grid the answer is unpacked onto
+    unsigned int gridHeight = 0;
+    unsigned int frameWidth = 0;
+    unsigned int frameHeight = 0;
+    float compression = 1.0f; // the smaller side's k
+    std::chrono::steady_clock::time_point at {};
+};
+
+PeripheryState PeripheryStatus();
 
 // What the white point meter last settled on, or 0 when it is not running. For the menu.
 
