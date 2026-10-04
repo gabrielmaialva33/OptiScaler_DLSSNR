@@ -34,6 +34,15 @@ assert dispatch.count('g_nr.evaluate(') == 2  # no unmeasured forwarder calls ou
 assert second_begin > dispatch.index('for (unsigned i = 1; i < passSnapshot.Count; ++i)')
 assert dispatch.index('timing.FinishOnScopeExit(') > dispatch.index('colorRead.Restore();')
 assert 'wrote && result == 1 && chain.completed == passSnapshot.Count' in dispatch
+# Model cadence (design/model-cadence.md): a carried frame calls no model, so it records no model markers,
+# is never rejected as a partial chain, finishes with zero passes, and holds a pending reset.
+carry_call = dispatch.index('g_nr.cadence->Carry(')
+assert carry_call < first_begin, 'the carry must be the alternative to the model call, not after it'
+assert dispatch[carry_call:first_begin].count('g_nr.evaluate(') == 0
+assert 'if (!carried && chain.completed != passSnapshot.Count)\n        timing.Reject("partial-chain");' in dispatch
+assert 'timing.FinishOnScopeExit(carried ? 0u : chain.completed, timingComplete);' in dispatch
+assert 'if (!carried)\n        g_nr.reset = false;' in dispatch
+assert dispatch.count('g_nr.reset = false;') == 2  # the proxy path and the model frame, never a carried one
 header = (root / 'OptiScaler/dlssnr/DlssNr_GpuTiming.h').read_text()
 records = between(header, 'struct Metadata\n', '// Collection never waits')
 unit = (here / 'fakes.h').read_text()

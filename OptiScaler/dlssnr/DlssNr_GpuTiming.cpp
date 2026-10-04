@@ -193,7 +193,8 @@ void PollLocked()
                     const D3D12_RANGE written { 0, 0 };
                     slot.readback->Unmap(0, &written);
                     Detail::Durations durations;
-                    if (!Detail::Decode(values.data(), slot.queryCount, slot.models, certificate.frequency, durations))
+                    if (!Detail::Decode(values.data(), slot.queryCount, slot.models, certificate.frequency, durations,
+                                        slot.metadata.carried))
                         Drop("invalid-timestamps", &slot);
                     else
                     {
@@ -218,7 +219,8 @@ void PollLocked()
                             LOG_INFO(
                                 "DLSS-NR gpu timing confirmed: run={} sample={} evaluation={} present={} stage={} "
                                 "contract={} generation={} model_identity={} render={}x{} compose={}x{} model={}x{} "
-                                "working_scale={} model_reset={} capture_active={} passes={}/{} dispatch_ms={:.6f} "
+                                "working_scale={} model_reset={} capture_active={} cadence={} carried={} passes={}/{} "
+                                "dispatch_ms={:.6f} "
                                 "model_ms={:.6f} outside_model_ms={:.6f} "
                                 "queue={} fence={} frequency_hz={} interval={} unit=eligible-evaluations "
                                 "accepted={} discarded={} proof=sealed-single-execution-fence",
@@ -227,10 +229,10 @@ void PollLocked()
                                 slot.metadata.modelIdentity, slot.metadata.renderWidth, slot.metadata.renderHeight,
                                 slot.metadata.outputWidth, slot.metadata.outputHeight, slot.metadata.modelWidth,
                                 slot.metadata.modelHeight, slot.metadata.workingScale, slot.metadata.modelReset,
-                                slot.metadata.captureActive, slot.actualPasses, slot.metadata.requestedPasses,
-                                durations.totalMs, durations.modelMs, durations.outsideModelMs, certificate.queue,
-                                certificate.fence, certificate.frequency, slot.interval, snapshot.accepted,
-                                snapshot.discarded);
+                                slot.metadata.captureActive, slot.metadata.cadence, slot.metadata.carried,
+                                slot.actualPasses, slot.metadata.requestedPasses, durations.totalMs, durations.modelMs,
+                                durations.outsideModelMs, certificate.queue, certificate.fence, certificate.frequency,
+                                slot.interval, snapshot.accepted, snapshot.discarded);
                         }
                         catch (...)
                         {

@@ -2,7 +2,7 @@
 
 Run `python3 tests/nr-timing-boundary/run.py` from the repository root. The runner extracts the
 production metadata builder and timing menu, compiles them with strict host fakes under ASan/UBSan,
-and requires all 15 cases to execute. An assertion, compilation error, sanitizer report, or missing
+and requires all 21 cases to execute. An assertion, compilation error, sanitizer report, or missing
 source anchor is failure. Production declaration records are extracted from `DlssNr_GpuTiming.h`.
 
 The executable checks configuration generations, stage, working-size and HDR/format changes, per-pass overrides,
@@ -19,6 +19,14 @@ source guards are not execution of the full Windows renderer.
 
 The metadata cases include returning to a prior contract and repeated evaluation without a
 generation/hash change.
+
+Model cadence (`dlssnr/design/model-cadence.md`): the cadence in effect is named in the contract only
+when it runs, so a contract with it off reads as before; a carried frame has the same contract and
+generation as a model frame of the same cadence and differs only by its `carried` flag; the menu names
+a carried sample (no model call, so no model time) and a model frame of a cadence, and says nothing
+with the cadence off. Source guards require the carry to be the alternative to the model call -- before
+the first model marker, with no forwarder call in between -- a carried frame never rejected as a
+partial chain and finished with zero passes, and a pending reset cleared only by a frame the model ran on.
 
 These tests prove host metadata/UI decisions and detect marker-placement regressions. They do not run
 NGX, submit D3D12 commands, validate actual GPU timestamps, or establish Crimson Desert acceptance.

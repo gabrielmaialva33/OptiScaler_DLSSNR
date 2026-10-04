@@ -3,8 +3,10 @@ int main() {
     Config cfg;
     DlssNrPassSnapshot passes;
     auto make=[&](const char* stage="after", unsigned w=3440, unsigned h=1440, float scale=1.0f,
-                  bool reset=false, bool capture=false, bool hdr=true, unsigned format=10) {
-        return TimingMetadata(cfg,passes,42,17,stage,2293,960,w,h,unsigned(w*scale),unsigned(h*scale),scale,reset,capture,hdr,format);
+                  bool reset=false, bool capture=false, bool hdr=true, unsigned format=10, unsigned cadence=1,
+                  bool carried=false) {
+        return TimingMetadata(cfg,passes,42,17,stage,2293,960,w,h,unsigned(w*scale),unsigned(h*scale),scale,reset,capture,hdr,format,
+                              cadence,carried);
     };
     auto a=make(), b=make();
     assert(a.settingsGeneration==b.settingsGeneration && a.contractHash==b.contractHash); ++cases;
@@ -27,6 +29,14 @@ int main() {
     auto sdr=make("after",3440,1440,1,false,false,false,28);
     assert(sdr.contractHash!=hidden.contractHash); ++cases;
     assert(a.modelWidth==3440 && a.settingsGeneration<hidden.settingsGeneration); ++cases;
+    // Model cadence: the cadence in effect is configuration, a carried frame is not; off reads as it always did.
+    auto plain=make("after",3440,1440,1,false,false,false,28,1,false);
+    assert(plain.contractHash==sdr.contractHash && plain.cadence==1 && !plain.carried); ++cases;
+    auto modelFrame=make("after",3440,1440,1,false,false,false,28,2,false);
+    auto carriedFrame=make("after",3440,1440,1,false,false,false,28,2,true);
+    assert(modelFrame.contractHash!=plain.contractHash && modelFrame.cadence==2 && !modelFrame.carried);
+    assert(carriedFrame.contractHash==modelFrame.contractHash && carriedFrame.settingsGeneration==modelFrame.settingsGeneration);
+    assert(carriedFrame.carried && carriedFrame.cadence==2); ++cases;
 
     using DlssNr::RenderGpuTiming;
     ImGui::Clear(); RenderGpuTiming(&cfg,true);
@@ -45,8 +55,17 @@ int main() {
     ImGui::Clear(); RenderGpuTiming(&cfg,false);
     assert(ImGui::Contains("Historical sample 12, 2.5 s") && ImGui::Contains("interval was 30 evaluations"));
     assert(ImGui::Contains("not the current frame") && !ImGui::Contains("ms per frame")); ++cases;
+    published.metadata=carriedFrame; published.actualPasses=0; published.modelMs=0;
+    ImGui::Clear(); RenderGpuTiming(&cfg,false);
+    assert(ImGui::Contains("A carried frame of model cadence 2") && !ImGui::Contains("A model frame of model cadence")); ++cases;
+    published.metadata=modelFrame; published.actualPasses=1; published.modelMs=4;
+    ImGui::Clear(); RenderGpuTiming(&cfg,false);
+    assert(ImGui::Contains("A model frame of model cadence 2") && !ImGui::Contains("A carried frame")); ++cases;
+    published.metadata=a;
+    ImGui::Clear(); RenderGpuTiming(&cfg,false);
+    assert(!ImGui::Contains("model cadence")); ++cases;
     ImGui::toggle=0; ImGui::Clear(); RenderGpuTiming(&cfg,false);
     assert(!cfg.settings.Enabled && ImGui::sliderCalls==0 && !ImGui::Contains("Last confirmed")); ++cases;
-    assert(cases==16);
+    assert(cases==21);
     std::printf("PASS %d timing boundary metadata/UI cases\n",cases);
 }

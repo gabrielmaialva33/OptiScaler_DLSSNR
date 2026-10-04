@@ -44,6 +44,9 @@
 #include "DlssNr_UiMask_Dx12.h"
 #include "DlssNr_GuideMatch.h"
 #include "DlssNr_GuideMatch_Dx12.h"
+#include "DlssNr_Cadence_Dx12.h"
+#include <dlssnr/DlssNr_Cadence.h>
+#include <framegen/IFGFeature_Dx12.h>
 
 namespace
 {
@@ -365,6 +368,15 @@ struct NrState
     DlssNr_UiMask_Dx12* uiMask = nullptr;
     std::chrono::steady_clock::time_point uiMaskLast {};
 
+    // Model cadence (design/model-cadence.md): the surfaces that carry the model's last edit onto the frames
+    // it does not run on. Built for one working size, parked like the stabilizer when that changes or when the
+    // cadence is switched off or cannot run on the route. featureGeneration counts feature creations, so a
+    // rebuilt model never inherits an edit made by the one before it; cadencePasses is what the last model
+    // frame completed, which the menu keeps showing through carried frames.
+    DlssNr_Cadence_Dx12* cadence = nullptr;
+    uint64_t featureGeneration = 0;
+    unsigned int cadencePasses = 0;
+
     unsigned int workWidth = 0;
     unsigned int workHeight = 0;
 
@@ -552,7 +564,7 @@ DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSn
                                            uint64_t present, const char* stage, unsigned renderWidth,
                                            unsigned renderHeight, unsigned width, unsigned height, unsigned workWidth,
                                            unsigned workHeight, float workScale, bool reset, bool captureActive,
-                                           bool linearHdr, unsigned format)
+                                           bool linearHdr, unsigned format, unsigned cadence, bool carried)
 {
     auto contract = std::format(
         "stage={} render={}x{} compose={}x{} model={}x{} scale={} passes={} individual={} "
@@ -577,6 +589,10 @@ DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSn
                                 pass.Preset, pass.Style, pass.Intensity, pass.LocalStructure, pass.LocalTone,
                                 pass.SkinStructure, pass.AutoMask);
     }
+    // The cadence in effect is part of the configuration; whether this evaluation was a carried frame is not,
+    // like the reset. Only named when it runs, so a contract with it off reads as it always did.
+    if (cadence > 1)
+        contract += std::format(" cadence={}", cadence);
     static std::string previous;
     static uint64_t generation = 0;
     static uint64_t hash = 0;
@@ -607,6 +623,8 @@ DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSn
     metadata.requestedPasses = passes.Count;
     metadata.modelReset = reset;
     metadata.captureActive = captureActive;
+    metadata.cadence = cadence > 1 ? cadence : 1;
+    metadata.carried = carried;
     const auto& identity = TimingModelIdentity();
     std::snprintf(metadata.modelIdentity, sizeof(metadata.modelIdentity), "%s", identity.c_str());
     return metadata;
@@ -1014,6 +1032,41 @@ void ChainStatus(const char* reason)
         LOG_INFO("DLSS-NR chain: {}", reason);
 }
 
+// Model cadence (design/model-cadence.md): which frames run the model and which carry its last edit. Decided
+// once per Dispatch, under the pass's lock.
+DlssNr::Cadence::Scheduler g_cadence;
+
+// What the menu shows under the control. Starts as "off", so a session that never turns the cadence on logs
+// nothing about it.
+std::atomic<const char*> g_cadenceStatus { DlssNr::Cadence::Describe(DlssNr::Cadence::Reason::Off, 1) };
+
+// Published, and logged once on change, for a refusal or a running cadence. A forced model frame -- a reset,
+// a change, a gap -- is one frame's event, not a state, and leaves the status alone. A second call in one
+// present is published: a title that does it every present never carries, and should say why.
+void PublishCadence(const DlssNr::Cadence::Decision& decision)
+{
+    using DlssNr::Cadence::Reason;
+    if (DlssNr::Cadence::IsForced(decision.reason) && decision.reason != Reason::SamePresent)
+        return;
+
+    const char* status = DlssNr::Cadence::Describe(decision.reason, decision.cadence);
+    if (g_cadenceStatus.exchange(status) != status)
+        LOG_INFO("DLSS-NR cadence: {}", status);
+}
+
+// Whether any frame generation is turning this pass's frames into more than one present: OptiScaler's own
+// (FSR-FG, XeFG, reprojection, synthesized) running and not paused, the game's DLSS-G through NGX (the
+// multi-frame count its evaluate reports, cleared after six evaluates without one), or a DLSS-G mode set
+// through Streamline. Model cadence stands down for all of them unless the user opts in: frame times then
+// alternate long and short, and DLSS-G was measured unable to pace through that.
+bool FrameGenerationActive()
+{
+    auto& state = State::Instance();
+    if (auto* fg = state.currentFG; fg != nullptr && fg->IsActive() && !fg->IsPaused())
+        return true;
+    return state.dlssgDetectedInterpolationCount > 0 || state.dlssgLastSetMode != sl::DLSSGMode::eOff;
+}
+
 bool RetiredCapacity();
 
 bool WantsTrackedRecording(const DlssNrPassSnapshot& requested)
@@ -1093,6 +1146,7 @@ struct NrRetired
     OS_Dx12* scaler = nullptr;
     DlssNr_Stabilizer_Dx12* stabilizer = nullptr;
     DlssNr_UiMask_Dx12* uiMask = nullptr;
+    DlssNr_Cadence_Dx12* cadence = nullptr;
 };
 
 std::vector<NrRetired> g_nrRetired;
@@ -1174,6 +1228,22 @@ void ParkNrUiMask(DlssNr_UiMask_Dx12*& uiMask)
     g_nrRetired.push_back(r);
 }
 
+// The cadence's surfaces, descriptor heaps and constants are still referenced by the last recordings; a new
+// working size, the cadence switched off, or a route it cannot run on parks them rather than deleting them.
+void ParkNrCadence(DlssNr_Cadence_Dx12*& cadence)
+{
+    if (!cadence)
+        return;
+
+    NrRetired r;
+    r.tracked = g_tracked;
+    if (g_tracked)
+        r.usage = g_usage;
+    r.cadence = cadence;
+    cadence = nullptr;
+    g_nrRetired.push_back(r);
+}
+
 void TickNrRetired()
 {
     for (size_t i = 0; i < g_nrRetired.size();)
@@ -1194,6 +1264,7 @@ void TickNrRetired()
         delete retired.scaler;
         delete retired.stabilizer;
         delete retired.uiMask;
+        delete retired.cadence;
 
         g_nrRetired[i] = std::move(g_nrRetired.back());
         g_nrRetired.pop_back();
@@ -2958,6 +3029,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             // UI correction at the model's own default: with no UI layer fed to it there
             // is nothing for it to correct.
             1);
+        ++g_nr.featureGeneration; // a carried edit belongs to the feature that made it
 
         if (chainEnabled)
         {
@@ -3071,6 +3143,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                             cmdList, g_nr.capabilityParams, workWidth, workHeight, (int) settings.Preset,
                             settings.Intensity, (int) settings.Style, settings.LocalStructure, settings.LocalTone,
                             settings.SkinStructure, settings.AutoMask ? 1 : 0, 1);
+            ++g_nr.featureGeneration;
             g_nr.passBuilt[i] = settings;
             g_nr.creationFrame[i] = observedFrame;
             g_nr.passReset[i] = true;
@@ -3143,6 +3216,93 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // represent -- it exists precisely because the proxy is meant to clip. Normalising the highlights
     // away first leaves it nothing to give back.
 
+    // Model cadence (design/model-cadence.md): whether this frame runs the model or carries its last edit.
+    // Decided here, after everything that can ask for a reset except releasing a hold -- which the hold
+    // refusal covers, since a hold being released is still a hold this frame -- and before the timing
+    // metadata, which says which kind of frame this is. With Cadence=1 nothing is built and every frame runs
+    // the model exactly as before.
+    namespace Cadence = DlssNr::Cadence;
+    Cadence::Inputs cadenceInputs {};
+    cadenceInputs.requested = Cadence::Requested(cfg.DlssNrCadence.value_or_default());
+    cadenceInputs.driverProxy = useProxy;
+    cadenceInputs.available = DlssNr_Cadence_Dx12::Available();
+    cadenceInputs.beforeUpscale = beforeUpscale;
+    cadenceInputs.gameGuides = frame.GameGuides;
+    cadenceInputs.frameGeneration = FrameGenerationActive();
+    cadenceInputs.allowWithFrameGen = cfg.DlssNrCadenceWithFrameGen.value_or_default();
+    cadenceInputs.hold = holdFrame || g_nr.heldActive;
+    cadenceInputs.capture = g_capture.isActive();
+
+    // The carry works at the model's working size, on the proxy the model is shown; without the reduced
+    // proxy's surface there is no such picture to carry onto.
+    const bool proxyAtWorkSize = !reduced || g_nr.colorSmall != nullptr;
+
+    // Built only when the cadence would run, given back when it is off or cannot exist here, and otherwise kept
+    // as it is, so a route or a toggle that comes and goes does not reallocate them (DlssNr_Cadence.h).
+    const Cadence::Reason cadenceRefusal = Cadence::Refusal(cadenceInputs);
+    if (Cadence::ReleasesSurfaces(cadenceRefusal))
+    {
+        ParkNrCadence(g_nr.cadence);
+    }
+    else if (Cadence::BuildsSurfaces(cadenceRefusal))
+    {
+        if (g_nr.cadence != nullptr && !g_nr.cadence->Fits(device, workWidth, workHeight))
+            ParkNrCadence(g_nr.cadence);
+        if (g_nr.cadence == nullptr)
+            g_nr.cadence = new DlssNr_Cadence_Dx12("DLSS-NR cadence", device, workWidth, workHeight);
+    }
+    cadenceInputs.surfaces = proxyAtWorkSize && g_nr.cadence != nullptr && g_nr.cadence->IsInit() &&
+                             g_nr.cadence->Fits(device, workWidth, workHeight);
+
+    // Everything whose change makes the stored edit describe another picture: what the model reads, and the
+    // proxy it reads it from. Composition sliders stay out -- the edit is taken before composition.
+    uint64_t cadenceSettings = Cadence::kMixSeed;
+    cadenceSettings = Cadence::Mix(cadenceSettings, passSnapshot.Count);
+    for (unsigned i = 0; i < passSnapshot.Count && i < passSnapshot.Settings.size(); ++i)
+    {
+        const auto& pass = passSnapshot.Settings[i];
+        cadenceSettings = Cadence::Mix(cadenceSettings, static_cast<uint32_t>(pass.Preset));
+        cadenceSettings = Cadence::Mix(cadenceSettings, static_cast<uint32_t>(pass.Style));
+        cadenceSettings = Cadence::Mix(cadenceSettings, pass.Intensity);
+        cadenceSettings = Cadence::Mix(cadenceSettings, pass.LocalStructure);
+        cadenceSettings = Cadence::Mix(cadenceSettings, pass.LocalTone);
+        cadenceSettings = Cadence::Mix(cadenceSettings, pass.SkinStructure);
+        cadenceSettings = Cadence::Mix(cadenceSettings, pass.AutoMask ? 1u : 0u);
+    }
+    cadenceSettings = Cadence::Mix(cadenceSettings, isHdrBuffer ? 1u : 0u);
+    cadenceSettings = Cadence::Mix(cadenceSettings, static_cast<uint32_t>(cfg.DlssNrReversibleMode.value_or_default()));
+    cadenceSettings = Cadence::Mix(cadenceSettings, static_cast<uint32_t>(nrScalerForChain));
+    cadenceSettings =
+        Cadence::Mix(cadenceSettings, frame.PresentSource && cfg.DlssNrUiProtection.value_or_default() ? 1u : 0u);
+    cadenceSettings = Cadence::Mix(cadenceSettings, cfg.DlssNrMatchGuides.value_or_default() ? 1u : 0u);
+    cadenceSettings = Cadence::Mix(cadenceSettings, cfg.DlssNrRenderMotionScale.value_or_default() ? 1u : 0u);
+    cadenceSettings = Cadence::Mix(cadenceSettings, frame.DepthInverted ? 1u : 0u);
+    cadenceSettings = Cadence::Mix(cadenceSettings, frame.MotionVectorsLowResolution ? 1u : 0u);
+    cadenceSettings = Cadence::Mix(cadenceSettings, frame.MvScaleX);
+    cadenceSettings = Cadence::Mix(cadenceSettings, frame.MvScaleY);
+
+    const Cadence::Signature cadenceSignature {
+        width,
+        static_cast<uint32_t>(height),
+        workWidth,
+        workHeight,
+        static_cast<uint32_t>(desc.Format),
+        Cadence::Route(beforeUpscale, frame.AfterRayReconstruction, frame.PresentSource),
+        cadenceSettings,
+        g_nr.featureGeneration,
+    };
+
+    // A pending reset is held until a model frame runs: it forces one, and a carried frame never clears it.
+    bool cadenceResetPending = g_nr.reset;
+    for (unsigned i = 1; chainEnabled && i < passSnapshot.Count && i < 3; ++i)
+        cadenceResetPending = cadenceResetPending || g_nr.passReset[i];
+
+    const auto cadence = g_cadence.Decide(
+        cadenceInputs, cadenceSignature, observedFrame,
+        std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count(), cadenceResetPending);
+    const bool carried = !cadence.runModel;
+    PublishCadence(cadence);
+
     bool timingMetadataReady = !timingEnabled;
     if (timingEnabled)
     {
@@ -3151,10 +3311,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             bool modelReset = g_nr.reset;
             for (unsigned i = 1; i < passSnapshot.Count; ++i)
                 modelReset = modelReset || g_nr.passReset[i];
-            timing.SetMetadata(TimingMetadata(cfg, passSnapshot, initialTiming.evaluationId, observedFrame,
-                                              beforeUpscale ? "before" : stageForTiming, guideWidth, guideHeight, width,
-                                              height, workWidth, workHeight, workScale, modelReset,
-                                              g_capture.isActive(), isHdrBuffer, static_cast<unsigned>(desc.Format)));
+            timing.SetMetadata(TimingMetadata(
+                cfg, passSnapshot, initialTiming.evaluationId, observedFrame, beforeUpscale ? "before" : stageForTiming,
+                guideWidth, guideHeight, width, height, workWidth, workHeight, workScale, modelReset,
+                g_capture.isActive(), isHdrBuffer, static_cast<unsigned>(desc.Format), cadence.cadence, carried));
             timingMetadataReady = true;
         }
         catch (...)
@@ -3702,101 +3862,156 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return false;
     }
 
-    timing.ModelBegin();
+    // Model cadence (design/model-cadence.md): what the carry reads this frame. The game's vectors are put in
+    // working pixels by the size they are measured against, whatever the model itself is told.
+    DlssNr_Cadence_Dx12::Frame cadenceFrame {};
+    cadenceFrame.proxy = modelInput;
+    cadenceFrame.depth = depthForModel;
+    cadenceFrame.depthRegion = { modelDepthBaseX, modelDepthBaseY, modelDepthWidth, modelDepthHeight };
+    cadenceFrame.motion = motionForModel;
+    cadenceFrame.motionRegion = { modelMotionBaseX, modelMotionBaseY, modelMotionWidth, modelMotionHeight };
+    cadenceFrame.mvToWorkX = DlssNr::GuideMatch::ModelMotionScale(g_nr.guideMvScaleX, workWidth, motionReferenceWidth);
+    cadenceFrame.mvToWorkY =
+        DlssNr::GuideMatch::ModelMotionScale(g_nr.guideMvScaleY, workHeight, motionReferenceHeight);
+    cadenceFrame.scale = Cadence::TapScale(workWidth, width);
 
-    // Preserve the single/master call and anchor. Each extra layer has independent history.
-    const auto firstCpuStart =
-        chainEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-    int result;
-    result = g_nr.evaluate(cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthForModel, motionForModel,
-                           g_nr.output, workWidth, workHeight, modelDepthWidth, modelDepthHeight, modelMotionWidth,
-                           modelMotionHeight, modelDepthBaseX, modelDepthBaseY, modelMotionBaseX, modelMotionBaseY,
-                           guideDepthInverted, g_nr.reset ? 1 : 0, intensityForChain, styleForChain,
-                           localStructureForChain, localToneForChain, skinStructureForChain, autoMaskForChain ? 1 : 0,
-                           guideMvScaleXToWork, guideMvScaleYToWork);
-
-    timing.ModelEnd();
-
-    if (chainEnabled && (isLogFrame || result != 1))
-        LOG_INFO("DLSS-NR chain: pass 1 result=0x{:X}, dimensions={}x{}, CPU-call-ms={:.3f} (not GPU time)",
-                 (unsigned) result, workWidth, workHeight,
-                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - firstCpuStart).count());
-    DlssNr::Chain::Routing<ID3D12Resource*> chain(modelInput, g_nr.output, g_nr.passPing);
-    if (result == 1)
-        chain.Success();
-    if (chainEnabled && result == 1)
+    // The model frame after carried ones: its own history is as old as the last model frame, so it is handed the
+    // chain summed back to it -- working pixels, scale 1, off the picture where the chain broke -- rather than
+    // this frame's vectors, which would misalign that history by every carried frame (BeliyG3's lesson). The
+    // texture has the shape the guide match already hands over. A forced model frame keeps the game's vectors.
+    float modelMvScaleX = guideMvScaleXToWork;
+    float modelMvScaleY = guideMvScaleYToWork;
+    if (cadence.handChain && g_nr.cadence != nullptr)
     {
-        for (unsigned i = 1; i < passSnapshot.Count; ++i)
+        if (ID3D12Resource* chainMotion = g_nr.cadence->ModelMotion(cmdList, cadenceFrame))
         {
-            if (!g_nr.passFeature[i] || g_nr.passFailed[i] || observedFrame <= g_nr.creationFrame[i] ||
-                !DlssNr::Submission::Completed(g_nr.creation[i]))
-            {
-                ChainStatus(g_nr.passFailed[i]
-                                ? "Additional pass failed/admission refused; last successful answer retained"
-                                : "Additional pass waiting for creation and submitted GPU completion; last successful "
-                                  "answer retained");
-                break;
-            }
-            auto* input = chain.Input();
-            auto* answer = chain.Output();
-            Barrier(cmdList, input, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            const auto& settings = passSnapshot.Settings[i];
-            SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
-            const auto startCpu = std::chrono::steady_clock::now();
-            timing.ModelBegin();
-            const int extraResult =
-                g_nr.evaluate(cmdList, g_nr.passFeature[i], g_nr.capabilityParams, input, depthForModel, motionForModel,
-                              answer, workWidth, workHeight, modelDepthWidth, modelDepthHeight, modelMotionWidth,
-                              modelMotionHeight, modelDepthBaseX, modelDepthBaseY, modelMotionBaseX, modelMotionBaseY,
-                              guideDepthInverted, (g_nr.reset || g_nr.passReset[i]) ? 1 : 0, settings.Intensity,
-                              (int) settings.Style, settings.LocalStructure, settings.LocalTone, settings.SkinStructure,
-                              settings.AutoMask ? 1 : 0, guideMvScaleXToWork, guideMvScaleYToWork);
-            timing.ModelEnd();
-            const double cpuMs =
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startCpu).count();
-            Barrier(cmdList, input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            if (extraResult != 1)
-            {
-                g_nr.passFailed[i] = true;
-                ParkNrFeature(g_nr.passFeature[i]);
-                for (unsigned downstream = i; downstream < 3; ++downstream)
-                    g_nr.passReset[downstream] = true;
-                LOG_INFO("DLSS-NR chain: pass {} failed result=0x{:X}, completed={}, CPU-call-ms={:.3f}; preserving "
-                         "previous answer",
-                         i + 1, (unsigned) extraResult, chain.completed, cpuMs);
-                break;
-            }
-            g_nr.passReset[i] = false;
-            chain.Success();
-            if (isLogFrame)
-                LOG_INFO("DLSS-NR chain: pass {} evaluated at {}x{}, CPU-call-ms={:.3f} (not GPU time)", i + 1,
-                         workWidth, workHeight, cpuMs);
+            motionForModel = chainMotion;
+            modelMotionWidth = workWidth;
+            modelMotionHeight = workHeight;
+            modelMotionBaseX = modelMotionBaseY = 0;
+            modelMvScaleX = modelMvScaleY = 1.0f;
         }
     }
-    ID3D12Resource* finalOutput = chain.answer;
-    g_activePasses = chain.completed;
-    if (chainEnabled && chain.completed == passSnapshot.Count)
-        ChainStatus("All requested passes completed; one final composition");
-    if (chainEnabled && (isLogFrame || chain.completed != passSnapshot.Count))
+
+    int result = 0;
+    DlssNr::Chain::Routing<ID3D12Resource*> chain(modelInput, g_nr.output, g_nr.passPing);
+
+    if (carried)
     {
-        static unsigned previousRequested = 0, previousCompleted = 0;
-        if (isLogFrame || previousRequested != passSnapshot.Count || previousCompleted != chain.completed)
-            LOG_INFO("DLSS-NR chain: requested={} completed={} present={} stage={} status={}", passSnapshot.Count,
-                     chain.completed, observedFrame, beforeUpscale ? "before" : "after", g_chainStatus.load());
-        previousRequested = passSnapshot.Count;
-        previousCompleted = chain.completed;
+        // A carried frame: no model call and no extra pass. The proxy plus the last edit, moved along the chain,
+        // is written where the model writes its answer, and the resolve below composes it as one. The pending
+        // reset, if any, is held -- there is none here, since one forces a model frame -- and the menu keeps
+        // showing what the last model frame completed.
+        const bool carriedOk = g_nr.cadence != nullptr &&
+                               g_nr.cadence->Carry(cmdList, cadenceFrame, cadence.chainStart, uiAlpha, g_nr.output);
+        result = carriedOk ? 1 : 0; // 1 is NVSDK_NGX_Result_Success: the resolve composes it like an answer
+        g_activePasses = g_nr.cadencePasses;
+    }
+    else
+    {
+        timing.ModelBegin();
+
+        // Preserve the single/master call and anchor. Each extra layer has independent history.
+        const auto firstCpuStart =
+            chainEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+        result = g_nr.evaluate(cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthForModel, motionForModel,
+                               g_nr.output, workWidth, workHeight, modelDepthWidth, modelDepthHeight, modelMotionWidth,
+                               modelMotionHeight, modelDepthBaseX, modelDepthBaseY, modelMotionBaseX, modelMotionBaseY,
+                               guideDepthInverted, g_nr.reset ? 1 : 0, intensityForChain, styleForChain,
+                               localStructureForChain, localToneForChain, skinStructureForChain,
+                               autoMaskForChain ? 1 : 0, modelMvScaleX, modelMvScaleY);
+
+        timing.ModelEnd();
+
+        if (chainEnabled && (isLogFrame || result != 1))
+            LOG_INFO(
+                "DLSS-NR chain: pass 1 result=0x{:X}, dimensions={}x{}, CPU-call-ms={:.3f} (not GPU time)",
+                (unsigned) result, workWidth, workHeight,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - firstCpuStart).count());
+        if (result == 1)
+            chain.Success();
+        if (chainEnabled && result == 1)
+        {
+            for (unsigned i = 1; i < passSnapshot.Count; ++i)
+            {
+                if (!g_nr.passFeature[i] || g_nr.passFailed[i] || observedFrame <= g_nr.creationFrame[i] ||
+                    !DlssNr::Submission::Completed(g_nr.creation[i]))
+                {
+                    ChainStatus(g_nr.passFailed[i]
+                                    ? "Additional pass failed/admission refused; last successful answer retained"
+                                    : "Additional pass waiting for creation and submitted GPU completion; last "
+                                      "successful answer retained");
+                    break;
+                }
+                auto* input = chain.Input();
+                auto* answer = chain.Output();
+                Barrier(cmdList, input, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                const auto& settings = passSnapshot.Settings[i];
+                SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+                const auto startCpu = std::chrono::steady_clock::now();
+                timing.ModelBegin();
+                const int extraResult = g_nr.evaluate(
+                    cmdList, g_nr.passFeature[i], g_nr.capabilityParams, input, depthForModel, motionForModel, answer,
+                    workWidth, workHeight, modelDepthWidth, modelDepthHeight, modelMotionWidth, modelMotionHeight,
+                    modelDepthBaseX, modelDepthBaseY, modelMotionBaseX, modelMotionBaseY, guideDepthInverted,
+                    (g_nr.reset || g_nr.passReset[i]) ? 1 : 0, settings.Intensity, (int) settings.Style,
+                    settings.LocalStructure, settings.LocalTone, settings.SkinStructure, settings.AutoMask ? 1 : 0,
+                    modelMvScaleX, modelMvScaleY);
+                timing.ModelEnd();
+                const double cpuMs =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startCpu).count();
+                Barrier(cmdList, input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                if (extraResult != 1)
+                {
+                    g_nr.passFailed[i] = true;
+                    ParkNrFeature(g_nr.passFeature[i]);
+                    for (unsigned downstream = i; downstream < 3; ++downstream)
+                        g_nr.passReset[downstream] = true;
+                    LOG_INFO("DLSS-NR chain: pass {} failed result=0x{:X}, completed={}, CPU-call-ms={:.3f}; "
+                             "preserving previous answer",
+                             i + 1, (unsigned) extraResult, chain.completed, cpuMs);
+                    break;
+                }
+                g_nr.passReset[i] = false;
+                chain.Success();
+                if (isLogFrame)
+                    LOG_INFO("DLSS-NR chain: pass {} evaluated at {}x{}, CPU-call-ms={:.3f} (not GPU time)", i + 1,
+                             workWidth, workHeight, cpuMs);
+            }
+        }
+        g_activePasses = chain.completed;
+        g_nr.cadencePasses = chain.completed;
+        if (chainEnabled && chain.completed == passSnapshot.Count)
+            ChainStatus("All requested passes completed; one final composition");
+        if (chainEnabled && (isLogFrame || chain.completed != passSnapshot.Count))
+        {
+            static unsigned previousRequested = 0, previousCompleted = 0;
+            if (isLogFrame || previousRequested != passSnapshot.Count || previousCompleted != chain.completed)
+                LOG_INFO("DLSS-NR chain: requested={} completed={} present={} stage={} status={}", passSnapshot.Count,
+                         chain.completed, observedFrame, beforeUpscale ? "before" : "after", g_chainStatus.load());
+            previousRequested = passSnapshot.Count;
+            previousCompleted = chain.completed;
+        }
+
+        if (coverage != nullptr)
+            coverage->ModelResult(result, workWidth, workHeight);
     }
 
-    if (coverage != nullptr)
-        coverage->ModelResult(result, workWidth, workHeight);
+    // On a carried frame the answer is the synthesized one, in the surface the model writes.
+    ID3D12Resource* finalOutput = carried ? g_nr.output : chain.answer;
 
     // Read before it is cleared: everything that reset the model this frame resets the stabilizer too,
     // except the zero-guide policy, which changes nothing on screen.
     const bool stabilizerReset = frame.ResetIsPolicy ? resetBeforeFrameFlag : g_nr.reset;
 
-    g_nr.reset = false;
+    // Cleared only by a frame the model ran on. A carried frame holds it, so a reset is never lost on one.
+    if (!carried)
+        g_nr.reset = false;
+
+    // Whether this model frame's edit was stored for the frames that carry it.
+    bool cadenceRecorded = false;
 
     // Supersampling probe: report the model working ABOVE native so a test log tells us whether NGX even
     // accepts a super-native evaluate and what it returns. Once per working-size change, or on any error.
@@ -3987,6 +4202,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         Barrier(cmdList, finalOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
+        // Model cadence: a model frame stores its final answer minus its proxy, the proxy and the depth for the
+        // frames that carry it -- only when every requested pass completed, so a carried frame never shows a
+        // partial chain's answer, and only when the scheduler asks, so a refused or switched-off cadence, or a
+        // second call in one present, records nothing.
+        if (cadence.record && !carried && chain.completed == passSnapshot.Count && g_nr.cadence != nullptr)
+            cadenceRecorded = g_nr.cadence->Record(cmdList, cadenceFrame, finalOutput);
+
         // Supersampling down-leg. Average the Nx model answer back to native with the chosen filter, so
         // the resolve composites a native answer against the native proxy 1:1 -- a real area resample,
         // not the single bilinear tap the Nx answer would otherwise get in the resolve (which aliases
@@ -4084,6 +4306,12 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 g_captureWriteAtFrame = g_frames + 8;
         }
     }
+    else if (carried)
+    {
+        // The carry could not be recorded. The model was not asked for anything, so nothing here says the model
+        // failed; the frame keeps the game's colour and the next one runs the model.
+        reportSkip("model cadence could not carry the edit this frame");
+    }
     else if (result == 0xBAD00005)
     {
         // FAIL_InvalidParameter is the model rejecting what it was asked for, not the model breaking.
@@ -4127,12 +4355,25 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Leave the staging copy as the next frame expects to find it.
     colorRead.Restore();
 
+    // What the cadence learns from this frame: a stored edit restarts its count, a carried frame advances it,
+    // and anything else -- a failed or partial model frame, a failed carry -- leaves nothing usable to carry.
+    if (carried && result == 1)
+        g_cadence.Carried();
+    else if (!carried && cadenceRecorded)
+        g_cadence.Recorded();
+    else
+        g_cadence.Drop();
+
     // Arm, but do not record the final timestamp yet. All remaining resource/state destructors
     // precede timing's destructor. Partial chains and failed composition never publish success.
-    if (chain.completed != passSnapshot.Count)
+    // A carried frame calls no model by design: zero passes is its whole chain, not a partial one, and its
+    // sample says it was carried (GpuTiming::Metadata::carried).
+    if (!carried && chain.completed != passSnapshot.Count)
         timing.Reject("partial-chain");
-    timing.FinishOnScopeExit(chain.completed,
-                             timingMetadataReady && wrote && result == 1 && chain.completed == passSnapshot.Count);
+    const bool timingComplete =
+        carried ? timingMetadataReady && wrote && result == 1
+                : timingMetadataReady && wrote && result == 1 && chain.completed == passSnapshot.Count;
+    timing.FinishOnScopeExit(carried ? 0u : chain.completed, timingComplete);
 
     // restoreOutput hands the output back in its arrival state on every exit.
     device->Release();
@@ -4955,6 +5196,8 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
     params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &createFlags);
 
     DlssNrFrameInfo frame {};
+    // Depth and motion come from the game's upscaler evaluate: real guides, which model cadence needs.
+    frame.GameGuides = true;
     frame.DepthInverted = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
     frame.ColourIsLinearHdr = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0;
     frame.MotionVectorsLowResolution = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0;
@@ -6316,6 +6559,8 @@ bool ObservedRayReconstructionRoute()
 }
 unsigned int ActivePassCount() { return g_activePasses.load(); }
 const char* MultipassStatus() { return g_chainStatus.load(); }
+const char* CadenceStatus() { return g_cadenceStatus.load(); }
+bool CadenceAvailable() { return DlssNr_Cadence_Dx12::Available(); }
 
 void RequestCapture(unsigned int frames)
 {
@@ -6349,6 +6594,7 @@ void Shutdown()
         delete r.scaler;
         delete r.stabilizer;
         delete r.uiMask;
+        delete r.cadence;
         if (r.feature != nullptr && g_nr.release != nullptr)
             g_nr.release(r.feature);
 
@@ -6475,6 +6721,14 @@ void Shutdown()
         delete g_nr.uiMask;
         g_nr.uiMask = nullptr;
     }
+
+    // The edit it held was made by the feature released above.
+    if (g_nr.cadence != nullptr)
+    {
+        delete g_nr.cadence;
+        g_nr.cadence = nullptr;
+    }
+    g_cadence.Drop();
 
     if (g_nr.meter != nullptr)
     {

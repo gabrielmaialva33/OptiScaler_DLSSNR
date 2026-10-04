@@ -121,6 +121,19 @@ int main()
     const uint64_t large[] { UINT64_MAX - 100, UINT64_MAX - 90, UINT64_MAX - 30, UINT64_MAX - 10 };
     assert(GpuTiming::Detail::Decode(large, 4, 1, 1000, result) && result.totalMs == 90);
     ++cases;
+    // Model cadence: a carried evaluation is exactly total begin and end, all outside the model; only a sample
+    // that says it is carried may lack a model pair, and a carried one may not carry one.
+    const uint64_t carried[] { 100, 180 };
+    assert(GpuTiming::Detail::Decode(carried, 2, 0, 1000, result, true));
+    assert(result.totalMs == 80 && result.modelMs == 0 && result.outsideModelMs == 80);
+    ++cases;
+    assert(!GpuTiming::Detail::Decode(carried, 2, 0, 1000, result, false));
+    assert(!GpuTiming::Detail::Decode(one, 4, 1, 1000, result, true));
+    ++cases;
+    const uint64_t backwards[] { 180, 100 };
+    assert(!GpuTiming::Detail::Decode(backwards, 2, 0, 1000, result, true));
+    assert(!GpuTiming::Detail::Decode(carried, 2, 0, 0, result, true));
+    ++cases;
 
     for (uintptr_t iteration = 2; iteration < 3002; ++iteration)
     {
@@ -133,7 +146,7 @@ int main()
         assert(GpuTiming::Detail::Certify(*e, done, frequency).accepted);
     }
     ++cases;
-    if (cases != 27)
+    if (cases != 30)
         return 2; // A runner that exercises nothing must fail loudly.
     std::cout << "PASS " << cases << " timing model cases; 3000 confirmed epoch cycles\n";
 }

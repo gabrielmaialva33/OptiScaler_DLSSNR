@@ -172,6 +172,12 @@ struct DlssNrFrameInfo
     // motion sets this false and the pass clamps the working scale to 1.0, rather than letting the
     // model refuse a size the user picked. A caller with real guides leaves it true.
     bool AllowSupersampling = true;
+
+    // Whether depth and motion are the game's own, as it handed them to an upscaler -- set by GatherFrame
+    // and carried by a present-time capture of it. False for zero guides and for synthesized motion, whose
+    // depth is zero. Model cadence carries the model's edit along these and refuses to run without them
+    // (design/model-cadence.md). False by default, so a route that does not say has no game guides.
+    bool GameGuides = false;
 };
 
 struct alignas(256) DlssNrConstants

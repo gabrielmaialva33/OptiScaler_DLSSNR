@@ -21,6 +21,10 @@ struct Metadata
     float workingScale = 1.0f;
     bool modelReset = false;
     bool captureActive = false;
+    // Model cadence (design/model-cadence.md). A carried evaluation makes no model call by design: it records
+    // no model brackets, completes zero passes, and is its own kind of sample rather than a partial chain.
+    uint32_t cadence = 1;
+    bool carried = false;
 };
 
 struct DiscardCount

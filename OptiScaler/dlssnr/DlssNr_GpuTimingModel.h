@@ -107,10 +107,19 @@ struct Durations
 };
 
 // Layout: total begin, N adjacent model begin/end pairs, total end. Sum explicit gaps.
-inline bool Decode(const uint64_t* values, size_t queryCount, size_t models, uint64_t frequency, Durations& result)
+//
+// A carried evaluation (model cadence, design/model-cadence.md) calls no model by design, so it is exactly
+// total begin and total end, all of it outside the model. Only a sample that says it is carried may have no
+// model pair: an ordinary evaluation without one is still an incomplete evaluation, and a carried one with a
+// model pair is not what it claims to be.
+inline bool Decode(const uint64_t* values, size_t queryCount, size_t models, uint64_t frequency, Durations& result,
+                   bool carried = false)
 {
     result = {};
-    if (!values || !frequency || models == 0 || models > MaxModels || queryCount != 2 + models * 2)
+    if (!values || !frequency)
+        return false;
+    if (carried ? (models != 0 || queryCount != 2)
+                : (models == 0 || models > MaxModels || queryCount != 2 + models * 2))
         return false;
     for (size_t i = 1; i < queryCount; ++i)
         if (values[i] < values[i - 1])

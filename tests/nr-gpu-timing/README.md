@@ -9,15 +9,18 @@ python3 tests/nr-gpu-timing/run.py
 The runner builds with Clang ASan/UBSan and executes two binaries (the runtime binary also runs cadence cases in a fresh process). Nonzero exit, any sanitizer
 finding, wrong case count or zero instrumented queries/maps fails the run loudly.
 
-- Portable production certificate and timestamp decoding: 27 cases plus 3000 epoch cycles. These
+- Portable production certificate and timestamp decoding: 30 cases plus 3000 epoch cycles. These
   cover pending/failed Reset, completion before Reset, Reset before completion, device loss,
   replay, multiple queues, missing notification, unknown submission, zero frequency, never observed
-  submission, incomplete/misordered/wrapped timestamps and explicit outside-model gaps.
+  submission, incomplete/misordered/wrapped timestamps and explicit outside-model gaps, and model
+  cadence's carried evaluations: total begin and end only, all of it outside the model, accepted
+  only from a sample that says it is carried and refused from one that carries a model pair.
 - The production `DlssNr_GpuTiming.cpp` with fake D3D12 interfaces: disabled allocation/hook/query
   inactivity, no Map before both completion and Reset, one/three model passes, early aborts (including
   an unmatched model begin), replay/multiple queues, injected Map/Track/heap/readback failures,
   pending collection after disable, out-of-order completion without regressing the latest sample,
-  immutable copied metadata, and bounded retention/pool refusal.
+  immutable copied metadata, bounded retention/pool refusal, and a carried evaluation accepted with
+  zero passes and no model time while a "carried" one with a model pair is discarded (24 cases).
 
 The fake GPU deliberately writes timestamps synchronously. Thus these tests prove host admission,
 query accounting, immutable sample metadata, publication gating and retention decisions, **not** real

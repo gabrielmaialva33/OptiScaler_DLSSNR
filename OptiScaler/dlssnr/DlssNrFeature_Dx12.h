@@ -343,6 +343,14 @@ bool ObservedRayReconstructionRoute();
 unsigned int ActivePassCount();
 const char* MultipassStatus();
 
+// What model cadence is doing, for the line under its control: running, or the reason the model runs every
+// frame. A string literal from DlssNr::Cadence::Describe. design/model-cadence.md.
+const char* CadenceStatus();
+
+// Whether this build carries model cadence's shader. Its bytecode header is optional; without it the control
+// is not offered.
+bool CadenceAvailable();
+
 // What the white point meter last settled on, or 0 when it is not running. For the menu.
 
 // Writes a run of consecutive frames, each as the upscaler produced it and again after the model's edit.

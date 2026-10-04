@@ -120,11 +120,14 @@ void Seal(List& list)
     assert(epoch);
     Submission::Detail::Model::AfterReset(epoch, true);
 }
-void Record(Device& device, List& list, unsigned passes = 1, bool finish = true, unsigned interval = 1)
+void Record(Device& device, List& list, unsigned passes = 1, bool finish = true, unsigned interval = 1,
+            bool carried = false)
 {
     list.device = &device;
     GpuTiming::Metadata metadata;
     metadata.evaluationId = queries + 1;
+    metadata.carried = carried;
+    metadata.cadence = carried ? 2 : 1;
     metadata.contractHash = 123;
     char localStage[] = "before";
     metadata.stage = localStage;
@@ -348,6 +351,26 @@ int main(int argc, char** argv)
     assert(GpuTiming::GetSnapshot().accepted == 6 && GpuTiming::GetSnapshot().sampleId == newestId);
     ++cases;
 
+    // Model cadence: a carried evaluation has no model pair by design and is accepted as its own kind of
+    // sample, with no model time; one that claims to be carried and does carry a model pair is not.
+    Record(device, lists[33], 0, true, 1, true);
+    Execute(lists[33]);
+    Seal(lists[33]);
+    GpuTiming::Poll();
+    {
+        const auto carriedSample = GpuTiming::GetSnapshot();
+        assert(carriedSample.accepted == 7 && carriedSample.metadata.carried && carriedSample.metadata.cadence == 2 &&
+               carriedSample.actualPasses == 0 && carriedSample.modelMs == 0 && carriedSample.totalMs > 0 &&
+               carriedSample.otherMs == carriedSample.totalMs);
+    }
+    ++cases;
+    Record(device, lists[34], 1, true, 1, true);
+    Execute(lists[34]);
+    Seal(lists[34]);
+    GpuTiming::Poll();
+    assert(GpuTiming::GetSnapshot().accepted == 7 && GpuTiming::GetSnapshot().discarded == 10);
+    ++cases;
+
     // Unknown/lost or never-observed submission never authorizes releasing/reusing a GPU slot.
     const auto freesBeforeRetained = heapFrees + bufferFrees;
     for (unsigned i = 16; i < 32; ++i)
@@ -365,9 +388,9 @@ int main(int argc, char** argv)
     assert(queries == beforePoolDrop && heapFrees + bufferFrees == freesBeforeRetained);
     ++cases;
     GpuTiming::Poll();
-    assert(GpuTiming::GetSnapshot().discarded == 26);
+    assert(GpuTiming::GetSnapshot().discarded == 27);
     ++cases;
-    if (cases != 22 || queries == 0 || resolves == 0 || maps == 0 || tracks == 0)
+    if (cases != 24 || queries == 0 || resolves == 0 || maps == 0 || tracks == 0)
         return 2;
     std::cout << "PASS " << cases << " production timing runtime cases; queries=" << queries << " resolves=" << resolves
               << " maps=" << maps << " tracked=" << tracks << '\n';
