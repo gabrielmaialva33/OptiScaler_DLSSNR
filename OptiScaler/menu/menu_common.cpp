@@ -996,9 +996,9 @@ template <HasDefaultValue B> void MenuCommon::AddDLSSDRenderPreset(std::string n
         { 1, "PRESET A", "Preset A\nRemoved on recent versions!" },
         { 2, "PRESET B", "Preset B\nRemoved on recent versions!" },
         { 3, "PRESET C", "Preset C\nRemoved on recent versions!" },
-        { 4, "PRESET D", "Default model, Transformer" },
+        { 4, "PRESET D", "Transformer model\nThe default before 310.9.1" },
         { 5, "PRESET E", "Latest Transformer model\nMust use if DoF guide is needed" },
-        { 6, "PRESET F", "Latest Transformer model\nMust use if DoF guide is needed" },
+        { 6, "PRESET F", "Transformer RR2\nThe default model since 310.9.1" },
         { NV_PRESET_LATEST, "Latest", "Latest supported by the dll" }
     };
 
