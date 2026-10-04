@@ -581,7 +581,8 @@ CompareTags=auto
 ; 0.5 to 5.0 - Default (auto) is 1.5
 TagScale=auto
 
-; Samples 3 consecutive evaluations out of every 240, profiling GPU time per kernel group and logging the breakdown.
+; Samples 3 consecutive evaluations out of every 240, profiling GPU time per kernel group and logging the breakdown
+; (mean and the window's maximum). D3D12 only; the Vulkan route and UseProxy are not profiled.
 ; true or false - Default (auto) is false
 KernelProfile=auto
 ```

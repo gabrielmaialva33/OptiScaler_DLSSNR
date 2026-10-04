@@ -31,7 +31,7 @@ namespace DlssNr::KernelProfile
 {
 constexpr const char* kGroupNames[] = {
     "pre_block",          "post_block",     "swin_1h_32", "swin_2h_64",        "swin_4h_128",
-    "swin_8h_256",        "split_swin_16h", "vit_1d",     "cg2r_post_process", "cg2r_copy",
+    "swin_8h_256",        "split_swin_16h", "vit",        "cg2r_post_process", "cg2r_copy",
     "dec_input_upsample", "cb_clear",       "other"
 };
 constexpr unsigned kGroupCount = static_cast<unsigned>(sizeof(kGroupNames) / sizeof(kGroupNames[0]));
@@ -63,12 +63,11 @@ inline Info Classify(const char* rawName)
     };
 
     // Specific prefixes precede generic ones (e.g. pre_block and split_swin before swin)
-    static constexpr Rule kRules[] = {
-        { "pre_block", 0 },    { "post_block", 1 },        { "split_swin", 6 }, { "cc_vit_1d", 7 },
-        { "vit_1d", 7 },       { "cg2r_post_process", 8 }, { "cg2r_copy", 9 },  { "dec_input_upsample", 10 },
-        { "cc_cb_clear", 11 }, { "cb_clear", 11 },         { "swin_1h_32", 2 }, { "swin_2h_64", 3 },
-        { "swin_4h_128", 4 },  { "swin_8h_256", 5 }
-    };
+    static constexpr Rule kRules[] = { { "pre_block", 0 },         { "post_block", 1 },  { "split_swin", 6 },
+                                       { "cc_vit_1d", 7 },         { "vit_1d", 7 },      { "cc_vit_", 7 },
+                                       { "cg2r_post_process", 8 }, { "cg2r_copy", 9 },   { "dec_input_upsample", 10 },
+                                       { "cc_cb_clear", 11 },      { "cb_clear", 11 },   { "swin_1h_32", 2 },
+                                       { "swin_2h_64", 3 },        { "swin_4h_128", 4 }, { "swin_8h_256", 5 } };
 
     for (const auto& r : kRules)
     {
@@ -104,7 +103,7 @@ struct AggregateReport
 
     std::string Format() const
     {
-        std::string s = std::format("DLSS-NR kernel profile (sampled {} evals): total {:.2f} ms GPU (p95 {:.2f} ms), "
+        std::string s = std::format("DLSS-NR kernel profile (sampled {} evals): total {:.2f} ms GPU (max {:.2f} ms), "
                                     "{} kernels ({} fp8, {} fp16). e.g. fp8: {} | plain: {} | ",
                                     evaluationsSampled, totalMeanMs, totalP95Ms, fp8Count + fp16Count, fp8Count,
                                     fp16Count, fp8SampleName.empty() ? "none" : fp8SampleName,
@@ -120,7 +119,7 @@ struct AggregateReport
         {
             if (groups[g].kernelCount == 0 && groups[g].meanMs <= 0.0)
                 continue;
-            s += std::format("{}: {:.2f} ms [p95 {:.2f} ms] ({:.1f}%, x{})  ", kGroupNames[g], groups[g].meanMs,
+            s += std::format("{}: {:.2f} ms [max {:.2f} ms] ({:.1f}%, x{})  ", kGroupNames[g], groups[g].meanMs,
                              groups[g].p95Ms, groups[g].sharePercent, groups[g].kernelCount);
         }
 
@@ -310,6 +309,13 @@ class Profiler
         // Independent from NR resource-retirement mode; refusal drops measurement only.
         if (!DlssNr::Submission::Track(cmd, s.usage))
         {
+            static bool s_loggedRefusal = false;
+            if (!s_loggedRefusal)
+            {
+                LOG_INFO("DLSS-NR kernel profile: the command list cannot be tracked ({}); no sample this time",
+                         DlssNr::Submission::LastRefusal());
+                s_loggedRefusal = true;
+            }
             s.usage = {};
             return;
         }
@@ -390,11 +396,14 @@ class Profiler
                     "(wrapper not queried by model or kernel launches occur on another command list)");
                 s_loggedNoLaunches = true;
             }
-            s.pending = false;
+            // EndQuery was already recorded on this list: the slot waits for its certificate like any other.
+            s.hasData = false;
+            s.pending = true;
             return;
         }
 
         cmd->ResolveQueryData(s.heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, s.queries, s.readback, 0);
+        s.hasData = true;
         s.pending = true;
     }
 
@@ -427,7 +436,8 @@ class Profiler
         uint32_t queries = 0;
         unsigned fp8Kernels = 0;
         unsigned plainKernels = 0;
-        bool pending = false;
+        bool pending = false; // recorded on a list; the slot is not reused until its certificate is reusable
+        bool hasData = false; // the readback holds this sample's timestamps and has not been read
         std::string fp8Example;
         std::string plainExample;
     };
@@ -500,27 +510,42 @@ class Profiler
             if (!certificate.terminal)
                 continue;
 
-            if (!certificate.accepted || certificate.frequency == 0)
+            // As DlssNr_GpuTiming.cpp: read at most once, and give the slot back only when the certificate says
+            // its list is done with the heap and the readback. A slot that is final but not reusable stays held.
+            if (s.hasData)
             {
-                s.pending = false;
-                continue;
+                s.hasData = false;
+
+                if (certificate.accepted && certificate.frequency != 0)
+                {
+                    void* mapped = nullptr;
+                    const D3D12_RANGE range { 0, static_cast<SIZE_T>(s.queries) * sizeof(UINT64) };
+                    if (SUCCEEDED(s.readback->Map(0, &range, &mapped)) && mapped != nullptr)
+                    {
+                        const UINT64* data = static_cast<const UINT64*>(mapped);
+                        std::vector<UINT64> ticks(data, data + s.queries);
+                        const D3D12_RANGE noWrite { 0, 0 };
+                        s.readback->Unmap(0, &noWrite);
+                        ReportLocked(s, ticks, certificate.frequency);
+                    }
+                }
+                else
+                {
+                    static bool s_loggedRejected = false;
+                    if (!s_loggedRejected)
+                    {
+                        LOG_INFO("DLSS-NR kernel profile: a sample's submission was not accepted ({}); it is dropped",
+                                 certificate.reason);
+                        s_loggedRejected = true;
+                    }
+                }
             }
 
-            void* mapped = nullptr;
-            const D3D12_RANGE range { 0, static_cast<SIZE_T>(s.queries) * sizeof(UINT64) };
-            if (FAILED(s.readback->Map(0, &range, &mapped)) || mapped == nullptr)
+            if (certificate.reusable)
             {
+                s.usage = {};
                 s.pending = false;
-                continue;
             }
-
-            const UINT64* data = static_cast<const UINT64*>(mapped);
-            std::vector<UINT64> ticks(data, data + s.queries);
-            const D3D12_RANGE noWrite { 0, 0 };
-            s.readback->Unmap(0, &noWrite);
-            s.pending = false;
-
-            ReportLocked(s, ticks, certificate.frequency);
         }
     }
 
@@ -566,9 +591,9 @@ class Profiler
 
 namespace Detail
 {
-static decltype(&NvAPI_D3D12_CreateCuFunction) o_CreateCuFunction = nullptr;
-static decltype(&NvAPI_D3D12_DestroyCuFunction) o_DestroyCuFunction = nullptr;
-static decltype(&NvAPI_D3D12_LaunchCuKernelChain) o_LaunchCuKernelChain = nullptr;
+inline decltype(&NvAPI_D3D12_CreateCuFunction) o_CreateCuFunction = nullptr;
+inline decltype(&NvAPI_D3D12_DestroyCuFunction) o_DestroyCuFunction = nullptr;
+inline decltype(&NvAPI_D3D12_LaunchCuKernelChain) o_LaunchCuKernelChain = nullptr;
 
 inline NvAPI_Status __cdecl hkNvAPI_D3D12_CreateCuFunction(ID3D12Device* pDevice, NVDX_ObjectHandle hModule,
                                                            const char* functionName, NVDX_ObjectHandle* pFunction)

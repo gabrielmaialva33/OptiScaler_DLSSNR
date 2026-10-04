@@ -49,7 +49,7 @@ one. A 3060 is roughly three to four times slower than a 4090 at general compute
 term's 2.6x sits comfortably inside that. **25x on the per-pixel term does not.** Whatever separates
 these two runs, it is not "one card is slower".
 
-### The hypothesis confirmed as static fact (Update 2026-10-04)
+### Its precondition, confirmed statically (update 2026-10-04)
 
 Ada (sm_89) and Blackwell (sm_120) have native FP8 tensor cores. Ampere (sm_86) does not.
 Static binary analysis of the shipping model (`nvngx_dlssnr.dll`, sha256 `6eb209e7...3927`)
@@ -62,7 +62,7 @@ performed by extracting the fatbins and disassembling with `cuobjdump -sass` con
 | sm_89 (Ada) | 477,760 | 19,952 | 35,536 |
 | sm_120 (Blackwell) | 487,424 | 19,952 | 35,088 |
 
-The hypothesis is confirmed: Ada and Blackwell execute a dedicated FP8 network (19,952 tensor ops),
+The precondition is confirmed statically: Ada and Blackwell ship a separate FP8 network (19,952 tensor ops),
 while Ampere has zero FP8 instructions and runs an FP16 fallback network with 2.8x more total SASS
 instructions.
 

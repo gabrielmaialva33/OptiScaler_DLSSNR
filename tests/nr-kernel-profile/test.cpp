@@ -27,7 +27,9 @@ void TestClassification()
     assert(info4.fp8 == true);
 
     const auto info5 = Classify("cc_vit_1d_repack_2d_to_1d_fp8");
-    assert(info5.group == 7); // vit_1d
+    assert(info5.group == 7); // vit
+    // The second ViT family in the model's strings (attention, ffn, qkv, projection) is ViT too, not "other".
+    assert(Classify("cc_vit_attention_fp8").group == 7 && Classify("cc_vit_ffn_expand_chained").group == 7);
     assert(info5.fp8 == true);
 
     const auto info6 = Classify("unknown_custom_gemm");
@@ -45,7 +47,7 @@ void TestMetricsAggregation()
 
     double gMsA[kGroupCount] = {};
     unsigned gKernA[kGroupCount] = {};
-    gMsA[7] = 2.0; // vit_1d takes 2.0 ms
+    gMsA[7] = 2.0; // vit takes 2.0 ms
     gMsA[2] = 8.0; // swin takes 8.0 ms
     gKernA[7] = 8;
     gKernA[2] = 32;
@@ -77,7 +79,7 @@ void TestMetricsAggregation()
     assert(std::fabs(report.groups[7].sharePercent - 22.5) < 1e-4);
 
     const auto text = report.Format();
-    assert(text.find("vit_1d: 2.25 ms [p95 2.50 ms] (22.5%, x8)") != std::string::npos);
+    assert(text.find("vit: 2.25 ms [max 2.50 ms] (22.5%, x8)") != std::string::npos);
 
     // Aggregator reset empties all window entries
     agg.Reset();
