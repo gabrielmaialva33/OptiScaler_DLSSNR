@@ -1756,6 +1756,12 @@
     <ClInclude Include="dlssnr\DlssNr_Chain.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_Enlarge.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_PrivateSr.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClCompile Include="misc\Localization.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1784,6 +1790,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="dlssnr\DlssNr_PresentHost.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dlssnr\DlssNr_PrivateSr.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
