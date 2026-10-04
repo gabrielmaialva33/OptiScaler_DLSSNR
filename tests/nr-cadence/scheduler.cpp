@@ -325,9 +325,9 @@ void Refusals_EachRunTheModelWithTheirOwnReason()
           "frame generation is active" },
         { "hold", [](Inputs& i) { i.hold = true; }, Reason::FrameHold, false, "Hold frame" },
         { "capture", [](Inputs& i) { i.capture = true; }, Reason::Capture, false, "capture" },
-        { "reversible replace", [](Inputs& i) { i.reversibleReplace = true; }, Reason::ReversibleReplace, true,
-          "replace curves" },
         { "no surfaces", [](Inputs& i) { i.surfaces = false; }, Reason::NoSurfaces, false, "could not be allocated" },
+        { "reversible replace", [](Inputs& i) { i.reversibleReplace = true; }, Reason::ReversibleReplace, false,
+          "replace curves" },
     };
     std::set<std::string> said;
     for (const auto& c : cases)
@@ -394,7 +394,7 @@ void Status_TextsAreDistinctAndCadenceSpecific()
     assert(std::string(Describe(Reason::Scheduled, 3)).find("every 3rd") != std::string::npos);
     assert(std::string(Describe(Reason::Carried, 4)).find("every 4th") != std::string::npos);
     std::set<std::string> texts;
-    for (int r = static_cast<int>(Reason::None); r <= static_cast<int>(Reason::NoSurfaces); ++r)
+    for (int r = static_cast<int>(Reason::None); r <= static_cast<int>(Reason::ReversibleReplace); ++r)
     {
         const auto reason = static_cast<Reason>(r);
         if (reason == Reason::Scheduled)
@@ -402,55 +402,6 @@ void Status_TextsAreDistinctAndCadenceSpecific()
         assert(texts.insert(Describe(reason, 2)).second);
         assert(std::strchr(Describe(reason, 2), '%') == nullptr); // the pt-BR pack rejects a bare %
     }
-    ++g_cases;
-}
-
-void LowFrameRate_LocksOutUntilRecoveredWithHysteresis()
-{
-    Driver d;
-    const auto in = Running(2);
-    // Warm up at 60 fps (16 ms steps)
-    d.Frame(in, Shape(), true, 1, 16);
-    d.Frame(in, Shape(), true, 1, 16);
-    assert(d.pattern == "Mc");
-
-    // Drop to 20 fps (50 ms steps) -> smoothed FPS drops below 25 fps
-    for (int i = 0; i < 20; ++i)
-        d.Frame(in, Shape(), true, 1, 50);
-
-    // Should now refuse with LowFrameRate
-    const auto lowDecision = d.Frame(in, Shape(), true, 1, 50);
-    assert(lowDecision.runModel && lowDecision.reason == Reason::LowFrameRate);
-    assert(!BuildsSurfaces(Reason::LowFrameRate) && !ReleasesSurfaces(Reason::LowFrameRate));
-    assert(std::strcmp(Describe(Reason::LowFrameRate, 2), "The model runs every frame: frame rate is below 25 fps.") ==
-           0);
-
-    // Recover to 33 fps (30 ms steps) -> FPS is >= 28 fps, but requires 1.0 s (1000 ms) sustained
-    for (int i = 0; i < 15; ++i)
-    {
-        const auto mid = d.Frame(in, Shape(), true, 1, 30);
-        assert(mid.runModel && mid.reason == Reason::LowFrameRate);
-    }
-
-    // Advance until 1000 ms of sustained >= 28 fps elapses
-    int framesUntilResumed = 0;
-    while (framesUntilResumed < 50)
-    {
-        framesUntilResumed++;
-        const auto dec = d.Frame(in, Shape(), true, 1, 30);
-        if (dec.reason != Reason::LowFrameRate)
-        {
-            // First resumed frame must be NoEdit (to store fresh edit)
-            assert(dec.runModel && dec.reason == Reason::NoEdit);
-            break;
-        }
-    }
-    assert(framesUntilResumed > 0);
-
-    // Next frame carries
-    const auto carried = d.Frame(in, Shape(), true, 1, 30);
-    assert(!carried.runModel && carried.reason == Reason::Carried);
-
     ++g_cases;
 }
 
@@ -485,9 +436,8 @@ int main()
     FrameGeneration_RunsWhenOptedIn();
     Refusal_NamesWhatTheUserCanChangeLeast();
     Status_TextsAreDistinctAndCadenceSpecific();
-    LowFrameRate_LocksOutUntilRecoveredWithHysteresis();
     TapScale_FollowsTheWorkingSize();
-    if (g_cases != 19)
+    if (g_cases != 18)
         return 2; // a runner that exercises nothing must fail loudly
     std::printf("PASS %d scheduler cases: off allocates nothing, age in presents the pass ran at, held reset, forced "
                 "model frames, every refusal with its reason\n",

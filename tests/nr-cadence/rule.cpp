@@ -537,32 +537,29 @@ void UiProtection_KeepsTheFrameUnderTheInterface()
     ++g_cases;
 }
 
-void ReversibleReplace_HighlightFlashDemonstration()
+void ReversibleReplace_HighlightCarriedReachesClamp()
 {
-    // Under Neutwo replace (ReversibleMode = 2), the output is NeutwoDecode(modelDirect).
-    // NeutwoDecode(y) = y / sqrt(1 - y^2), which diverges as y -> 1.
-    // For a highlight with linear light = 6.0, NeutwoEncode(6.0) = 6.0 / sqrt(37) = 0.98639.
-    // If a small carried edit (+0.01762 from a neighbouring edge) lands on this highlight,
-    // the proxy sum becomes 0.98639 + 0.01762 = 1.00401 (clamped to 1.0).
-    // In NeutwoDecode, clamping just below 1.0 (0.999999) yields light = 707.11!
-    // This represents a 117.8x brightness explosion, which the resolve's 2x guard clips
-    // to exactly 12.0 (2x the pixel) on carried frames, causing severe visual flashes.
-    const auto neutwoEncode = [](float x) { return x / std::sqrt(x * x + 1.0f); };
-    const auto neutwoDecode = [](float y)
-    {
-        y = std::max(y, 0.0f);
-        float m = std::min(y, 0.999999f);
-        return m <= 1e-6f ? m : m / std::sqrt(std::max(1.0f - m * m, 1e-8f));
-    };
+    // Highlights in sRGB-encoded proxy space (e.g. NeutwoEncode(light) near 1.0):
+    // If last frame's proxy was 0.97 and the model answered 0.99 (residual = +0.02),
+    // and this frame's proxy is already a highlight at 0.99, CadenceSynthesize carries
+    // the edit and computes o = proxy_now + add = 0.99 + 0.02 = 1.01.
+    // In production, CadenceSynthesize clamps the output to max(1.0, proxy_now) = 1.0.
+    // When this value reaches the resolve, NeutwoDecode(1.0) diverges towards infinity (~707x),
+    // which proves why ReversibleMode 2 and 4 must refuse cadence under HDR.
+    CadenceParams P = Shipped();
+    g_proxyNow.Resize(W, H, float3(0.99f, 0.99f, 0.99f));
+    g_proxyThen.Resize(W, H, float3(0.97f, 0.97f, 0.97f));
+    g_depthNow.Resize(W, H, 0.5f);
+    g_depthThen.Resize(W, H, 0.5f);
+    g_chain.Resize(W, H, float2(0.0f, 0.0f));             // still camera
+    g_residual.Resize(W, H, float3(0.02f, 0.02f, 0.02f)); // answer (0.99) - proxy_then (0.97)
+    g_low.Resize(P.lowWidth, P.lowHeight, float3(0.02f, 0.02f, 0.02f));
+    g_ui.Resize(W, H, 0.0f);
 
-    const float light = 6.0f;
-    const float proxy = neutwoEncode(light);
-    const float midEdit = neutwoEncode(0.5f * 1.05f) - neutwoEncode(0.5f); // +0.01762
-    const float carriedProxy = std::min(proxy + midEdit, 1.0f);
-    const float decoded = neutwoDecode(carriedProxy);
-    const float ratio = decoded / light;
+    const float3 out = CadenceSynthesize(W / 2, H / 2, float2(0.0f, 0.0f), P);
 
-    assert(ratio > 50.0f); // decodes to 707.11, over 117x the base light
+    // Verifies that production CadenceSynthesize clamped the output at exactly 1.0
+    assert(out.x == 1.0f && out.y == 1.0f && out.z == 1.0f);
     ++g_cases;
 }
 } // namespace
@@ -580,7 +577,7 @@ int main()
     Occluder_UncoveredPixelsGetNoModelHistory();
     NoMatch_NoFill();
     UiProtection_KeepsTheFrameUnderTheInterface();
-    ReversibleReplace_HighlightFlashDemonstration();
+    ReversibleReplace_HighlightCarriedReachesClamp();
     if (g_cases != 12)
         return 2;
     std::printf("PASS %d rule cases over synthetic sequences: still scene exact, integer pan exact and sub-pixel pan "

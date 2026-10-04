@@ -115,7 +115,7 @@ descriptor slot gets a null descriptor.
      HUD pixel never receives scenery's carried edit.
    - The synthesized answer is written into `g_nr.output`, the surface the model writes, in its
      format, and the resolve runs unchanged — every transfer mode, working scale above and below 1,
-     the reversible modes, compare and debug views.
+     the reversible composed modes (modes 1 and 3; replace modes 2 and 4 are refused under HDR), compare and debug views.
 
 **On the next model frame after carried frames**, the model is handed the summed chain as its motion
 vectors (`CadenceModelMotion`): an R32G32F texture at the working size, origin 0, scale 1.0 — the shape
@@ -219,29 +219,45 @@ Before anyone calls it a win:
 
 ## Addendum A: Highlight Flashing under Reversible Replace Modes (Reproduced)
 
-Under replace curves (`ReversibleMode = 2` Neutwo replace, `ReversibleMode = 4` Hybrid replace), the resolve decodes the model output $y$ directly through the curve's inverse:
-$$x = \text{Neutwo}^{-1}(y) = \frac{y}{\sqrt{1 - y^2}}$$
+Discovered by janblade (commit `289287c9`): under replace curves (`ReversibleMode = 2` Neutwo replace,
+`ReversibleMode = 4` Hybrid replace), the resolve decodes the model output $y$ directly through the curve's
+inverse ($x = 	ext{Neutwo}^{-1}(y) = y / \sqrt{1 - y^2}$ in HDR) and completely skips the ratio composition
+and highlight guard (`dlssnr.hlsl:1198-1205`, "no ratio, no highlight guard").
 
-Because $\text{Neutwo}^{-1}(y)$ possesses a vertical asymptote as $y \to 1.0$, small delta edits added in the proxy space explode when applied to highlight pixels:
-- For linear highlight light $= 6.0$, $\text{NeutwoEncode}(6.0) = \frac{6.0}{\sqrt{37}} = 0.98639$.
-- If a modest carried edit (+0.01762, corresponding to a $+5\%$ change on mid-grey) lands on this highlight from an adjacent edge, the carried proxy sum becomes $0.98639 + 0.01762 = 1.00401$ (clamped to $1.0$).
-- When decoded through $\text{NeutwoDecode}$ (clamped just below $1.0$ at $0.999999$), the decoded light value shoots to **$707.11$** — a **$117.8\times$ brightness explosion**!
-- In the resolve, the $2\times$ MaxRatio highlight guard clamps this to $12.0$ ($2\times$ the original light). Consequently, highlight pixels violently strobe between normal ($6.0$) on model frames and doubled ($12.0$) on carried frames.
+In the sRGB-encoded proxy space where the carry operates, values near the highlight ceiling are close to 1.0:
+- If last frame's encoded proxy was $0.97$ and the model answered $0.99$, the carried edit is $+0.02$.
+- If the current frame's proxy is already a highlight at $0.99$, adding the carried edit produces
+  $o = 0.99 + 0.02 = 1.01$, clamped to $1.0$ by `CadenceSynthesize`.
+- When decoded through $	ext{NeutwoDecode}(1.0)$ (clamped at $0.999999$), the decoded light value diverges
+  to **$707.11 	imes 	ext{WhitePoint}$**!
+- Because the replace mode skips the ratio composition and the $2	imes$ MaxRatio highlight guard entirely,
+  this result is unbounded. Highlights flash violently to hundreds of times their brightness on carried frames.
 
 **Decision & Resolution:**
-Cadence relies fundamentally on ratio composition in linear space (`Ratio composition, not a delta`, README §4). In replace modes, the ratio composition is completely bypassed. Rather than adding complex domain-switching approximations into the inner shader loop, model cadence explicitly refuses execution when `ReversibleMode == 2 || ReversibleMode == 4` with `Reason::ReversibleReplace`, releasing cadence scratch surfaces and informing the player in the UI.
+Cadence relies fundamentally on ratio composition in linear space (`Ratio composition, not a delta`,
+"Design notes worth knowing" in README). In replace modes under HDR, that ratio composition is bypassed.
+Model cadence therefore explicitly refuses execution when `isHdrBuffer && (ReversibleMode == 2 || ReversibleMode == 4)`
+with `Reason::ReversibleReplace`. Under SDR (passthrough), replace modes use `modelDirect` without inverse
+curves and remain supported. Surfaces are retained (`ReleasesSurfaces = false`) since switching between composed
+and replace is a single-click A/B toggle.
 
 ---
 
-## Addendum B: Low Frame Rate Gate (25 FPS cutoff with 1.0s Hysteresis)
+## Addendum B: Low Frame Rate Gate (Evaluated and Discarded)
 
-At low frame rates ($< 25 \text{ fps}$), the spatial displacement between consecutive real frames expands significantly. Reprojection errors and motion disocclusions grow proportionally larger, causing carried frames to exhibit conspicuous ghosting trails around moving characters.
+An experimental low frame rate gate was evaluated to run the model every frame below 25 fps.
+Testing and simulation against real runtime cadence behavior proved this approach fundamentally flawed:
 
-**Design:**
-- The scheduler tracks rendered frame interval using an exponential moving average smoothed over $\sim 0.5 \text{ s}$ ($\alpha = 1.0 - e^{-\Delta t / 0.5}$).
-- When smoothed framerate drops below $25.0 \text{ fps}$ ($\Delta t > 40.0 \text{ ms}$), the gate trips to `Reason::LowFrameRate` and runs the model every frame.
-- To prevent rapid oscillation (flicker) when hovering near the boundary, recovery requires sustaining $\ge 28.0 \text{ fps}$ continuously for at least $1.0 \text{ s}$ ($1000 \text{ ms}$) before resuming carried frames.
-- Surfaces are retained during low-FPS lockouts (since framerate drops are transient in combat or dense scenes), avoiding expensive $130 \text{ MB}$ reallocations.
+1. **Self-defeating feedback loop:** Cadence increases frame rate (e.g. from 20 fps to 46.5 fps at N=4).
+   When the gate trips and forces every frame through the model, frame rate drops back to 20 fps, preventing
+   the recovery threshold (28 fps) from ever being reached. In simulation, it locked out 1000 of 1000 frames.
+2. **Phase jitter susceptibility:** Cadence inherently produces alternating frame times (e.g. 30 ms carried,
+   48 ms model frame; real average 25.6 fps). An exponential moving average is pulled down by the slower frame,
+   falsely tripping the gate.
+3. **Transient stalls:** A single hitch or garbage collection pause (e.g. 120 ms) permanently latches the lockout.
+   As observed by janblade (`0df40796`), a dual-threshold hysteresis lock "latches forever".
+
+For these reasons, the low frame rate gate was completely removed.
 
 ---
 

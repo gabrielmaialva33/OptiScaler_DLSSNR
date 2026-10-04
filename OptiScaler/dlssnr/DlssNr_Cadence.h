@@ -71,7 +71,6 @@ enum class Reason : uint8_t
     Capture,
     NoSurfaces,        // the surfaces could not be allocated
     ReversibleReplace, // model cadence does not run with replace curves (causes highlight flashing)
-    LowFrameRate,      // rendered frame rate is below 25 fps; model runs every frame
 };
 
 constexpr bool IsRefusal(Reason reason) { return reason >= Reason::Off; }
@@ -106,8 +105,6 @@ constexpr Reason Refusal(const Inputs& in)
         return Reason::DriverProxy;
     if (!in.available)
         return Reason::Unavailable;
-    if (in.reversibleReplace)
-        return Reason::ReversibleReplace;
     // Age, and a second call in one present, are both read off the present counter. Where it never advances,
     // every call after the first would look like a second call in one present: refused under its own name
     // instead, rather than counting calls, which would let one view's edit land on another.
@@ -117,6 +114,8 @@ constexpr Reason Refusal(const Inputs& in)
         return Reason::BeforeUpscale;
     if (!in.gameGuides)
         return Reason::NoGameGuides;
+    if (in.reversibleReplace)
+        return Reason::ReversibleReplace;
     if (in.frameGeneration && !in.allowWithFrameGen)
         return Reason::FrameGeneration;
     if (in.hold)
@@ -141,7 +140,7 @@ constexpr bool BuildsSurfaces(Reason refusal) { return refusal == Reason::None; 
 constexpr bool ReleasesSurfaces(Reason refusal)
 {
     return refusal == Reason::Off || refusal == Reason::NativeVulkan || refusal == Reason::DriverProxy ||
-           refusal == Reason::Unavailable || refusal == Reason::ReversibleReplace;
+           refusal == Reason::Unavailable;
 }
 
 // The menu's line, and the log's. String literals, so the pointer outlives everything. Forced reasons are
@@ -175,8 +174,6 @@ constexpr const char* Describe(Reason reason, uint32_t cadence)
         return "The model runs every frame: this build has no model cadence shader.";
     case Reason::ReversibleReplace:
         return "The model runs every frame: model cadence does not run with replace curves.";
-    case Reason::LowFrameRate:
-        return "The model runs every frame: frame rate is below 25 fps.";
     case Reason::NoPresentCount:
         return "The model runs every frame: this route does not present through OptiScaler's swapchain, so model "
                "cadence cannot count frames.";
@@ -259,12 +256,6 @@ class Scheduler
     bool _seen = false;
     bool _edit = false; // an edit is stored, from the last model frame
 
-    // Frame rate gate: below 25 fps rendered, run the model every frame to prevent large motion trails.
-    // Resumes above 28 fps sustained for 1.0 s (1000 ms) to avoid rapid oscillation (hysteresis).
-    double _smoothedIntervalMs = 0.0;
-    bool _fpsAllowed = true;
-    int64_t _aboveResumeSince = 0;
-
   public:
     // One call per Dispatch. resetPending is anything that will reset the model's history this frame -- the
     // game's flag, a tuning pulse, a released hold, a route switch, an extra pass's own reset.
@@ -274,34 +265,6 @@ class Scheduler
         const bool gap = _seen && nowMs - _lastMs > kGapMs;
         const bool changed = _seen && !(signature == _signature);
 
-        if (_seen && nowMs > _lastMs && (nowMs - _lastMs) < kGapMs)
-        {
-            const double dt = static_cast<double>(nowMs - _lastMs);
-            const double alpha = _smoothedIntervalMs > 0.0 ? 1.0 - std::exp(-dt / 500.0) : 1.0;
-            _smoothedIntervalMs += (dt - _smoothedIntervalMs) * alpha;
-
-            const double fps = _smoothedIntervalMs > 0.0 ? 1000.0 / _smoothedIntervalMs : 0.0;
-            if (_fpsAllowed && fps < 25.0)
-            {
-                _fpsAllowed = false;
-                _aboveResumeSince = 0;
-            }
-            else if (!_fpsAllowed)
-            {
-                if (fps >= 28.0)
-                {
-                    if (_aboveResumeSince == 0)
-                        _aboveResumeSince = nowMs;
-                    else if (nowMs - _aboveResumeSince >= 1000)
-                        _fpsAllowed = true;
-                }
-                else
-                {
-                    _aboveResumeSince = 0;
-                }
-            }
-        }
-
         _seen = true;
         _lastPresent = present;
         _lastMs = nowMs;
@@ -310,10 +273,7 @@ class Scheduler
         Decision d;
         d.cadence = in.requested;
 
-        Reason refusal = Refusal(in);
-        if (refusal == Reason::None && !_fpsAllowed)
-            refusal = Reason::LowFrameRate;
-
+        const Reason refusal = Refusal(in);
         if (refusal != Reason::None)
         {
             Drop();
