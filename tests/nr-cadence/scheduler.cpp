@@ -133,11 +133,11 @@ void Cadence_DroppedCallShiftsThePatternAndNeverFlipsIt()
     // the last model frame, so there is no global parity to flip.
     Driver d;
     const auto in = Running(2);
-    d.Frame(in, Shape());    // 1 M
-    d.Frame(in, Shape());    // 2 c
+    d.Frame(in, Shape());          // 1 M
+    d.Frame(in, Shape());          // 2 c
     d.Frame(in, Shape(), true, 2); // 4 M
-    d.Frame(in, Shape());    // 5 c
-    d.Frame(in, Shape());    // 6 M
+    d.Frame(in, Shape());          // 5 c
+    d.Frame(in, Shape());          // 6 M
     assert(d.pattern == "McMcM");
     ++g_cases;
 }
@@ -202,21 +202,21 @@ void Changes_ForceAModelFrameAndDropTheEdit()
         auto after = d.Frame(in, s); // the new shape has its own edit now
         assert(!after.runModel && after.chainStart);
     };
-    expectChanged([](Signature& s) { s.workWidth = 1720; });                          // working size
-    expectChanged([](Signature& s) { s.width = 2560; });                              // frame size
-    expectChanged([](Signature& s) { s.format = 26; });                               // colour format
-    expectChanged([](Signature& s) { s.route = Route(false, true, false); });         // after RR
-    expectChanged([](Signature& s) { s.route = Route(false, false, true); });         // present route
-    expectChanged([](Signature& s) { s.settings = Mix(s.settings, 2u); });            // what the model reads
-    expectChanged([](Signature& s) { s.feature += 1; });                              // a rebuilt feature
+    expectChanged([](Signature& s) { s.workWidth = 1720; });                  // working size
+    expectChanged([](Signature& s) { s.width = 2560; });                      // frame size
+    expectChanged([](Signature& s) { s.format = 26; });                       // colour format
+    expectChanged([](Signature& s) { s.route = Route(false, true, false); }); // after RR
+    expectChanged([](Signature& s) { s.route = Route(false, false, true); }); // present route
+    expectChanged([](Signature& s) { s.settings = Mix(s.settings, 2u); });    // what the model reads
+    expectChanged([](Signature& s) { s.feature += 1; });                      // a rebuilt feature
     ++g_cases;
 }
 
 void Settings_HashSeparatesWhatTheModelReads()
 {
     // The renderer folds each model-affecting value in; any single change must move the hash.
-    auto fold = [](uint32_t preset, uint32_t style, float intensity, float structure, float tone, float skin,
-                   bool mask, uint32_t passes)
+    auto fold = [](uint32_t preset, uint32_t style, float intensity, float structure, float tone, float skin, bool mask,
+                   uint32_t passes)
     {
         uint64_t h = Mix(kMixSeed, passes);
         h = Mix(h, preset);
@@ -265,7 +265,7 @@ void SecondCallInOnePresent_StandsDownForItAndTheNext()
 {
     Driver d;
     const auto in = Running(2);
-    d.Frame(in, Shape()); // present 1, M
+    d.Frame(in, Shape());                      // present 1, M
     auto same = d.Frame(in, Shape(), true, 0); // present 1 again
     assert(same.runModel && same.reason == Reason::SamePresent && !same.handChain);
     // That second model frame stores nothing: the next present runs the model too.
@@ -326,6 +326,8 @@ void Refusals_EachRunTheModelWithTheirOwnReason()
         { "hold", [](Inputs& i) { i.hold = true; }, Reason::FrameHold, false, "Hold frame" },
         { "capture", [](Inputs& i) { i.capture = true; }, Reason::Capture, false, "capture" },
         { "no surfaces", [](Inputs& i) { i.surfaces = false; }, Reason::NoSurfaces, false, "could not be allocated" },
+        { "reversible replace", [](Inputs& i) { i.reversibleReplace = true; }, Reason::ReversibleReplace, false,
+          "replace curves" },
     };
     std::set<std::string> said;
     for (const auto& c : cases)
@@ -383,6 +385,14 @@ void Refusal_NamesWhatTheUserCanChangeLeast()
     assert(Refusal(in) == Reason::DriverProxy);
     in.requested = Requested(1);
     assert(Refusal(in) == Reason::Off);
+    // The replace curve is one click away: it is named after what the user can do little about, and before
+    // frame generation, which it sits beside.
+    Inputs replace = Running(2);
+    replace.reversibleReplace = true;
+    replace.frameGeneration = true;
+    assert(Refusal(replace) == Reason::ReversibleReplace);
+    replace.gameGuides = false;
+    assert(Refusal(replace) == Reason::NoGameGuides);
     ++g_cases;
 }
 
@@ -392,7 +402,7 @@ void Status_TextsAreDistinctAndCadenceSpecific()
     assert(std::string(Describe(Reason::Scheduled, 3)).find("every 3rd") != std::string::npos);
     assert(std::string(Describe(Reason::Carried, 4)).find("every 4th") != std::string::npos);
     std::set<std::string> texts;
-    for (int r = static_cast<int>(Reason::None); r <= static_cast<int>(Reason::NoSurfaces); ++r)
+    for (int r = static_cast<int>(Reason::None); r <= static_cast<int>(Reason::ReversibleReplace); ++r)
     {
         const auto reason = static_cast<Reason>(r);
         if (reason == Reason::Scheduled)

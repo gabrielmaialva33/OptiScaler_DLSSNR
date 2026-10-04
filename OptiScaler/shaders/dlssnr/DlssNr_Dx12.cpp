@@ -3860,6 +3860,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     cadenceInputs.allowWithFrameGen = cfg.DlssNrCadenceWithFrameGen.value_or_default();
     cadenceInputs.hold = holdFrame || g_nr.heldActive;
     cadenceInputs.capture = g_capture.isActive();
+    cadenceInputs.reversibleReplace = isHdrBuffer && (cfg.DlssNrReversibleMode.value_or_default() == 2 ||
+                                                      cfg.DlssNrReversibleMode.value_or_default() == 4);
 
     // The carry works at the model's working size, on the proxy the model is shown; without the reduced
     // proxy's surface there is no such picture to carry onto.

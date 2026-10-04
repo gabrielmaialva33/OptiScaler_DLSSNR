@@ -68,7 +68,8 @@ enum class Reason : uint8_t
     FrameGeneration,
     FrameHold,
     Capture,
-    NoSurfaces, // the surfaces could not be allocated
+    NoSurfaces,        // the surfaces could not be allocated
+    ReversibleReplace, // model cadence does not run with replace curves (causes highlight flashing)
 };
 
 constexpr bool IsRefusal(Reason reason) { return reason >= Reason::Off; }
@@ -89,6 +90,7 @@ struct Inputs
     bool hold = false;              // Hold frame on, or a hold being released this frame
     bool capture = false;           // a matched before/after capture is running
     bool surfaces = true;           // the cadence's surfaces exist
+    bool reversibleReplace = false; // ReversibleMode 2 or 4 (replace curves flash under carried edits)
 };
 
 // Why the cadence cannot run, or None. When several hold, the first one a user can do least about is named.
@@ -111,6 +113,8 @@ constexpr Reason Refusal(const Inputs& in)
         return Reason::BeforeUpscale;
     if (!in.gameGuides)
         return Reason::NoGameGuides;
+    if (in.reversibleReplace)
+        return Reason::ReversibleReplace;
     if (in.frameGeneration && !in.allowWithFrameGen)
         return Reason::FrameGeneration;
     if (in.hold)
@@ -167,6 +171,8 @@ constexpr const char* Describe(Reason reason, uint32_t cadence)
         return "The model runs every frame: model cadence does not run with the driver proxy.";
     case Reason::Unavailable:
         return "The model runs every frame: this build has no model cadence shader.";
+    case Reason::ReversibleReplace:
+        return "The model runs every frame: model cadence does not run with replace curves.";
     case Reason::NoPresentCount:
         return "The model runs every frame: this route does not present through OptiScaler's swapchain, so model "
                "cadence cannot count frames.";

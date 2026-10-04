@@ -258,8 +258,9 @@ void Rules_CatmullRomIsExactAtTexelsAndNeverRings()
         const float3 at = CadenceResidualCatmullRom(x, 20.3f, m.P);
         assert(at.x >= -0.2f && at.x <= 0.3f && at.z >= -0.1f && at.z <= 0.1f); // no overshoot beside the step
     }
-    assert(MaxAbs(CadenceResidual(float3(std::numeric_limits<float>::quiet_NaN(), 0.5f, 0.5f), float3(0.5f, 0.5f, 0.5f)),
-                  float3(0, 0, 0)) == 0.0f);
+    assert(
+        MaxAbs(CadenceResidual(float3(std::numeric_limits<float>::quiet_NaN(), 0.5f, 0.5f), float3(0.5f, 0.5f, 0.5f)),
+               float3(0, 0, 0)) == 0.0f);
     ++g_cases;
 }
 
@@ -296,7 +297,7 @@ void StillScene_CarriesTheModelAnswerExactly()
 
 struct PanError
 {
-    float exactMax = 0.0f;  // where the carry has everything it needs
+    float exactMax = 0.0f; // where the carry has everything it needs
     float exactMean = 0.0f;
     float inPlaceMean = 0.0f; // the same pixels with the edit reused where it was, unmoved
     float frameMean = 0.0f;   // the whole frame, entering edge included
@@ -359,8 +360,8 @@ void SubPixelPan_CarriesWithinInterpolationError()
 {
     const auto e = CarriedPan(0.5f, 0.25f, 3);
     assert(e.exactCount > W * H / 2);
-    assert(e.exactMax < 0.005f);   // measured 0.0016: Catmull-Rom over a smooth edit
-    assert(e.exactMean < 2e-4f);   // measured 2.4e-5
+    assert(e.exactMax < 0.005f); // measured 0.0016: Catmull-Rom over a smooth edit
+    assert(e.exactMean < 2e-4f); // measured 2.4e-5
     assert(e.inPlaceMean > 10.0f * e.exactMean);
     assert(e.frameMean < 0.01f);
     ++g_cases;
@@ -535,6 +536,32 @@ void UiProtection_KeepsTheFrameUnderTheInterface()
     assert(MaxAbs(out.At(60, 30), plain.At(60, 30)) == 0.0f);
     ++g_cases;
 }
+
+void ReversibleReplace_HighlightCarriedReachesClamp()
+{
+    // Highlights in sRGB-encoded proxy space (e.g. NeutwoEncode(light) near 1.0):
+    // If last frame's proxy was 0.97 and the model answered 0.99 (residual = +0.02),
+    // and this frame's proxy is already a highlight at 0.99, CadenceSynthesize carries
+    // the edit and computes o = proxy_now + add = 0.99 + 0.02 = 1.01.
+    // In production, CadenceSynthesize clamps the output to max(1.0, proxy_now) = 1.0.
+    // When this value reaches the resolve, NeutwoDecode(1.0) diverges towards infinity (~707x),
+    // which proves why ReversibleMode 2 and 4 must refuse cadence under HDR.
+    CadenceParams P = Shipped();
+    g_proxyNow.Resize(W, H, float3(0.99f, 0.99f, 0.99f));
+    g_proxyThen.Resize(W, H, float3(0.97f, 0.97f, 0.97f));
+    g_depthNow.Resize(W, H, 0.5f);
+    g_depthThen.Resize(W, H, 0.5f);
+    g_chain.Resize(W, H, float2(0.0f, 0.0f));             // still camera
+    g_residual.Resize(W, H, float3(0.02f, 0.02f, 0.02f)); // answer (0.99) - proxy_then (0.97)
+    g_low.Resize(P.lowWidth, P.lowHeight, float3(0.02f, 0.02f, 0.02f));
+    g_ui.Resize(W, H, 0.0f);
+
+    const float3 out = CadenceSynthesize(W / 2, H / 2, float2(0.0f, 0.0f), P);
+
+    // Verifies that production CadenceSynthesize clamped the output at exactly 1.0
+    assert(out.x == 1.0f && out.y == 1.0f && out.z == 1.0f);
+    ++g_cases;
+}
 } // namespace
 
 int main()
@@ -550,7 +577,8 @@ int main()
     Occluder_UncoveredPixelsGetNoModelHistory();
     NoMatch_NoFill();
     UiProtection_KeepsTheFrameUnderTheInterface();
-    if (g_cases != 11)
+    ReversibleReplace_HighlightCarriedReachesClamp();
+    if (g_cases != 12)
         return 2;
     std::printf("PASS %d rule cases over synthetic sequences: still scene exact, integer pan exact and sub-pixel pan "
                 "within interpolation, chain off the picture, occluder restarts the chain, no match no fill, UI kept\n",
