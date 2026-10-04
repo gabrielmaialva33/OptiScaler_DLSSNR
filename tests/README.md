@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Twenty-two suites. All but `nr-invariants` build real production code with local fakes under
+**Host tier.** Twenty-three suites. All but `nr-invariants` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
@@ -80,6 +80,11 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-multipass` — portable multi-pass chain helpers.
 - `nr-pass-config` — the pass-settings codec and the four-point Config round trip
   for the master keys.
+- `nr-periphery` — peripheral compression's layout and per-pixel mapping, compiled from the header the
+  shader includes: extents and stated refusals, the inverse, monotonicity and no kink at either join,
+  the whole-texel centre at 100, the uniform path it must reduce to (the guide read and the downsample),
+  the colour pack's weights and conservation, and motion converted in frame pixels (the defect in
+  wilsjo2's v0.8.91 pinned). Also holds its constant block to the cbuffer. No GPU, no model.
 - `nr-present-host` — what the production present host builds and when: a frame too small
   for the model, a resize, the pass switched off, an HDR swapchain declined, and on which list the
   model is created.

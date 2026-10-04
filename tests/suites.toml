@@ -38,6 +38,11 @@ tier = "host"
 timeout = 300
 summary = "The HUD-protection mask's per-pixel rule, the header the shader runs, over synthetic sequences: a glyph over a pan is protected, still scenery beside a moving silhouette is not."
 
+[nr-periphery]
+tier = "host"
+timeout = 300
+summary = "Peripheral compression's layout and mapping, the header the shader runs: extents and refusals, inverse, monotone, no kink at either join, whole-texel centre at 100, the uniform path (guide reads and mode 2), the colour pack's weights and conservation, motion in frame pixels; the constant block held to the cbuffer."
+
 [nr-gpu-timing]
 tier = "host"
 timeout = 300

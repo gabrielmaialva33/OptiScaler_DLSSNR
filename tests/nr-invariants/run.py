@@ -142,6 +142,18 @@ if (precompile / 'DlssNr_UiMask_Shader.cso').exists():
     targets.append(('DlssNr_UiMask_Shader.cso', 'DlssNr_UiMask_Shader.h', 'DlssNr_UiMask_cso', b'DXBC'))
 if (precompile / 'DlssNr_Guides_Shader.cso').exists():
     targets.append(('DlssNr_Guides_Shader.cso', 'DlssNr_Guides_Shader.h', 'DlssNr_Guides_cso', b'DXBC'))
+# Peripheral compression's three passes (peripheral-compression.md). Optional bytecode like the guide resample's:
+# none of the six files is a supported state (the feature says "unavailable"); any one of them commits to all
+# six, because DlssNr_Periphery_Dx12.cpp loads the three headers together and a .cso without its header, or a
+# header without the .cso it was made from, is the half-commit this check exists to catch.
+periphery_stems = ('DlssNr_PeripheryColour', 'DlssNr_PeripheryGuides', 'DlssNr_PeripheryUnpack')
+if any((precompile / f'{stem}_Shader{ext}').exists() for stem in periphery_stems for ext in ('.cso', '.h')):
+    for stem in periphery_stems:
+        if not (precompile / f'{stem}_Shader.cso').exists() or not (precompile / f'{stem}_Shader.h').exists():
+            fail(f'{stem}_Shader.cso and {stem}_Shader.h must be committed together with the other periphery passes '
+                 '(build commands in precompile/dlssnr_periphery.hlsl)')
+        else:
+            targets.append((f'{stem}_Shader.cso', f'{stem}_Shader.h', f'{stem}_cso', b'DXBC'))
 
 with tempfile.TemporaryDirectory() as scratch:
     for binary, header, array, magic in targets:
