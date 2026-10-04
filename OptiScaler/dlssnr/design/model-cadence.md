@@ -90,7 +90,10 @@ descriptor slot gets a null descriptor.
 
 1. *Chain step* (`dlssnr_cadence_rule.h`, `CadenceChainStep`): `acc = mv + accPrev(p + mv)`, read
    bilinearly, mv converted to work pixels (`game scale × work / the size the vectors are measured
-   against`, the same reference `DlssNr_GuideMatch.h` uses). The first carried frame after a model
+   against`, the same reference `DlssNr_GuideMatch.h` uses). Under peripheral compression the
+   vectors read are the packed ones the model is handed, already in packed working pixels, so the
+   scale is 1, as the model's is; converting them again from the game's units carried every edit too
+   far (`tests/nr-cadence` guards it). The first carried frame after a model
    frame starts from `mv` alone. Each step is validated: if the end of the chain shows another
    surface in the residual's frame (depth mismatch over twice the tolerance, or colour gate at or
    under 0.05), the chain restarts from this frame's own vector and the reprojection rejects it

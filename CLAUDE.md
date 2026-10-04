@@ -240,8 +240,9 @@ Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in paralle
 `nr-invariants`, is the `DEVELOPMENT.md` §4 mechanical guard (config round-trip for every `DlssNr`
 key, struct equals cbuffer, precompiled headers equal the committed bytecode, retired identifiers);
 it is pure Python and the one to run after touching `Config.*`, `OptiScaler.ini` or the shader. **wine** needs the msvc-wine prefix and runs serially, because these suites contend for the
-same prefix `build-local.sh` uses: `nr-gpu-timing-d3d12`, `vulkan-overlay` (which also needs a
-graphical session and a working Vulkan loader), and `dlssnr-loopback` (real NGX/NR under Proton).
+same prefix `build-local.sh` uses: `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`
+(which also needs a graphical session and a working Vulkan loader), and `dlssnr-loopback` (real
+NGX/NR under Proton).
 There are currently no **wip** suites.
 
 `suites.toml` is a drift guard, not just a config file. A directory with no entry, or an entry with

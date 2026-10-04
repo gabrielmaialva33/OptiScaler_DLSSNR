@@ -34,7 +34,7 @@ what keeps it honest (last taken 2026-09-23).
 | `hooks/D3D12_Hooks.cpp` | exposure-scan resource notes |
 | `resource_tracking/ResTrack_dx12.cpp` | exposure-scan resource notes and submission tracking |
 | `hooks/Vulkan_Hooks.cpp` | the device extensions the Vulkan route needs (`VkExt`) |
-| `menu/menu_common.cpp` | the settings panel, the timing row, the toggle key, compare tags, the scan meter |
+| `menu/menu_common.cpp` | the Neural Rendering tab and its card (`DlssNr::RenderMenu`), the timing row, the toggle key, compare tags, the scan meter |
 | `Config.h` / `Config.cpp` | the `[DlssNr]` declarations and their read/write runs |
 
 `shaders/output_scaling/OS_Dx12.h` also takes a downscaler argument NR passes; it defaults, so it
@@ -72,7 +72,7 @@ experiment.
 | `shaders/dlssnr/DlssNr_Dx12.h/.cpp` | the pass: forwarder loading, feature lifetime, the evaluate path, encode/resolve orchestration, capture |
 | `shaders/dlssnr/DlssNr_Common.h` | the constant buffer, shared by the host and the shader |
 | `shaders/dlssnr/precompile/dlssnr.hlsl` | **the live shader**: encode (scale and sRGB-encode with a soft knee), area downsample, resolve (RenoDX's two-branch composition, OkLab hue correction, AP1 clamp, the guard) |
-| `shaders/dlssnr/precompile/DlssNr_Shader.h` | that shader compiled, as bytes |
+| `shaders/dlssnr/precompile/DlssNr_Shader.h`, `DlssNr_Shader_Vk.h` | that shader compiled, as bytes (D3D12 and Vulkan). The other passes' bytecode sits beside it, one `DlssNr_<Pass>_Shader.h` each: `Cadence`, `Guides`, `PeripheryColour`, `PeripheryGuides`, `PeripheryUnpack`, `Stabilizer`, `UiMask` |
 | `shaders/dlssnr/DlssNr_Stabilizer_Dx12.h/.cpp`, `precompile/dlssnr_stabilizer.hlsl` | the output stabilizer, off by default; `design/output-stabilizer.md` |
 | `DlssNr_Cadence.h`, `shaders/dlssnr/DlssNr_Cadence_Dx12.h/.cpp`, `precompile/dlssnr_cadence.hlsl`, `precompile/dlssnr_cadence_rule.h` | model cadence, off by default: the model every Nth frame, its edit carried along the motion in between; the bytecode header is optional (`__has_include`); `design/model-cadence.md` |
 | `shaders/dlssnr/DlssNr_GuideMatch.h`, `DlssNr_GuideMatch_Dx12.h/.cpp`, `precompile/dlssnr_guides.hlsl` | below the frame's size: depth and motion point-resampled to the model's working size, and the motion-vector scale for the texture handed over; the bytecode header is optional (`__has_include`); `design/reduced-scale-guides.md` |
