@@ -12,8 +12,11 @@ from two threads.
 Checked: the bracketed prefix (wall clock, tag, level, thread, uptime) is cut and nothing else; the
 first line from a site is always written; 75 repeats a second from two threads write nothing for 10 s,
 then one line carrying the 742 it stands for; the count restarts after each written line; different
-text or a different status is another site and is written at once; the table is bounded and, past
-256 sites, writes every new site every time instead of hiding it.
+text or a different status is another site and is written at once; the table is bounded at 256 sites,
+and a full one first forgets the sites that are quiet with nothing folded, so a repeater that arrives
+after start-up's burst of one-off lines is still limited (Crimson Desert, 2026-10-04: 4,717 unfolded
+lines in three minutes before this); a table full of sites with a count pending writes every new site
+every time instead of hiding it.
 
 It does not run Streamline, spdlog or the callbacks in `Streamline_Hooks.cpp`; that wiring is
 covered by the Release build and a game log.

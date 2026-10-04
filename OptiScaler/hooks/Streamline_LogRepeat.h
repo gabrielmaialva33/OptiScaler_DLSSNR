@@ -23,8 +23,9 @@ using Clock = std::chrono::steady_clock;
 
 constexpr Clock::duration Interval = std::chrono::seconds(10);
 
-// Sites remembered at once. Past it, a new site is written every time: the table fails open rather
-// than hiding a message nobody has seen before.
+// Sites remembered at once. A full table first forgets the sites that are not repeating (see Observe); a
+// new site that still finds no room is written every time: the table fails open rather than hiding a
+// message nobody has seen before.
 constexpr size_t MaxSites = 256;
 
 // Streamline starts every line with bracketed fields that change on each repeat: wall clock, the
@@ -81,6 +82,15 @@ class Filter
 
         if (found == _sites.end())
         {
+            // A full table lets go of the sites that are not repeating: quiet for an interval with nothing
+            // folded. Forgetting one changes nothing, since it would be written as it is next time either way,
+            // and start-up's burst of one-off lines no longer leaves a later repeater without a place. In
+            // Crimson Desert (2026-10-04) the repeater arrived 20 s in, found 256 one-offs, and was written
+            // 44 times a second.
+            if (_sites.size() >= MaxSites)
+                std::erase_if(_sites, [&](const auto& entry)
+                              { return entry.second.pending == 0 && now - entry.second.lastWrite >= _interval; });
+
             if (_sites.size() < MaxSites)
                 _sites.emplace(std::move(site), Entry { now, 0 });
 

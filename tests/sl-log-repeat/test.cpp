@@ -92,6 +92,53 @@ int main()
         CHECK(!filter.Observe("site 0", t0 + 1ms).write);
     }
 
+    {
+        // A full table forgets the sites that stopped repeating, so start-up's one-off lines do not leave a
+        // later repeater unlimited (Crimson Desert, 2026-10-04: it arrived 20 s in and was written 44 times a
+        // second)
+        Filter filter;
+        const auto t0 = Clock::time_point {} + 1h;
+
+        for (size_t i = 0; i < MaxSites; ++i)
+            CHECK(filter.Observe("one-off " + std::to_string(i), t0).write);
+        CHECK(filter.Sites() == MaxSites);
+
+        const auto t1 = t0 + 20s;
+        CHECK(filter.Observe(kFirst, t1).write);
+        CHECK(filter.Sites() == 1);
+
+        // 44 a second for just under 10 s, from two threads: nothing written, then one line with the count
+        int written = 0;
+        for (int i = 1; i < 440; ++i)
+            written += filter.Observe(i % 2 ? kSecond : kFirst, t1 + i * 22727us).write;
+        CHECK(written == 0);
+        const auto d = filter.Observe(kFirst, t1 + 10s);
+        CHECK(d.write && d.folded == 439);
+
+        // A one-off that comes back after being forgotten is written as it would have been anyway
+        CHECK(filter.Observe("one-off 7", t1 + 11s).write);
+    }
+
+    {
+        // Sites holding a folded count are never forgotten: a table full of repeaters still fails open
+        Filter filter;
+        const auto t0 = Clock::time_point {} + 1h;
+
+        for (size_t i = 0; i < MaxSites; ++i)
+        {
+            const std::string site = "repeater " + std::to_string(i);
+            CHECK(filter.Observe(site, t0).write);
+            CHECK(!filter.Observe(site, t0 + 1ms).write);
+        }
+
+        CHECK(filter.Observe("new", t0 + 1min).write);
+        CHECK(filter.Observe("new", t0 + 1min + 1ms).write);
+        CHECK(filter.Sites() == MaxSites);
+
+        const auto d = filter.Observe("repeater 0", t0 + 1min + 2ms);
+        CHECK(d.write && d.folded == 1);
+    }
+
     if (failures != 0)
     {
         std::fprintf(stderr, "%d failure(s)\n", failures);
@@ -99,6 +146,6 @@ int main()
     }
 
     std::printf("PASS: Streamline log repeat filter: prefix cut to the site, one line per 10 s with the folded "
-                "count, new sites at once, bounded table fails open\n");
+                "count, new sites at once, a full table forgets sites that stopped repeating and otherwise fails open\n");
     return EXIT_SUCCESS;
 }
