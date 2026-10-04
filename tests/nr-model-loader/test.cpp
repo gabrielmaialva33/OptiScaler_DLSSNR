@@ -6,6 +6,7 @@
 
 #include "DlssNr_PeScan.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
