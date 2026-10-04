@@ -13,7 +13,10 @@
 #include "detours/detours.h"
 
 #include <filesystem>
+#include <format>
+#include <string_view>
 #include <vulkan/vulkan.hpp>
+#include <hooks/Streamline_LogRepeat.h>
 
 inline const char* project_id_override = "24480451-f00d-face-1304-0308dabad187";
 constexpr unsigned long long app_id_override = 0x24480451;
@@ -441,8 +444,32 @@ class NVNGXProxy
     inline static void LogCallback(const char* message, NVSDK_NGX_Logging_Level loggingLevel,
                                    NVSDK_NGX_Feature sourceComponent)
     {
-        std::string logMessage(message);
-        LOG_DEBUG("NVSDK Feature {}: {}", (UINT) sourceComponent, logMessage);
+        if (message == nullptr)
+            return;
+
+        std::string_view sv(message);
+        const bool isFailure =
+            sv.find("FAIL_") != std::string_view::npos || sv.find("failed") != std::string_view::npos ||
+            sv.find("nvapi status") != std::string_view::npos || sv.find("error:") != std::string_view::npos;
+
+        if (isFailure)
+        {
+            static StreamlineLogRepeat::Filter ngxRepeats;
+            const auto decision = ngxRepeats.Observe(sv, StreamlineLogRepeat::Clock::now());
+            if (decision.write)
+            {
+                std::string repeats;
+                if (decision.folded > 0)
+                    repeats =
+                        std::format(" (repeated {} more times since the previous line, not written)", decision.folded);
+
+                LOG_WARN("NVSDK Feature {}: {}{}", (UINT) sourceComponent, sv, repeats);
+            }
+        }
+        else
+        {
+            LOG_DEBUG("NVSDK Feature {}: {}", (UINT) sourceComponent, sv);
+        }
     }
 
   public:
