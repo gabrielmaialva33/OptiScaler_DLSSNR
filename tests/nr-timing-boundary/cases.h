@@ -37,6 +37,15 @@ int main() {
     assert(modelFrame.contractHash!=plain.contractHash && modelFrame.cadence==2 && !modelFrame.carried);
     assert(carriedFrame.contractHash==modelFrame.contractHash && carriedFrame.settingsGeneration==modelFrame.settingsGeneration);
     assert(carriedFrame.carried && carriedFrame.cadence==2); ++cases;
+    // Peripheral compression is in the contract only while it is switched on, so the default keeps its hash;
+    // two centre bands at one packed extent are two contracts.
+    cfg.DlssNrPeripheryCenter.value=70; auto offAgain=make();
+    assert(offAgain.contractHash==hidden.contractHash); ++cases;
+    cfg.DlssNrPeripheryCompression.value=true; auto band70=make();
+    cfg.DlssNrPeripheryCenter.value=80; auto band80=make();
+    assert(band70.contractHash!=offAgain.contractHash && band80.contractHash!=band70.contractHash); ++cases;
+    cfg.DlssNrPeripheryCompression.value=false; auto off=make();
+    assert(off.contractHash==offAgain.contractHash); ++cases;
 
     using DlssNr::RenderGpuTiming;
     ImGui::Clear(); RenderGpuTiming(&cfg,true);
@@ -66,6 +75,6 @@ int main() {
     assert(!ImGui::Contains("model cadence")); ++cases;
     ImGui::toggle=0; ImGui::Clear(); RenderGpuTiming(&cfg,false);
     assert(!cfg.settings.Enabled && ImGui::sliderCalls==0 && !ImGui::Contains("Last confirmed")); ++cases;
-    assert(cases==21);
+    assert(cases==24);
     std::printf("PASS %d timing boundary metadata/UI cases\n",cases);
 }

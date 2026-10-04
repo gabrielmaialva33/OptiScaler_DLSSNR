@@ -47,6 +47,8 @@
 #include "DlssNr_Cadence_Dx12.h"
 #include <dlssnr/DlssNr_Cadence.h>
 #include <framegen/IFGFeature_Dx12.h>
+#include "DlssNr_Periphery.h"
+#include "DlssNr_Periphery_Dx12.h"
 
 namespace
 {
@@ -464,6 +466,17 @@ struct NrState
     ID3D12Resource* motionMatched = nullptr;
     DlssNr_GuideMatch_Dx12* guideMatch = nullptr;
 
+    // Peripheral compression (peripheral-compression.md). While it runs, the working size above is the
+    // packed extent and depthMatched/motionMatched hold the packed guides. periphery is the pass that packs
+    // and unpacks, built on first use, only when its bytecode is in the build, and kept until shutdown like
+    // guideMatch. The unpacked pair is the packed proxy and answer brought back onto the uniform grid for the
+    // resolve: sized to that grid, resting in UNORDERED_ACCESS, parked when the grid moves or the feature
+    // stops. peripheryFailed latches a pass that could not be built or run; Retry clears it.
+    DlssNr_Periphery_Dx12* periphery = nullptr;
+    ID3D12Resource* unpackedProxy = nullptr;
+    ID3D12Resource* unpackedAnswer = nullptr;
+    bool peripheryFailed = false;
+
     unsigned int width = 0;
     unsigned int height = 0;
     bool afterRayReconstruction = false;
@@ -593,6 +606,11 @@ DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSn
     // like the reset. Only named when it runs, so a contract with it off reads as it always did.
     if (cadence > 1)
         contract += std::format(" cadence={}", cadence);
+    // Peripheral compression's layout, only while it is switched on, so the default contract keeps its text and
+    // hash. Two centre bands at one packed extent cost the same pixels but are not the same measurement.
+    if (cfg.DlssNrPeripheryCompression.value_or_default())
+        contract += std::format(" periphery=[centre={},work={}]", cfg.DlssNrPeripheryCenter.value_or_default(),
+                                cfg.DlssNrPeripheryWork.value_or_default());
     static std::string previous;
     static uint64_t generation = 0;
     static uint64_t hash = 0;
@@ -1276,9 +1294,9 @@ bool RetiredCapacity()
     if (!g_tracked)
         return true;
     TickNrRetired();
-    // A rebuild can retire at most 16 objects, and the six of the other colour format's set with a
-    // resolution change (ParkAltSurfaces). Refuse BEFORE recording or allocation,
-    // not after unsubmitted slider/DRS changes already consumed arbitrary memory.
+    // A rebuild can retire at most 18 objects (16, and peripheral compression's unpacked pair), and the six
+    // of the other colour format's set with a resolution change (ParkAltSurfaces). Refuse BEFORE recording or
+    // allocation, not after unsubmitted slider/DRS changes already consumed arbitrary memory.
     return DlssNr::Chain::RetirementAllowed(g_nrRetired.size());
 }
 
@@ -2119,6 +2137,150 @@ void ReportSkipOnce(const char* reason)
     LOG_INFO("DLSS-NR did not run: {}", reason);
 }
 
+// What peripheral compression did last, for the menu. Its own lock: the menu reads it from another thread and
+// must not wait on a dispatch for it.
+std::mutex g_peripheryStatusMutex;
+DlssNr::PeripheryState g_peripheryStatus;
+
+// Peripheral compression's layout for this frame (design/peripheral-compression.md), or an inactive one with
+// the reason. Builds the pass on first use; says on change what it decided, and drops the model's history
+// when the layout moves, because the history then describes other pixels. A change of the packed extent is
+// also a resolution change, which Dispatch rebuilds for on its own.
+//
+// Off -- the default -- is three config reads and a constant shape: no pass, no surface, no log line, and the
+// working size Dispatch takes is the one it always took.
+DlssNr::Periphery::Layout PeripheryLayoutFor(const Config& cfg, ID3D12Device* device, unsigned int width,
+                                             unsigned int height, float workScale, unsigned int gridWidth,
+                                             unsigned int gridHeight, bool afterUpscale, bool useProxy)
+{
+    namespace P = DlssNr::Periphery;
+
+    P::Settings settings {};
+    settings.enabled = cfg.DlssNrPeripheryCompression.value_or_default();
+    settings.center = cfg.DlssNrPeripheryCenter.value_or_default();
+    settings.work = cfg.DlssNrPeripheryWork.value_or_default();
+
+    P::Layout layout = P::Build(settings, width, height, workScale);
+
+    if (settings.enabled)
+    {
+        // The route's refusals first: they hold whatever the two numbers say.
+        const char* refusal = !afterUpscale ? P::kReasonBeforeUpscale : useProxy ? P::kReasonUseProxy : nullptr;
+
+        if (refusal == nullptr && layout.active)
+        {
+            if (!DlssNr_Periphery_Dx12::Available())
+            {
+                refusal = P::kReasonNoShader;
+            }
+            else
+            {
+                if (g_nr.periphery == nullptr && !g_nr.peripheryFailed)
+                {
+                    g_nr.periphery = new DlssNr_Periphery_Dx12("DLSS-NR periphery", device);
+
+                    // Nothing was recorded with an object that failed to build, so it goes at once.
+                    if (!g_nr.periphery->IsInit())
+                    {
+                        delete g_nr.periphery;
+                        g_nr.periphery = nullptr;
+                        g_nr.peripheryFailed = true;
+                    }
+                }
+
+                if (g_nr.peripheryFailed || g_nr.periphery == nullptr)
+                    refusal = P::kReasonPassFailed;
+            }
+        }
+
+        if (refusal != nullptr)
+        {
+            layout.active = false;
+            layout.reason = refusal;
+        }
+    }
+
+    // The unpacked pair exists only while the feature runs, at the uniform grid's size.
+    for (ID3D12Resource** unpacked : { &g_nr.unpackedProxy, &g_nr.unpackedAnswer })
+    {
+        if (*unpacked == nullptr)
+            continue;
+
+        const auto have = (*unpacked)->GetDesc();
+        if (!layout.active || (unsigned int) have.Width != gridWidth || have.Height != gridHeight)
+            ParkNrResource(*unpacked);
+    }
+
+    // Said, and the history dropped, once per change. Switched off it is one constant shape whatever the two
+    // numbers say, so a default configuration never logs a line about a feature nobody turned on.
+    struct Shape
+    {
+        bool enabled = false;
+        bool active = false;
+        const char* reason = "";
+        uint32_t center = 0, work = 0;
+        unsigned int modelW = 0, modelH = 0, gridW = 0, gridH = 0, frameW = 0, frameH = 0;
+        bool operator==(const Shape&) const = default;
+    };
+
+    static Shape said {};
+    Shape now {};
+
+    if (settings.enabled)
+        now = { true,          layout.active, layout.reason, settings.center, settings.work, layout.modelW,
+                layout.modelH, gridWidth,     gridHeight,    width,           height };
+
+    const float compression = layout.active ? std::min({ layout.x.compression[0], layout.x.compression[1],
+                                                         layout.y.compression[0], layout.y.compression[1] })
+                                            : 1.0f;
+
+    if (!(now == said))
+    {
+        // The layout moving is what invalidates history here. A new packed extent alone is a resolution change,
+        // which rebuilds the model and resets it anyway, and a title that alternates extents must not also
+        // drop history on every alternation from this side.
+        const bool layoutMoved = said.enabled != now.enabled || said.active != now.active ||
+                                 said.center != now.center || said.work != now.work;
+        if (layoutMoved && (said.active || now.active))
+        {
+            g_nr.reset = true;
+            for (auto& reset : g_nr.passReset)
+                reset = true;
+        }
+
+        if (now.active)
+            LOG_INFO("DLSS-NR periphery: active, model {}x{} for a {}x{} frame (uniform grid {}x{}; centre {}, work "
+                     "{}, compression {:.2f}; {:.0f} percent of the grid's pixels)",
+                     now.modelW, now.modelH, width, height, gridWidth, gridHeight, settings.center, settings.work,
+                     compression, 100.0 * layout.PixelShare(gridWidth, gridHeight));
+        else if (now.enabled)
+            LOG_INFO("DLSS-NR periphery: not active -- {}", now.reason);
+        else
+            LOG_INFO("DLSS-NR periphery: switched off");
+
+        said = now;
+    }
+
+    // The menu shows the status only while the setting is on, and reads its age, so off writes nothing.
+    if (settings.enabled)
+    {
+        std::lock_guard<std::mutex> lock(g_peripheryStatusMutex);
+        g_peripheryStatus.seen = true;
+        g_peripheryStatus.active = layout.active;
+        g_peripheryStatus.reason = layout.reason;
+        g_peripheryStatus.modelWidth = layout.modelW;
+        g_peripheryStatus.modelHeight = layout.modelH;
+        g_peripheryStatus.gridWidth = gridWidth;
+        g_peripheryStatus.gridHeight = gridHeight;
+        g_peripheryStatus.frameWidth = width;
+        g_peripheryStatus.frameHeight = height;
+        g_peripheryStatus.compression = compression;
+        g_peripheryStatus.at = std::chrono::steady_clock::now();
+    }
+
+    return layout;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -2743,8 +2905,18 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // the user's chosen scale into the nearest size that runs, silently and every frame.
     const float maxWorkScale = frame.AllowSupersampling ? 2.0f : 1.0f;
     const float workScale = std::clamp(configuredWorkScale, 0.25f, maxWorkScale);
-    const auto workWidth = (unsigned int) (width * workScale + 0.5f);
-    const auto workHeight = (unsigned int) (height * workScale + 0.5f);
+
+    // The uniform grid: the size the model works at, unless peripheral compression packs its input, in which
+    // case it is the grid the model's answer is unpacked back onto (design/peripheral-compression.md). From
+    // here on workWidth/workHeight is the model's extent either way, so the feature, its output, the chain,
+    // the settle gates and the format-flip set all follow the packed extent while the periphery runs.
+    const auto gridWidth = (unsigned int) (width * workScale + 0.5f);
+    const auto gridHeight = (unsigned int) (height * workScale + 0.5f);
+    const DlssNr::Periphery::Layout periphery = PeripheryLayoutFor(cfg, device, width, (unsigned int) height, workScale,
+                                                                   gridWidth, gridHeight, sourceIsTarget, useProxy);
+    const bool peripheryActive = periphery.active;
+    const auto workWidth = peripheryActive ? periphery.modelW : gridWidth;
+    const auto workHeight = peripheryActive ? periphery.modelH : gridHeight;
     const bool reduced = workWidth != width || workHeight != height;
 
     // Say what the model is being asked for, when it changes.
@@ -2759,8 +2931,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         if (workWidth != lastW || workHeight != lastH)
         {
-            LOG_INFO("DLSS-NR working size: {}x{} at scale {:.2f} ({:.2f} Mpx), frame {}x{}", workWidth, workHeight,
-                     workScale, (workWidth * (double) workHeight) / 1.0e6, width, height);
+            LOG_INFO("DLSS-NR working size: {}x{} at scale {:.2f} ({:.2f} Mpx), frame {}x{}{}", workWidth, workHeight,
+                     workScale, (workWidth * (double) workHeight) / 1.0e6, width, height,
+                     peripheryActive ? " -- packed by peripheral compression" : "");
             lastW = workWidth;
             lastH = workHeight;
         }
@@ -2819,7 +2992,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                           !AltSurfacesFit(desc.Format, width, height, workWidth, workHeight))))
     {
         DXGI_QUERY_VIDEO_MEMORY_INFO budget {};
-        const uint64_t surfaceBytes = uint64_t(workWidth) * workHeight * 48 + uint64_t(width) * height * 48;
+        // Peripheral compression adds the unpacked pair, two RGBA16F surfaces on the uniform grid.
+        const uint64_t surfaceBytes = uint64_t(workWidth) * workHeight * 48 + uint64_t(width) * height * 48 +
+                                      (peripheryActive ? uint64_t(gridWidth) * gridHeight * 16 : 0);
         if (!VideoMemory(device, budget) ||
             !DlssNr::Chain::Admit(budget.Budget, budget.CurrentUsage, g_nr.measuredModelBytes, surfaceBytes))
         {
@@ -3555,11 +3730,42 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // enlarged during the resolve while the frame underneath stays full size and untouched.
     ID3D12Resource* modelInput = g_nr.colorCopy;
 
+    // Without its packed surface the model would be handed the frame-size proxy as if it were packed.
+    if (peripheryActive && g_nr.colorSmall == nullptr)
+    {
+        g_nr.peripheryFailed = true;
+        g_nr.reset = true;
+        LOG_ERROR("DLSS-NR periphery: the packed colour surface could not be created; off for this session");
+        reportSkip("the peripheral packed colour surface could not be created");
+        device->Release();
+        return false;
+    }
+
     if (reduced && g_nr.colorSmall != nullptr)
     {
         bool built = false;
 
-        if (workScale > 1.0f)
+        if (peripheryActive)
+        {
+            // Peripheral compression: the proxy packed, each packed texel the exact area average of its warped
+            // footprint in the frame -- the downsample's integral with warped bounds. A pass that will not
+            // record here leaves nothing usable for the model at this extent, so the frame keeps the game's
+            // colour, the feature is latched off and the next frame rebuilds at the uniform size.
+            if (!g_nr.periphery->PackColour(cmdList, periphery, g_nr.colorCopy, g_nr.colorSmall))
+            {
+                g_nr.peripheryFailed = true;
+                g_nr.reset = true;
+                LOG_ERROR("DLSS-NR periphery: the colour pack could not be recorded; off for this session");
+                reportSkip("the peripheral colour pack could not be recorded");
+                device->Release();
+                return false;
+            }
+
+            Barrier(cmdList, g_nr.colorSmall, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            built = true;
+        }
+        else if (workScale > 1.0f)
         {
             // Supersample: enlarge the proxy to the larger working size with a real upscaling filter
             // (the Output Scaling upsampler) so the model sees a clean super-native input, rather than
@@ -3689,8 +3895,75 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     unsigned int modelMotionBaseY = motionBaseY;
     bool guidesMatched = false;
 
-    if (DlssNr::GuideMatch::Wanted(cfg.DlssNrMatchGuides.value_or_default(), DlssNr_GuideMatch_Dx12::Available(),
-                                   workWidth, workHeight, guideWidth, guideHeight, motionWidth, motionHeight))
+    // Peripheral compression's guides are in packed space whatever their size, and their vectors in packed
+    // pixels, so `guidesPacked` replaces the resample below and the model is handed a scale of 1.
+    bool guidesPacked = false;
+
+    // The size the game's scale is measured against: the render size for low-resolution vectors (the
+    // depth region is the render region), the frame's otherwise.
+    const unsigned int motionReferenceWidth =
+        DlssNr::GuideMatch::MotionReference(frame.MotionVectorsLowResolution, guideWidth, width);
+    const unsigned int motionReferenceHeight =
+        DlssNr::GuideMatch::MotionReference(frame.MotionVectorsLowResolution, guideHeight, height);
+
+    if (peripheryActive)
+    {
+        if (g_nr.depthMatched == nullptr)
+            g_nr.depthMatched = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, workWidth, workHeight);
+
+        if (g_nr.motionMatched == nullptr)
+            g_nr.motionMatched = CreateScratch(device, DXGI_FORMAT_R32G32_FLOAT, workWidth, workHeight);
+
+        // The game's vectors in FRAME pixels before their ends go through the mapping: measured against the
+        // size they come in, converted to the frame's. wilsjo2's v0.8.91 handed the raw game scale here,
+        // render pixels for low-resolution vectors, and every packed vector came out too short.
+        const float frameScaleX = DlssNr::Periphery::FrameMotionScale(g_nr.guideMvScaleX, width, motionReferenceWidth);
+        const float frameScaleY =
+            DlssNr::Periphery::FrameMotionScale(g_nr.guideMvScaleY, (unsigned int) height, motionReferenceHeight);
+
+        if (g_nr.depthMatched == nullptr || g_nr.motionMatched == nullptr ||
+            !g_nr.periphery->PackGuides(cmdList, periphery, depthIn, motionIn, depthBaseX, depthBaseY, guideWidth,
+                                        guideHeight, motionBaseX, motionBaseY, motionWidth, motionHeight, frameScaleX,
+                                        frameScaleY, g_nr.depthMatched, g_nr.motionMatched))
+        {
+            // The colour is already packed and nothing else fits it: no model this frame, the feature latched
+            // off, and the next frame rebuilds at the uniform size.
+            g_nr.peripheryFailed = true;
+            g_nr.reset = true;
+            LOG_ERROR("DLSS-NR periphery: the guide pack could not be recorded; off for this session");
+            reportSkip("the peripheral guide pack could not be recorded");
+            device->Release();
+            return false;
+        }
+
+        Barrier(cmdList, g_nr.depthMatched, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Barrier(cmdList, g_nr.motionMatched, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        depthForModel = g_nr.depthMatched;
+        motionForModel = g_nr.motionMatched;
+        modelDepthWidth = modelMotionWidth = workWidth;
+        modelDepthHeight = modelMotionHeight = workHeight;
+        modelDepthBaseX = modelDepthBaseY = modelMotionBaseX = modelMotionBaseY = 0;
+        guidesMatched = true;
+        guidesPacked = true;
+
+        static float saidFrameScale[2] = { -1.0f, -1.0f };
+        if (saidFrameScale[0] != frameScaleX || saidFrameScale[1] != frameScaleY)
+        {
+            saidFrameScale[0] = frameScaleX;
+            saidFrameScale[1] = frameScaleY;
+            LOG_INFO("DLSS-NR periphery guides: depth and motion packed to {}x{}; the game's vectors to frame pixels "
+                     "by {:.1f} x {:.1f} (game scale {:.1f} x {:.1f} against {}x{}, {}), then both ends through the "
+                     "mapping",
+                     workWidth, workHeight, frameScaleX, frameScaleY, g_nr.guideMvScaleX, g_nr.guideMvScaleY,
+                     motionReferenceWidth, motionReferenceHeight,
+                     frame.MotionVectorsLowResolution ? "render size, low-resolution vectors" : "output size");
+        }
+    }
+    else if (DlssNr::GuideMatch::Wanted(cfg.DlssNrMatchGuides.value_or_default(), DlssNr_GuideMatch_Dx12::Available(),
+                                        workWidth, workHeight, guideWidth, guideHeight, motionWidth, motionHeight))
     {
         if (g_nr.guideMatch == nullptr)
             g_nr.guideMatch = new DlssNr_GuideMatch_Dx12("DLSS-NR guide match", device);
@@ -3738,20 +4011,17 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS };
 
-    // The size the game's scale is measured against: the render size for low-resolution vectors (the
-    // depth region is the render region), the frame's otherwise.
-    const unsigned int motionReferenceWidth =
-        DlssNr::GuideMatch::MotionReference(frame.MotionVectorsLowResolution, guideWidth, width);
-    const unsigned int motionReferenceHeight =
-        DlssNr::GuideMatch::MotionReference(frame.MotionVectorsLowResolution, guideHeight, height);
-
+    // Packed vectors are packed pixels already: the model's scale is 1, and RenderMotionScale has nothing to
+    // choose between (the pack's own conversion above is always the corrected one).
     const bool renderMotionScale = cfg.DlssNrRenderMotionScale.value_or_default();
     const float guideMvScaleXToWork =
-        renderMotionScale
+        guidesPacked ? 1.0f
+        : renderMotionScale
             ? DlssNr::GuideMatch::ModelMotionScale(g_nr.guideMvScaleX, modelMotionWidth, motionReferenceWidth)
             : DlssNr::GuideMatch::LegacyMotionScale(g_nr.guideMvScaleX, workWidth, width);
     const float guideMvScaleYToWork =
-        renderMotionScale
+        guidesPacked ? 1.0f
+        : renderMotionScale
             ? DlssNr::GuideMatch::ModelMotionScale(g_nr.guideMvScaleY, modelMotionHeight, motionReferenceHeight)
             : DlssNr::GuideMatch::LegacyMotionScale(g_nr.guideMvScaleY, workHeight, height);
     const int guideDepthInverted = g_nr.guideDepthInverted ? 1 : 0;
@@ -3759,20 +4029,27 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Said once per change: which guides the model got, and the scale it was given for them.
     {
         static bool saidMatched = false;
+        static bool saidPacked = false;
         static unsigned int saidShape[4] = { ~0u, ~0u, ~0u, ~0u };
         static float saidScale[2] = { -1.0f, -1.0f };
         const unsigned int shapeNow[4] = { modelMotionWidth, modelMotionHeight, workWidth, workHeight };
 
-        if (saidMatched != guidesMatched ||
+        if (saidMatched != guidesMatched || saidPacked != guidesPacked ||
             !std::equal(std::begin(shapeNow), std::end(shapeNow), std::begin(saidShape)) ||
             saidScale[0] != guideMvScaleXToWork || saidScale[1] != guideMvScaleYToWork)
         {
             saidMatched = guidesMatched;
+            saidPacked = guidesPacked;
             std::copy(std::begin(shapeNow), std::end(shapeNow), std::begin(saidShape));
             saidScale[0] = guideMvScaleXToWork;
             saidScale[1] = guideMvScaleYToWork;
 
-            if (guidesMatched)
+            if (guidesPacked)
+                LOG_INFO("DLSS-NR guides packed by peripheral compression: depth and motion {}x{} for a {}x{} model "
+                         "(the frame's guides are {}x{} and {}x{})",
+                         workWidth, workHeight, workWidth, workHeight, guideWidth, guideHeight, motionWidth,
+                         motionHeight);
+            else if (guidesMatched)
                 LOG_INFO("DLSS-NR guides matched to the working size: depth and motion {}x{} for a {}x{} model (the "
                          "frame's guides are {}x{} and {}x{})",
                          workWidth, workHeight, workWidth, workHeight, guideWidth, guideHeight, motionWidth,
@@ -3791,8 +4068,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                      motionReferenceWidth, motionReferenceHeight,
                      frame.MotionVectorsLowResolution ? "render size, low-resolution vectors" : "output size",
                      modelMotionWidth, modelMotionHeight,
-                     guidesMatched ? "matched to the working size" : "the game's region", workWidth, workHeight,
-                     renderMotionScale ? "" : " -- legacy working/frame conversion");
+                     guidesPacked    ? "packed, vectors in packed pixels"
+                     : guidesMatched ? "matched to the working size"
+                                     : "the game's region",
+                     workWidth, workHeight,
+                     guidesPacked || renderMotionScale ? "" : " -- legacy working/frame conversion");
         }
     }
     const bool isLogFrame = g_frames % 120 == 0;
@@ -3870,9 +4150,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     cadenceFrame.depthRegion = { modelDepthBaseX, modelDepthBaseY, modelDepthWidth, modelDepthHeight };
     cadenceFrame.motion = motionForModel;
     cadenceFrame.motionRegion = { modelMotionBaseX, modelMotionBaseY, modelMotionWidth, modelMotionHeight };
-    cadenceFrame.mvToWorkX = DlssNr::GuideMatch::ModelMotionScale(g_nr.guideMvScaleX, workWidth, motionReferenceWidth);
+    // Under peripheral compression the guides are already packed: the vectors hold packed working pixels, scale
+    // 1, as the model is told. Scaling them again from the game's units would carry every edit too far.
+    cadenceFrame.mvToWorkX =
+        guidesPacked ? 1.0f : DlssNr::GuideMatch::ModelMotionScale(g_nr.guideMvScaleX, workWidth, motionReferenceWidth);
     cadenceFrame.mvToWorkY =
-        DlssNr::GuideMatch::ModelMotionScale(g_nr.guideMvScaleY, workHeight, motionReferenceHeight);
+        guidesPacked ? 1.0f
+                     : DlssNr::GuideMatch::ModelMotionScale(g_nr.guideMvScaleY, workHeight, motionReferenceHeight);
     cadenceFrame.scale = Cadence::TapScale(workWidth, width);
 
     // The model frame after carried ones: its own history is as old as the last model frame, so it is handed the
@@ -4229,6 +4513,55 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ID3D12Resource* resolveProxy = resolved.proxy;
         ID3D12Resource* resolveAnswer = resolved.answer;
 
+        // Peripheral compression (design/peripheral-compression.md): the packed proxy and the packed answer
+        // brought back onto the uniform grid, once, after every pass of the chain, so the resolve reads them
+        // exactly as it reads the uniform path's pair. ForceResidual keeps Transfer 1 and 3 on the residual
+        // path when that grid is the frame's own size, where the size test alone would fall back to Classic
+        // over a proxy that has been packed and unpacked.
+        bool unpacked = false;
+        bool resolvable = true;
+
+        if (peripheryActive)
+        {
+            if (g_nr.unpackedProxy == nullptr)
+                g_nr.unpackedProxy = CreateScratch(device, DXGI_FORMAT_R16G16B16A16_FLOAT, gridWidth, gridHeight);
+            if (g_nr.unpackedAnswer == nullptr)
+                g_nr.unpackedAnswer = CreateScratch(device, DXGI_FORMAT_R16G16B16A16_FLOAT, gridWidth, gridHeight);
+
+            if (g_nr.unpackedProxy != nullptr && g_nr.unpackedAnswer != nullptr &&
+                g_nr.periphery->Unpack(cmdList, periphery, modelInput, finalOutput, g_nr.unpackedProxy,
+                                       g_nr.unpackedAnswer, gridWidth, gridHeight))
+            {
+                Barrier(cmdList, g_nr.unpackedProxy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                Barrier(cmdList, g_nr.unpackedAnswer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                resolveProxy = g_nr.unpackedProxy;
+                resolveAnswer = g_nr.unpackedAnswer;
+                resolveParams.ForceResidual = 1;
+                unpacked = true;
+            }
+            else
+            {
+                // A packed answer composed as if it were uniform would put the whole periphery in the wrong
+                // place, so this frame keeps the game's colour, and the next rebuilds at the uniform size.
+                g_nr.peripheryFailed = true;
+                g_nr.reset = true;
+                resolvable = false;
+                LOG_ERROR("DLSS-NR periphery: the unpack could not be recorded; off for this session");
+            }
+        }
+
+        // Debug view 4, "Packed model input": the model's input as it was handed over, shown through the
+        // proxy view. Only while the periphery ran: otherwise 4 reaches the shader as it always did, which
+        // knows no view 4 and composes the frame -- the default path stays what it was for every value.
+        if (resolveParams.DebugView == 4 && unpacked)
+        {
+            resolveProxy = modelInput;
+            resolveParams.DebugView = 1;
+        }
+
+        if (resolvable)
         {
             ReadResourceScope exposureRead(cmdList, exposureTex, exposureBarrierState);
             wrote = DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, motionIn,
@@ -4240,6 +4573,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (superDownOk)
             Barrier(cmdList, g_nr.outputNative, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        if (unpacked)
+        {
+            Barrier(cmdList, g_nr.unpackedProxy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            Barrier(cmdList, g_nr.unpackedAnswer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
 
         // The output stabilizer (design/output-stabilizer.md), last, over what the resolve just wrote.
         //
@@ -4266,10 +4607,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             // the stage was before the upscaler, so the history no longer describes the screen.
             static std::optional<ComposeReport> stabilizerShape;
             static DlssNrPassSnapshot stabilizerPasses {};
-            static std::tuple<float, float, uint32_t, uint32_t, uint32_t, bool, Scaler> stabilizerExtras {};
+            // The periphery's layout too: a centre moved at the same packed extent reshapes every edge pixel.
+            static std::tuple<float, float, uint32_t, uint32_t, uint32_t, bool, Scaler, uint32_t, uint32_t>
+                stabilizerExtras {};
             const auto extrasNow = std::make_tuple(
                 resolveParams.CompareSplit, resolveParams.CompareZoom, resolveParams.CompareSwap,
-                resolveParams.ReversibleMode, resolveParams.ApplyModel, frame.AfterRayReconstruction, nrScalerForChain);
+                resolveParams.ReversibleMode, resolveParams.ApplyModel, frame.AfterRayReconstruction, nrScalerForChain,
+                peripheryActive ? periphery.settings.center : 0u, peripheryActive ? periphery.settings.work : 0u);
             const bool settingsChanged = !stabilizerShape || !stabilizerShape->SameShape(composeNow) ||
                                          stabilizerPasses.Count != passSnapshot.Count ||
                                          stabilizerPasses.Individual != passSnapshot.Individual ||
@@ -4392,6 +4736,7 @@ void RetryAfterFailure()
     g_nr.failed = false;
     for (auto& failed : g_nr.passFailed)
         failed = false;
+    g_nr.peripheryFailed = false;
     g_nr.reason = "";
     g_nr.reset = true;
 }
@@ -6562,6 +6907,12 @@ const char* MultipassStatus() { return g_chainStatus.load(); }
 const char* CadenceStatus() { return g_cadenceStatus.load(); }
 bool CadenceAvailable() { return DlssNr_Cadence_Dx12::Available(); }
 
+PeripheryState PeripheryStatus()
+{
+    std::lock_guard<std::mutex> lock(g_peripheryStatusMutex);
+    return g_peripheryStatus;
+}
+
 void RequestCapture(unsigned int frames)
 {
     ClearCaptureDirectory();
@@ -6681,6 +7032,21 @@ void Shutdown()
     {
         delete g_nr.guideMatch;
         g_nr.guideMatch = nullptr;
+    }
+
+    for (ID3D12Resource** r : { &g_nr.unpackedProxy, &g_nr.unpackedAnswer })
+    {
+        if (*r != nullptr)
+        {
+            (*r)->Release();
+            *r = nullptr;
+        }
+    }
+
+    if (g_nr.periphery != nullptr)
+    {
+        delete g_nr.periphery;
+        g_nr.periphery = nullptr;
     }
 
     if (g_nr.superDown != nullptr)

@@ -418,6 +418,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCompareTags.set_from_config(readBool("DlssNr", "CompareTags"));
             DlssNrTagScale.set_from_config(readFloat("DlssNr", "TagScale"));
             DlssNrWorkingScale.set_from_config(readFloat("DlssNr", "WorkingScale"));
+            DlssNrPeripheryCompression.set_from_config(readBool("DlssNr", "PeripheryCompression"));
+            DlssNrPeripheryCenter.set_from_config(readUInt("DlssNr", "PeripheryCenter"));
+            DlssNrPeripheryWork.set_from_config(readUInt("DlssNr", "PeripheryWork"));
 
             if (auto v = readEnum<Scaler>("DlssNr", "ScalingDownscaler"))
                 DlssNrScalingDownscaler.set_from_config(*v);
@@ -1376,6 +1379,12 @@ bool Config::SaveIni()
         ini.SetValue("DlssNr", "TagScale", GetFloatValue(Instance()->DlssNrTagScale.value_for_config()).c_str());
         ini.SetValue("DlssNr", "WorkingScale",
                      GetFloatValue(Instance()->DlssNrWorkingScale.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "PeripheryCompression",
+                     GetBoolValue(Instance()->DlssNrPeripheryCompression.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "PeripheryCenter",
+                     GetIntValue(Instance()->DlssNrPeripheryCenter.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "PeripheryWork",
+                     GetIntValue(Instance()->DlssNrPeripheryWork.value_for_config()).c_str());
         ini.SetValue("DlssNr", "ScalingDownscaler", GetIntValue(Instance()->DlssNrScalingDownscaler).c_str());
 
         ini.SetValue("DlssNr", "Stage", GetIntValue(Instance()->DlssNrStage.value_for_config()).c_str());

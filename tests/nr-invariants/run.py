@@ -148,6 +148,30 @@ if (precompile / 'DlssNr_Cadence_Shader.cso').exists():
     targets.append(('DlssNr_Cadence_Shader.cso', 'DlssNr_Cadence_Shader.h', 'DlssNr_Cadence_cso', b'DXBC'))
 elif (precompile / 'DlssNr_Cadence_Shader.h').exists():
     fail('DlssNr_Cadence_Shader.h is committed without DlssNr_Cadence_Shader.cso beside it')
+# Peripheral compression's three passes (peripheral-compression.md). Optional bytecode like the guide resample's:
+# none of the six files is a supported state (the feature says "unavailable"); any one of them commits to all
+# six, because DlssNr_Periphery_Dx12.cpp loads the three headers together and a .cso without its header, or a
+# header without the .cso it was made from, is the half-commit this check exists to catch.
+periphery_stems = ('DlssNr_PeripheryColour', 'DlssNr_PeripheryGuides', 'DlssNr_PeripheryUnpack')
+if any((precompile / f'{stem}_Shader{ext}').exists() for stem in periphery_stems for ext in ('.cso', '.h')):
+    for stem in periphery_stems:
+        if not (precompile / f'{stem}_Shader.cso').exists() or not (precompile / f'{stem}_Shader.h').exists():
+            fail(f'{stem}_Shader.cso and {stem}_Shader.h must be committed together with the other periphery passes '
+                 '(build commands in precompile/dlssnr_periphery.hlsl)')
+        else:
+            targets.append((f'{stem}_Shader.cso', f'{stem}_Shader.h', f'{stem}_cso', b'DXBC'))
+    # The feature also needs the composition shader to read ForceResidual (appended in 0c3a49fc); with the
+    # bytecode from before it, the periphery runs and the resolve silently falls back to Classic at 100. Nothing
+    # here can compile the .hlsl, but it can refuse the two binaries known to predate the field (75e62d22).
+    import hashlib
+    stale = {
+        'DlssNr_Shader.cso': '666485bca95113aced89451a2967c0278b996d3f303223da25a67b66ab41cc87',
+        'DlssNr_Shader_Vk.spv': 'a949fb96abf5bf05200b72639efc5fcdb94ea8909a788976802829c4593a5e3a',
+    }
+    for binary, digest in stale.items():
+        if hashlib.sha256((precompile / binary).read_bytes()).hexdigest() == digest:
+            fail(f'{binary} predates ForceResidual: rebuild dlssnr.hlsl (both targets) before committing the '
+                 'periphery bytecode')
 
 with tempfile.TemporaryDirectory() as scratch:
     for binary, header, array, magic in targets:

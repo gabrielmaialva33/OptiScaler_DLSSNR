@@ -263,6 +263,13 @@ struct alignas(256) DlssNrConstants
     // preExposure * trim, so the live white point is ExposurePreMul / exposure. Mirrored in the cbuffer.
     uint32_t UseGameExposure;
     float ExposurePreMul;
+
+    // Take the matched-residual path (Transfer 1 and 3) even when the proxy is the frame's size. Set only
+    // while peripheral compression is running (dlssnr/design/peripheral-compression.md): at Model resolution
+    // 100 the unpacked pair is frame-sized, so the size test alone sent the composition to Classic over a
+    // proxy that had been packed and unpacked. Zero everywhere else, which is the path the shader took
+    // before this existed. Trailing scalar, mirrored in the shader cbuffer.
+    uint32_t ForceResidual;
 };
 
 class DlssNr_Common

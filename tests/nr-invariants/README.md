@@ -18,7 +18,12 @@ the live tree rather than pinned to a baseline:
    HLSL `g` prefix aside). A divergence names the first scalar where they part.
 3. **Headers are the committed bytecode (rule 6, the half a host can check).** `DlssNr_Shader.h` and
    `DlssNr_Shader_Vk.h` are byte-identical to what `create_header.py` makes from the `.cso` and
-   `.spv` beside them, and each binary starts with its container magic.
+   `.spv` beside them, and each binary starts with its container magic. The optional passes are checked
+   once their bytecode is committed: the guide resample, and peripheral compression's three passes
+   (`DlssNr_Periphery{Colour,Guides,Unpack}_Shader`), which must arrive all six files together -- any
+   one of them without the rest fails. With them committed, `DlssNr_Shader.cso` and
+   `DlssNr_Shader_Vk.spv` must not be the two binaries from before `ForceResidual` (their SHA-256 is in
+   `run.py`): the periphery would run and the resolve would silently fall back to Classic at 100.
 4. **Retired identifiers.** A preprocessor gate on `DLSS_NEURAL_RENDERING` (the macro nothing defined,
    which silently dropped the present-time pass from every build), a read or save of the retired
    `Dx11BridgeHost` key, and a forwarder write of `DLSSNR.GlobalToneStrength` (a name the model never

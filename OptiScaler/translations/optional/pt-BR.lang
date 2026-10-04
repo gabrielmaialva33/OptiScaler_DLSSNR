@@ -365,3 +365,26 @@ The model runs every frame while Hold frame is on.	O modelo roda em todo quadro 
 The model runs every frame while a capture is running.	O modelo roda em todo quadro enquanto uma captura estiver em andamento.
 The model runs every frame: the model cadence surfaces could not be allocated.	O modelo roda em todo quadro: as superfícies da cadência do modelo não puderam ser alocadas.
 Waiting for the pass to run.	Aguardando o passe rodar.
+
+# Peripheral compression (dlssnr/design/peripheral-compression.md)
+Peripheral compression	Compressão periférica
+Centre band	Faixa central
+Packed extent	Extensão compactada
+Packed model input	Entrada compactada do modelo
+Experimental. The model's input is packed denser in the centre than at the edges, so at the\nsame cost the centre keeps full detail and the edges give some up. Its answer is unpacked\nbefore it is composed; the frame itself is untouched.\n\nThe defaults, 80 and 90, cost what a Model resolution of 90 costs, so that is the\ncomparison to make, not 100. Matched residual is used at full model resolution too;\nClassic blurs colour at the edges here.\n\nD3D12, after the upscaler or at present. Not above Model resolution 100 and not with the\ndriver proxy. Moving a slider restarts the model's history; a new packed size rebuilds it\nafter a moment.	Experimental. A entrada do modelo é compactada, mais densa no centro do que nas bordas, então\npelo mesmo custo o centro mantém todo o detalhe e as bordas cedem um pouco. A resposta é\ndescompactada antes da composição; o quadro em si não é alterado.\n\nOs padrões, 80 e 90, custam o mesmo que uma resolução do modelo de 90, então é com isso\nque se compara, não com 100. O resíduo correspondente é usado também na resolução cheia\ndo modelo; a Clássica borra a cor nas bordas aqui.\n\nD3D12, depois do upscaler ou no present. Não acima da resolução do modelo 100 e não com o\nproxy do driver. Mover um controle reinicia o histórico do modelo; um novo tamanho\ncompactado o reconstrói após um momento.
+How much of each axis, around the middle, the model sees at full density.	Quanto de cada eixo, em volta do meio, o modelo vê em densidade total.
+How much of each axis the model's input spans, before Model resolution. Everything past the\ncentre is squeezed into the rest, to no less than half its size: this has to be at least\nhalfway between the centre band and 100.	Quanto de cada eixo a entrada do modelo cobre, antes da resolução do modelo. Tudo além do\ncentro é espremido no restante, a não menos que metade do tamanho: isto tem de ficar pelo\nmenos a meio caminho entre a faixa central e 100.
+Active: the model works at %ux%u for a %ux%u frame, %.0f percent of the pixels it would work on without it.	Ativa: o modelo trabalha em %ux%u para um quadro de %ux%u, %.0f por cento dos pixels com que trabalharia sem ela.
+Not active: %s.	Inativa: %s.
+Peripheral compression is running, so this applies at full model resolution too.	A compressão periférica está ativa, então isto vale também na resolução cheia do modelo.
+Packed model input: what the model was handed, edges squeezed, stretched over the frame.	Entrada compactada do modelo: o que o modelo recebeu, bordas espremidas, esticado sobre o quadro.
+the frame is too small to lay out	o quadro é pequeno demais para o layout
+supersampling (Model resolution above 100) is not supported with peripheral compression	supersampling (resolução do modelo acima de 100) não é suportado com compressão periférica
+the centre band must be at least 10 and smaller than the packed extent, which must be below 100	a faixa central deve ser pelo menos 10 e menor que a extensão compactada, que deve ficar abaixo de 100
+the edges would be squeezed below half their size, which aliases: widen the packed extent or narrow the centre band (packed extent x 2 must be at least 100 + centre band)	as bordas seriam espremidas abaixo da metade do tamanho, o que gera aliasing: aumente a extensão compactada ou estreite a faixa central (extensão compactada x 2 deve ser pelo menos 100 + faixa central)
+the packed model would be under a quarter of the frame: raise Model resolution or the packed extent	o modelo compactado ficaria abaixo de um quarto do quadro: aumente a resolução do modelo ou a extensão compactada
+less than one packed pixel would be left on a side of the centre band	sobraria menos de um pixel compactado de um lado da faixa central
+not on the before-upscale stage	não no estágio antes do upscaler
+not with the driver proxy (UseProxy)	não com o proxy do driver (UseProxy)
+this build has no pack/unpack shader	esta build não tem o shader de compactação
+the pack/unpack pass could not be built or run on this device	o passe de compactação não pôde ser criado ou executado neste dispositivo
