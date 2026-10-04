@@ -27,6 +27,8 @@ uint64_t frameIndex = 0;
 struct Spec
 {
     uint32_t configured = kTransferDlss;
+    bool proxy = false;     // [DlssNr] UseProxy
+    bool periphery = false; // peripheral compression packs the model
     unsigned width = 3440, height = 1440, workWidth = 1720, workHeight = 720;
     bool beforeUpscale = false;
     bool realGuides = true;
@@ -79,8 +81,8 @@ Outcome Run(const Spec& s)
     const bool usable =
         DlssNr::Enlarge::Guides(false, DlssNr_GuideMatch_Dx12::Available(), s.workWidth, s.workHeight, 0, 0,
                                 s.depthWidth, s.depthHeight, 0, 0, s.motionWidth, s.motionHeight) != GuideSource::None;
-    const auto plan = PlanEnlarge(s.configured, s.debugView, info, s.dev, s.beforeUpscale, usable, s.width, s.height,
-                                  s.workWidth, s.workHeight, present, frameIndex);
+    const auto plan = PlanEnlarge(s.configured, s.proxy, s.periphery, s.debugView, info, s.dev, s.beforeUpscale,
+                                  usable, s.width, s.height, s.workWidth, s.workHeight, present, frameIndex);
 
     uint32_t sent = plan.transfer;
     ID3D12Resource* enlarged = nullptr;
@@ -666,6 +668,47 @@ void CadenceParkedWithTheRest()
     ++cases;
 }
 
+// Switched on while it runs, peripheral compression lets the private SR go and says so under its own reason --
+// not "not-selected", which read in a log as Transfer having been changed. Switched off, it is built again.
+// The driver proxy does the same.
+void PeripheryAndProxyReleaseIt()
+{
+    Fresh();
+    Run(Spec {});
+    auto o = Run(Spec {});
+    assert(o.plan.why == Why::Running && o.sent == 2);
+
+    for (int which = 0; which < 2; ++which)
+    {
+        Spec off;
+        off.periphery = which == 0;
+        off.proxy = which == 1;
+        const Why why = which == 0 ? Why::Periphery : Why::Proxy;
+        o = Run(off);
+        assert(o.plan.why == why && !o.plan.keep && o.sent == 1 && o.enlarged == nullptr);
+        assert(g_enlarge.live == nullptr && DlssNr::EnlargeStatus().why == why);
+        o = Run(off);
+        assert(o.plan.why == why && !o.plan.build && g_enlarge.live == nullptr);
+
+        o = Run(Spec {});
+        assert(o.plan.why == Why::WarmingUp && o.plan.build && o.sent == 1);
+        o = Run(Spec {});
+        assert(o.plan.why == Why::Running && o.sent == 2);
+    }
+
+    // Sharp and Classic go through untouched under the periphery: the resolve is sent what was configured.
+    for (uint32_t configured : { 0u, 3u })
+    {
+        Spec other;
+        other.configured = configured;
+        other.periphery = true;
+        o = Run(other);
+        assert(o.plan.why == Why::NotSelected && o.sent == configured);
+    }
+    Fresh(); // the bundles let go above settle here, before the process ends
+    ++cases;
+}
+
 void VulkanNeverBuilds()
 {
     // The D3D12 plan is never asked on native Vulkan, which maps 2 to 1 itself; the rule still refuses it.
@@ -705,6 +748,7 @@ int main()
     CoreShutDownByTheGame();
     RetryIsNarrow();
     CadenceParkedWithTheRest();
+    PeripheryAndProxyReleaseIt();
     VulkanNeverBuilds();
     std::printf("PASS: %d Transfer 2 host cases on production's plan, enlarge, retirement and retry: build on one "
                 "frame and run from a later one, inert for 0/1/3, guides, resets, hold, failure until Retry, release "

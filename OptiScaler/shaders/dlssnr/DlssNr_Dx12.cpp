@@ -2422,10 +2422,11 @@ void PublishEnlarge(uint32_t transfer, DlssNr::Enlarge::Why why)
 // What the resolve is sent this frame, decided before the timing contract is written so a sample says which
 // enlargement it measured. Retires a bundle that is not this frame's -- another size, depth direction or
 // device, or a feature the game took down with the NGX core -- or that this configuration no longer wants.
-DlssNr::Enlarge::Decision PlanEnlarge(uint32_t configured, uint32_t debugView, const DlssNrFrameInfo& frame,
-                                      ID3D12Device* device, bool beforeUpscale, bool guidesUsable, unsigned int width,
-                                      unsigned int height, unsigned int workWidth, unsigned int workHeight,
-                                      uint64_t present, uint64_t frameIndex)
+DlssNr::Enlarge::Decision PlanEnlarge(uint32_t configured, bool proxy, bool periphery, uint32_t debugView,
+                                      const DlssNrFrameInfo& frame, ID3D12Device* device, bool beforeUpscale,
+                                      bool guidesUsable, unsigned int width, unsigned int height,
+                                      unsigned int workWidth, unsigned int workHeight, uint64_t present,
+                                      uint64_t frameIndex)
 {
     namespace Enlarge = DlssNr::Enlarge;
     const DlssNr::PrivateSr::Shape shape { workWidth, workHeight, width, height, frame.DepthInverted };
@@ -2457,6 +2458,8 @@ DlssNr::Enlarge::Decision PlanEnlarge(uint32_t configured, uint32_t debugView, c
 
     Enlarge::Inputs in;
     in.configured = configured;
+    in.proxy = proxy;
+    in.periphery = periphery;
     in.width = width;
     in.height = height;
     in.workWidth = workWidth;
@@ -3930,15 +3933,15 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Transfer 2 (design/dlss-enlargement.md): what the resolve is sent this frame, decided before the timing
     // contract so a sample says which enlargement it measured. Any other Transfer passes through unchanged and
     // touches nothing. The driver proxy never reaches the resolve, and peripheral compression hands it an edit
-    // unpacked onto another grid than the working size this enlarges from, so both are planned as matched
+    // unpacked onto another grid than the working size this enlarges from, so with either the plan is matched
     // residual, which builds nothing and lets go of a private DLSS built before either was switched on.
-    const auto enlargePlan = PlanEnlarge(
-        useProxy || peripheryActive ? DlssNr::Enlarge::kTransferMatched : cfg.DlssNrTransfer.value_or_default(),
-        cfg.DlssNrDebugView.value_or_default(), frame, device, beforeUpscale,
-        DlssNr::Enlarge::Guides(false, DlssNr_GuideMatch_Dx12::Available(), workWidth, workHeight, depthBaseX,
-                                depthBaseY, guideWidth, guideHeight, motionBaseX, motionBaseY, motionWidth,
-                                motionHeight) != DlssNr::Enlarge::GuideSource::None,
-        width, height, workWidth, workHeight, observedFrame, g_frames);
+    const auto enlargePlan =
+        PlanEnlarge(cfg.DlssNrTransfer.value_or_default(), useProxy, peripheryActive,
+                    cfg.DlssNrDebugView.value_or_default(), frame, device, beforeUpscale,
+                    DlssNr::Enlarge::Guides(false, DlssNr_GuideMatch_Dx12::Available(), workWidth, workHeight,
+                                            depthBaseX, depthBaseY, guideWidth, guideHeight, motionBaseX, motionBaseY,
+                                            motionWidth, motionHeight) != DlssNr::Enlarge::GuideSource::None,
+                    width, height, workWidth, workHeight, observedFrame, g_frames);
 
     bool timingMetadataReady = !timingEnabled;
     if (timingEnabled)

@@ -76,6 +76,31 @@ void DecisionTable()
     in.vulkan = true;
     Expect(in, 1, Why::Vulkan, false, false, false);
 
+    // The driver proxy and peripheral compression send 1 and let go, each with its own reason, in every state:
+    // the log must not read as Transfer having been changed. Any other Transfer goes through untouched under
+    // either -- 3 stays sharp and 0 Classic under the periphery, as its design note says.
+    for (State state : { State::Missing, State::Waiting, State::Ready, State::Failed })
+    {
+        in = Runnable();
+        in.state = state;
+        in.proxy = true;
+        Expect(in, 1, Why::Proxy, false, false, false);
+        in.periphery = true;
+        Expect(in, 1, Why::Proxy, false, false, false);
+        in.proxy = false;
+        Expect(in, 1, Why::Periphery, false, false, false);
+    }
+    for (uint32_t configured : { 0u, 1u, 3u })
+    {
+        in = Runnable();
+        in.configured = configured;
+        in.periphery = true;
+        Expect(in, configured, Why::NotSelected, false, false, false);
+        in.periphery = false;
+        in.proxy = true;
+        Expect(in, configured, Why::NotSelected, false, false, false);
+    }
+
     // At and above the frame's size there is nothing to enlarge, and nothing is kept: this is the case
     // wilsjo2's build created and released every frame (supersampling). Equal size, 2x, and one axis above.
     for (auto [w, h] : { std::pair { 3440u, 1440u }, std::pair { 6880u, 2880u }, std::pair { 3441u, 1440u },

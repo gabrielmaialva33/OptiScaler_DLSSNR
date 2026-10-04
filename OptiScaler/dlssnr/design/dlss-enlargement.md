@@ -80,8 +80,8 @@ enlarged with bilinear. The menu shows a status line with the reason while 2 is 
 | Native Vulkan | 1 (mapped at the Vulkan resolve) | none |
 | Model at or above the frame's size | 1 | released |
 | Model below a third of the frame, further than DLSS enlarges (Ultra Performance) | 1 | released |
-| Driver proxy (`UseProxy`), which never reaches the resolve | planned as 1 | released |
-| Peripheral compression active: the resolve gets the edit unpacked onto the uniform grid, not the working size this enlarges from. Not combined in this version | planned as 1 | released |
+| Driver proxy (`UseProxy`), which never reaches the resolve; reason `proxy` | 1 | released |
+| Peripheral compression active: the resolve gets the edit unpacked onto the uniform grid, not the working size this enlarges from. Not combined in this version; reason `periphery`. Until 2026-10-04 both were planned as Transfer 1 whatever was configured, so the log read `not-selected` and, under the periphery, Sharp (3) and Classic (0) silently ran as 1 against `peripheral-compression.md`; any Transfer other than 2 now goes through under either | 1 | released |
 | Before the upscaler (Stage 1) | 1 | kept, idle |
 | No real guides (zero-guide hosts: `AllowSupersampling` false) | 1 | kept, idle |
 | Guides not at the working size and no resample shader in the build | 1 | kept, idle |

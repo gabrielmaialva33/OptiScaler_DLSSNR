@@ -945,6 +945,13 @@ void RenderMenu(Config* config, float menuResScale)
                 case Enlarge::Why::Vulkan:
                     line = Localization::Tr("D3D12 only: native Vulkan runs Matched residual.");
                     break;
+                case Enlarge::Why::Proxy:
+                    line =
+                        Localization::Tr("The driver proxy runs the model without the resolve: nothing is enlarged.");
+                    break;
+                case Enlarge::Why::Periphery:
+                    line = Localization::Tr("Peripheral compression is running: Matched residual runs.");
+                    break;
                 case Enlarge::Why::FullSize:
                     line = Localization::Tr("The model runs at full size or above: nothing to enlarge, Matched "
                                             "residual runs.");

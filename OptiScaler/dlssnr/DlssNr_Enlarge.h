@@ -44,6 +44,8 @@ enum class Why : uint8_t
     NotYet,          // nothing has dispatched since start or Retry
     NotSelected,     // Transfer is not 2
     Vulkan,          // native Vulkan has no private SR
+    Proxy,           // the driver proxy runs the model and never reaches the resolve
+    Periphery,       // peripheral compression unpacks the edit onto another grid than the one this enlarges from
     FullSize,        // the model works at or above the frame's size: nothing to enlarge
     TooSmall,        // the model is below a third of the frame: further than DLSS enlarges (Ultra Performance)
     BeforeUpscale,   // before the upscaler there is no frame-sized edit to make
@@ -59,6 +61,8 @@ struct Inputs
 {
     uint32_t configured = kTransferMatched; // [DlssNr] Transfer
     bool vulkan = false;
+    bool proxy = false;                     // [DlssNr] UseProxy
+    bool periphery = false;                 // peripheral compression packs the model this frame
     uint32_t width = 0, height = 0;         // the frame
     uint32_t workWidth = 0, workHeight = 0; // the model
     bool beforeUpscale = false;
@@ -99,6 +103,14 @@ constexpr Decision Decide(const Inputs& in)
 
     if (in.vulkan)
         return { kTransferMatched, Why::Vulkan, false, false, false };
+
+    // Neither combines with it in this version: each sends matched residual and lets go of one built before it
+    // was switched on. Their own reasons, so the log does not read as Transfer having been changed.
+    if (in.proxy)
+        return { kTransferMatched, Why::Proxy, false, false, false };
+
+    if (in.periphery)
+        return { kTransferMatched, Why::Periphery, false, false, false };
 
     if (!BelowFrame(in.width, in.height, in.workWidth, in.workHeight))
         return { kTransferMatched, Why::FullSize, false, false, false };
@@ -247,6 +259,10 @@ constexpr const char* Token(Why why)
         return "not-selected";
     case Why::Vulkan:
         return "vulkan";
+    case Why::Proxy:
+        return "proxy";
+    case Why::Periphery:
+        return "periphery";
     case Why::FullSize:
         return "full-size";
     case Why::TooSmall:

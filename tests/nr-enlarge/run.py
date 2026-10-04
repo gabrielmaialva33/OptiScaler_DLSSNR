@@ -71,10 +71,10 @@ assert 'float3 fullProxy = gPassthrough != 0' in matched
 # --- Dispatch has the shape host.cpp drives. ------------------------------------------------------------------
 
 dispatch = between(renderer, 'bool DlssNr_Dx12::Dispatch(', '\nnamespace DlssNr\n{')
-plans = list(re.finditer(r'const auto enlargePlan =\s*PlanEnlarge\(\s*useProxy \|\| peripheryActive \? '
-                         r'DlssNr::Enlarge::kTransferMatched : cfg\.DlssNrTransfer\.value_or_default\(\),', dispatch))
+plans = list(re.finditer(r'const auto enlargePlan =\s*PlanEnlarge\(\s*cfg\.DlssNrTransfer\.value_or_default\(\), '
+                         r'useProxy, peripheryActive,', dispatch))
 assert len(plans) == 1 and dispatch.count('PlanEnlarge(') == 1, \
-    'Dispatch plans once, from the key, matched on the proxy and while peripheral compression packs the model'
+    'Dispatch plans once, from the key, told about the proxy and peripheral compression (each its own reason)'
 # The plan reads the periphery's decision, so it has to come after it.
 assert dispatch.index('const bool peripheryActive = periphery.active;') < plans[0].start()
 plan_at = plans[0].start()
