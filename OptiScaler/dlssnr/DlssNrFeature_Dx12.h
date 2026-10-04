@@ -387,6 +387,7 @@ struct DetailMeasureStatus
 {
     bool running = false;
     bool initFailed = false;
+    const char* endReason = nullptr; // a literal: why the last run ended without a result
     float progress = 0.0f;
     unsigned samples = 0;
     unsigned total = 60;

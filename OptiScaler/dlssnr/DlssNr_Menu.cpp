@@ -1831,6 +1831,9 @@ void RenderMenu(Config* config, float menuResScale)
                         "Results are compared against the previous measurement.");
                 }
 
+                if (mStatus.endReason != nullptr)
+                    ImGui::TextDisabled("%s", Localization::Tr(mStatus.endReason));
+
                 if (mStatus.initFailed)
                 {
                     ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s",

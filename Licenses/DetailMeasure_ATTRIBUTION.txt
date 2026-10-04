@@ -2,7 +2,7 @@ Measure detail (in-game detail and stability stats)
 =====================================================
 
 Project:  OptiScaler fork / DLSS-NR scene calibration by janblade
-Source:   janblade commits 28daeebf and db065ec2
+Source:   janblade commits 28daeebf and daeb388f
 Licence:  GNU General Public License v3.0, the licence of OptiScaler itself
 
 What is derived from it:

@@ -162,8 +162,8 @@ bool DlssNr_DetailStats_Dx12::Record(ID3D12GraphicsCommandList* cmdList, ID3D12R
     p.measureWhitePoint = whitePoint > 1e-6f ? whitePoint : 1.0f;
     p.width = width;
     p.height = height;
-    p.shoulderThreshold = 1.0f;
-    p.floorThreshold = 0.05f;
+    p.shoulderThreshold = DlssNr::DetailStats::kShoulderThreshold;
+    p.floorThreshold = DlssNr::DetailStats::kFloorThreshold;
     std::memcpy(_mappedConstants[slot], &p, sizeof(p));
 
     ID3D12DescriptorHeap* heaps[] = { heap.GetHeapCSU() };

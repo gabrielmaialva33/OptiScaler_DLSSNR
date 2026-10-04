@@ -1438,7 +1438,6 @@ struct DetailMeasureSession
     bool wanted = false;
     bool cancelRequested = false;
     bool running = false;
-    unsigned samplesCollected = 0;
     static constexpr unsigned kTarget = 60;
     uint32_t currentCopy = 0;
     bool hasPreviousFrame = false;
@@ -1454,6 +1453,14 @@ struct DetailMeasureSession
     bool outputReadable[2] = {};
     bool inputReadable[2] = {};
 
+    // A run ends at kTarget still frames, or after kMaxAttempts readbacks (moving frames are dropped), or when
+    // no sample has completed for kStallEvaluates evaluates. Fewer than kMinKept still frames is no result.
+    static constexpr unsigned kMaxAttempts = 120;
+    static constexpr unsigned kMinKept = 30;
+    static constexpr unsigned kStallEvaluates = 240;
+    unsigned attempts = 0;
+    unsigned evaluatesWithoutSample = 0;
+
     uint32_t slot = 0;
     DlssNr::Submission::Usage slotUsage[DLSSNR_DETAIL_STATS_SLOTS] {};
     bool slotPending[DLSSNR_DETAIL_STATS_SLOTS] {};
@@ -1463,6 +1470,21 @@ struct DetailMeasureSession
 };
 
 static DetailMeasureSession g_detailMeasure;
+
+// Parks the pass and the frame copies through the retirement list. Caller holds g_nrMutex and the session mutex.
+static void ParkDetailMeasureLocked()
+{
+    ParkNrDetailStats(g_detailMeasure.pass);
+    for (auto& outRes : g_detailMeasure.outputs)
+        ParkNrResource(outRes);
+    for (auto& inRes : g_detailMeasure.inputs)
+        ParkNrResource(inRes);
+    g_detailMeasure.outputReadable[0] = g_detailMeasure.outputReadable[1] = false;
+    g_detailMeasure.inputReadable[0] = g_detailMeasure.inputReadable[1] = false;
+    for (bool& p : g_detailMeasure.slotPending)
+        p = false;
+    g_detailMeasure.running = false;
+}
 
 static void DetailMeasureCopy(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D12Resource*& copy,
                               bool& readable, ID3D12Resource* from, D3D12_RESOURCE_STATES fromState)
@@ -5301,132 +5323,165 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                   NgxResultName((unsigned int) result));
     }
 
-    // "Measure detail": in-game detail and temporal stability metrics across 60 evaluations on a still scene
-    if (g_detailMeasure.cancelRequested ||
-        (g_detailMeasure.running &&
-         (g_detailMeasure.width != width || g_detailMeasure.height != height || g_detailMeasure.format != desc.Format)))
+    // "Measure detail": in-game detail and temporal stability metrics across 60 evaluations on a still scene.
+    // The session's flags are written by the menu under its mutex; it is taken once here, after g_nrMutex, the
+    // same order every path uses.
     {
         std::lock_guard<std::mutex> lock(g_detailMeasure.mutex);
-        ParkNrDetailStats(g_detailMeasure.pass);
-        for (auto& outRes : g_detailMeasure.outputs)
-            ParkNrResource(outRes);
-        for (auto& inRes : g_detailMeasure.inputs)
-            ParkNrResource(inRes);
-        g_detailMeasure.outputReadable[0] = g_detailMeasure.outputReadable[1] = false;
-        g_detailMeasure.inputReadable[0] = g_detailMeasure.inputReadable[1] = false;
-        g_detailMeasure.running = false;
-        g_detailMeasure.wanted = false;
-        g_detailMeasure.cancelRequested = false;
-        g_detailMeasure.status.running = false;
-    }
 
-    if (g_detailMeasure.wanted && wrote && DlssNr_DetailStats_Dx12::Available())
-    {
-        std::lock_guard<std::mutex> lock(g_detailMeasure.mutex);
-        if (!g_detailMeasure.running)
+        const bool reshaped =
+            g_detailMeasure.running && (g_detailMeasure.width != width || g_detailMeasure.height != height ||
+                                        g_detailMeasure.format != desc.Format);
+
+        if (g_detailMeasure.cancelRequested || reshaped)
         {
-            g_detailMeasure.running = true;
-            g_detailMeasure.width = width;
-            g_detailMeasure.height = height;
-            g_detailMeasure.format = desc.Format;
-            g_detailMeasure.frozenWhitePoint = whitePoint;
-            g_detailMeasure.samplesCollected = 0;
-            g_detailMeasure.currentCopy = 0;
-            g_detailMeasure.hasPreviousFrame = false;
-            g_detailMeasure.slot = 0;
-            for (bool& p : g_detailMeasure.slotPending)
-                p = false;
-            g_detailMeasure.accumulator.Reset();
-            if (g_detailMeasure.pass == nullptr)
-                g_detailMeasure.pass = new DlssNr_DetailStats_Dx12("DLSS-NR detail stats", device);
-
-            if (g_detailMeasure.pass != nullptr && !g_detailMeasure.pass->IsInit())
-            {
-                LOG_ERROR("DLSS-NR measure detail: compute pass initialization failed");
-                g_detailMeasure.status.initFailed = true;
-                g_detailMeasure.status.running = false;
-                g_detailMeasure.running = false;
-                g_detailMeasure.wanted = false;
-                ParkNrDetailStats(g_detailMeasure.pass);
-            }
+            // A cancel ends the run; a new size or format starts it again on the next evaluate.
+            ParkDetailMeasureLocked();
+            g_detailMeasure.wanted = g_detailMeasure.wanted && !g_detailMeasure.cancelRequested;
+            g_detailMeasure.cancelRequested = false;
+            g_detailMeasure.status.running = g_detailMeasure.wanted;
         }
 
-        if (g_detailMeasure.pass != nullptr && g_detailMeasure.pass->IsInit())
+        if (g_detailMeasure.wanted && wrote && DlssNr_DetailStats_Dx12::Available())
         {
-            // Collect any pending readbacks whose submission is completed on CPU
-            for (uint32_t s = 0; s < DLSSNR_DETAIL_STATS_SLOTS; ++s)
+            if (!g_detailMeasure.running)
             {
-                if (g_detailMeasure.slotPending[s] && DlssNr::Submission::Completed(g_detailMeasure.slotUsage[s]))
+                g_detailMeasure.running = true;
+                g_detailMeasure.width = width;
+                g_detailMeasure.height = height;
+                g_detailMeasure.format = desc.Format;
+                g_detailMeasure.frozenWhitePoint = whitePoint;
+                g_detailMeasure.attempts = 0;
+                g_detailMeasure.evaluatesWithoutSample = 0;
+                g_detailMeasure.currentCopy = 0;
+                g_detailMeasure.hasPreviousFrame = false;
+                g_detailMeasure.slot = 0;
+                for (bool& p : g_detailMeasure.slotPending)
+                    p = false;
+                g_detailMeasure.accumulator.Reset();
+                g_detailMeasure.status.samples = 0;
+                g_detailMeasure.status.progress = 0.0f;
+                g_detailMeasure.status.endReason = nullptr;
+                if (g_detailMeasure.pass == nullptr)
+                    g_detailMeasure.pass = new DlssNr_DetailStats_Dx12("DLSS-NR detail stats", device);
+
+                if (g_detailMeasure.pass != nullptr && !g_detailMeasure.pass->IsInit())
                 {
-                    DlssNr::DetailStats::Stats st {};
-                    if (g_detailMeasure.pass->Readback(s, st))
+                    LOG_ERROR("DLSS-NR measure detail: compute pass initialization failed");
+                    g_detailMeasure.status.initFailed = true;
+                    g_detailMeasure.status.running = false;
+                    g_detailMeasure.running = false;
+                    g_detailMeasure.wanted = false;
+                    ParkNrDetailStats(g_detailMeasure.pass);
+                }
+            }
+
+            if (g_detailMeasure.pass != nullptr && g_detailMeasure.pass->IsInit())
+            {
+                // Collect the readbacks whose submission completed. Every one counts as an attempt; only still,
+                // finite frames are kept by the accumulator, and only those count towards the target.
+                for (uint32_t s = 0; s < DLSSNR_DETAIL_STATS_SLOTS; ++s)
+                {
+                    if (g_detailMeasure.slotPending[s] && DlssNr::Submission::Completed(g_detailMeasure.slotUsage[s]))
                     {
-                        g_detailMeasure.accumulator.Add(st);
-                        g_detailMeasure.samplesCollected++;
-                        g_detailMeasure.status.samples = g_detailMeasure.samplesCollected;
-                        g_detailMeasure.status.progress =
-                            (float) g_detailMeasure.samplesCollected / (float) DetailMeasureSession::kTarget;
+                        DlssNr::DetailStats::Stats st {};
+                        if (g_detailMeasure.pass->Readback(s, st))
+                        {
+                            ++g_detailMeasure.attempts;
+                            g_detailMeasure.accumulator.Add(st);
+                            g_detailMeasure.evaluatesWithoutSample = 0;
+                        }
+                        g_detailMeasure.slotPending[s] = false;
                     }
-                    g_detailMeasure.slotPending[s] = false;
                 }
-            }
 
-            const unsigned cur = g_detailMeasure.currentCopy;
-            const unsigned prev = cur ^ 1;
+                const auto kept = static_cast<unsigned>(g_detailMeasure.accumulator.Count());
+                g_detailMeasure.status.samples = kept;
+                g_detailMeasure.status.progress = (float) kept / (float) DetailMeasureSession::kTarget;
 
-            // Copy target (UNORDERED_ACCESS) and hdrCopy (NON_PIXEL_SHADER_RESOURCE) into our owned copies
-            DetailMeasureCopy(cmdList, device, g_detailMeasure.outputs[cur], g_detailMeasure.outputReadable[cur],
-                              target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            DetailMeasureCopy(cmdList, device, g_detailMeasure.inputs[cur], g_detailMeasure.inputReadable[cur],
-                              g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                const bool enough = kept >= DetailMeasureSession::kTarget;
+                const bool exhausted = g_detailMeasure.attempts >= DetailMeasureSession::kMaxAttempts;
+                const char* stalled = nullptr;
 
-            if (g_detailMeasure.hasPreviousFrame && g_detailMeasure.samplesCollected < DetailMeasureSession::kTarget)
-            {
-                const uint32_t currentSlot = g_detailMeasure.slot;
-                g_detailMeasure.slot = (g_detailMeasure.slot + 1) % DLSSNR_DETAIL_STATS_SLOTS;
-
-                if (g_detailMeasure.pass->Record(cmdList, g_detailMeasure.outputs[cur], g_detailMeasure.outputs[prev],
-                                                 g_detailMeasure.inputs[cur], g_detailMeasure.inputs[prev], modelInput,
-                                                 width, height, g_detailMeasure.frozenWhitePoint, currentSlot))
+                if (!enough && !exhausted)
                 {
-                    if (DlssNr::Submission::Track(cmdList, g_detailMeasure.slotUsage[currentSlot]))
-                        g_detailMeasure.slotPending[currentSlot] = true;
+                    const unsigned cur = g_detailMeasure.currentCopy;
+                    const unsigned prev = cur ^ 1;
+
+                    // Copy target (UNORDERED_ACCESS) and hdrCopy (NON_PIXEL_SHADER_RESOURCE) into our owned copies
+                    DetailMeasureCopy(cmdList, device, g_detailMeasure.outputs[cur],
+                                      g_detailMeasure.outputReadable[cur], target,
+                                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    DetailMeasureCopy(cmdList, device, g_detailMeasure.inputs[cur], g_detailMeasure.inputReadable[cur],
+                                      g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+                    // The slot's constants, descriptors and readback are only rewritten once its last sample was
+                    // collected; a slot still in flight skips this evaluate. Track before recording any use.
+                    const uint32_t currentSlot = g_detailMeasure.slot;
+                    if (g_detailMeasure.hasPreviousFrame && !g_detailMeasure.slotPending[currentSlot])
+                    {
+                        if (!DlssNr::Submission::Track(cmdList, g_detailMeasure.slotUsage[currentSlot]))
+                        {
+                            LOG_INFO("DLSS-NR measure detail: the command list cannot be tracked ({}); measurement "
+                                     "stopped",
+                                     DlssNr::Submission::LastRefusal());
+                            stalled = "Measure detail stopped: this command list cannot be tracked (see the log).";
+                        }
+                        else if (g_detailMeasure.pass->Record(
+                                     cmdList, g_detailMeasure.outputs[cur], g_detailMeasure.outputs[prev],
+                                     g_detailMeasure.inputs[cur], g_detailMeasure.inputs[prev], modelInput, width,
+                                     height, g_detailMeasure.frozenWhitePoint, currentSlot))
+                        {
+                            g_detailMeasure.slotPending[currentSlot] = true;
+                            g_detailMeasure.slot = (currentSlot + 1) % DLSSNR_DETAIL_STATS_SLOTS;
+                        }
+                    }
+
+                    g_detailMeasure.currentCopy ^= 1;
+                    g_detailMeasure.hasPreviousFrame = true;
+
+                    if (stalled == nullptr &&
+                        ++g_detailMeasure.evaluatesWithoutSample > DetailMeasureSession::kStallEvaluates)
+                        stalled = "Measure detail stopped: no sample completed (see the log).";
                 }
-            }
 
-            g_detailMeasure.currentCopy ^= 1;
-            g_detailMeasure.hasPreviousFrame = true;
-
-            if (g_detailMeasure.samplesCollected >= DetailMeasureSession::kTarget)
-            {
-                // Measurement completed
-                const auto finalMeasurement = g_detailMeasure.accumulator.Finish(width, height);
-                if (g_detailMeasure.status.latest.samples > 0)
+                if (enough || exhausted || stalled != nullptr)
                 {
-                    g_detailMeasure.status.previous = g_detailMeasure.status.latest;
-                    g_detailMeasure.status.hasPrevious = true;
+                    if (stalled == nullptr && kept >= DetailMeasureSession::kMinKept)
+                    {
+                        const auto finalMeasurement = g_detailMeasure.accumulator.Finish(width, height);
+                        if (g_detailMeasure.status.latest.samples > 0)
+                        {
+                            g_detailMeasure.status.previous = g_detailMeasure.status.latest;
+                            g_detailMeasure.status.hasPrevious = true;
+                        }
+                        g_detailMeasure.status.latest = finalMeasurement;
+                        g_detailMeasure.status.detailWords = finalMeasurement.DetailWords();
+                        g_detailMeasure.status.flickerWords = finalMeasurement.FlickerWords();
+                        g_detailMeasure.status.colourWords = finalMeasurement.ColourWords();
+                        g_detailMeasure.status.shadowWords = finalMeasurement.ShadowWords();
+                        g_detailMeasure.status.compareWords = finalMeasurement.Compare(g_detailMeasure.status.previous);
+
+                        LOG_INFO("DLSS-NR measure detail ({} still frames of {} read): {} | {} | {} | {}", kept,
+                                 g_detailMeasure.attempts, g_detailMeasure.status.detailWords,
+                                 g_detailMeasure.status.flickerWords, g_detailMeasure.status.colourWords,
+                                 g_detailMeasure.status.shadowWords);
+                    }
+                    else
+                    {
+                        // The last result stays on screen; this run produced none.
+                        g_detailMeasure.status.endReason =
+                            stalled != nullptr
+                                ? stalled
+                                : "Measure detail: the scene moved, too few still frames (turn on Hold frame).";
+                        LOG_INFO("DLSS-NR measure detail: no result, {} still frames of {} read ({})", kept,
+                                 g_detailMeasure.attempts, g_detailMeasure.status.endReason);
+                    }
+
+                    ParkDetailMeasureLocked();
+                    g_detailMeasure.wanted = false;
+                    g_detailMeasure.status.running = false;
                 }
-                g_detailMeasure.status.latest = finalMeasurement;
-                g_detailMeasure.status.detailWords = finalMeasurement.DetailWords();
-                g_detailMeasure.status.flickerWords = finalMeasurement.FlickerWords();
-                g_detailMeasure.status.colourWords = finalMeasurement.ColourWords();
-                g_detailMeasure.status.shadowWords = finalMeasurement.ShadowWords();
-                g_detailMeasure.status.compareWords = finalMeasurement.Compare(g_detailMeasure.status.previous);
-                g_detailMeasure.status.running = false;
-                g_detailMeasure.running = false;
-                g_detailMeasure.wanted = false;
-
-                LOG_INFO("DLSS-NR measure detail: {} | {} | {} | {}", g_detailMeasure.status.detailWords,
-                         g_detailMeasure.status.flickerWords, g_detailMeasure.status.colourWords,
-                         g_detailMeasure.status.shadowWords);
-
-                ParkNrDetailStats(g_detailMeasure.pass);
-                for (auto& outRes : g_detailMeasure.outputs)
-                    ParkNrResource(outRes);
-                for (auto& inRes : g_detailMeasure.inputs)
-                    ParkNrResource(inRes);
-                g_detailMeasure.outputReadable[0] = g_detailMeasure.outputReadable[1] = false;
-                g_detailMeasure.inputReadable[0] = g_detailMeasure.inputReadable[1] = false;
             }
         }
     }
@@ -7682,21 +7737,17 @@ void RequestCapture(unsigned int frames)
 
 bool CaptureInProgress() { return g_capture.isActive(); }
 
+// Only asks. The run's state is reset by Dispatch when it starts the run, under g_nrMutex: resetting slots
+// here could hand a slot whose readback is still in flight to the next sample.
 void StartMeasureDetail()
 {
     std::lock_guard<std::mutex> lock(g_detailMeasure.mutex);
+    if (g_detailMeasure.running || g_detailMeasure.cancelRequested)
+        return;
     g_detailMeasure.wanted = true;
-    g_detailMeasure.cancelRequested = false;
-    g_detailMeasure.running = false;
-    g_detailMeasure.samplesCollected = 0;
-    g_detailMeasure.currentCopy = 0;
-    g_detailMeasure.hasPreviousFrame = false;
-    g_detailMeasure.slot = 0;
-    for (bool& p : g_detailMeasure.slotPending)
-        p = false;
-    g_detailMeasure.accumulator.Reset();
     g_detailMeasure.status.running = true;
     g_detailMeasure.status.initFailed = false;
+    g_detailMeasure.status.endReason = nullptr;
     g_detailMeasure.status.progress = 0.0f;
     g_detailMeasure.status.samples = 0;
 }
