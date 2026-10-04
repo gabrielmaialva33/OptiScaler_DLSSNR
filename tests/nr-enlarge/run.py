@@ -130,7 +130,7 @@ ngx_name = between(renderer, 'const char* NgxResultName(unsigned int r)', "// Do
 retirement = between(renderer, 'DlssNr::PrivateSr::Api PrivateSrApi()', '// The inject point decides which buffer')
 section = between(renderer, '// The live bundle, whether it failed this session',
                   '\n} // namespace\n\n// ---------------------------------------------------------------------------------------------\n// The pass itself.')
-retry_status = between(renderer, 'void RetryAfterFailure()', 'struct PresentTemporal')
+retry_status = between(renderer, 'void RetryAfterFailure()', 'struct PresentGuideClone')
 
 host = ('#include "host_fakes.h"\n'
         'namespace\n{\n' + ngx_name + retirement + section + '\n} // namespace\n'

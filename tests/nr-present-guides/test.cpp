@@ -1,9 +1,14 @@
 #include <dlssnr/DlssNr_PresentGuideRing.h>
+#include <dlssnr/DlssNr_SubmissionModel.h>
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
+#include <random>
 #include <unordered_set>
 
+using namespace DlssNr::Submission::Detail;
 using namespace DlssNr::PresentGuides;
 
 void TestRingBasicAcquireCommitPick()
@@ -14,7 +19,7 @@ void TestRingBasicAcquireCommitPick()
     auto isWriteCompleted = [&](void* token) { return completedWrites.find(token) != completedWrites.end(); };
     auto isReadInFlight = [&](void* token) { return inFlightReads.find(token) != inFlightReads.end(); };
 
-    Ring<decltype(isWriteCompleted), decltype(isReadInFlight)> ring;
+    Ring ring;
 
     // Initially no slots recorded
     assert(ring.PickForPresent(isWriteCompleted, 1000) == kRingSize);
@@ -65,7 +70,7 @@ void TestRingInFlightReadProtectionNotLastRead()
     auto isWriteCompleted = [&](void* token) { return completedWrites.find(token) != completedWrites.end(); };
     auto isReadInFlight = [&](void* token) { return inFlightReads.find(token) != inFlightReads.end(); };
 
-    Ring<decltype(isWriteCompleted), decltype(isReadInFlight)> ring;
+    Ring ring;
 
     void* w[4] = { (void*) 0x1, (void*) 0x2, (void*) 0x3, (void*) 0x4 };
     void* r[4] = { (void*) 0x11, (void*) 0x12, (void*) 0x13, (void*) 0x14 };
@@ -115,7 +120,7 @@ void TestRingAllSlotsInFlightSkipsCapture()
     auto isWriteCompleted = [&](void* token) { return completedWrites.find(token) != completedWrites.end(); };
     auto isReadInFlight = [&](void* token) { return inFlightReads.find(token) != inFlightReads.end(); };
 
-    Ring<decltype(isWriteCompleted), decltype(isReadInFlight)> ring;
+    Ring ring;
 
     void* w[4] = { (void*) 0x1, (void*) 0x2, (void*) 0x3, (void*) 0x4 };
     void* r[4] = { (void*) 0x11, (void*) 0x12, (void*) 0x13, (void*) 0x14 };
@@ -155,7 +160,7 @@ void TestRingMaxAgeStaleRejection()
     auto isWriteCompleted = [&](void* token) { return completedWrites.find(token) != completedWrites.end(); };
     auto isReadInFlight = [&](void* token) { return inFlightReads.find(token) != inFlightReads.end(); };
 
-    Ring<decltype(isWriteCompleted), decltype(isReadInFlight)> ring;
+    Ring ring;
 
     void* w0 = (void*) 0x10;
     void* r0 = (void*) 0x20;
@@ -188,40 +193,245 @@ void TestRingMaxAgeStaleRejection()
     assert(ring.PickForPresent(isWriteCompleted, 1300) == kRingSize);
 }
 
-void TestSkippedPresentAfterTrackReleasesSlot()
+void TestProductionSignature()
 {
-    // Test (Correction 1): a present skipped/dropped after Track must restore saved usage,
-    // ensuring the slot does not remain locked as in-flight forever.
-    struct FakeClone
-    {
-        bool readTracked = false;
-        int simulatedFence = 0;
-    } clone;
+    // Item 1b: Verify exact production signature compiles with lambdas capturing state
+    Ring ring;
+    void* queue = (void*) 0x1234;
+    const auto isEligible = [queue](void* token) -> bool { return token != nullptr && token == queue; };
+    const auto isReadInFlight = [queue](void* token) -> bool { return token != nullptr && token != queue; };
+    assert(ring.AcquireForRecord(isReadInFlight) == 0);
+    assert(ring.PickForPresent(isEligible, 0) == kRingSize);
+}
 
-    auto isReadInFlight = [&](void* token) -> bool
+// -------------------------------------------------------------------------------------------------
+// Full Detail::Model simulation under DLSS-G 1x, 2x, 4x, same-queue and cross-queue (port of sim.cpp / drops.cpp)
+// -------------------------------------------------------------------------------------------------
+struct SimClone
+{
+    Usage writeUsage;
+    Usage captureWriteUsage;
+    Usage readUsage;
+    Usage presentReadUsage;
+    bool tracked = false;
+    bool readTracked = false;
+};
+
+struct SimResult
+{
+    long capSkip = 0;
+    long neutral = 0;
+    long enhanced = 0;
+    long dupSkip = 0;
+    long drops = 0;
+};
+
+static SimResult RunSimulation(int frames, int B, size_t presentQ, unsigned lag, double dropP, unsigned seed, Model& m,
+                               uint64_t* gpuDone, uint64_t* nextFence)
+{
+    m = Model {};
+    for (size_t i = 0; i < MaxQueues; ++i)
     {
-        auto* c = static_cast<FakeClone*>(token);
-        if (!c->readTracked)
-            return false;
-        if (c->simulatedFence >= 1)
+        gpuDone[i] = 0;
+        nextFence[i] = 0;
+    }
+
+    auto completed = [gpuDone](size_t q) -> uint64_t { return gpuDone[q]; };
+    auto isCompleted = [&](const Usage& u)
+    {
+        bool any = false;
+        for (auto& e : u.epochs)
         {
-            c->readTracked = false;
-            return false;
+            if (!e)
+                continue;
+            any = true;
+            if (!IsComplete(*e, completed))
+                return false;
         }
-        return true;
+        return any;
     };
+    auto isOnlyOn = [&](const Usage& u, size_t q)
+    {
+        bool any = false;
+        for (auto& e : u.epochs)
+        {
+            if (!e)
+                continue;
+            any = true;
+            if (!IsSubmittedOnlyOn(*e, q))
+                return false;
+        }
+        return any;
+    };
+    auto submit = [&](uintptr_t list, size_t q)
+    {
+        auto e = m.BeforeExecute(list);
+        Model::AfterExecute(e, q, ++nextFence[q], true);
+    };
+    auto reset = [&](uintptr_t list) { Model::AfterReset(m.Current(list), true); };
 
-    // If present tracks reading:
-    auto savedTracked = clone.readTracked;
-    clone.readTracked = true; // simulated Track(list, clone.readUsage)
-    assert(isReadInFlight(&clone) == true);
+    SimClone clones[kRingSize];
+    Ring ring;
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<> U(0, 1);
 
-    // But then present list is dropped without execution (e.g. sequence skip or g_nr.failed):
-    // Saved usage is restored:
-    clone.readTracked = savedTracked;
+    uint64_t lastEnhancedRecorded = 0;
+    SimResult r;
+    int64_t now = 1000;
+    unsigned pslot = 0;
+    uint64_t pfence[3] = {};
 
-    // Slot must now be immediately free for recording again!
-    assert(isReadInFlight(&clone) == false);
+    for (int f = 0; f < frames; ++f)
+    {
+        // Game render: evaluate list reset, CaptureTemporal, submit on queue 0
+        uintptr_t evalList = 100 + f % 3;
+        reset(evalList);
+
+        auto inFlight = [&](void* t)
+        {
+            auto* c = static_cast<SimClone*>(t);
+            if (!t || !c->readTracked)
+                return false;
+            if (isCompleted(c->presentReadUsage))
+            {
+                c->readTracked = false;
+                return false;
+            }
+            return true;
+        };
+
+        size_t s = ring.AcquireForRecord(inFlight);
+        if (s >= kRingSize)
+            ++r.capSkip;
+        else
+        {
+            auto& c = clones[s];
+            c.captureWriteUsage = {};
+            c.tracked = (m.Track(evalList, c.writeUsage, completed) != nullptr) &&
+                        (m.Track(evalList, c.captureWriteUsage, completed) != nullptr);
+            assert(c.tracked && "write track must not refuse during active session");
+            ring.CommitRecord(s, 1920, 1080, false, now, &c.captureWriteUsage, &c);
+        }
+        submit(evalList, 0);
+
+        for (int p = 0; p < B; ++p)
+        {
+            uintptr_t pl = 200 + pslot;
+            if (gpuDone[presentQ] < pfence[pslot])
+                gpuDone[presentQ] = pfence[pslot];
+            reset(pl);
+
+            const auto newestRecorded = ring.NewestRecordedSequence();
+            if (newestRecorded > 0 && newestRecorded == lastEnhancedRecorded)
+            {
+                // Sequence check BEFORE track: skip present without calling Track
+                ++r.dupSkip;
+                pslot = (pslot + 1) % 3;
+                now += 16 / B;
+                continue;
+            }
+
+            auto elig = [&](void* t)
+            {
+                auto& u = *static_cast<Usage*>(t);
+                return isOnlyOn(u, presentQ) || isCompleted(u);
+            };
+
+            size_t pk = ring.PickForPresent(elig, now);
+            bool tracked = false;
+            Usage savedUsage;
+            bool savedReadTracked = false;
+            size_t ts = kRingSize;
+
+            if (pk < kRingSize)
+            {
+                auto& c = clones[pk];
+                savedUsage = c.readUsage;
+                savedReadTracked = c.readTracked;
+                c.presentReadUsage = {};
+                tracked = (m.Track(pl, c.readUsage, completed) != nullptr) &&
+                          (m.Track(pl, c.presentReadUsage, completed) != nullptr);
+                if (tracked)
+                {
+                    c.readTracked = true;
+                    ts = pk;
+                    lastEnhancedRecorded = newestRecorded;
+                    ++r.enhanced;
+                }
+                else
+                {
+                    c.readUsage = savedUsage;
+                }
+            }
+            else
+            {
+                ++r.neutral;
+            }
+
+            if (ts < kRingSize && U(rng) < dropP)
+            {
+                // Unsubmitted present drop (e.g. g_nr.failed)
+                ++r.drops;
+                clones[ts].readUsage = savedUsage;
+                clones[ts].readTracked = savedReadTracked;
+                m.Abandon(pl); // Abandon cleans up epoch without leaking capacity
+            }
+            else
+            {
+                submit(pl, presentQ);
+                pfence[pslot] = nextFence[presentQ];
+            }
+
+            pslot = (pslot + 1) % 3;
+            for (size_t q : { (size_t) 0, presentQ })
+                gpuDone[q] = nextFence[q] > lag ? std::max(gpuDone[q], nextFence[q] - lag) : gpuDone[q];
+            now += 16 / B;
+        }
+
+        for (size_t q : { (size_t) 0, presentQ })
+            gpuDone[q] = nextFence[q] > lag ? std::max(gpuDone[q], nextFence[q] - lag) : gpuDone[q];
+    }
+
+    return r;
+}
+
+void TestFullSubmissionModelSimulation()
+{
+    Model m;
+    uint64_t gpuDone[MaxQueues] {};
+    uint64_t nextFence[MaxQueues] {};
+
+    // 1. Same-queue 1x, lag 2: 20000 / 20000 frames enhanced, zero skips, zero neutral
+    auto r1 = RunSimulation(20000, 1, 0, 2, 0.0, 7, m, gpuDone, nextFence);
+    assert(r1.enhanced == 20000 && r1.neutral == 0 && r1.capSkip == 0 && r1.drops == 0);
+
+    // 2. Same-queue DLSS-G 2x, lag 2: 20000 enhanced, 20000 duplicate skips
+    auto r2 = RunSimulation(20000, 2, 0, 2, 0.0, 7, m, gpuDone, nextFence);
+    assert(r2.enhanced == 20000 && r2.dupSkip == 20000 && r2.neutral == 0 && r2.capSkip == 0);
+
+    // 3. Same-queue DLSS-G 4x, lag 3: 20000 enhanced, 60000 duplicate skips
+    auto r3 = RunSimulation(20000, 4, 0, 3, 0.0, 7, m, gpuDone, nextFence);
+    assert(r3.enhanced == 20000 && r3.dupSkip == 60000 && r3.neutral == 0 && r3.capSkip == 0);
+
+    // 4. Same-queue DLSS-G 3x with 5% unsubmitted list drops:
+    // With m.Abandon(pl), all dropped epochs are immediately recycled; exactly 20000 frames enhanced!
+    auto r4 = RunSimulation(20000, 3, 0, 2, 0.05, 7, m, gpuDone, nextFence);
+    assert(r4.enhanced == 20000 && r4.dupSkip == 40000 && r4.neutral == 0 && r4.drops > 900);
+
+    // Verify model capacity after 20,000 frames with drops: fresh epochs are allocatable
+    auto completed = [&gpuDone](size_t q) -> uint64_t { return gpuDone[q]; };
+    int allocatable = 0;
+    for (int i = 0; i < 300; ++i)
+    {
+        Usage one;
+        if (m.Track(5000 + i, one, completed))
+            ++allocatable;
+    }
+    assert(allocatable >= 250 && "Model epochs must not leak after dropped present lists");
+
+    // 5. Cross-queue DLSS-G 2x, lag 2: 19998 enhanced
+    auto r5 = RunSimulation(20000, 2, 1, 2, 0.0, 7, m, gpuDone, nextFence);
+    assert(r5.enhanced >= 19990 && r5.capSkip == 0);
 }
 
 int main()
@@ -230,8 +440,10 @@ int main()
     TestRingInFlightReadProtectionNotLastRead();
     TestRingAllSlotsInFlightSkipsCapture();
     TestRingMaxAgeStaleRejection();
-    TestSkippedPresentAfterTrackReleasesSlot();
-    std::printf("PASS: nr-present-guides ring acquisition, in-flight read protection, skip fallback, max-age and "
-                "dropped list\n");
+    TestProductionSignature();
+    TestFullSubmissionModelSimulation();
+    std::printf(
+        "PASS: nr-present-guides ring acquisition, in-flight read protection, skip fallback, max-age and 20k-frame "
+        "DLSS-G Model simulation\n");
     return 0;
 }

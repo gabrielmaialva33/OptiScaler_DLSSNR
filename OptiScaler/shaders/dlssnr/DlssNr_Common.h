@@ -164,11 +164,12 @@ struct DlssNrFrameInfo
     // the config for that copy would transition it out of a state it was never in.
     int OutputState = -1;
 
-    // The resource state depth and motion arrive in and rest in, as a D3D12_RESOURCE_STATES value,
+    // The resource states depth and motion arrive in and rest in, as D3D12_RESOURCE_STATES values,
     // when the caller owns the guides and knows (e.g. present-time guide copies resting in
-    // NON_PIXEL_SHADER_RESOURCE). Negative means the guides are the game's own and arrive in whatever
-    // state the config says.
-    int GuideState = -1;
+    // NON_PIXEL_SHADER_RESOURCE, or synthesized motion resting in GuideRestState(true)).
+    // Negative means the guide is the game's own and arrives in whatever state the config says.
+    int DepthState = -1;
+    int MotionState = -1;
 
     // True when running on the swapchain backbuffer at present time.
     bool PresentSource = false;

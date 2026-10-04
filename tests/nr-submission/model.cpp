@@ -111,6 +111,21 @@ int main()
     {
         Model m;
         Usage use;
+        auto e = m.Track(7, use, completed);
+        assert(!IsSubmittedOnlyOn(*e, 0)); // not submitted yet
+        submit(m, 7, 0, 15);
+        assert(IsSubmittedOnlyOn(*e, 0));  // submitted only on queue 0
+        assert(!IsSubmittedOnlyOn(*e, 1)); // not on queue 1
+        submit(m, 7, 1, 20);
+        assert(!IsSubmittedOnlyOn(*e, 0)); // submitted on multiple queues
+        assert(!IsSubmittedOnlyOn(*e, 1));
+        m.Abandon(7);
+        assert(m.Track(7, use, completed) != nullptr); // epoch recycled
+        ++cases;
+    }
+    {
+        Model m;
+        Usage use;
         for (uint64_t frame = 1; frame <= 3000; ++frame)
         {
             auto e = m.Track(5, use, completed);

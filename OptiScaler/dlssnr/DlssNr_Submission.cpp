@@ -280,6 +280,15 @@ bool SubmittedOnlyOn(const Usage& usage, ID3D12CommandQueue* queue)
     return any;
 }
 
+void Abandon(ID3D12GraphicsCommandList* list)
+{
+    if (list == nullptr)
+        return;
+    auto real = Canonical(list);
+    std::lock_guard lock(stateMutex);
+    model.Abandon(Key(real));
+}
+
 GpuTiming::Detail::Certificate TimingCertificate(const Usage& usage)
 {
     std::lock_guard lock(stateMutex);

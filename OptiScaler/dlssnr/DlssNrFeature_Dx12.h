@@ -88,6 +88,7 @@ DlssNrFrameInfo PresentFrameDefaults(bool reset);
 // them inside the recording it is building and does not store them.
 bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** depth, ID3D12Resource** motion,
                            DlssNrFrameInfo* frame, ID3D12CommandQueue* queue = nullptr);
+void AbandonCapturedGuides();
 
 // The pass, over a frame no upscaler was asked for.
 //

@@ -129,6 +129,17 @@ class Model
             ++e->executions;
     }
 
+    void Abandon(uintptr_t list)
+    {
+        for (auto& e : epochs)
+        {
+            if (e && e->list == list && !e->submitted && e->executions == 0)
+            {
+                e.reset();
+            }
+        }
+    }
+
     std::shared_ptr<Epoch> BeforeExecute(uintptr_t list)
     {
         auto e = Current(list);

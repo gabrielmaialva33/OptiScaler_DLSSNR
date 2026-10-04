@@ -30,7 +30,7 @@ struct Slot
     void* readToken = nullptr;  // pointer to present submission tracking usage
 };
 
-template <typename WriteEligiblePredicate, typename ReadInFlightPredicate> class Ring
+class Ring
 {
     Slot _slots[kRingSize] {};
     size_t _lastReadIndex = kRingSize; // index of the slot present last read
@@ -40,7 +40,7 @@ template <typename WriteEligiblePredicate, typename ReadInFlightPredicate> class
     // Selects a slot to record a new capture into on the evaluate command list.
     // Skips slots currently being read by in-flight present commands and the slot read last.
     // If all other slots are currently in flight, returns kRingSize (skips capture, matching RenoDX).
-    size_t AcquireForRecord(ReadInFlightPredicate isReadInFlight)
+    template <typename P> size_t AcquireForRecord(P isReadInFlight)
     {
         size_t best = kRingSize;
         uint64_t oldestSeq = UINT64_MAX;
@@ -99,7 +99,7 @@ template <typename WriteEligiblePredicate, typename ReadInFlightPredicate> class
     // Selects the newest capture whose evaluate submission is eligible (either submitted on the same queue,
     // or completed on CPU). Never performs a GPU cross-queue wait. Rejects captures older than kPresentGuideMaxAgeMs.
     // If no recorded capture is eligible and fresh, returns kRingSize (caller uses neutral zero guides).
-    size_t PickForPresent(WriteEligiblePredicate isEligible, int64_t nowMs)
+    template <typename P> size_t PickForPresent(P isEligible, int64_t nowMs)
     {
         size_t newestCompleted = kRingSize;
         uint64_t highestSeq = 0;
@@ -129,6 +129,7 @@ template <typename WriteEligiblePredicate, typename ReadInFlightPredicate> class
         return newestCompleted;
     }
 
+    uint64_t NewestRecordedSequence() const { return _nextSequence > 1 ? _nextSequence - 1 : 0; }
     const Slot& GetSlot(size_t index) const { return _slots[index < kRingSize ? index : 0]; }
     size_t LastReadIndex() const { return _lastReadIndex; }
 

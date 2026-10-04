@@ -535,6 +535,7 @@ void PresentHost::AbandonRecording()
         return;
 
     _guides.AbandonRecording();
+    AbandonCapturedGuides();
 
     // The estimator settles its own abandon: its recording never ran either, and it knows what that
     // leaves it holding.
