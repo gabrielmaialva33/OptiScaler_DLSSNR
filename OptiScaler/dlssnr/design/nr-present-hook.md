@@ -2,13 +2,27 @@
 
 Update 2026-10-04: **guide snapshot ring implemented (item 4).** Replaced simple `AddRef`
 referencing in `CaptureTemporal` with an owned 4-slot guide snapshot ring (`DlssNr_PresentGuideRing.h`,
-adapting RenoDX `present_path.hpp:30-33, 96-100, 155-168`). Depth and motion are copied via mip-0
-`CopyTextureRegion` on the game's evaluate list, with barriers transitioning the game's buffers from their
-arrival states to `COPY_SOURCE` and back. Submissions are tracked via `DlssNr::Submission::Track` (refusing
-untracked lists), and present selections require CPU completion proof without GPU cross-queue waits
-(avoiding the DLSS-G deadlock cycle). Stale or uncompleted captures fall back cleanly to neutral zero guides.
-What remains unproven: game-specific motion vector transformations during post-processing, and 4K bandwidth
-overhead of two guide copies per frame. Item 5 continues to govern the broader dispatch pipeline.
+adapting RenoDX `present_path.hpp:30-33, 96-100, 155-168, 880-1090`, commit `9bb6c0f`).
+Depth and motion are copied via mip-0 `CopyTextureRegion` on the game's evaluate list, with barriers
+transitioning the game's buffers from their arrival states to `COPY_SOURCE` and back. Submissions are tracked
+via independent per-slot usage objects (`clone.writeUsage` at evaluate, `clone.readUsage` at present),
+leaving 1-pass NR completely unburdened by global multi-pass submission locks (Decision A).
+Present selections require CPU completion proof without GPU cross-queue waits (avoiding the DLSS-G deadlock cycle).
+Captures older than `kPresentGuideMaxAge` (4 frames) are dropped as stale in favor of neutral zero guides.
+
+**VRAM overhead:** 4 sets of 2 textures (depth + motion vectors) at render resolution allocate 8 textures in total,
+costing ~118 MB at 1440p.
+
+**Queue identity & single-queue latency (Decision B):** RenoDX bypasses completion waits when evaluate and present
+execute on the identical queue (`present_path.hpp:96-100`). In this tree, `DlssNr::Submission` does not expose queue
+identity or cross-queue matching across recorded lists. Completion proof (`Submission::Completed(writeUsage)`) is
+therefore required unconditionally; in single-queue GPU-bound titles, this delays guide consumption by 1 or 2 frames
+compared to RenoDX's same-queue fast path.
+
+**What remains unproven:**
+- Game-specific motion vector transformations during post-processing, and 4K bandwidth overhead of two guide copies per frame.
+- Depth planar copy: for typeless depth formats with stencil planes (`R32G8X24_TYPELESS`, `R24G8_TYPELESS`), copying subresource 0 directly to `R32_FLOAT` via `CopyTextureRegion` works under Proton/vkd3d-proton, but native Windows Direct3D 12 may reject cross-format planar copy without explicit planar subresource indexing (precisa de uma rodada no PC do Rafael).
+Item 5 continues to govern the broader dispatch pipeline.
 
 Update 2026-09-23: **implemented.** `3e1b3960` (the D3D12 present-time pass and temporal capture,
 `HookMethod=2`) and `37db9f65` (the `DLSS_NEURAL_RENDERING` gate removed, without which LTCG dropped

@@ -1099,19 +1099,13 @@ bool RetiredCapacity();
 
 bool WantsTrackedRecording(const DlssNrPassSnapshot& requested)
 {
-    const auto& cfg = *Config::Instance();
-    const uint32_t method = cfg.DlssNrHookMethod.value_or_default();
-    const bool presentRoute = (method == 0 || method == 2);
-    return g_tracked || (!g_legacyRecorded && (requested.Count > 1 || requested.Individual || presentRoute));
+    return g_tracked || (!g_legacyRecorded && (requested.Count > 1 || requested.Individual));
 }
 
 bool TrackNrRecording(ID3D12GraphicsCommandList* cmd, const DlssNrPassSnapshot& requested,
                       DlssNr::Chain::RecordingLease* lease)
 {
-    const auto& cfg = *Config::Instance();
-    const uint32_t method = cfg.DlssNrHookMethod.value_or_default();
-    const bool presentRoute = (method == 0 || method == 2);
-    const bool optIn = requested.Count > 1 || requested.Individual || presentRoute;
+    const bool optIn = requested.Count > 1 || requested.Individual;
     if (!g_tracked && optIn && !g_legacyRecorded)
         g_tracked = true;
     if (!g_tracked)
@@ -3188,10 +3182,12 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         cfg.MVResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
     const auto exposureBarrierState =
         sourceIsTarget ? exposureResourceBarrier : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    const auto depthBarrierState =
-        sourceIsTarget ? depthResourceBarrier : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    const auto motionBarrierState =
-        sourceIsTarget ? motionResourceBarrier : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const auto depthBarrierState = frame.GuideState >= 0 ? static_cast<D3D12_RESOURCE_STATES>(frame.GuideState)
+                                   : sourceIsTarget      ? depthResourceBarrier
+                                                         : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const auto motionBarrierState = frame.GuideState >= 0 ? static_cast<D3D12_RESOURCE_STATES>(frame.GuideState)
+                                    : sourceIsTarget      ? motionResourceBarrier
+                                                          : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
     // Whether the resolve wrote the target this frame. See the header.
     bool wrote = false;
@@ -5595,15 +5591,16 @@ struct PresentGuideClone
     ID3D12Resource* motion = nullptr;
     const void* deviceIdentity = nullptr;
     DlssNrFrameInfo frame {};
-    DlssNr::Submission::Usage usage {};
+    DlssNr::Submission::Usage writeUsage {};
+    DlssNr::Submission::Usage readUsage {};
     bool tracked = false;
+    bool readTracked = false;
     uint32_t width = 0;
     uint32_t height = 0;
 };
 
 static PresentGuideClone g_presentGuideClones[DlssNr::PresentGuides::kRingSize];
 static DlssNr::PresentGuides::Ring<bool (*)(void*), bool (*)(void*)> g_presentGuideRing;
-static DlssNr::Submission::Usage g_presentReadUsages[DlssNr::PresentGuides::kRingSize];
 
 // Creates a dedicated guide clone for the present snapshot ring matching the donor description,
 // mip 0 only, in NON_PIXEL_SHADER_RESOURCE state with no unordered access requirements.
@@ -5698,14 +5695,14 @@ static ID3D12Resource* g_lastEnhancedBb = nullptr;
 static unsigned int g_lastEnhancedBbIdx = 0xFFFFFFFF;
 static unsigned int g_sameBbStreak = 0, g_maxSameBbStreak = 0;
 
-static void ParkNrClone(ID3D12Resource*& res, const DlssNr::Submission::Usage& usage)
+static void ParkNrClone(ID3D12Resource*& res, const DlssNr::Submission::Usage& usage, bool tracked)
 {
     if (res == nullptr)
         return;
 
     NrRetired r;
-    r.tracked = g_tracked;
-    if (g_tracked)
+    r.tracked = tracked;
+    if (tracked)
         r.usage = usage;
     r.resource = res;
     res = nullptr;
@@ -5714,24 +5711,21 @@ static void ParkNrClone(ID3D12Resource*& res, const DlssNr::Submission::Usage& u
 
 static void ReleasePresentTemporal()
 {
-    if (g_temporal.depth != nullptr)
-    {
-        g_temporal.depth->Release();
-        g_temporal.depth = nullptr;
-    }
-    if (g_temporal.motion != nullptr)
-    {
-        g_temporal.motion->Release();
-        g_temporal.motion = nullptr;
-    }
     for (auto& clone : g_presentGuideClones)
     {
-        ParkNrClone(clone.depth, clone.usage);
-        ParkNrClone(clone.motion, clone.usage);
+        if (clone.depth != nullptr)
+        {
+            clone.depth->Release();
+            clone.depth = nullptr;
+        }
+        if (clone.motion != nullptr)
+        {
+            clone.motion->Release();
+            clone.motion = nullptr;
+        }
         clone = PresentGuideClone {};
     }
     g_presentGuideRing.Reset();
-    g_temporal.valid = false;
     g_temporalValid = false;
 }
 
@@ -5759,30 +5753,63 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
         return;
     }
 
+    struct AllocFailKey
+    {
+        const void* device;
+        DXGI_FORMAT format;
+        uint64_t width;
+        uint32_t height;
+        auto operator<=>(const AllocFailKey&) const = default;
+    };
+    static std::set<AllocFailKey> s_failedAllocs;
+
+    const void* const devId = static_cast<const void*>(device);
+    if (s_failedAllocs.contains({ devId, depthDesc.Format, depthDesc.Width, depthDesc.Height }) ||
+        s_failedAllocs.contains({ devId, motionDesc.Format, motionDesc.Width, motionDesc.Height }))
+    {
+        device->Release();
+        return;
+    }
+
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
 
     const auto isReadInFlight = [](void* token) -> bool
     {
-        if (!token || !g_tracked)
+        if (token == nullptr)
             return false;
-        return !DlssNr::Submission::Completed(*static_cast<DlssNr::Submission::Usage*>(token));
+        auto* c = static_cast<PresentGuideClone*>(token);
+        if (!c->readTracked)
+            return false;
+        if (DlssNr::Submission::Completed(c->readUsage))
+        {
+            c->readTracked = false;
+            return false;
+        }
+        return true;
     };
 
     const size_t slot = g_presentGuideRing.AcquireForRecord(isReadInFlight);
+    if (slot >= DlssNr::PresentGuides::kRingSize)
+    {
+        device->Release();
+        return;
+    }
+
     auto& clone = g_presentGuideClones[slot];
 
-    const void* const devId = static_cast<const void*>(device);
     if (clone.depth != nullptr)
     {
         const auto have = clone.depth->GetDesc();
-        if (clone.deviceIdentity != devId || have.Width != depthDesc.Width || have.Height != depthDesc.Height)
-            ParkNrClone(clone.depth, clone.usage);
+        if (clone.deviceIdentity != devId || have.Width != depthDesc.Width || have.Height != depthDesc.Height ||
+            have.Format != TypedGuideFormat(depthDesc.Format) || have.Flags != D3D12_RESOURCE_FLAG_NONE)
+            ParkNrClone(clone.depth, clone.writeUsage, clone.tracked);
     }
     if (clone.motion != nullptr)
     {
         const auto have = clone.motion->GetDesc();
-        if (clone.deviceIdentity != devId || have.Width != motionDesc.Width || have.Height != motionDesc.Height)
-            ParkNrClone(clone.motion, clone.usage);
+        if (clone.deviceIdentity != devId || have.Width != motionDesc.Width || have.Height != motionDesc.Height ||
+            have.Format != TypedGuideFormat(motionDesc.Format) || have.Flags != D3D12_RESOURCE_FLAG_NONE)
+            ParkNrClone(clone.motion, clone.writeUsage, clone.tracked);
     }
 
     if (clone.depth == nullptr)
@@ -5795,11 +5822,25 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
 
     if (clone.depth == nullptr || clone.motion == nullptr)
     {
-        static bool s_loggedAllocFail = false;
-        if (!s_loggedAllocFail)
+        s_failedAllocs.insert({ devId, depthDesc.Format, depthDesc.Width, depthDesc.Height });
+        s_failedAllocs.insert({ devId, motionDesc.Format, motionDesc.Width, motionDesc.Height });
+        LOG_ERROR("DLSS-NR present guides: clone allocation failed on device {:p} for depth format {}/{}x{}; "
+                  "present route will use neutral guides",
+                  devId, (int) depthDesc.Format, (uint32_t) depthDesc.Width, depthDesc.Height);
+        g_presentGuideRing.InvalidateSlot(slot);
+        return;
+    }
+
+    // Submission tracking before ANY barrier or recording on this list (Correction 4)
+    clone.tracked = DlssNr::Submission::Track(cmdList, clone.writeUsage);
+    if (!clone.tracked)
+    {
+        static bool s_loggedTrackFail = false;
+        if (!s_loggedTrackFail)
         {
-            LOG_ERROR("DLSS-NR present guides: clone allocation failed; present route will use neutral guides");
-            s_loggedAllocFail = true;
+            LOG_WARN("DLSS-NR present guides: evaluate command list refused submission tracking (type != DIRECT or "
+                     "sealed); skipping guide snapshot");
+            s_loggedTrackFail = true;
         }
         g_presentGuideRing.InvalidateSlot(slot);
         return;
@@ -5837,17 +5878,13 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
         Barrier(cmdList, motion, D3D12_RESOURCE_STATE_COPY_SOURCE, motionArrival);
 
     clone.frame = frame;
+    clone.frame.GuideState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     clone.width = static_cast<uint32_t>(depthDesc.Width);
     clone.height = depthDesc.Height;
 
-    clone.tracked = g_tracked;
-    if (g_tracked && !DlssNr::Submission::Track(cmdList, clone.usage))
-    {
-        g_presentGuideRing.InvalidateSlot(slot);
-        return;
-    }
+    ++g_renderSeq; // Count render frame at successful CaptureTemporal (Correction 5b)
 
-    g_presentGuideRing.CommitRecord(slot, clone.width, clone.height, frame.DepthInverted, &clone.usage);
+    g_presentGuideRing.CommitRecord(slot, clone.width, clone.height, frame.DepthInverted, &clone.writeUsage, &clone);
     g_temporalValid = true;
 }
 
@@ -6324,11 +6361,8 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         {
             if (token == nullptr)
                 return false;
-            if (!g_tracked)
-                return true;
             return DlssNr::Submission::Completed(*static_cast<DlssNr::Submission::Usage*>(token));
-        },
-        g_tracked ? &g_presentReadUsages[slot] : nullptr);
+        });
 
     bool temporalValid = false;
     unsigned long long temporalSeq = 0;
@@ -6336,11 +6370,20 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     if (pickedSlot < DlssNr::PresentGuides::kRingSize)
     {
         auto& clone = g_presentGuideClones[pickedSlot];
-        depth = clone.depth;
-        motion = clone.motion;
-        frame = clone.frame;
-        temporalValid = (depth != nullptr && motion != nullptr);
-        temporalSeq = g_presentGuideRing.GetSlot(pickedSlot).sequence;
+        clone.readTracked = DlssNr::Submission::Track(list, clone.readUsage);
+        if (clone.readTracked)
+        {
+            depth = clone.depth;
+            motion = clone.motion;
+            frame = clone.frame;
+            frame.GuideState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            temporalValid = (depth != nullptr && motion != nullptr);
+            temporalSeq = g_presentGuideRing.GetSlot(pickedSlot).sequence;
+        }
+        else
+        {
+            temporalValid = false;
+        }
     }
 
     nrLock.unlock();
@@ -6368,10 +6411,11 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
             LOG_ERROR("DLSS-NR present: {}", g_nr.reason);
             return;
         }
-        s_dummyGuides.RecordClear(list);
+        s_dummyGuides.RecordClear(list, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         depth = s_dummyGuides.Depth();
         motion = s_dummyGuides.Motion();
         frame = DlssNrFrameInfo {};
+        frame.GuideState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
         // Zero guides above native are refused by the model (FAIL_InvalidParameter), so a working
         // scale above 1 is clamped to native here, as the D3D11 host does since fcc5fdf0. This route
@@ -7269,12 +7313,25 @@ bool CapturedPresentGuides(ID3D12Resource** depth, ID3D12Resource** motion, Dlss
     // replaced capture is parked, not released.
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
 
-    if (!g_temporal.valid || g_temporal.depth == nullptr || g_temporal.motion == nullptr)
+    const size_t pickedSlot = g_presentGuideRing.PickForPresent(
+        [](void* token) -> bool
+        {
+            if (token == nullptr)
+                return false;
+            return DlssNr::Submission::Completed(*static_cast<DlssNr::Submission::Usage*>(token));
+        });
+
+    if (pickedSlot >= DlssNr::PresentGuides::kRingSize)
         return false;
 
-    *depth = g_temporal.depth;
-    *motion = g_temporal.motion;
-    *frame = g_temporal.frame;
+    auto& clone = g_presentGuideClones[pickedSlot];
+    if (clone.depth == nullptr || clone.motion == nullptr)
+        return false;
+
+    *depth = clone.depth;
+    *motion = clone.motion;
+    *frame = clone.frame;
+    frame->GuideState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     return true;
 }
 
@@ -8008,8 +8065,12 @@ void Shutdown()
             std::any_of(g_nrRetired.begin(), g_nrRetired.end(), [](const NrRetired& retired)
                         { return retired.tracked && !DlssNr::Submission::Ready(retired.usage); });
         const bool pendingClones = std::any_of(
-            std::begin(g_presentGuideClones), std::end(g_presentGuideClones), [](const auto& clone)
-            { return clone.depth != nullptr && clone.tracked && !DlssNr::Submission::Completed(clone.usage); });
+            std::begin(g_presentGuideClones), std::end(g_presentGuideClones),
+            [](const auto& clone)
+            {
+                return clone.depth != nullptr && ((clone.tracked && !DlssNr::Submission::Ready(clone.writeUsage)) ||
+                                                  (clone.readTracked && !DlssNr::Submission::Ready(clone.readUsage)));
+            });
         if (!DlssNr::Submission::Ready(g_usage) || pendingRetired || pendingClones)
         {
             LOG_INFO("DLSS-NR shutdown: retained all objects because tracked recordings are unsealed, pending or "

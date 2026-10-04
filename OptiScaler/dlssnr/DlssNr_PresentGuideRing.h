@@ -1,9 +1,11 @@
 #pragma once
 
 // Selection logic for present-time guide snapshot ring.
-// Ported from RenoDX (present_path.hpp:30-33, 96-100, 155-168, commit 9bb6c0f, MIT licence, Carlos Lopez Jr.).
+// Ported from RenoDX (present_path.hpp:30-33, 96-100, 155-168, 880-1090, commit 9bb6c0f, MIT licence, Carlos Lopez
+// Jr.).
 //
-// Pure C++ (stdlib only), so tests/nr-present-guides can verify ordering, completion and cross-queue rules on host.
+// Pure C++ (stdlib only), so tests/nr-present-guides can verify ordering, completion, age limits, and cross-queue rules
+// on host.
 
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +15,8 @@ namespace DlssNr::PresentGuides
 // Four capture sets (RenoDX kPresentGuideSets): the newest, one the game may be copying into,
 // one a present on the GPU may still read, and one a present read last.
 constexpr size_t kRingSize = 4;
+// Drop captures older than this window as stale (RenoDX kPresentGuideMaxAge).
+constexpr uint64_t kPresentGuideMaxAge = 4;
 
 struct Slot
 {
@@ -21,8 +25,8 @@ struct Slot
     uint32_t height = 0;
     bool depthInverted = false;
     bool recorded = false;
-    void* writeToken = nullptr; // e.g. pointer to evaluate submission tracking usage
-    void* readToken = nullptr;  // e.g. pointer to present submission tracking usage
+    void* writeToken = nullptr; // pointer to evaluate submission tracking usage
+    void* readToken = nullptr;  // pointer to present submission tracking usage
 };
 
 template <typename WriteCompletedPredicate, typename ReadInFlightPredicate> class Ring
@@ -33,7 +37,8 @@ template <typename WriteCompletedPredicate, typename ReadInFlightPredicate> clas
 
   public:
     // Selects a slot to record a new capture into on the evaluate command list.
-    // Skips slots currently being read by in-flight present commands or the slot read last.
+    // Skips slots currently being read by in-flight present commands and the slot read last.
+    // If all other slots are currently in flight, returns kRingSize (skips capture, matching RenoDX).
     size_t AcquireForRecord(ReadInFlightPredicate isReadInFlight)
     {
         size_t best = kRingSize;
@@ -58,23 +63,11 @@ template <typename WriteCompletedPredicate, typename ReadInFlightPredicate> clas
             }
         }
 
-        // If all other slots have in-flight reads, pick oldest recorded
-        if (best == kRingSize)
-        {
-            for (size_t i = 0; i < kRingSize; ++i)
-            {
-                if (i != _lastReadIndex && _slots[i].sequence < oldestSeq)
-                {
-                    oldestSeq = _slots[i].sequence;
-                    best = i;
-                }
-            }
-        }
-
-        return best != kRingSize ? best : 0;
+        // When all non-last-read slots have in-flight reads, return kRingSize to skip capture
+        return best;
     }
 
-    void CommitRecord(size_t index, uint32_t w, uint32_t h, bool depthInverted, void* token)
+    void CommitRecord(size_t index, uint32_t w, uint32_t h, bool depthInverted, void* writeToken, void* readToken)
     {
         if (index >= kRingSize)
             return;
@@ -83,7 +76,8 @@ template <typename WriteCompletedPredicate, typename ReadInFlightPredicate> clas
         _slots[index].width = w;
         _slots[index].height = h;
         _slots[index].depthInverted = depthInverted;
-        _slots[index].writeToken = token;
+        _slots[index].writeToken = writeToken;
+        _slots[index].readToken = readToken;
         _slots[index].recorded = true;
     }
 
@@ -94,13 +88,14 @@ template <typename WriteCompletedPredicate, typename ReadInFlightPredicate> clas
             _slots[index].recorded = false;
             _slots[index].sequence = 0;
             _slots[index].writeToken = nullptr;
+            _slots[index].readToken = nullptr;
         }
     }
 
-    // Selects the newest capture whose submission is completed on the CPU.
-    // Never performs a GPU cross-queue wait. If no recorded capture is completed,
-    // returns kRingSize (caller falls back to neutral zero guides).
-    size_t PickForPresent(WriteCompletedPredicate isWriteCompleted, void* presentReadToken)
+    // Selects the newest capture whose evaluate submission is completed on the CPU.
+    // Never performs a GPU cross-queue wait. Rejects captures older than kPresentGuideMaxAge.
+    // If no recorded capture is completed and fresh, returns kRingSize (caller uses neutral zero guides).
+    size_t PickForPresent(WriteCompletedPredicate isWriteCompleted)
     {
         size_t newestCompleted = kRingSize;
         uint64_t highestSeq = 0;
@@ -112,6 +107,10 @@ template <typename WriteCompletedPredicate, typename ReadInFlightPredicate> clas
 
             if (isWriteCompleted(_slots[i].writeToken))
             {
+                // Discard stale captures
+                if (_nextSequence > 1 && (_nextSequence - 1) - _slots[i].sequence >= kPresentGuideMaxAge)
+                    continue;
+
                 if (_slots[i].sequence > highestSeq)
                 {
                     highestSeq = _slots[i].sequence;
@@ -121,10 +120,7 @@ template <typename WriteCompletedPredicate, typename ReadInFlightPredicate> clas
         }
 
         if (newestCompleted != kRingSize)
-        {
             _lastReadIndex = newestCompleted;
-            _slots[newestCompleted].readToken = presentReadToken;
-        }
 
         return newestCompleted;
     }
