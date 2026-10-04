@@ -24,6 +24,7 @@ finishes before the present read, eliminating 1-2 frames of guide latency. When 
 **What remains unproven:**
 - Game-specific motion vector transformations during post-processing, and 4K bandwidth overhead of two guide copies per frame.
 - Depth copy on native Windows: the copy keeps the source's exact format (as the donor does), mip 0 of plane 0 by `CopyTextureRegion`, and the typed read goes through `ReadableGuide` as for the game's own resource. Proton/vkd3d-proton accepts it; D24S8, D32S8 and their typeless families need a run on native Windows with the D3D12 debug layer (Rafael's PC) before this is called done.
+- Frame generation (measured, Crimson Desert, 2026-10-04): with the game's DLSS-G on, this route runs under the interposer, so NR lands on the real frame's present and the generated frames reach the screen without it. At 2x every other frame is unedited, which reads as flicker; with DLSS-G off it stopped (68 presents : 68 renders, NR on each). This predates the guide copies. With DLSS-G, use HookMethod=1, where the after-upscale pass edits the frame before it is interpolated; running at DLSS-G's real-frame boundary is a separate task.
 Item 5 continues to govern the broader dispatch pipeline.
 
 Update 2026-09-23: **implemented.** `3e1b3960` (the D3D12 present-time pass and temporal capture,
