@@ -29,6 +29,7 @@ cbuffer Params : register(b0)
     uint  gApplyModel;     // 0 output the clean frame (pass still runs), 1 apply the model's edit
     uint  gUseGameExposure;// D3D12 source-1 only: 1 = read the game's live exposure in-shader (t4)
     float gExposurePreMul; // preExposure * trim, so the live white point is gExposurePreMul / exposure
+    uint  gForceResidual;  // 1 = matched residual even at the frame's size (peripheral compression), else 0
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -872,7 +873,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         // enlargement, not the bilinear one, or the view would hide the one thing that mode changes.
         uint dw, dh;
         gSource.GetDimensions(dw, dh);
-        const float3 applied = gTransfer == 3 && (dw != gWidth || dh != gHeight) ? SharpEditAt(cmpUv, dw, dh) : edit;
+        const float3 applied =
+            gTransfer == 3 && (dw != gWidth || dh != gHeight || gForceResidual != 0) ? SharpEditAt(cmpUv, dw, dh) : edit;
 
         // Amplified and centred on grey, so both directions of the edit are visible at once.
         float3 shown = saturate(0.5 + applied * 20.0);
@@ -914,9 +916,13 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // agree to within the proxy surface's precision rather than exactly. Skipping the path when there
     // is no residual to carry makes 100% bit-identical to Classic instead of nearly identical, which
     // is what lets this default to on: the shipped configuration cannot be changed by it at all.
+    //
+    // Peripheral compression is the exception, and says so through gForceResidual: at 100% its proxy is
+    // frame-sized but has been packed and unpacked, so it is not the frame's own proxy, and Classic would
+    // read the edges' pack blur as headroom -- the very error the residual exists to remove.
     uint proxyW, proxyH;
     gSource.GetDimensions(proxyW, proxyH);
-    const bool modelRanSmall = proxyW != gWidth || proxyH != gHeight;
+    const bool modelRanSmall = proxyW != gWidth || proxyH != gHeight || gForceResidual != 0;
 
     if ((gTransfer == 1 || gTransfer == 3) && modelRanSmall)
     {
