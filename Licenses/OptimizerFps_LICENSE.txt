@@ -1,0 +1,54 @@
+optimizer-fps-dlss5
+===================
+
+Project:  optimizer-fps-dlss5 by Yuri Grib (BeliyG3)
+Source:   https://github.com/BeliyG3/optimizer-fps-dlss5 (commit 3636e6d8)
+
+What is derived from it
+-----------------------
+
+The carry of DLSS-NR's model cadence, in
+OptiScaler/shaders/dlssnr/precompile/dlssnr_cadence_rule.h and
+OptiScaler/shaders/dlssnr/precompile/dlssnr_cadence.hlsl, is taken from its temporal
+mode (core/shaders/temporal_mapping.hlsli, temporal_reproject.hlsli and
+temporal_residual.hlsli): the depth mismatch with its 0..1 depth term and the best of
+four texels around the reprojected point; the colour gate on chromaticity and luma;
+the motion chain summed over the skipped frames, with each step validated and restarted
+from the frame's own vector when its end shows another surface; the 9-tap acceptance
+gated by the centre pixel's own result; the fill from the coarse residual scaled by the
+luma ratio, the four rotated rings of same-depth taps, the "no match, no fill" rule and
+the fill's luma applied along the pixel's own chroma; the clamped Catmull-Rom read of
+the residual; and the chain handed to the model as its motion vectors, off the picture
+where it is broken.
+
+What is not theirs: the scheduling, the refusals and the forced-frame rules, the edge
+ramp that spares still pixels by the border, the scaling of taps and rings with the
+working size, the point-resampled depth snapshot, the plain box-averaged coarse residual,
+and the resource lifetime. Their cross-pass blend, phase-in, Lucas-Kanade refinement,
+expected depth, older passes, cells, compose pass and background queue are not ported.
+See OptiScaler/dlssnr/design/model-cadence.md.
+
+Upstream licence
+----------------
+
+MIT License
+
+Copyright (c) 2026 Yuri Grib (BeliyG3)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

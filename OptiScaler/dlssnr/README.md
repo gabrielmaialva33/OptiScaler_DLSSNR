@@ -72,6 +72,7 @@ experiment.
 | `shaders/dlssnr/precompile/dlssnr.hlsl` | **the live shader**: encode (scale and sRGB-encode with a soft knee), area downsample, resolve (RenoDX's two-branch composition, OkLab hue correction, AP1 clamp, the guard) |
 | `shaders/dlssnr/precompile/DlssNr_Shader.h` | that shader compiled, as bytes |
 | `shaders/dlssnr/DlssNr_Stabilizer_Dx12.h/.cpp`, `precompile/dlssnr_stabilizer.hlsl` | the output stabilizer, off by default; `design/output-stabilizer.md` |
+| `DlssNr_Cadence.h`, `shaders/dlssnr/DlssNr_Cadence_Dx12.h/.cpp`, `precompile/dlssnr_cadence.hlsl`, `precompile/dlssnr_cadence_rule.h` | model cadence, off by default: the model every Nth frame, its edit carried along the motion in between; the bytecode header is optional (`__has_include`); `design/model-cadence.md` |
 | `shaders/dlssnr/DlssNr_GuideMatch.h`, `DlssNr_GuideMatch_Dx12.h/.cpp`, `precompile/dlssnr_guides.hlsl` | below the frame's size: depth and motion point-resampled to the model's working size, and the motion-vector scale for the texture handed over; the bytecode header is optional (`__has_include`); `design/reduced-scale-guides.md` |
 
 ### Editing the shader
@@ -107,6 +108,12 @@ and PQ transforms are standard colour science.
 The output stabilizer's gate -- the 3x3 input box held against an anchor from when the pixel last moved
 -- is **taken from DLSS5-Feeder's `feed_hold12.h` by Jean-Laurent Rouzies**
 (https://github.com/jlrouzies-fr/DLSS5-Feeder, MIT). `Licenses/DLSS5-Feeder_LICENSE.txt` carries their
+licence and says which parts are theirs.
+
+Model cadence's carry -- the depth mismatch, the colour gate, the validated motion chain, the 9-tap
+acceptance, the ring fill and its "no match, no fill" rule, the off-picture vectors handed to the model
+-- is **taken from BeliyG3's optimizer-fps-dlss5 by Yuri Grib**
+(https://github.com/BeliyG3/optimizer-fps-dlss5, MIT). `Licenses/OptimizerFps_LICENSE.txt` carries their
 licence and says which parts are theirs.
 
 ## Why a forwarder DLL exists
@@ -159,6 +166,9 @@ part of the solution, and builds with everything else.
   The output stabilizer (`design/output-stabilizer.md`) is not that and does not reopen it: it is gated
   by the model's *input* and reprojects nothing, so a pixel whose input changed shows the current answer
   that frame, and only pixels the game left alone keep what was shown.
+  Model cadence (`design/model-cadence.md`) is not that either, and does hit this dead end in motion: it
+  is an FPS option that moves the last answer onto the frames between model calls, blends no two answers,
+  and is off by default because it costs stability in motion.
 - **The model's own UI correction went with it.** It only ever acted on a UI layer the game tagged
   through Streamline, which almost no title does, and it could not be shown to change anything when
   one did. Removing it removed the Streamline tag hook as well, so the module no longer touches that
