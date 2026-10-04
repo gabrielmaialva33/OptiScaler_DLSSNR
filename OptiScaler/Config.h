@@ -433,6 +433,15 @@ class Config
     // where auto is 0.5 must survive a save, and the WithDefault rule would write it back as auto.
     CustomOptional<float, SoftDefault> DlssNrWorkingScale { 1.0f };
 
+    // Peripheral compression (dlssnr/design/peripheral-compression.md): the model's input packed denser in
+    // the centre than at the edges, its answer unpacked before the composition. D3D12, after the upscaler or
+    // at present, not above Model resolution 100 and not with UseProxy. Off by default. The centre band
+    // (percent of each axis kept at full density) and the work extent (percent of each axis the packed input
+    // spans, before Model resolution) apply to both axes; work x 2 must be at least 100 + centre.
+    CustomOptional<bool> DlssNrPeripheryCompression { false };
+    CustomOptional<uint32_t> DlssNrPeripheryCenter { 80 };
+    CustomOptional<uint32_t> DlssNrPeripheryWork { 90 };
+
     // Filter used for NR supersampling (working scale > 1): the model runs above native, and this is
     // the downscaler that averages its answer back to native. Independent of OutputScalingDownscaler
     // so NR and Output Scaling can run different filters at once. Lanczos3 is the sharp default.

@@ -452,6 +452,16 @@ MatchGuides=auto
 ; the older working / frame conversion, which shrank every low-resolution vector below 100%. For A/B.
 ; true or false - Default (auto) is true
 RenderMotionScale=auto
+
+; Peripheral compression (D3D12, after the upscaler or at present). The model's input is packed denser in
+; the centre than at the edges -- PeripheryCenter percent of each axis keeps full density, and the packed
+; input spans PeripheryWork percent of each axis before WorkingScale -- and its answer is unpacked before it
+; is composed. 80 and 90 cost what a uniform WorkingScale of 0.9 costs. PeripheryWork x 2 must be at least
+; 100 + PeripheryCenter. Not with WorkingScale above 1.0, not with UseProxy, not on Stage 1 or Vulkan.
+; true or false - Default (auto) is false; 10 to 96 - Default (auto) is 80; 55 to 99 - Default (auto) is 90
+PeripheryCompression=auto
+PeripheryCenter=auto
+PeripheryWork=auto
 ; Which estimator SynthMotion uses. ffx is the FidelityFX optical-flow port, which runs on the shader
 ; cores. nvofa is NVIDIA's Optical Flow Accelerator (RTX 20 and later), a fixed-function engine that
 ; leaves the shader cores to the model; it needs nvofapi64.dll (the NVIDIA driver on Windows,
