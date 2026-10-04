@@ -142,6 +142,12 @@ if (precompile / 'DlssNr_UiMask_Shader.cso').exists():
     targets.append(('DlssNr_UiMask_Shader.cso', 'DlssNr_UiMask_Shader.h', 'DlssNr_UiMask_cso', b'DXBC'))
 if (precompile / 'DlssNr_Guides_Shader.cso').exists():
     targets.append(('DlssNr_Guides_Shader.cso', 'DlssNr_Guides_Shader.h', 'DlssNr_Guides_cso', b'DXBC'))
+# Model cadence (model-cadence.md). Its header is optional (__has_include): without the bytecode the build
+# reports the cadence unavailable, so the pair is checked once committed, and a header without its .cso fails.
+if (precompile / 'DlssNr_Cadence_Shader.cso').exists():
+    targets.append(('DlssNr_Cadence_Shader.cso', 'DlssNr_Cadence_Shader.h', 'DlssNr_Cadence_cso', b'DXBC'))
+elif (precompile / 'DlssNr_Cadence_Shader.h').exists():
+    fail('DlssNr_Cadence_Shader.h is committed without DlssNr_Cadence_Shader.cso beside it')
 
 with tempfile.TemporaryDirectory() as scratch:
     for binary, header, array, magic in targets:

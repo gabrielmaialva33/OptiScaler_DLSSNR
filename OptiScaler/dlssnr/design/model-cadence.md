@@ -78,6 +78,14 @@ right after the final answer becomes readable and before the resolve:
 sub-pixel (the guide-match comment). About 36 bytes per working pixel: ~133 MB at a 2560×1440
 working size, ~300 MB at 4K. Nothing when off.
 
+The surfaces are built only when the cadence would actually run, so a title that cannot carry (zero
+guides, before the upscaler) never pays for them; they are parked when the cadence is off or cannot
+exist here (native Vulkan, the driver proxy, no shader); every other refusal keeps what is built, so a
+frame-generation toggle, a hold or a route that comes and goes does not reallocate them — each
+discarded copy would sit in the retired list for 32 evaluates. They rest in
+`NON_PIXEL_SHADER_RESOURCE` between dispatches, like the stabilizer's history, and every unused
+descriptor slot gets a null descriptor.
+
 **On a carried frame:**
 
 1. *Chain step* (`dlssnr_cadence_rule.h`, `CadenceChainStep`): `acc = mv + accPrev(p + mv)`, read
