@@ -64,7 +64,9 @@ performed by extracting the fatbins and disassembling with `cuobjdump -sass` con
 
 The hypothesis is confirmed: Ada and Blackwell execute a dedicated FP8 network (19,952 tensor ops),
 while Ampere has zero FP8 instructions and runs an FP16 fallback network with 2.8x more total SASS
-instructions. Live per-kernel timing is measured through `[DlssNr] KernelProfile` (`DlssNr_KernelProfile.h`).
+instructions.
+
+**Caution & scope:** static SASS instruction counts confirm the presence of distinct binary networks (native FP8 vs FP16 fallback) compiled into the binary, but static counts alone are not dynamic execution cost. They do not explain the full 25x disparity on their own, and say nothing about runtime loop trip counts or bandwidth bottlenecks. Dynamic execution cost is measured at runtime via `[DlssNr] KernelProfile` (`DlssNr_KernelProfile.h`).
 
 ## Frame generation does not exist there at all
 

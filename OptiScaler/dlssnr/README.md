@@ -33,6 +33,7 @@ what keeps it honest (last taken 2026-09-23).
 | `with_dx12/dx11_with_dx12_sc.{h,cpp}` | the D3D11 bridge's present host (`PresentHost`), and the colour space it is told on `SetColorSpace1` |
 | `hooks/D3D12_Hooks.cpp` | exposure-scan resource notes |
 | `resource_tracking/ResTrack_dx12.cpp` | exposure-scan resource notes and submission tracking |
+| `nvapi/NvApiHooks.cpp` | CUDA kernel wrapper hook for `[DlssNr] KernelProfile` (`DlssNr::KernelProfile::WrapNvapi`) |
 | `hooks/Vulkan_Hooks.cpp` | the device extensions the Vulkan route needs (`VkExt`) |
 | `menu/menu_common.cpp` | the Neural Rendering tab and its card (`DlssNr::RenderMenu`), the timing row, the toggle key, compare tags, the scan meter |
 | `Config.h` / `Config.cpp` | the `[DlssNr]` declarations and their read/write runs |

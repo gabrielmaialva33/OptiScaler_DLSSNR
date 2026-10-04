@@ -1,15 +1,18 @@
 #pragma once
 
 // Kernel-variant census and per-group GPU timing of NVIDIA's DLSS-NR model from NvAPI launches.
-// Ported from janblade (OptiScaler descendants-scan, commit db065ec2, GPL-3.0).
+// Ported from janblade (https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass, commit db065ec2, GPL-3.0).
 //
 // The DLSS-NR model launches every kernel through NvAPI_D3D12_LaunchCuKernelChain on the command list.
 // When enabled via [DlssNr] KernelProfile, timestamps are sampled across 3 of every 240 evaluations
-// and resolved to readback buffers without blocking the CPU (using DlssNr::Submission::Completed).
+// and resolved to readback buffers without blocking the CPU (using DlssNr::Submission::TimingCertificate).
 
 #ifdef _WIN32
 #include <d3d12.h>
-#include <wrl/client.h>
+#include <nvapi.h>
+#include "DlssNr_Submission.h"
+#include <Config.h>
+#include <Logger.h>
 #endif
 
 #include <algorithm>
@@ -117,8 +120,8 @@ struct AggregateReport
         {
             if (groups[g].kernelCount == 0 && groups[g].meanMs <= 0.0)
                 continue;
-            s += std::format("{}: {:.2f} ms ({:.1f}%, x{})  ", kGroupNames[g], groups[g].meanMs, groups[g].sharePercent,
-                             groups[g].kernelCount);
+            s += std::format("{}: {:.2f} ms [p95 {:.2f} ms] ({:.1f}%, x{})  ", kGroupNames[g], groups[g].meanMs,
+                             groups[g].p95Ms, groups[g].sharePercent, groups[g].kernelCount);
         }
 
         s += "(approximate: chained kernels overlap)";
@@ -171,6 +174,7 @@ class MetricsAggregator
             return rep;
 
         rep.evaluationsSampled = _entries.size();
+        const double invN = 1.0 / static_cast<double>(_entries.size());
         std::vector<double> totals;
         totals.reserve(_entries.size());
 
@@ -178,11 +182,15 @@ class MetricsAggregator
         for (auto& pg : perGroup)
             pg.reserve(_entries.size());
 
+        double sumFp8 = 0.0;
+        double sumPlain = 0.0;
+        double sumGroupKernels[kGroupCount] {};
+
         for (const auto& e : _entries)
         {
             totals.push_back(e.totalMs);
-            rep.fp8Count += e.fp8;
-            rep.fp16Count += e.plain;
+            sumFp8 += e.fp8;
+            sumPlain += e.plain;
             if (rep.fp8SampleName.empty() && !e.fp8Example.empty())
                 rep.fp8SampleName = e.fp8Example;
             if (rep.fp16SampleName.empty() && !e.plainExample.empty())
@@ -191,9 +199,13 @@ class MetricsAggregator
             for (unsigned g = 0; g < kGroupCount; ++g)
             {
                 perGroup[g].push_back(e.groupMs[g]);
-                rep.groups[g].kernelCount += e.groupKernels[g];
+                sumGroupKernels[g] += e.groupKernels[g];
             }
         }
+
+        // Kernel counts per evaluate (average across the window)
+        rep.fp8Count = static_cast<unsigned>(std::round(sumFp8 * invN));
+        rep.fp16Count = static_cast<unsigned>(std::round(sumPlain * invN));
 
         const auto calcStats = [](std::vector<double>& v) -> std::pair<double, double>
         {
@@ -218,6 +230,7 @@ class MetricsAggregator
             const auto [gMean, gP95] = calcStats(perGroup[g]);
             rep.groups[g].meanMs = gMean;
             rep.groups[g].p95Ms = gP95;
+            rep.groups[g].kernelCount = static_cast<unsigned>(std::round(sumGroupKernels[g] * invN));
             rep.groups[g].sharePercent = totMean > 1e-6 ? (gMean / totMean) * 100.0 : 0.0;
         }
 
@@ -232,8 +245,9 @@ class Profiler
   public:
     static Profiler& Instance()
     {
-        static Profiler p;
-        return p;
+        // Deliberately leaked raw allocation to prevent destruction order crashes during process exit
+        static Profiler* p = new Profiler();
+        return *p;
     }
 
     void RegisterFunction(void* handle, const char* name)
@@ -252,14 +266,9 @@ class Profiler
         _fnInfo.erase(handle);
     }
 
-    bool Recording(const ID3D12GraphicsCommandList* cmd) const
-    {
-        return _recordingSlot >= 0 && _slots[_recordingSlot].cmd == cmd;
-    }
-
     void Begin(ID3D12GraphicsCommandList* cmd, bool enabled)
     {
-        if (!enabled)
+        if (!enabled || cmd == nullptr)
             return;
 
         std::lock_guard lock(_mutex);
@@ -268,31 +277,54 @@ class Profiler
         _recordingSlot = -1;
 
         // Sample 3 consecutive evaluations out of every 240
-        if (_failed || cmd == nullptr || (_evaluation % 240) >= 3)
+        if ((_evaluation % 240) >= 3)
             return;
 
-        if (!InitLocked(cmd))
+        ID3D12Device* device = nullptr;
+        if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
             return;
 
+        int chosenSlot = -1;
         for (size_t i = 0; i < kSlots; ++i)
         {
-            auto& s = _slots[i];
-            if (s.pending)
-                continue;
-
-            s.cmd = cmd;
-            s.evaluation = _evaluation;
-            s.queries = 0;
-            s.fp8Kernels = 0;
-            s.plainKernels = 0;
-            s.recs.clear();
-            s.fp8Example.clear();
-            s.plainExample.clear();
-
-            cmd->EndQuery(s.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, s.queries++);
-            _recordingSlot = static_cast<int>(i);
+            if (!_slots[i].pending)
+            {
+                chosenSlot = static_cast<int>(i);
+                break;
+            }
+        }
+        if (chosenSlot < 0)
+        {
+            device->Release();
             return;
         }
+
+        auto& s = _slots[chosenSlot];
+        if (!InitSlotLocked(s, device))
+        {
+            device->Release();
+            return;
+        }
+        device->Release();
+
+        // Independent from NR resource-retirement mode; refusal drops measurement only.
+        if (!DlssNr::Submission::Track(cmd, s.usage))
+        {
+            s.usage = {};
+            return;
+        }
+
+        s.cmd = cmd;
+        s.queries = 0;
+        s.fp8Kernels = 0;
+        s.plainKernels = 0;
+        s.recs.clear();
+        s.fp8Example.clear();
+        s.plainExample.clear();
+
+        // Initial timestamp at query 0
+        cmd->EndQuery(s.heap, D3D12_QUERY_TYPE_TIMESTAMP, s.queries++);
+        _recordingSlot = chosenSlot;
     }
 
     void Launched(ID3D12GraphicsCommandList* cmd, const void* const* functionHandles, uint32_t count)
@@ -301,45 +333,39 @@ class Profiler
             return;
 
         std::lock_guard lock(_mutex);
-        if (!Recording(cmd))
+        if (_recordingSlot < 0 || _slots[_recordingSlot].cmd != cmd)
             return;
 
         auto& s = _slots[_recordingSlot];
         if (s.queries >= kCap)
             return;
 
-        std::vector<Info> infos;
-        infos.reserve(count);
+        Rec rec {};
+        rec.timeGroup = kOtherGroupIndex;
         for (uint32_t i = 0; i < count; ++i)
         {
-            auto it = _fnInfo.find(functionHandles[i]);
-            if (it != _fnInfo.end())
-                infos.push_back(it->second);
-            else
-                infos.push_back(Classify("unknown"));
-        }
+            const auto it = _fnInfo.find(functionHandles[i]);
+            const Info info = it != _fnInfo.end() ? it->second : Classify("unknown");
+            rec.kernels[info.group]++;
+            if (i == 0)
+                rec.timeGroup = info.group;
 
-        Rec rec;
-        rec.timeGroup = infos.front().group;
-        for (const auto& inf : infos)
-        {
-            rec.kernels[inf.group]++;
-            if (inf.fp8)
+            if (info.fp8)
             {
                 s.fp8Kernels++;
                 if (s.fp8Example.empty())
-                    s.fp8Example = inf.name;
+                    s.fp8Example = info.name;
             }
             else
             {
                 s.plainKernels++;
                 if (s.plainExample.empty())
-                    s.plainExample = inf.name;
+                    s.plainExample = info.name;
             }
         }
 
         s.recs.push_back(std::move(rec));
-        cmd->EndQuery(s.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, s.queries++);
+        cmd->EndQuery(s.heap, D3D12_QUERY_TYPE_TIMESTAMP, s.queries++);
     }
 
     void End(ID3D12GraphicsCommandList* cmd)
@@ -348,20 +374,28 @@ class Profiler
             return;
 
         std::lock_guard lock(_mutex);
-        if (!Recording(cmd))
+        if (_recordingSlot < 0 || _slots[_recordingSlot].cmd != cmd)
             return;
 
         auto& s = _slots[_recordingSlot];
-        cmd->ResolveQueryData(s.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, s.queries, s.readback.Get(), 0);
-        s.pending = true;
-        s.queuedAt = _evaluation;
         _recordingSlot = -1;
-    }
 
-    void Collect()
-    {
-        std::lock_guard lock(_mutex);
-        CollectLocked();
+        if (s.queries <= 1)
+        {
+            static bool s_loggedNoLaunches = false;
+            if (!s_loggedNoLaunches)
+            {
+                LOG_WARN(
+                    "DLSS-NR kernel profile: no NvAPI CUDA launches intercepted on command list; profiling inactive "
+                    "(wrapper not queried by model or kernel launches occur on another command list)");
+                s_loggedNoLaunches = true;
+            }
+            s.pending = false;
+            return;
+        }
+
+        cmd->ResolveQueryData(s.heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, s.queries, s.readback, 0);
+        s.pending = true;
     }
 
     std::vector<std::string> TakeReports()
@@ -384,43 +418,49 @@ class Profiler
 
     struct Slot
     {
-        Microsoft::WRL::ComPtr<ID3D12QueryHeap> heap;
-        Microsoft::WRL::ComPtr<ID3D12Resource> readback;
+        ID3D12QueryHeap* heap = nullptr;
+        ID3D12Resource* readback = nullptr;
+        ID3D12Device* device = nullptr;
         ID3D12GraphicsCommandList* cmd = nullptr;
+        DlssNr::Submission::Usage usage {};
         std::vector<Rec> recs;
         uint32_t queries = 0;
         unsigned fp8Kernels = 0;
         unsigned plainKernels = 0;
         bool pending = false;
-        uint64_t queuedAt = 0;
-        uint64_t evaluation = 0;
         std::string fp8Example;
         std::string plainExample;
     };
 
     Profiler() = default;
 
-    bool InitLocked(ID3D12GraphicsCommandList* cmd)
+    bool InitSlotLocked(Slot& s, ID3D12Device* device)
     {
-        if (_ready)
+        if (s.device != device)
+        {
+            if (s.heap != nullptr)
+            {
+                s.heap->Release();
+                s.heap = nullptr;
+            }
+            if (s.readback != nullptr)
+            {
+                s.readback->Release();
+                s.readback = nullptr;
+            }
+            s.device = device;
+        }
+
+        if (s.heap != nullptr && s.readback != nullptr)
             return true;
 
-        Microsoft::WRL::ComPtr<ID3D12Device> device;
-        if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
-        {
-            _failed = true;
-            return false;
-        }
+        D3D12_QUERY_HEAP_DESC qDesc {};
+        qDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        qDesc.Count = kCap;
+        qDesc.NodeMask = 0;
 
-        D3D12_COMMAND_QUEUE_DESC qDesc {};
-        qDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
-        if (FAILED(device->CreateCommandQueue(&qDesc, IID_PPV_ARGS(&queue))) ||
-            FAILED(queue->GetTimestampFrequency(&_frequency)) || _frequency == 0)
-        {
-            _failed = true;
+        if (FAILED(device->CreateQueryHeap(&qDesc, IID_PPV_ARGS(&s.heap))) || s.heap == nullptr)
             return false;
-        }
 
         D3D12_HEAP_PROPERTIES rbHeap {};
         rbHeap.Type = D3D12_HEAP_TYPE_READBACK;
@@ -433,21 +473,19 @@ class Profiler
         bDesc.SampleDesc.Count = 1;
         bDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 
-        D3D12_QUERY_HEAP_DESC qhDesc { D3D12_QUERY_HEAP_TYPE_TIMESTAMP, kCap, 0 };
-
-        for (auto& s : _slots)
+        if (FAILED(device->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &bDesc,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                   IID_PPV_ARGS(&s.readback))) ||
+            s.readback == nullptr)
         {
-            if (FAILED(device->CreateQueryHeap(&qhDesc, IID_PPV_ARGS(&s.heap))) ||
-                FAILED(device->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &bDesc,
-                                                       D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                       IID_PPV_ARGS(&s.readback))))
+            if (s.heap != nullptr)
             {
-                _failed = true;
-                return false;
+                s.heap->Release();
+                s.heap = nullptr;
             }
+            return false;
         }
 
-        _ready = true;
         return true;
     }
 
@@ -455,24 +493,38 @@ class Profiler
     {
         for (auto& s : _slots)
         {
-            if (!s.pending || _evaluation < s.queuedAt + 90)
+            if (!s.pending)
                 continue;
 
-            s.pending = false;
-            UINT64* data = nullptr;
-            D3D12_RANGE range { 0, static_cast<SIZE_T>(s.queries) * sizeof(UINT64) };
-            if (FAILED(s.readback->Map(0, &range, reinterpret_cast<void**>(&data))) || data == nullptr)
+            const auto certificate = DlssNr::Submission::TimingCertificate(s.usage);
+            if (!certificate.terminal)
                 continue;
 
+            if (!certificate.accepted || certificate.frequency == 0)
+            {
+                s.pending = false;
+                continue;
+            }
+
+            void* mapped = nullptr;
+            const D3D12_RANGE range { 0, static_cast<SIZE_T>(s.queries) * sizeof(UINT64) };
+            if (FAILED(s.readback->Map(0, &range, &mapped)) || mapped == nullptr)
+            {
+                s.pending = false;
+                continue;
+            }
+
+            const UINT64* data = static_cast<const UINT64*>(mapped);
             std::vector<UINT64> ticks(data, data + s.queries);
-            D3D12_RANGE noWrite { 0, 0 };
+            const D3D12_RANGE noWrite { 0, 0 };
             s.readback->Unmap(0, &noWrite);
+            s.pending = false;
 
-            ReportLocked(s, ticks);
+            ReportLocked(s, ticks, certificate.frequency);
         }
     }
 
-    void ReportLocked(const Slot& s, const std::vector<UINT64>& ticks)
+    void ReportLocked(const Slot& s, const std::vector<UINT64>& ticks, UINT64 frequency)
     {
         if (ticks.size() < 2 || ticks.front() == 0 || ticks.back() < ticks.front() || s.recs.size() + 1 != ticks.size())
             return;
@@ -483,7 +535,7 @@ class Profiler
         for (size_t i = 0; i < s.recs.size(); ++i)
         {
             const double ms = ticks[i + 1] >= ticks[i] ? (static_cast<double>(ticks[i + 1] - ticks[i]) * 1000.0) /
-                                                             static_cast<double>(_frequency)
+                                                             static_cast<double>(frequency)
                                                        : 0.0;
             groupMs[s.recs[i].timeGroup] += ms;
             for (unsigned g = 0; g < kGroupCount; ++g)
@@ -491,11 +543,16 @@ class Profiler
         }
 
         const double totalMs =
-            static_cast<double>(ticks.back() - ticks.front()) * 1000.0 / static_cast<double>(_frequency);
+            static_cast<double>(ticks.back() - ticks.front()) * 1000.0 / static_cast<double>(frequency);
         _aggregator.Add(totalMs, groupMs, groupKernels, s.fp8Kernels, s.plainKernels, s.fp8Example, s.plainExample);
 
-        const auto rep = _aggregator.BuildReport();
-        _reports.push_back(rep.Format());
+        // One report line per 3-sample window, then reset aggregator
+        if (_aggregator.Count() >= 3)
+        {
+            const auto rep = _aggregator.BuildReport();
+            _reports.push_back(rep.Format());
+            _aggregator.Reset();
+        }
     }
 
     std::mutex _mutex;
@@ -503,12 +560,78 @@ class Profiler
     Slot _slots[kSlots];
     int _recordingSlot = -1;
     uint64_t _evaluation = 0;
-    UINT64 _frequency = 0;
-    bool _ready = false;
-    bool _failed = false;
     MetricsAggregator _aggregator;
     std::vector<std::string> _reports;
 };
+
+namespace Detail
+{
+static decltype(&NvAPI_D3D12_CreateCuFunction) o_CreateCuFunction = nullptr;
+static decltype(&NvAPI_D3D12_DestroyCuFunction) o_DestroyCuFunction = nullptr;
+static decltype(&NvAPI_D3D12_LaunchCuKernelChain) o_LaunchCuKernelChain = nullptr;
+
+inline NvAPI_Status __cdecl hkNvAPI_D3D12_CreateCuFunction(ID3D12Device* pDevice, NVDX_ObjectHandle hModule,
+                                                           const char* functionName, NVDX_ObjectHandle* pFunction)
+{
+    if (!o_CreateCuFunction)
+        return NVAPI_ERROR;
+    const auto status = o_CreateCuFunction(pDevice, hModule, functionName, pFunction);
+    if (status == NVAPI_OK && pFunction && *pFunction && functionName)
+        Profiler::Instance().RegisterFunction(*pFunction, functionName);
+    return status;
+}
+
+inline NvAPI_Status __cdecl hkNvAPI_D3D12_DestroyCuFunction(ID3D12Device* pDevice, NVDX_ObjectHandle hFunction)
+{
+    if (hFunction)
+        Profiler::Instance().UnregisterFunction(hFunction);
+    return o_DestroyCuFunction ? o_DestroyCuFunction(pDevice, hFunction) : NVAPI_ERROR;
+}
+
+inline NvAPI_Status __cdecl hkNvAPI_D3D12_LaunchCuKernelChain(ID3D12GraphicsCommandList* pCommandList,
+                                                              const NVAPI_CU_KERNEL_LAUNCH_PARAMS* pKernels,
+                                                              NvU32 numKernels)
+{
+    if (!o_LaunchCuKernelChain)
+        return NVAPI_ERROR;
+    const auto status = o_LaunchCuKernelChain(pCommandList, pKernels, numKernels);
+    if (status == NVAPI_OK && pCommandList && pKernels && numKernels > 0)
+    {
+        std::vector<const void*> handles(numKernels);
+        for (NvU32 i = 0; i < numKernels; ++i)
+            handles[i] = pKernels[i].hFunction;
+        Profiler::Instance().Launched(pCommandList, handles.data(), numKernels);
+    }
+    return status;
+}
+} // namespace Detail
+
+inline void* WrapNvapi(uint32_t interfaceId, void* functionPointer)
+{
+    if (!functionPointer)
+        return nullptr;
+
+    if (!Config::Instance()->DlssNrKernelProfile.value_or_default())
+        return functionPointer;
+
+    if (interfaceId == 0xe2436e22) // NvAPI_D3D12_CreateCuFunction
+    {
+        Detail::o_CreateCuFunction = reinterpret_cast<decltype(&NvAPI_D3D12_CreateCuFunction)>(functionPointer);
+        return reinterpret_cast<void*>(&Detail::hkNvAPI_D3D12_CreateCuFunction);
+    }
+    if (interfaceId == 0xdf295ea6) // NvAPI_D3D12_DestroyCuFunction
+    {
+        Detail::o_DestroyCuFunction = reinterpret_cast<decltype(&NvAPI_D3D12_DestroyCuFunction)>(functionPointer);
+        return reinterpret_cast<void*>(&Detail::hkNvAPI_D3D12_DestroyCuFunction);
+    }
+    if (interfaceId == 0x24973538) // NvAPI_D3D12_LaunchCuKernelChain
+    {
+        Detail::o_LaunchCuKernelChain = reinterpret_cast<decltype(&NvAPI_D3D12_LaunchCuKernelChain)>(functionPointer);
+        return reinterpret_cast<void*>(&Detail::hkNvAPI_D3D12_LaunchCuKernelChain);
+    }
+
+    return functionPointer;
+}
 #endif
 
 } // namespace DlssNr::KernelProfile

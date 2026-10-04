@@ -4662,8 +4662,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     else
     {
         const bool profileKernels = cfg.DlssNrKernelProfile.value_or_default();
-        auto& kernelProfiler = DlssNr::KernelProfile::Profiler::Instance();
-        kernelProfiler.Begin(cmdList, profileKernels);
+        if (profileKernels)
+            DlssNr::KernelProfile::Profiler::Instance().Begin(cmdList, true);
 
         timing.ModelBegin();
 
@@ -4679,9 +4679,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         timing.ModelEnd();
 
-        kernelProfiler.End(cmdList);
-        for (const auto& rep : kernelProfiler.TakeReports())
-            LOG_INFO("{}", rep);
+        if (profileKernels)
+        {
+            auto& kernelProfiler = DlssNr::KernelProfile::Profiler::Instance();
+            kernelProfiler.End(cmdList);
+            for (const auto& rep : kernelProfiler.TakeReports())
+                LOG_INFO("{}", rep);
+        }
 
         if (chainEnabled && (isLogFrame || result != 1))
             LOG_INFO(

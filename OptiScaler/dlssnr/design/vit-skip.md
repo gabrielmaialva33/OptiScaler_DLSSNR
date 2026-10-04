@@ -104,9 +104,17 @@ Once kernel timings confirm that `cc_vit_1d_*` accounts for $\sim 18-22\%$ of to
 - Determine whether `vit_1d_*` accounts for $\sim 20\%$ of execution time on both Ada (FP8) and Ampere (FP16).
 - Verify whether `dxvk-nvapi` on Linux introduces any timing distortion between timestamp queries and CUDA kernel launches.
 
+### Step 2 test plan (when implemented)
+- **Host unit test (`tests/nr-vit-skip`):**
+  Simulate NvAPI kernel launch stream against synthetic signature buffers, verifying:
+  - Correct detection of ViT entry/exit markers (`cc_vit_1d_repack_2d_to_1d` to `cc_vit_1d_repack_1d_to_2d`);
+  - Clean shutdown on malformed sequences;
+  - Enforced full evaluation on history reset (`g_nr.reset`).
+
 ---
 
 ## 8. Open questions
 
 - Does `dxvk-nvapi` forward the required private NvAPI CUDA launch table IDs cleanly without overhead on Linux?
 - Can the intermediate latent buffer suffer from race conditions when asynchronous compute queues run alongside graphics?
+- **Unverified note:** `nvngx_dlssnr.dll` also contains the interface ID for `NvAPI_D3D12_LaunchCubinShader` (`0x5c52bb86`). Any kernels launched through that entry point are invisible to `LaunchCuKernelChain` interception and their execution time falls into the adjacent kernel interval.
