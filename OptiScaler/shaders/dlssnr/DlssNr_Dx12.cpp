@@ -3853,6 +3853,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     cadenceInputs.requested = Cadence::Requested(cfg.DlssNrCadence.value_or_default());
     cadenceInputs.driverProxy = useProxy;
     cadenceInputs.available = DlssNr_Cadence_Dx12::Available();
+    cadenceInputs.presentsCounted = observedFrame != 0;
     cadenceInputs.beforeUpscale = beforeUpscale;
     cadenceInputs.gameGuides = frame.GameGuides;
     cadenceInputs.frameGeneration = FrameGenerationActive();

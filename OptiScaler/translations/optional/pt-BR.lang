@@ -372,6 +372,7 @@ Off: the model runs every frame.	Desligado: o modelo roda em todo quadro.
 The model runs every frame: model cadence is not available on native Vulkan.	O modelo roda em todo quadro: a cadência do modelo não está disponível no Vulkan nativo.
 The model runs every frame: model cadence does not run with the driver proxy.	O modelo roda em todo quadro: a cadência do modelo não roda com o proxy do driver.
 The model runs every frame: this build has no model cadence shader.	O modelo roda em todo quadro: esta compilação não tem o shader da cadência do modelo.
+The model runs every frame: this route does not present through OptiScaler's swapchain, so model cadence cannot count frames.	O modelo roda em todo quadro: esta rota não apresenta pelo swapchain do OptiScaler, então a cadência do modelo não consegue contar os quadros.
 The model runs every frame: model cadence does not run before the upscaler.	O modelo roda em todo quadro: a cadência do modelo não roda antes do upscaler.
 The model runs every frame: this frame has no game depth and motion to carry the edit with.	O modelo roda em todo quadro: este quadro não tem profundidade e movimento do jogo para levar a edição.
 The model runs every frame: frame generation is active (see Allow with frame generation).	O modelo roda em todo quadro: a geração de quadros está ativa (veja Permitir com geração de quadros).

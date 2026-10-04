@@ -72,6 +72,7 @@ assert 'if (cadence.handChain && g_nr.cadence != nullptr)' in renderer
 assert 'if (cadence.record && !carried && chain.completed == passSnapshot.Count && g_nr.cadence != nullptr)' in renderer
 # The refusals the design note lists are what the renderer feeds the scheduler.
 for field in ('driverProxy = useProxy', 'available = DlssNr_Cadence_Dx12::Available()',
+              'presentsCounted = observedFrame != 0',
               'beforeUpscale = beforeUpscale', 'gameGuides = frame.GameGuides',
               'frameGeneration = FrameGenerationActive()', 'hold = holdFrame || g_nr.heldActive',
               'capture = g_capture.isActive()'):

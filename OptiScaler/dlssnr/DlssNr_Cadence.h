@@ -61,7 +61,8 @@ enum class Reason : uint8_t
     Off,
     NativeVulkan,
     DriverProxy,
-    Unavailable, // this build carries no cadence bytecode
+    Unavailable,    // this build carries no cadence bytecode
+    NoPresentCount, // the route never presents through the wrapped swapchain, so presents are not counted
     BeforeUpscale,
     NoGameGuides,
     FrameGeneration,
@@ -80,6 +81,7 @@ struct Inputs
     bool nativeVulkan = false;      // the D3D12 pass never sees this; the menu and the tests do
     bool driverProxy = false;       // [DlssNr] UseProxy: it returns before the resolve
     bool available = true;          // the bytecode is in this build
+    bool presentsCounted = true;    // State::frameCount advances: the route presents through the wrapped swapchain
     bool beforeUpscale = false;     // stage 1: jittered input the upscaler would accumulate
     bool gameGuides = true;         // the game's own depth and motion, not zero or synthesized guides
     bool frameGeneration = false;   // any frame generation active
@@ -100,6 +102,11 @@ constexpr Reason Refusal(const Inputs& in)
         return Reason::DriverProxy;
     if (!in.available)
         return Reason::Unavailable;
+    // Age, and a second call in one present, are both read off the present counter. Where it never advances,
+    // every call after the first would look like a second call in one present: refused under its own name
+    // instead, rather than counting calls, which would let one view's edit land on another.
+    if (!in.presentsCounted)
+        return Reason::NoPresentCount;
     if (in.beforeUpscale)
         return Reason::BeforeUpscale;
     if (!in.gameGuides)
@@ -160,6 +167,9 @@ constexpr const char* Describe(Reason reason, uint32_t cadence)
         return "The model runs every frame: model cadence does not run with the driver proxy.";
     case Reason::Unavailable:
         return "The model runs every frame: this build has no model cadence shader.";
+    case Reason::NoPresentCount:
+        return "The model runs every frame: this route does not present through OptiScaler's swapchain, so model "
+               "cadence cannot count frames.";
     case Reason::BeforeUpscale:
         return "The model runs every frame: model cadence does not run before the upscaler.";
     case Reason::NoGameGuides:

@@ -279,6 +279,16 @@ void SecondCallInOnePresent_StandsDownForItAndTheNext()
     for (int i = 0; i < 6; ++i)
         stuck.Frame(in, Shape(), true, i == 0 ? 1 : 0);
     assert(stuck.pattern == "MMMMMM");
+    // A route whose counter never moved at all (still 0: it never presents through the wrapped swapchain) is told
+    // apart by the renderer and refused under its own name, not reported as a second call in one present.
+    Inputs uncounted = Running(2);
+    uncounted.presentsCounted = false;
+    Driver zero;
+    for (int i = 0; i < 4; ++i)
+    {
+        const auto decision = zero.Frame(uncounted, Shape(), true, 0);
+        assert(decision.runModel && decision.reason == Reason::NoPresentCount && !decision.record);
+    }
     ++g_cases;
 }
 
@@ -306,6 +316,8 @@ void Refusals_EachRunTheModelWithTheirOwnReason()
         { "native Vulkan", [](Inputs& i) { i.nativeVulkan = true; }, Reason::NativeVulkan, true, "native Vulkan" },
         { "driver proxy", [](Inputs& i) { i.driverProxy = true; }, Reason::DriverProxy, true, "driver proxy" },
         { "no shader", [](Inputs& i) { i.available = false; }, Reason::Unavailable, true, "no model cadence shader" },
+        { "no present count", [](Inputs& i) { i.presentsCounted = false; }, Reason::NoPresentCount, false,
+          "cannot count frames" },
         { "before upscale", [](Inputs& i) { i.beforeUpscale = true; }, Reason::BeforeUpscale, false,
           "before the upscaler" },
         { "zero guides", [](Inputs& i) { i.gameGuides = false; }, Reason::NoGameGuides, false, "no game depth" },

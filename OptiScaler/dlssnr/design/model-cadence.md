@@ -165,6 +165,7 @@ Each refusal is logged once on change (`DLSS-NR cadence: ...`) and shown under t
 | frame hold, capture | both compare frames; a carried frame would compare a moved answer with itself |
 | frame generation | frame times alternate long and short. neural-upstream measured DLSS-G unable to pace through 8.9/13.9 ms alternation, with stutter and flashes growing with the multiplier and the cadence; the same work with the effect at zero showed the same artefact, so it is pacing, not image. `CadenceWithFrameGen=true` opts in. Detected as OptiScaler's own FG active and unpaused, the game's DLSS-G through NGX (`dlssgDetectedInterpolationCount`), or a DLSS-G mode set through Streamline |
 | no cadence shader | the bytecode header is optional (`__has_include`); without it the pass reports itself unavailable |
+| no counted presents | `State::frameCount` advances only in the wrapped swapchain's present, and some routes never present through it (`DlssNr_Enlarge.h`, `CreationCrossed`). With the counter at 0 every call after the first read as a second call in one present: the cadence never carried and said so under the wrong reason. Counting calls instead would lose that guard, so it is refused by name |
 | surfaces could not be built | allocation failed |
 
 ## Not ported, on purpose
