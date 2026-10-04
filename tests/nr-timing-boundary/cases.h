@@ -27,6 +27,15 @@ int main() {
     auto sdr=make("after",3440,1440,1,false,false,false,28);
     assert(sdr.contractHash!=hidden.contractHash); ++cases;
     assert(a.modelWidth==3440 && a.settingsGeneration<hidden.settingsGeneration); ++cases;
+    // Peripheral compression is in the contract only while it is switched on, so the default keeps its hash;
+    // two centre bands at one packed extent are two contracts.
+    cfg.DlssNrPeripheryCenter.value=70; auto offAgain=make();
+    assert(offAgain.contractHash==hidden.contractHash); ++cases;
+    cfg.DlssNrPeripheryCompression.value=true; auto band70=make();
+    cfg.DlssNrPeripheryCenter.value=80; auto band80=make();
+    assert(band70.contractHash!=offAgain.contractHash && band80.contractHash!=band70.contractHash); ++cases;
+    cfg.DlssNrPeripheryCompression.value=false; auto off=make();
+    assert(off.contractHash==offAgain.contractHash); ++cases;
 
     using DlssNr::RenderGpuTiming;
     ImGui::Clear(); RenderGpuTiming(&cfg,true);
@@ -47,6 +56,6 @@ int main() {
     assert(ImGui::Contains("not the current frame") && !ImGui::Contains("ms per frame")); ++cases;
     ImGui::toggle=0; ImGui::Clear(); RenderGpuTiming(&cfg,false);
     assert(!cfg.settings.Enabled && ImGui::sliderCalls==0 && !ImGui::Contains("Last confirmed")); ++cases;
-    assert(cases==16);
+    assert(cases==19);
     std::printf("PASS %d timing boundary metadata/UI cases\n",cases);
 }

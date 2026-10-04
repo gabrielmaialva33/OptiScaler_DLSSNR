@@ -250,11 +250,17 @@ inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float
     const uint32_t modelW = EvenExtent(nativeW, static_cast<double>(globalScale) * work);
     const uint32_t modelH = EvenExtent(nativeH, static_cast<double>(globalScale) * work);
 
-    if (modelW < nativeW * 0.25f || modelH < nativeH * 0.25f ||
-        s.center * 0.01f >= static_cast<float>(rawW) / nativeW ||
-        s.center * 0.01f >= static_cast<float>(rawH) / nativeH)
+    if (modelW < nativeW * 0.25f || modelH < nativeH * 0.25f)
     {
         result.reason = kReasonTooSmall;
+        return result;
+    }
+
+    // The band must still fit inside the work extent once that is rounded to whole, even texels.
+    if (s.center * 0.01f >= static_cast<float>(rawW) / nativeW ||
+        s.center * 0.01f >= static_cast<float>(rawH) / nativeH)
+    {
+        result.reason = kReasonRange;
         return result;
     }
 

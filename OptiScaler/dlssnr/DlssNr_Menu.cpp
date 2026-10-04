@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace DlssNr
 {
@@ -82,6 +83,22 @@ static void RenderPeriphery(Config* config)
     if (!periphery)
         return;
 
+    DlssNr::PeripheryState status {};
+    const bool running = PeripheryRunning(config, &status);
+    const bool fresh = status.seen && std::chrono::steady_clock::now() - status.at < std::chrono::seconds(1);
+
+    // Refused by the route rather than by the two numbers: the sliders could not make it run, so they stay
+    // visible (kept for when the route changes) but greyed, and the status line below says why.
+    const auto refusedBy = [&](const char* reason) { return std::strcmp(status.reason, reason) == 0; };
+    const bool routeRefused =
+        config->DlssNrUseProxy.value_or_default() ||
+        (fresh && !status.active &&
+         (refusedBy(P::kReasonUseProxy) || refusedBy(P::kReasonBeforeUpscale) || refusedBy(P::kReasonSupersampling) ||
+          refusedBy(P::kReasonNoShader) || refusedBy(P::kReasonPassFailed)));
+
+    if (routeRefused)
+        ImGui::BeginDisabled();
+
     static int pendingCenter = -1;
     static int pendingWork = -1;
 
@@ -111,8 +128,8 @@ static void RenderPeriphery(Config* config)
                "\ncentre is squeezed into the rest, to no less than half its size: this has to be at least"
                "\nhalfway between the centre band and 100.");
 
-    DlssNr::PeripheryState status {};
-    const bool running = PeripheryRunning(config, &status);
+    if (routeRefused)
+        ImGui::EndDisabled();
 
     if (running)
     {
@@ -126,7 +143,7 @@ static void RenderPeriphery(Config* config)
                            status.modelWidth, status.modelHeight, status.frameWidth, status.frameHeight, share);
         ImGui::PopStyleColor();
     }
-    else if (status.seen && !status.active && std::chrono::steady_clock::now() - status.at < std::chrono::seconds(1))
+    else if (fresh && !status.active)
     {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
         ImGui::TextWrapped(Localization::Tr("Not active: %s."), Localization::Tr(status.reason));
@@ -720,8 +737,13 @@ void RenderMenu(Config* config, float menuResScale)
         }
         else
         {
-            if (ImGui::SliderInt(Localization::Label("Model resolution"), &scalePercent, 25, 200,
-                                 autoScale && pendingScale < 0 ? "%d%% (auto)" : "%d%%"))
+            // With peripheral compression running the model works on a packed input, this scale times the
+            // packed extent, and the value says so rather than reading as the model's whole size.
+            const bool packedModel = PeripheryRunning(config);
+            const char* scaleFormat = autoScale && pendingScale < 0
+                                          ? (packedModel ? "%d%% (auto, packed)" : "%d%% (auto)")
+                                          : (packedModel ? "%d%% (packed)" : "%d%%");
+            if (ImGui::SliderInt(Localization::Label("Model resolution"), &scalePercent, 25, 200, scaleFormat))
                 pendingScale = scalePercent;
 
             if (ImGui::IsItemDeactivatedAfterEdit() && pendingScale >= 0)
@@ -1691,15 +1713,17 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nright of it is the frame the model edited.");
         }
 
-        // The last entry only while peripheral compression is switched on: without it there is no packed input,
-        // and DebugView 4 shows what 1 shows.
+        // The last entry only while peripheral compression is switched on, on D3D12: without it there is no packed
+        // input, and the pass hands DebugView 4 to the shader unchanged, which composes the frame as it does at 0
+        // -- so that is how the combo shows it, rather than as an entry it does not list.
         static const char* debugNames[] = { Localization::Label("Off"),
                                             Localization::Label("Proxy (what the model sees)"),
                                             Localization::Label("Model output (raw)"),
                                             Localization::Label("Difference (amplified)"),
                                             Localization::Label("Packed model input") };
-        const bool packedView = config->DlssNrPeripheryCompression.value_or_default();
-        int debugView = (int) config->DlssNrDebugView.value_or_default();
+        const bool packedView = config->DlssNrPeripheryCompression.value_or_default() && !nativeVulkan;
+        const int storedView = (int) config->DlssNrDebugView.value_or_default();
+        int debugView = !packedView && storedView == 4 ? 0 : storedView;
         if (ImGui::Combo(Localization::Label("Debug view"), &debugView, debugNames,
                          packedView ? IM_ARRAYSIZE(debugNames) : IM_ARRAYSIZE(debugNames) - 1))
             config->DlssNrDebugView = (uint32_t) debugView;

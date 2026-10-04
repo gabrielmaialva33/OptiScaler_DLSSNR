@@ -102,8 +102,9 @@ Everything below the encode changes size; nothing about the frame does.
 
 The controls sit under Model resolution, are hidden on native Vulkan, and the two sliders commit on
 release. A status line says what the pass did on its last dispatch: active with the packed size, or
-not active and why. `DebugView=4` ("Packed model input", offered only while the setting is on) shows the
-model's packed input through the proxy view; without the periphery it is view 1.
+not active and why. `DebugView=4` ("Packed model input", offered only while the setting is on, on D3D12)
+shows the model's packed input through the proxy view. While the periphery is not running, 4 reaches the
+shader unchanged, as it always did, and composes the frame as 0 does.
 
 The same two numbers serve both axes. wilsjo2 offers per-axis values, a centre offset and a budget
 shift; v1 has none of them, so there is one quantity per control and no control that edits another's

@@ -154,6 +154,18 @@ if any((precompile / f'{stem}_Shader{ext}').exists() for stem in periphery_stems
                  '(build commands in precompile/dlssnr_periphery.hlsl)')
         else:
             targets.append((f'{stem}_Shader.cso', f'{stem}_Shader.h', f'{stem}_cso', b'DXBC'))
+    # The feature also needs the composition shader to read ForceResidual (appended in 0c3a49fc); with the
+    # bytecode from before it, the periphery runs and the resolve silently falls back to Classic at 100. Nothing
+    # here can compile the .hlsl, but it can refuse the two binaries known to predate the field (75e62d22).
+    import hashlib
+    stale = {
+        'DlssNr_Shader.cso': '666485bca95113aced89451a2967c0278b996d3f303223da25a67b66ab41cc87',
+        'DlssNr_Shader_Vk.spv': 'a949fb96abf5bf05200b72639efc5fcdb94ea8909a788976802829c4593a5e3a',
+    }
+    for binary, digest in stale.items():
+        if hashlib.sha256((precompile / binary).read_bytes()).hexdigest() == digest:
+            fail(f'{binary} predates ForceResidual: rebuild dlssnr.hlsl (both targets) before committing the '
+                 'periphery bytecode')
 
 with tempfile.TemporaryDirectory() as scratch:
     for binary, header, array, magic in targets:

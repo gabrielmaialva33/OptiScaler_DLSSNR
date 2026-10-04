@@ -590,6 +590,11 @@ DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSn
                                 pass.Preset, pass.Style, pass.Intensity, pass.LocalStructure, pass.LocalTone,
                                 pass.SkinStructure, pass.AutoMask);
     }
+    // Peripheral compression's layout, only while it is switched on, so the default contract keeps its text and
+    // hash. Two centre bands at one packed extent cost the same pixels but are not the same measurement.
+    if (cfg.DlssNrPeripheryCompression.value_or_default())
+        contract += std::format(" periphery=[centre={},work={}]", cfg.DlssNrPeripheryCenter.value_or_default(),
+                                cfg.DlssNrPeripheryWork.value_or_default());
     static std::string previous;
     static uint64_t generation = 0;
     static uint64_t hash = 0;
@@ -4322,11 +4327,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
 
         // Debug view 4, "Packed model input": the model's input as it was handed over, shown through the
-        // proxy view. Without the periphery that input is what view 1 shows already.
-        if (resolveParams.DebugView == 4)
+        // proxy view. Only while the periphery ran: otherwise 4 reaches the shader as it always did, which
+        // knows no view 4 and composes the frame -- the default path stays what it was for every value.
+        if (resolveParams.DebugView == 4 && unpacked)
         {
-            if (unpacked)
-                resolveProxy = modelInput;
+            resolveProxy = modelInput;
             resolveParams.DebugView = 1;
         }
 
