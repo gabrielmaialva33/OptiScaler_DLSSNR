@@ -13,7 +13,7 @@ Cross-queue captures require CPU completion proof without GPU cross-queue waits 
 Captures older than `kPresentGuideMaxAgeMs` (250 ms) are dropped as stale in favor of neutral zero guides.
 
 **VRAM overhead:** 4 sets of 2 textures (depth + motion vectors) at render resolution allocate 8 textures in total
-(~118 MB at 1440p with R32 depth, up to ~177 MB with D32S8 depth).
+(four depth and motion pairs at render resolution: ~118 MB at 2560x1440 with 4-byte depth and 4-byte motion; R32G32 motion adds ~59 MB, and an 8-byte depth format such as D32S8 its own share again).
 
 **Queue identity & same-queue execution (Decision B):** RenoDX bypasses completion waits when evaluate and present
 execute on the identical queue (`present_path.hpp:96-100`). `DlssNr::Submission` exposes queue identity via
@@ -23,7 +23,7 @@ finishes before the present read, eliminating 1-2 frames of guide latency. When 
 
 **What remains unproven:**
 - Game-specific motion vector transformations during post-processing, and 4K bandwidth overhead of two guide copies per frame.
-- Depth planar copy: for typeless depth formats with stencil planes (`R32G8X24_TYPELESS`, `R24G8_TYPELESS`), copying subresource 0 directly to `R32_FLOAT` via `CopyTextureRegion` works under Proton/vkd3d-proton, but native Windows Direct3D 12 may reject cross-format planar copy without explicit planar subresource indexing (needs validation on Rafael's PC under native Windows).
+- Depth copy on native Windows: the copy keeps the source's exact format (as the donor does), mip 0 of plane 0 by `CopyTextureRegion`, and the typed read goes through `ReadableGuide` as for the game's own resource. Proton/vkd3d-proton accepts it; D24S8, D32S8 and their typeless families need a run on native Windows with the D3D12 debug layer (Rafael's PC) before this is called done.
 Item 5 continues to govern the broader dispatch pipeline.
 
 Update 2026-09-23: **implemented.** `3e1b3960` (the D3D12 present-time pass and temporal capture,

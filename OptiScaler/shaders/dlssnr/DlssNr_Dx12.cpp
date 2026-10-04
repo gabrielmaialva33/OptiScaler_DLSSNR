@@ -5607,7 +5607,9 @@ struct BridgeGuideRead
 {
     bool valid = false;
     size_t slot = 0;
+    ID3D12GraphicsCommandList* list = nullptr; // compared and passed to Abandon, not held
     DlssNr::Submission::Usage usage {};
+    DlssNr::Submission::Usage presentUsage {};
     bool tracked = false;
 };
 static BridgeGuideRead g_bridgeRead;
@@ -5631,6 +5633,11 @@ static ID3D12Resource* CreatePresentGuideClone(ID3D12Device* device, ID3D12Resou
     D3D12_RESOURCE_DESC desc = src;
     desc.Alignment = 0;
     desc.MipLevels = 1;
+    // As present_path.hpp:1029: a plain layout, and no flag that would stop the copy being read (DENY_SHADER_RESOURCE)
+    // or let it decay to COMMON between submissions (ALLOW_SIMULTANEOUS_ACCESS). The reuse check compares the
+    // stored source flags, so this does not rebuild the clone every frame.
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags &= ~(D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
     desc.DepthOrArraySize = 1;
     desc.SampleDesc.Count = 1;
 
@@ -5690,6 +5697,7 @@ static void ParkNrClone(ID3D12Resource*& res, const DlssNr::Submission::Usage& u
 
 static void ReleasePresentTemporal()
 {
+    g_bridgeRead = {};
     for (auto& clone : g_presentGuideClones)
     {
         if (clone.depth != nullptr)
@@ -5839,9 +5847,11 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
 
     // Submission tracking before ANY barrier or recording on this list (Correction 4)
     clone.captureWriteUsage = {}; // reset single capture write usage for eligibility (Correction 2)
-    clone.tracked = DlssNr::Submission::Track(cmdList, clone.writeUsage) &&
-                    DlssNr::Submission::Track(cmdList, clone.captureWriteUsage);
-    if (!clone.tracked)
+    const bool trackedNow = DlssNr::Submission::Track(cmdList, clone.writeUsage) &&
+                            DlssNr::Submission::Track(cmdList, clone.captureWriteUsage);
+    // Never set back to false: earlier captures' writes may still be pending on the GPU.
+    clone.tracked = clone.tracked || trackedNow;
+    if (!trackedNow)
     {
         static bool s_loggedTrackFail = false;
         if (!s_loggedTrackFail)
@@ -6121,6 +6131,8 @@ static void DropPresentList(unsigned int slot)
     if (FAILED(g_presentList.list[slot]->Close()))
         LOG_WARN("DLSS-NR present: dropped list slot {} would not close", slot);
 
+    // It will never execute: its submission epoch is abandoned, or it stays sealed and is never pruned.
+    DlssNr::Submission::Abandon(g_presentList.list[slot]);
     g_presentList.dirty[slot] = false;
 }
 
@@ -6398,6 +6410,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     const size_t pickedSlot = g_presentGuideRing.PickForPresent(isEligible, nowMs);
 
     DlssNr::Submission::Usage savedReadUsage {};
+    DlssNr::Submission::Usage savedPresentReadUsage {};
     bool savedReadTracked = false;
     size_t trackedSlot = DlssNr::PresentGuides::kRingSize;
 
@@ -6418,6 +6431,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         auto& clone = g_presentGuideClones[pickedSlot];
         savedReadUsage = clone.readUsage;
         savedReadTracked = clone.readTracked;
+        savedPresentReadUsage = clone.presentReadUsage;
         clone.presentReadUsage = {}; // reset for this specific present read (Correction 2)
         const bool tracked =
             DlssNr::Submission::Track(list, clone.readUsage) && DlssNr::Submission::Track(list, clone.presentReadUsage);
@@ -6437,6 +6451,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         {
             // Track refused: restore saved usage and do NOT overwrite readTracked with false
             clone.readUsage = savedReadUsage;
+            clone.presentReadUsage = savedPresentReadUsage;
             temporalValid = false;
         }
     }
@@ -6466,6 +6481,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         {
             std::lock_guard<std::mutex> lock(g_nrMutex);
             g_presentGuideClones[trackedSlot].readUsage = savedReadUsage;
+            g_presentGuideClones[trackedSlot].presentReadUsage = savedPresentReadUsage;
             g_presentGuideClones[trackedSlot].readTracked = savedReadTracked;
         }
         DropPresentList(slot);
@@ -6482,6 +6498,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
             {
                 std::lock_guard<std::mutex> lock(g_nrMutex);
                 g_presentGuideClones[trackedSlot].readUsage = savedReadUsage;
+                g_presentGuideClones[trackedSlot].presentReadUsage = savedPresentReadUsage;
                 g_presentGuideClones[trackedSlot].readTracked = savedReadTracked;
             }
             DropPresentList(slot);
@@ -6498,7 +6515,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         motion = s_dummyGuides.Motion();
         frame = DlssNrFrameInfo {};
         frame.DepthState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        frame.MotionState = GuideRestState(true);
+        frame.MotionState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
         // Zero guides above native are refused by the model (FAIL_InvalidParameter), so a working
         // scale above 1 is clamped to native here, as the D3D11 host does since fcc5fdf0. This route
@@ -6556,6 +6573,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
                                                         false, frame, "D3D12 present", queue))
         {
             motion = synthesized;
+            frame.MotionState = GuideRestState(true);
         }
     }
 
@@ -6584,6 +6602,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         {
             std::lock_guard<std::mutex> lock(g_nrMutex);
             g_presentGuideClones[trackedSlot].readUsage = savedReadUsage;
+            g_presentGuideClones[trackedSlot].presentReadUsage = savedPresentReadUsage;
             g_presentGuideClones[trackedSlot].readTracked = savedReadTracked;
         }
         DropPresentList(slot);
@@ -6615,6 +6634,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     {
         std::lock_guard<std::mutex> lock(g_nrMutex);
         g_presentGuideClones[trackedSlot].readUsage = savedReadUsage;
+        g_presentGuideClones[trackedSlot].presentReadUsage = savedPresentReadUsage;
         g_presentGuideClones[trackedSlot].readTracked = savedReadTracked;
     }
 
@@ -7423,12 +7443,21 @@ bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** 
     // The read is tracked before it is handed out, or the copy is not handed out: an untracked read could be
     // overwritten by the next capture while the bridge's list still reads it. What Track changed is kept so
     // AbandonCapturedGuides can undo it when the bridge drops its recording without executing it.
+    // isReadInFlight decides on presentReadUsage, so the bridge's read goes there too, or every slot it read
+    // would look in flight for good and the bridge would lose its guides after four frames.
     const auto savedUsage = clone.readUsage;
+    const auto savedPresentUsage = clone.presentReadUsage;
     const bool savedTracked = clone.readTracked;
-    if (!DlssNr::Submission::Track(cmdList, clone.readUsage))
+    clone.presentReadUsage = {};
+    if (!DlssNr::Submission::Track(cmdList, clone.readUsage) ||
+        !DlssNr::Submission::Track(cmdList, clone.presentReadUsage))
+    {
+        clone.readUsage = savedUsage;
+        clone.presentReadUsage = savedPresentUsage;
         return false;
+    }
     clone.readTracked = true;
-    g_bridgeRead = { true, pickedSlot, savedUsage, savedTracked };
+    g_bridgeRead = { true, pickedSlot, cmdList, savedUsage, savedPresentUsage, savedTracked };
 
     *depth = clone.depth;
     *motion = clone.motion;
@@ -7448,7 +7477,10 @@ void AbandonCapturedGuides()
         return;
     auto& clone = g_presentGuideClones[g_bridgeRead.slot];
     clone.readUsage = g_bridgeRead.usage;
+    clone.presentReadUsage = g_bridgeRead.presentUsage;
     clone.readTracked = g_bridgeRead.tracked;
+    if (g_bridgeRead.list != nullptr)
+        DlssNr::Submission::Abandon(g_bridgeRead.list);
     g_bridgeRead = {};
 }
 
