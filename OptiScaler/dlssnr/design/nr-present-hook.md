@@ -1,12 +1,14 @@
 # Present-time NR — port the host, preserve this fork's contracts
 
-Update 2026-10-04: **guide snapshot ring implemented (items 4 & 5).** Replaced simple `AddRef`
-referencing in `CaptureTemporal` with an owned 3-slot guide snapshot ring (`DlssNr_PresentGuideRing.h`).
-Depth and motion are copied on the game's evaluate list, tracked via `DlssNr::Submission::Track`,
-and selected at present time via CPU completion proof. No GPU cross-queue wait is issued (preventing
-the DLSS-G present deadlock discovered in RenoDX). Stale or uncompleted captures fall back to neutral
-guides without stalling. What remains unproven: game-specific motion vector transformations during
-post-processing, and 4K bandwidth overhead of two guide copies per frame.
+Update 2026-10-04: **guide snapshot ring implemented (item 4).** Replaced simple `AddRef`
+referencing in `CaptureTemporal` with an owned 4-slot guide snapshot ring (`DlssNr_PresentGuideRing.h`,
+adapting RenoDX `present_path.hpp:30-33, 96-100, 155-168`). Depth and motion are copied via mip-0
+`CopyTextureRegion` on the game's evaluate list, with barriers transitioning the game's buffers from their
+arrival states to `COPY_SOURCE` and back. Submissions are tracked via `DlssNr::Submission::Track` (refusing
+untracked lists), and present selections require CPU completion proof without GPU cross-queue waits
+(avoiding the DLSS-G deadlock cycle). Stale or uncompleted captures fall back cleanly to neutral zero guides.
+What remains unproven: game-specific motion vector transformations during post-processing, and 4K bandwidth
+overhead of two guide copies per frame. Item 5 continues to govern the broader dispatch pipeline.
 
 Update 2026-09-23: **implemented.** `3e1b3960` (the D3D12 present-time pass and temporal capture,
 `HookMethod=2`) and `37db9f65` (the `DLSS_NEURAL_RENDERING` gate removed, without which LTCG dropped

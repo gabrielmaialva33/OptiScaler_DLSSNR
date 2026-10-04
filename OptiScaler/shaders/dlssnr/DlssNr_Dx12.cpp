@@ -1099,13 +1099,19 @@ bool RetiredCapacity();
 
 bool WantsTrackedRecording(const DlssNrPassSnapshot& requested)
 {
-    return g_tracked || (!g_legacyRecorded && (requested.Count > 1 || requested.Individual));
+    const auto& cfg = *Config::Instance();
+    const uint32_t method = cfg.DlssNrHookMethod.value_or_default();
+    const bool presentRoute = (method == 0 || method == 2);
+    return g_tracked || (!g_legacyRecorded && (requested.Count > 1 || requested.Individual || presentRoute));
 }
 
 bool TrackNrRecording(ID3D12GraphicsCommandList* cmd, const DlssNrPassSnapshot& requested,
                       DlssNr::Chain::RecordingLease* lease)
 {
-    const bool optIn = requested.Count > 1 || requested.Individual;
+    const auto& cfg = *Config::Instance();
+    const uint32_t method = cfg.DlssNrHookMethod.value_or_default();
+    const bool presentRoute = (method == 0 || method == 2);
+    const bool optIn = requested.Count > 1 || requested.Individual || presentRoute;
     if (!g_tracked && optIn && !g_legacyRecorded)
         g_tracked = true;
     if (!g_tracked)
@@ -5587,14 +5593,77 @@ struct PresentGuideClone
 {
     ID3D12Resource* depth = nullptr;
     ID3D12Resource* motion = nullptr;
+    const void* deviceIdentity = nullptr;
     DlssNrFrameInfo frame {};
-    DlssNr::Submission::Usage usage;
+    DlssNr::Submission::Usage usage {};
+    bool tracked = false;
     uint32_t width = 0;
     uint32_t height = 0;
 };
 
 static PresentGuideClone g_presentGuideClones[DlssNr::PresentGuides::kRingSize];
-static DlssNr::PresentGuides::Ring<bool (*)(void*)> g_presentGuideRing;
+static DlssNr::PresentGuides::Ring<bool (*)(void*), bool (*)(void*)> g_presentGuideRing;
+static DlssNr::Submission::Usage g_presentReadUsages[DlssNr::PresentGuides::kRingSize];
+
+// Creates a dedicated guide clone for the present snapshot ring matching the donor description,
+// mip 0 only, in NON_PIXEL_SHADER_RESOURCE state with no unordered access requirements.
+static ID3D12Resource* CreatePresentGuideClone(ID3D12Device* device, ID3D12Resource* source)
+{
+    if (device == nullptr || source == nullptr)
+        return nullptr;
+
+    const D3D12_RESOURCE_DESC src = source->GetDesc();
+    if (src.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || src.DepthOrArraySize != 1 || src.SampleDesc.Count != 1)
+        return nullptr;
+
+    DXGI_FORMAT candidates[4] = {};
+    uint32_t count = 0;
+    candidates[count++] = TypedGuideFormat(src.Format);
+
+    switch (src.Format)
+    {
+    case DXGI_FORMAT_R32G8X24_TYPELESS:
+        candidates[count++] = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        candidates[count++] = DXGI_FORMAT_R32_FLOAT;
+        break;
+    case DXGI_FORMAT_R24G8_TYPELESS:
+        candidates[count++] = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        candidates[count++] = DXGI_FORMAT_R32_FLOAT;
+        break;
+    case DXGI_FORMAT_R32_TYPELESS:
+        candidates[count++] = DXGI_FORMAT_D32_FLOAT;
+        break;
+    case DXGI_FORMAT_R16_TYPELESS:
+        candidates[count++] = DXGI_FORMAT_R16_FLOAT;
+        break;
+    default:
+        break;
+    }
+
+    D3D12_HEAP_PROPERTIES heap {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        D3D12_RESOURCE_DESC desc = src;
+        desc.Format = candidates[i];
+        desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+        desc.Alignment = 0;
+        desc.MipLevels = 1;
+        desc.DepthOrArraySize = 1;
+        desc.SampleDesc.Count = 1;
+
+        ID3D12Resource* res = nullptr;
+        const HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+                                                           IID_PPV_ARGS(&res));
+
+        if (SUCCEEDED(hr) && res != nullptr)
+            return res;
+    }
+
+    return nullptr;
+}
 
 // Written on the render thread (the upscaler's evaluate) and read on the present thread, so every
 // access holds g_nrMutex -- including the parking, which feeds the same retired list Dispatch trims.
@@ -5629,6 +5698,20 @@ static ID3D12Resource* g_lastEnhancedBb = nullptr;
 static unsigned int g_lastEnhancedBbIdx = 0xFFFFFFFF;
 static unsigned int g_sameBbStreak = 0, g_maxSameBbStreak = 0;
 
+static void ParkNrClone(ID3D12Resource*& res, const DlssNr::Submission::Usage& usage)
+{
+    if (res == nullptr)
+        return;
+
+    NrRetired r;
+    r.tracked = g_tracked;
+    if (g_tracked)
+        r.usage = usage;
+    r.resource = res;
+    res = nullptr;
+    g_nrRetired.push_back(r);
+}
+
 static void ReleasePresentTemporal()
 {
     if (g_temporal.depth != nullptr)
@@ -5643,16 +5726,9 @@ static void ReleasePresentTemporal()
     }
     for (auto& clone : g_presentGuideClones)
     {
-        if (clone.depth != nullptr)
-        {
-            clone.depth->Release();
-            clone.depth = nullptr;
-        }
-        if (clone.motion != nullptr)
-        {
-            clone.motion->Release();
-            clone.motion = nullptr;
-        }
+        ParkNrClone(clone.depth, clone.usage);
+        ParkNrClone(clone.motion, clone.usage);
+        clone = PresentGuideClone {};
     }
     g_presentGuideRing.Reset();
     g_temporal.valid = false;
@@ -5675,66 +5751,103 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
     const auto depthDesc = depth->GetDesc();
     const auto motionDesc = motion->GetDesc();
 
+    if (depthDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || depthDesc.DepthOrArraySize != 1 ||
+        depthDesc.SampleDesc.Count != 1 || motionDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        motionDesc.DepthOrArraySize != 1 || motionDesc.SampleDesc.Count != 1)
+    {
+        device->Release();
+        return;
+    }
+
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
 
-    const size_t slot = g_presentGuideRing.AcquireForRecord();
+    const auto isReadInFlight = [](void* token) -> bool
+    {
+        if (!token || !g_tracked)
+            return false;
+        return !DlssNr::Submission::Completed(*static_cast<DlssNr::Submission::Usage*>(token));
+    };
+
+    const size_t slot = g_presentGuideRing.AcquireForRecord(isReadInFlight);
     auto& clone = g_presentGuideClones[slot];
 
-    // Ensure clone textures exist and match the donor's size/format
+    const void* const devId = static_cast<const void*>(device);
     if (clone.depth != nullptr)
     {
         const auto have = clone.depth->GetDesc();
-        if (have.Width != depthDesc.Width || have.Height != depthDesc.Height || have.Format != depthDesc.Format)
-            ParkNrResource(clone.depth);
+        if (clone.deviceIdentity != devId || have.Width != depthDesc.Width || have.Height != depthDesc.Height)
+            ParkNrClone(clone.depth, clone.usage);
     }
     if (clone.motion != nullptr)
     {
         const auto have = clone.motion->GetDesc();
-        if (have.Width != motionDesc.Width || have.Height != motionDesc.Height || have.Format != motionDesc.Format)
-            ParkNrResource(clone.motion);
+        if (clone.deviceIdentity != devId || have.Width != motionDesc.Width || have.Height != motionDesc.Height)
+            ParkNrClone(clone.motion, clone.usage);
     }
 
     if (clone.depth == nullptr)
-        clone.depth = CreateScratch(device, depthDesc.Format, static_cast<unsigned>(depthDesc.Width), depthDesc.Height);
+        clone.depth = CreatePresentGuideClone(device, depth);
     if (clone.motion == nullptr)
-        clone.motion =
-            CreateScratch(device, motionDesc.Format, static_cast<unsigned>(motionDesc.Width), motionDesc.Height);
+        clone.motion = CreatePresentGuideClone(device, motion);
 
+    clone.deviceIdentity = devId;
     device->Release();
 
     if (clone.depth == nullptr || clone.motion == nullptr)
+    {
+        static bool s_loggedAllocFail = false;
+        if (!s_loggedAllocFail)
+        {
+            LOG_ERROR("DLSS-NR present guides: clone allocation failed; present route will use neutral guides");
+            s_loggedAllocFail = true;
+        }
+        g_presentGuideRing.InvalidateSlot(slot);
         return;
+    }
 
-    // Copy donor depth and motion into our owned clones on the game's command list
-    Barrier(cmdList, clone.depth, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-    Barrier(cmdList, clone.motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+    // Transitions around copy: game guide to COPY_SOURCE, clone to COPY_DEST, copy mip 0, restore states
+    const auto& cfg = *Config::Instance();
+    const auto depthArrival = static_cast<D3D12_RESOURCE_STATES>(
+        cfg.DepthResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+    const auto motionArrival = static_cast<D3D12_RESOURCE_STATES>(
+        cfg.MVResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 
-    cmdList->CopyResource(clone.depth, depth);
-    cmdList->CopyResource(clone.motion, motion);
+    if (depthArrival != D3D12_RESOURCE_STATE_COPY_SOURCE)
+        Barrier(cmdList, depth, depthArrival, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Barrier(cmdList, clone.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
 
-    Barrier(cmdList, clone.depth, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    Barrier(cmdList, clone.motion, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    const CD3DX12_TEXTURE_COPY_LOCATION dstDepth(clone.depth, 0);
+    const CD3DX12_TEXTURE_COPY_LOCATION srcDepth(depth, 0);
+    cmdList->CopyTextureRegion(&dstDepth, 0, 0, 0, &srcDepth, nullptr);
+
+    Barrier(cmdList, clone.depth, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (depthArrival != D3D12_RESOURCE_STATE_COPY_SOURCE)
+        Barrier(cmdList, depth, D3D12_RESOURCE_STATE_COPY_SOURCE, depthArrival);
+
+    if (motionArrival != D3D12_RESOURCE_STATE_COPY_SOURCE)
+        Barrier(cmdList, motion, motionArrival, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Barrier(cmdList, clone.motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    const CD3DX12_TEXTURE_COPY_LOCATION dstMotion(clone.motion, 0);
+    const CD3DX12_TEXTURE_COPY_LOCATION srcMotion(motion, 0);
+    cmdList->CopyTextureRegion(&dstMotion, 0, 0, 0, &srcMotion, nullptr);
+
+    Barrier(cmdList, clone.motion, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (motionArrival != D3D12_RESOURCE_STATE_COPY_SOURCE)
+        Barrier(cmdList, motion, D3D12_RESOURCE_STATE_COPY_SOURCE, motionArrival);
 
     clone.frame = frame;
     clone.width = static_cast<uint32_t>(depthDesc.Width);
     clone.height = depthDesc.Height;
 
-    if (g_tracked)
-        DlssNr::Submission::Track(cmdList, clone.usage);
+    clone.tracked = g_tracked;
+    if (g_tracked && !DlssNr::Submission::Track(cmdList, clone.usage))
+    {
+        g_presentGuideRing.InvalidateSlot(slot);
+        return;
+    }
 
     g_presentGuideRing.CommitRecord(slot, clone.width, clone.height, frame.DepthInverted, &clone.usage);
-
-    ParkNrResource(g_temporal.depth);
-    ParkNrResource(g_temporal.motion);
-
-    clone.depth->AddRef();
-    clone.motion->AddRef();
-    g_temporal.depth = clone.depth;
-    g_temporal.motion = clone.motion;
-    g_temporal.frame = frame;
-    g_temporal.capturedAt = g_frames;
-    g_temporal.renderSeq = ++g_renderSeq;
-    g_temporal.valid = true;
     g_temporalValid = true;
 }
 
@@ -6209,10 +6322,13 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     const size_t pickedSlot = g_presentGuideRing.PickForPresent(
         [](void* token) -> bool
         {
-            if (token == nullptr || !g_tracked)
+            if (token == nullptr)
+                return false;
+            if (!g_tracked)
                 return true;
             return DlssNr::Submission::Completed(*static_cast<DlssNr::Submission::Usage*>(token));
-        });
+        },
+        g_tracked ? &g_presentReadUsages[slot] : nullptr);
 
     bool temporalValid = false;
     unsigned long long temporalSeq = 0;
@@ -6223,16 +6339,8 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         depth = clone.depth;
         motion = clone.motion;
         frame = clone.frame;
-        temporalValid = depth != nullptr && motion != nullptr;
+        temporalValid = (depth != nullptr && motion != nullptr);
         temporalSeq = g_presentGuideRing.GetSlot(pickedSlot).sequence;
-    }
-    else if (g_temporal.valid)
-    {
-        depth = g_temporal.depth;
-        motion = g_temporal.motion;
-        frame = g_temporal.frame;
-        temporalValid = true;
-        temporalSeq = g_temporal.renderSeq;
     }
 
     nrLock.unlock();
@@ -6746,7 +6854,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
                           static_cast<unsigned>(contractOutput.Width), contractOutput.Height);
 
     const uint32_t hookMethod = cfg.DlssNrHookMethod.value_or_default();
-    if (hookMethod != 1)
+    if (hookMethod == 2 || (hookMethod == 0 && PresentHookLive()))
         CaptureTemporal(cmdList, params, frame);
 
     if (hookMethod == 2 || (hookMethod == 0 && g_temporalValid.load() && PresentHookLive()))
@@ -7899,7 +8007,10 @@ void Shutdown()
         const bool pendingRetired =
             std::any_of(g_nrRetired.begin(), g_nrRetired.end(), [](const NrRetired& retired)
                         { return retired.tracked && !DlssNr::Submission::Ready(retired.usage); });
-        if (!DlssNr::Submission::Ready(g_usage) || pendingRetired)
+        const bool pendingClones = std::any_of(
+            std::begin(g_presentGuideClones), std::end(g_presentGuideClones), [](const auto& clone)
+            { return clone.depth != nullptr && clone.tracked && !DlssNr::Submission::Completed(clone.usage); });
+        if (!DlssNr::Submission::Ready(g_usage) || pendingRetired || pendingClones)
         {
             LOG_INFO("DLSS-NR shutdown: retained all objects because tracked recordings are unsealed, pending or "
                      "unknown; no unsafe release");
