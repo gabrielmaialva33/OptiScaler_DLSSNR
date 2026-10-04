@@ -367,6 +367,15 @@ class Config
     CustomOptional<float> DlssNrStabilizerStrength { 0.0f };
     CustomOptional<float> DlssNrStabilizerTolerance { 0.05f };
 
+    // Model cadence: run the model on one frame in N and carry its edit along the game's motion onto the
+    // frames in between. An FPS option that costs stability in motion, not an accumulator. 1 is every
+    // frame -- off, nothing allocated, nothing dispatched; 2..4 are allowed, anything else reads as 1.
+    // It stands down while frame generation is active unless CadenceWithFrameGen is true, because frame
+    // times then alternate long and short and DLSS-G cannot pace through that. D3D12 only. See
+    // dlssnr/design/model-cadence.md.
+    CustomOptional<uint32_t> DlssNrCadence { 1 };
+    CustomOptional<bool> DlssNrCadenceWithFrameGen { false };
+
     // The most the pass may multiply or divide a pixel by. A detail pass has no business restyling a
     // light source, whatever the model returns.
     CustomOptional<float> DlssNrMaxRatio { 2.0f };

@@ -525,6 +525,21 @@ StabilizerStrength=auto
 ; 0.01 to 0.20 - Default (auto) is 0.05
 StabilizerTolerance=auto
 
+; Model cadence. Run the model on one frame in N and carry its edit along the game's motion vectors onto
+; the frames in between: an FPS option that costs image stability in motion (detail pops at the cadence
+; rate, some ghosting where things are uncovered), not a smoother picture. Frame times alternate long and
+; short. Runs the model every frame on the before-upscale stage, without the game's own depth and motion,
+; with the driver proxy, Hold frame or a capture, and while frame generation is active (see below).
+; D3D12 only. 1 allocates and dispatches nothing.
+; 1 to 4 - Default (auto) is 1 (the model every frame, off)
+Cadence=auto
+
+; Let model cadence run while frame generation is active. Off by default: frame generation interpolates
+; between frames of alternating cost, and DLSS-G was measured unable to pace through that (stutter and
+; flashes that grow with the multiplier and the cadence).
+; true or false - Default (auto) is false
+CadenceWithFrameGen=auto
+
 ; Compare the clean upscaler frame with the NR edit: 0 off, 1 side by side, 2 wipe.
 ; Both comparison modes keep working with the menu closed.
 ; 0 to 2 - Default (auto) is 0 (off)
