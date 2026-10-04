@@ -371,7 +371,7 @@ CR_FN float3 CadenceSynthesize(int px, int py, float2 acc, CadenceParams P)
         const float turn = 0.785398f * frac(52.9829189f * frac(0.06711056f * cx + 0.00583715f * cy));
         CR_UNROLL for (int ring = 1; ring <= 4; ++ring)
         {
-            const float radius = 12.0f * (float) (1 << ring) * P.scale;
+            const float radius = 12.0f * (float) (1u << ring) * P.scale;
             CR_UNROLL for (int t = 0; t < 8; ++t)
             {
                 const float angle = (float) t * 0.785398f + ((ring & 1) == 0 ? 0.392699f : 0.0f) + turn;
