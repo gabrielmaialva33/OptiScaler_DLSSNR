@@ -240,7 +240,7 @@ inline TemporalFakeState g_temporal;
 inline std::atomic<bool> g_temporalValid { false };
 inline bool presentHookLive = false;
 inline bool PresentHookLive() { return presentHookLive; }
-inline void CaptureTemporal(NVSDK_NGX_Parameter*, const DlssNrFrameInfo&) {}
+inline void CaptureTemporal(ID3D12GraphicsCommandList*, NVSDK_NGX_Parameter*, const DlssNrFrameInfo&) {}
 inline std::atomic<bool> g_sourceIsPresent { false };
 // The upscaled route's own render count and last outcome (DlssNr_Dx12.cpp keeps them beside
 // g_presentFlip); the status line reads them, this harness only needs them to exist.

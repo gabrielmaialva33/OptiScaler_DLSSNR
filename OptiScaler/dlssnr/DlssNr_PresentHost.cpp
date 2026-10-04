@@ -420,7 +420,7 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     ID3D12Resource* capturedMotion = nullptr;
     DlssNrFrameInfo captured {};
 
-    if (CapturedPresentGuides(&capturedDepth, &capturedMotion, &captured))
+    if (CapturedPresentGuides(cmdList, &capturedDepth, &capturedMotion, &captured, queue))
     {
         // The capture describes its own guides -- their subrects, their motion encoding, whether depth
         // is inverted -- and none of that is knowable from here. What stays is this host's account of
@@ -535,6 +535,7 @@ void PresentHost::AbandonRecording()
         return;
 
     _guides.AbandonRecording();
+    AbandonCapturedGuides();
 
     // The estimator settles its own abandon: its recording never ran either, and it knows what that
     // leaves it holding.

@@ -339,7 +339,12 @@ inline DlssNrFrameInfo PresentFrameDefaults(bool reset)
     return frame;
 }
 
-inline bool CapturedPresentGuides(ID3D12Resource**, ID3D12Resource**, DlssNrFrameInfo*) { return false; }
+inline bool CapturedPresentGuides(ID3D12GraphicsCommandList*, ID3D12Resource**, ID3D12Resource**, DlssNrFrameInfo*,
+                                  ID3D12CommandQueue* = nullptr)
+{
+    return false;
+}
+inline void AbandonCapturedGuides() {}
 inline int GuideRestState(bool) { return (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE; }
 
 // The pass, reduced to the decisions the host cares about: it declines when off, declines below the

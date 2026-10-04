@@ -1,5 +1,31 @@
 # Present-time NR — port the host, preserve this fork's contracts
 
+Update 2026-10-04: **guide snapshot ring implemented (item 4).** Replaced simple `AddRef`
+referencing in `CaptureTemporal` with an owned 4-slot guide snapshot ring (`DlssNr_PresentGuideRing.h`,
+adapting RenoDX `present_path.hpp:30-33, 96-100, 155-168, 880-1090`, commit `9bb6c0f`).
+Depth and motion are copied via mip-0 `CopyTextureRegion` on the game's evaluate list, with barriers
+transitioning the game's buffers from their arrival states to `COPY_SOURCE` and back. Submissions are tracked
+via independent per-slot usage objects (`clone.writeUsage` at evaluate, `clone.readUsage` at present),
+leaving 1-pass NR completely unburdened by global multi-pass submission locks (Decision A).
+Present selections use the RenoDX same-queue rule (`SubmittedOnlyOn(writeUsage, queue)`) to bypass CPU completion
+proof when evaluate and present execute on the identical queue, preserving frame-exact temporal alignment.
+Cross-queue captures require CPU completion proof without GPU cross-queue waits (avoiding DLSS-G deadlocks).
+Captures older than `kPresentGuideMaxAgeMs` (250 ms) are dropped as stale in favor of neutral zero guides.
+
+**VRAM overhead:** 4 sets of 2 textures (depth + motion vectors) at render resolution allocate 8 textures in total
+(four depth and motion pairs at render resolution: ~118 MB at 2560x1440 with 4-byte depth and 4-byte motion; R32G32 motion adds ~59 MB, and an 8-byte depth format such as D32S8 its own share again).
+
+**Queue identity & same-queue execution (Decision B):** RenoDX bypasses completion waits when evaluate and present
+execute on the identical queue (`present_path.hpp:96-100`). `DlssNr::Submission` exposes queue identity via
+`SubmittedOnlyOn(usage, queue)`. If the copy was submitted on the present queue, hardware order guarantees the write
+finishes before the present read, eliminating 1-2 frames of guide latency. When the copy came from a different queue,
+`Submission::Completed(writeUsage)` is enforced.
+
+**What remains unproven:**
+- Game-specific motion vector transformations during post-processing, and 4K bandwidth overhead of two guide copies per frame.
+- Depth copy on native Windows: the copy keeps the source's exact format (as the donor does), mip 0 of plane 0 by `CopyTextureRegion`, and the typed read goes through `ReadableGuide` as for the game's own resource. Proton/vkd3d-proton accepts it; D24S8, D32S8 and their typeless families need a run on native Windows with the D3D12 debug layer (Rafael's PC) before this is called done.
+Item 5 continues to govern the broader dispatch pipeline.
+
 Update 2026-09-23: **implemented.** `3e1b3960` (the D3D12 present-time pass and temporal capture,
 `HookMethod=2`) and `37db9f65` (the `DLSS_NEURAL_RENDERING` gate removed, without which LTCG dropped
 the pass from every build). The text below is the design as written; the code is the authority.

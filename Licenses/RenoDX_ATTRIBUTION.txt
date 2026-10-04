@@ -7,6 +7,7 @@ Source:   https://github.com/clshortfuse/renodx
 What is derived from it
 -----------------------
 
+1. Colour composition:
 The colour composition in OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl is taken
 from RenoDX's DLSS 5 Neural Rendering addon. Specifically:
 
@@ -29,6 +30,13 @@ from RenoDX's DLSS 5 Neural Rendering addon. Specifically:
     the hue of exactly the saturated pixels most likely to breach; theirs scales
     the whole colour by one factor so only saturation gives way, and is the
     identity when nothing is out of gamut.
+
+2. Present-time guide snapshot ring:
+The present-time guide snapshot ring, clone creation, barriers and cross-queue completion selection
+(present_path.hpp:30-33, 96-100, 155-168, 880-1090, commit 9bb6c0f, v8.5dev) adapted in
+OptiScaler/dlssnr/DlssNr_PresentGuideRing.h and OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp,
+which copies depth and motion at evaluate, tracks submissions, avoids cross-queue
+GPU waits, and falls back to completed frames or neutral guides under DLSS-G.
 
 This is their design. It was reimplemented here with different names and
 comments, which does not make it original work, and it is credited as theirs.
