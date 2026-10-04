@@ -98,6 +98,11 @@ tier = "host"
 timeout = 300
 summary = "Timing metadata and UI boundary, plus placement of the timing markers."
 
+[nr-enlarge]
+tier = "host"
+timeout = 300
+summary = "Transfer 2 (private DLSS SR enlargement): the decision table, the carrier through FP16, the NGX adapter against a recording core, and production's plan/enlarge/retire/retry sliced out of DlssNr_Dx12.cpp against D3D12 fakes that chain every barrier. No GPU or NGX."
+
 [nr-gpu-timing-d3d12]
 tier = "wine"
 timeout = 1800

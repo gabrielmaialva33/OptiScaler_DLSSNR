@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Twenty-three suites. All but `nr-invariants` build real production code with local fakes under
+**Host tier.** Twenty-four suites. All but `nr-invariants` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
@@ -62,6 +62,11 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   patch, rain and a straight edge along a pan are not.
 - `nr-before-upscale` — pre-upscale boundary functions against strict host fakes.
 - `nr-dispatch` — composition constants, descriptor slots and partial initialization cleanup.
+- `nr-enlarge` — Transfer 2, the model's edit enlarged by a private DLSS Super Resolution: the
+  decision table (what the resolve is sent and why, supersampling and Vulkan included), the carrier
+  through FP16, the NGX adapter's parameters and release order against a recording core, and
+  production's plan, build, evaluate, retirement and Retry, sliced out of the renderer and run against
+  D3D12 fakes that chain every barrier. No GPU, NGX or shader.
 - `nr-gpu-timing` — portable timing validation, plus the duplicate-execution
   guard at the submission boundary.
 - `nr-gpu-timing-config` — the Config GPU-timing transactions and their INI

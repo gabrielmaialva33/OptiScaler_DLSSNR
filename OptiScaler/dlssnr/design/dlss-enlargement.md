@@ -35,9 +35,10 @@ the scene over many frames, so it can place sub-pixel detail that no single smal
    `0.5 + 0.5 * d / (1/64 + |d|)` to an RGBA16F texture.
    - 0.5 is "no change". The signed compression keeps darkening representable in an image DLSS treats
      as LDR colour.
-   - The 1/64 scale is there for FP16. At unit scale an edit of 0.001 sits 0.0005 above 0.5, which is
-     one FP16 step there, so it rounds to nothing or to double. At 1/64 the same edit lands 0.03 above
-     0.5. wilsjo2 measured the unit scale as speckles in KCD2. `tests/nr-enlarge` holds both numbers.
+   - The 1/64 scale is there for FP16, whose step just above 0.5 is 1/2048. At unit scale an edit of
+     0.0003 sits a third of a step above 0.5 and comes back as no edit at all; at 1/64 it lands nineteen
+     steps above and comes back within 4%. wilsjo2 measured the unit scale as speckles in KCD2.
+     `tests/nr-enlarge` holds both numbers.
    - **Deviation:** where the model's answer is empty (all channels at or below 1e-5, the resolve's own
      `emptyModel` test), the carrier is 0.5 instead of a large darkening. Transfer 1 hands such a pixel
      back untouched; a carrier of "black minus proxy" would have DLSS spread that darkening around it.
