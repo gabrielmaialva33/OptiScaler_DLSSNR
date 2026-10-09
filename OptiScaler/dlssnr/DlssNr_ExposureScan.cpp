@@ -6,6 +6,7 @@
 #include <Util.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -103,12 +104,28 @@ struct ScanState
 };
 
 ScanState g_scan;
+std::mutex g_scanMutex;
+
+// Whether the resource-creation detours went in when the device was hooked. They are attached only if
+// Neural Rendering was on at that moment, so a session that turns it on later has a scan that can
+// never see anything -- which has to be said, not shown as an endless "waiting".
 std::atomic<bool> g_resourceHooksAttached { false };
 
-void SetResourceHooksAttached(bool attached) { g_resourceHooksAttached.store(attached, std::memory_order_relaxed); }
+constexpr const char* kNeedsRestart =
+    "The exposure scan needs a restart: Neural Rendering was off when the game started.";
 
-bool ResourceHooksAttached() { return g_resourceHooksAttached.load(std::memory_order_relaxed); }
-std::mutex g_scanMutex;
+// True when the scan is wanted but cannot see. Logs the first time.
+bool BlindSinceStart()
+{
+    if (g_resourceHooksAttached.load(std::memory_order_relaxed))
+        return false;
+
+    static std::atomic<bool> logged { false };
+    if (!logged.exchange(true))
+        LOG_WARN("DLSS-NR exposure scan: {}", kNeedsRestart);
+
+    return true;
+}
 
 // Formats an exposure could plausibly be in: floating point, one or two channels.
 //
@@ -247,6 +264,10 @@ bool Wanted()
 }
 
 } // namespace
+
+void SetResourceHooksAttached(bool attached) { g_resourceHooksAttached.store(attached, std::memory_order_relaxed); }
+
+bool ResourceHooksAttached() { return g_resourceHooksAttached.load(std::memory_order_relaxed); }
 
 // Everything the two entry points share: does this description look like a number rather than a
 // picture, and if so what is it.
@@ -448,19 +469,8 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList)
     if (!Wanted())
         return;
 
-    if (!ResourceHooksAttached())
-    {
-        static bool logged = false;
-        if (!logged)
-        {
-            logged = true;
-            LOG_WARN("DLSS-NR exposure scan: The exposure scan needs a restart: Neural Rendering was off when the game "
-                     "started.");
-        }
-        std::lock_guard<std::mutex> lock(g_scanMutex);
-        g_scan.status = "The exposure scan needs a restart: Neural Rendering was off when the game started.";
+    if (BlindSinceStart())
         return;
-    }
 
     if (device == nullptr || cmdList == nullptr)
         return;
@@ -684,17 +694,8 @@ Verdict Where()
     if (!Wanted())
         return Verdict::Off;
 
-    if (!ResourceHooksAttached())
-    {
-        static bool logged = false;
-        if (!logged)
-        {
-            logged = true;
-            LOG_WARN("DLSS-NR exposure scan: The exposure scan needs a restart: Neural Rendering was off when the game "
-                     "started.");
-        }
+    if (BlindSinceStart())
         return Verdict::NeedsRestart;
-    }
 
     std::lock_guard<std::mutex> lock(g_scanMutex);
 
@@ -725,7 +726,7 @@ const char* Headline()
         break;
 
     case Verdict::NeedsRestart:
-        line = "The exposure scan needs a restart: Neural Rendering was off when the game started.";
+        line = kNeedsRestart;
         break;
 
     case Verdict::Waiting:
@@ -859,8 +860,8 @@ std::vector<Candidate> Report()
 
 const char* Status()
 {
-    if (Wanted() && !ResourceHooksAttached())
-        return "The exposure scan needs a restart: Neural Rendering was off when the game started.";
+    if (Wanted() && BlindSinceStart())
+        return kNeedsRestart;
 
     std::lock_guard<std::mutex> lock(g_scanMutex);
     return g_scan.status;
