@@ -6053,6 +6053,17 @@ static ID3D12GraphicsCommandList* GetPresentCommandList(ID3D12Device* device, un
                 if (wait != WAIT_OBJECT_0)
                     LOG_WARN("DLSS-NR present: allocator wait returned {} (slot {})", (unsigned) wait, slot);
             }
+
+            if (g_presentList.fence->GetCompletedValue() < g_presentList.fenceValue[slot])
+            {
+                static bool s_loggedBusy[PresentList::kSlots] = {};
+                if (!s_loggedBusy[slot])
+                {
+                    s_loggedBusy[slot] = true;
+                    LOG_WARN("DLSS-NR present: allocator slot {} still in use by GPU; skipping present pass", slot);
+                }
+                return nullptr;
+            }
         }
 
         HRESULT hr = g_presentList.allocator[slot]->Reset();
