@@ -1307,17 +1307,26 @@ void RenderMenu(Config* config, float menuResScale)
                         // it actually needs is for the light to change.
                         if (anchorNow <= 0.0f)
                         {
-                            const unsigned int watching = (unsigned int) DlssNr::ExposureScan::Report().size();
-
-                            if (watching == 0)
-                                ImGui::TextColored(
-                                    ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
-                                    Localization::Tr("Nothing in this game is shaped like an exposure."));
+                            if (DlssNr::ExposureScan::Where() == DlssNr::ExposureScan::Verdict::NeedsRestart)
+                            {
+                                ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
+                                                   Localization::Tr("The exposure scan needs a restart: Neural "
+                                                                    "Rendering was off when the game started."));
+                            }
                             else
-                                ImGui::TextColored(
-                                    ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
-                                    Localization::Tr("Watching %u, none moving yet -- go between light and shade."),
-                                    watching);
+                            {
+                                const unsigned int watching = (unsigned int) DlssNr::ExposureScan::Report().size();
+
+                                if (watching == 0)
+                                    ImGui::TextColored(
+                                        ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
+                                        Localization::Tr("Nothing in this game is shaped like an exposure."));
+                                else
+                                    ImGui::TextColored(
+                                        ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
+                                        Localization::Tr("Watching %u, none moving yet -- go between light and shade."),
+                                        watching);
+                            }
                         }
                         else if (!haveAnchor)
                             ImGui::TextColored(

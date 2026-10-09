@@ -194,6 +194,7 @@ This game supplies an exposure and it is being read.	Este jogo fornece uma expos
 Game exposure %.4f  ->  white point %.2f%s	Exposição do jogo %.4f  ->  ponto branco %.2f%s
   (held: absent this frame)	  (mantido: ausente neste quadro)
 Nothing in this game is shaped like an exposure.	Nada neste jogo tem o formato de uma exposição.
+The exposure scan needs a restart: Neural Rendering was off when the game started.	A busca de exposição precisa de reinicialização: o Neural Rendering estava desligado quando o jogo começou.
 Watching %u, none moving yet -- go between light and shade.	Observando %u, nenhum variando ainda -- alterne entre luz e sombra.
 Found one. Set paper white below until the picture looks right, then press Anchor here.	Um candidato encontrado. Ajuste o branco de referência abaixo até a imagem ficar certa e pressione "Criar ponto aqui".
 This game supplies an exposure -- the option above would use it.	Este jogo fornece uma exposição -- a opção acima a usaria.

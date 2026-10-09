@@ -2299,6 +2299,7 @@ static void HookToDevice(ID3D12Device* InDevice)
                 DetourAttach(&(PVOID&) o_GetResourceAllocationInfo, hkGetResourceAllocationInfo);
         }
 
+        bool attachedResourceHooks = false;
         if (wantSpoof || wantScan)
         {
             if (!wantSpoof)
@@ -2309,6 +2310,8 @@ static void HookToDevice(ID3D12Device* InDevice)
 
             if (o_CreatePlacedResource != nullptr)
                 DetourAttach(&(PVOID&) o_CreatePlacedResource, hkCreatePlacedResource);
+
+            attachedResourceHooks = true;
         }
 
         auto detourResult = DetourTransactionCommit();
@@ -2322,6 +2325,10 @@ static void HookToDevice(ID3D12Device* InDevice)
             o_CreatePlacedResource = nullptr;
             o_D3D12DeviceRelease = nullptr;
             o_GetResourceAllocationInfo = nullptr;
+        }
+        else if (attachedResourceHooks)
+        {
+            DlssNr::ExposureScan::SetResourceHooksAttached(true);
         }
     }
 
@@ -2381,6 +2388,7 @@ static void UnhookDevice()
         o_CreatePlacedResource = nullptr;
         o_D3D12DeviceRelease = nullptr;
         o_GetResourceAllocationInfo = nullptr;
+        DlssNr::ExposureScan::SetResourceHooksAttached(false);
     }
 
     ResTrack_Dx12::ReleaseDeviceHooks();

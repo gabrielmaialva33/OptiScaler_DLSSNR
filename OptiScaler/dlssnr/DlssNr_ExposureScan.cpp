@@ -103,6 +103,11 @@ struct ScanState
 };
 
 ScanState g_scan;
+std::atomic<bool> g_resourceHooksAttached { false };
+
+void SetResourceHooksAttached(bool attached) { g_resourceHooksAttached.store(attached, std::memory_order_relaxed); }
+
+bool ResourceHooksAttached() { return g_resourceHooksAttached.load(std::memory_order_relaxed); }
 std::mutex g_scanMutex;
 
 // Formats an exposure could plausibly be in: floating point, one or two channels.
@@ -443,6 +448,20 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList)
     if (!Wanted())
         return;
 
+    if (!ResourceHooksAttached())
+    {
+        static bool logged = false;
+        if (!logged)
+        {
+            logged = true;
+            LOG_WARN("DLSS-NR exposure scan: The exposure scan needs a restart: Neural Rendering was off when the game "
+                     "started.");
+        }
+        std::lock_guard<std::mutex> lock(g_scanMutex);
+        g_scan.status = "The exposure scan needs a restart: Neural Rendering was off when the game started.";
+        return;
+    }
+
     if (device == nullptr || cmdList == nullptr)
         return;
 
@@ -665,6 +684,18 @@ Verdict Where()
     if (!Wanted())
         return Verdict::Off;
 
+    if (!ResourceHooksAttached())
+    {
+        static bool logged = false;
+        if (!logged)
+        {
+            logged = true;
+            LOG_WARN("DLSS-NR exposure scan: The exposure scan needs a restart: Neural Rendering was off when the game "
+                     "started.");
+        }
+        return Verdict::NeedsRestart;
+    }
+
     std::lock_guard<std::mutex> lock(g_scanMutex);
 
     if (g_scan.tracked.empty())
@@ -691,6 +722,10 @@ const char* Headline()
     {
     case Verdict::Off:
         line = "";
+        break;
+
+    case Verdict::NeedsRestart:
+        line = "The exposure scan needs a restart: Neural Rendering was off when the game started.";
         break;
 
     case Verdict::Waiting:
@@ -824,6 +859,9 @@ std::vector<Candidate> Report()
 
 const char* Status()
 {
+    if (Wanted() && !ResourceHooksAttached())
+        return "The exposure scan needs a restart: Neural Rendering was off when the game started.";
+
     std::lock_guard<std::mutex> lock(g_scanMutex);
     return g_scan.status;
 }

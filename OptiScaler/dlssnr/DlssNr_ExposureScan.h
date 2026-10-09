@@ -84,14 +84,19 @@ float BestValue(int* outIndex = nullptr, float* outLowest = nullptr, float* outH
 // each candidate and reads back the copies taken a few frames ago.
 void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList);
 
+// Whether D3D12 resource creation detours were attached at device creation.
+void SetResourceHooksAttached(bool attached = true);
+bool ResourceHooksAttached();
+
 // What the scan has to say right now, in one line, for an indicator that can be read while playing.
 enum class Verdict
 {
-    Off,      // not scanning
-    Waiting,  // scanning, nothing shaped like an exposure has appeared
-    Watching, // candidates found, none of them has moved yet
-    Found,    // at least one candidate moves -- this is the result
-    Barren    // watched long enough with no movement to keep hoping
+    Off,          // not scanning
+    NeedsRestart, // NR was enabled mid-session but resource hooks were not attached at startup
+    Waiting,      // scanning, nothing shaped like an exposure has appeared
+    Watching,     // candidates found, none of them has moved yet
+    Found,        // at least one candidate moves -- this is the result
+    Barren        // watched long enough with no movement to keep hoping
 };
 
 Verdict Where();
