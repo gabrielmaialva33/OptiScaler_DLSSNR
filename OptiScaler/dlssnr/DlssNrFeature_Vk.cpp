@@ -9,6 +9,7 @@
 #include <dlssnr/DlssNr_Consumers.h>
 #include <dlssnr/DlssNr_Enlarge.h>
 #include <dlssnr/DlssNr_ModelLog.h>
+#include <dlssnr/DlssNr_RenderSize.h>
 #include <dlssnr/DlssNr_WorkingScale.h>
 
 #include <shaders/dlssnr/DlssNr_Vk.h>
@@ -966,9 +967,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     guideWidth = guideAllocWidth;
     guideHeight = guideAllocHeight;
 
-    uint32_t renderWidth = 0, renderHeight = 0;
-    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &renderWidth);
-    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &renderHeight);
+    const auto [renderWidth, renderHeight] = DlssNr::GetRenderSize(params);
 
     uint32_t depthBaseX = 0, depthBaseY = 0, motionBaseX = 0, motionBaseY = 0;
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X, &depthBaseX);

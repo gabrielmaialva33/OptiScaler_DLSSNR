@@ -69,6 +69,10 @@ constexpr auto NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width = "Width
 constexpr auto NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height = "Height";
 constexpr auto NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X = "X";
 constexpr auto NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y = "Y";
+constexpr auto NVSDK_NGX_Parameter_Width = "NVSDK_Width";
+constexpr auto NVSDK_NGX_Parameter_Height = "NVSDK_Height";
+constexpr auto NVSDK_NGX_Parameter_OutWidth = "OutWidth";
+constexpr auto NVSDK_NGX_Parameter_OutHeight = "OutHeight";
 struct D3D12_RESOURCE_DESC
 {
     int Dimension = 2;
@@ -155,6 +159,7 @@ struct NVSDK_NGX_Parameter
     void Set(const char* k, ID3D12Resource* r) { ++sets; typed[k] = r; }
     void Set(const char* k, void* r) { ++sets; untyped[k] = r; }
 };
+#include "OptiScaler/dlssnr/DlssNr_RenderSize.h"
 template<typename T> struct Option : std::optional<T>
 {
     T value_or_default() const { return this->value_or(T{}); }

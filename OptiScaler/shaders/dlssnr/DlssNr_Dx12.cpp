@@ -28,6 +28,7 @@
 #include <dlssnr/DlssNr_GpuTiming.h>
 #include <dlssnr/DlssNr_LogRate.h>
 #include <dlssnr/DlssNr_ZeroGuides.h>
+#include <dlssnr/DlssNr_RenderSize.h>
 #include <dlssnr/DlssNr_WorkingScale.h>
 #include <shaders/synth_motion/SynthMotion_Dx12.h>
 #include <shaders/synth_motion/SynthMotion_Handoff.h>
@@ -6762,8 +6763,9 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
     }
 
     // How much of the guides is real. See DlssNrFrameInfo -- zero means the game did not say.
-    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &frame.RenderSubrectWidth);
-    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &frame.RenderSubrectHeight);
+    const auto renderSize = DlssNr::GetRenderSize(params);
+    frame.RenderSubrectWidth = renderSize.width;
+    frame.RenderSubrectHeight = renderSize.height;
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X, &frame.DepthSubrectBaseX);
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y, &frame.DepthSubrectBaseY);
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, &frame.MotionSubrectBaseX);
@@ -7714,9 +7716,7 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     unsigned int height = colourDesc.Height;
 
     {
-        unsigned int subW = 0, subH = 0;
-        params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &subW);
-        params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &subH);
+        const auto [subW, subH] = DlssNr::GetRenderSize(params);
 
         if ((subW == 0) != (subH == 0))
         {

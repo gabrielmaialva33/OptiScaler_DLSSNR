@@ -18,6 +18,11 @@ tier = "host"
 timeout = 300
 summary = "Pre-upscale boundary functions against strict host fakes, under ASan/UBSan."
 
+[nr-render-size]
+tier = "host"
+timeout = 60
+summary = "Render size resolution: subrect handling and Width/Height fallback when subrect is absent."
+
 [nr-invariants]
 tier = "host"
 timeout = 120
