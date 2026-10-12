@@ -59,6 +59,7 @@ control, no missing one.
 |--------|-----------|---------------|-----------------|
 | 0 paper white | — | **Paper white** (absolute) | — |
 | 1 game exposure | game supplies one | **Trim (x the game's exposure)** + Reset | green "exposure -> white point" readout |
+| 1 game exposure | exposure unreliable (latched) | Trim (x the game's exposure) + Reset | amber "exposure is not usable here; paper white is in use" |
 | 1 game exposure | game supplies none | Trim (x the game's exposure) + Reset | amber "supplies no exposure -- paper white in use" |
 | 2 scan | 0 anchors | **Paper white** only | "Anchor here" (greyed unless a scan value exists); **NO Trim** |
 | 2 scan | ≥1 anchor, none selected | **Trim (x the scan)** + Reset only (Paper white hidden; Anchor captures the trimmed effective white) | Anchor here; table rows (× delete, `>` = active); readout |

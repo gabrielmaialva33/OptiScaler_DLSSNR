@@ -8,6 +8,7 @@
 #include <NVNGX_Parameter.h>
 #include <dlssnr/DlssNr_Consumers.h>
 #include <dlssnr/DlssNr_Enlarge.h>
+#include <dlssnr/DlssNr_Exposure.h>
 #include <dlssnr/DlssNr_ModelLog.h>
 #include <dlssnr/DlssNr_RenderSize.h>
 #include <dlssnr/DlssNr_WorkingScale.h>
@@ -135,6 +136,8 @@ struct VkState
     // default on those frames is a flicker, not a fallback.
     float gameExposure = 0.0f;
     float gamePreExposure = 1.0f;
+    DlssNr::Exposure::PlausibilityLatch exposureLatch;
+    bool exposureSettingWasOn = false;
 
     // The exposure's courier: an 8x8 R32_FLOAT image the meter writes, and a ring of host-visible
     // buffers it is copied into. Only texel (0,0) is ever read -- the rest of the grid belongs to the
@@ -590,6 +593,8 @@ unsigned long long FramesVk() { return g_vk.frames; }
 
 bool ExposureOfferedVk() { return g_vk.exposureOffered; }
 
+bool ExposureLatchedVk() { return g_vk.exposureLatch.Latched(); }
+
 std::optional<double> LastGpuTimeVk() { return g_vk.lastGpuTime; }
 
 void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params, VkInstance instance,
@@ -614,6 +619,21 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
     if (g_vkResetOnReturn.exchange(false))
         g_vk.reset = true;
+
+    const uint32_t wpSource = cfg.DlssNrWhitePointSource.value_or_default();
+    if (DlssNr::Exposure::InvalidateOnSourceChange(g_vk.exposureSettingWasOn, wpSource))
+    {
+        g_vk.gameExposure = 0.0f;
+        g_vk.meterFrames = 0;
+        g_vk.exposureLatch.Reset();
+    }
+    else if (g_vk.exposureSettingWasOn && wpSource != 1)
+    {
+        g_vk.gameExposure = 0.0f;
+        g_vk.meterFrames = 0;
+        g_vk.exposureLatch.Reset();
+    }
+    g_vk.exposureSettingWasOn = (wpSource == 1);
 
     // A fault the forwarder caught inside the model ends the session's NR; see dlssnr_fault_state.
     if (NoteModelFault())
@@ -678,8 +698,30 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
             // Believed only if it could be an exposure. A texel read through a layout the game did
             // not leave it in, or a slot the game stopped filling, fails here and the last good
             // value stands.
-            if (std::isfinite(measured) && measured > 0.0f)
+            if (DlssNr::Exposure::ValidSample(measured))
+            {
                 g_vk.gameExposure = measured;
+
+                // The game's own implied white, without the user's trim (see ConsumeMeterReadback).
+                const float implied = DlssNr::Exposure::PreExposure(g_vk.gamePreExposure) / measured;
+                if (g_vk.exposureLatch.Observe(implied))
+                {
+                    if (g_vk.exposureLatch.Reason() == DlssNr::Exposure::LatchReason::Swinging)
+                    {
+                        LOG_WARN(
+                            "DLSS-NR Vulkan: the game's exposure is not usable (implied white point {:.4f}..{:.4f}, "
+                            "{:.1f} stops in {} readings); using paper white for the rest of the session",
+                            g_vk.exposureLatch.MinSpan(), g_vk.exposureLatch.MaxSpan(), g_vk.exposureLatch.StopsSpan(),
+                            g_vk.exposureLatch.ReadingsSpan());
+                    }
+                    else
+                    {
+                        LOG_WARN("DLSS-NR Vulkan: the game's exposure is not usable (implied white point {:.4f} out of "
+                                 "range [0.02, 512] on {} readings); using paper white for the rest of the session",
+                                 g_vk.exposureLatch.LastReading(), g_vk.exposureLatch.OutOfRangeCount());
+                    }
+                }
+            }
         }
     }
 
@@ -1069,7 +1111,8 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     // Their value stays in the config untouched, so switching back to manual restores it.
     float whitePoint = cfg.DlssNrWhitePointScale.value_or_default();
 
-    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && g_vk.gameExposure > 1e-6f)
+    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && !g_vk.exposureLatch.Latched() &&
+        g_vk.gameExposure > 1e-6f)
     {
         const float trim = std::clamp(cfg.DlssNrWhitePointTrim.value_or_default(), 0.01f, 4.0f);
         whitePoint = std::clamp(g_vk.gamePreExposure / g_vk.gameExposure * trim, 0.01f, 4096.0f);
@@ -1457,6 +1500,7 @@ void ShutdownVk(bool deviceAlive)
         g_vk.workHeight = 0;
         g_vk.timedFrames = 0;
         g_vk.meterFrames = 0;
+        g_vk.exposureLatch.Reset();
         g_vk.lastGpuTime.reset();
         g_vk.ngxInitialised = false;
         g_vk.reset = true;
@@ -1499,6 +1543,8 @@ void ShutdownVk(bool deviceAlive)
     }
 
     g_vk.timedFrames = 0;
+    g_vk.meterFrames = 0;
+    g_vk.exposureLatch.Reset();
     g_vk.lastGpuTime.reset();
 
     g_vk.device = VK_NULL_HANDLE;

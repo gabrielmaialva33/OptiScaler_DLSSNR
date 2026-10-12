@@ -297,6 +297,8 @@ int main()
       assert(WhitePoint(2, true, 8, 1.5f, 0.5f, 2, 20) == 20);
       assert(WhitePoint(2, true, 8, 1.5f, 0.5f, 2, inf) == 8);
       assert(WhitePoint(1, true, 8, 1.5f, 0.5f, inf, 20) == 3);
+      assert(WhitePoint(1, true, 8, 1.5f, 0.5f, 2, 20, true) == 8);
+      assert(!LiveWanted(1, true, true, false, true));
       bool wasGame = false;
       for (unsigned source : {0u, 1u, 1u, 2u, 1u, 0u})
       { assert(InvalidateOnSourceChange(wasGame, source) == (source == 1 && !wasGame));

@@ -325,6 +325,7 @@ struct ExposureStatus
     bool everOffered = false;          // a texture on any frame so far
     float exposure = 0.0f;             // last value read back, 0 if none
     float preExposure = 1.0f;
+    bool latched = false; // exposure plausibility latch tripped
 };
 
 ExposureStatus GameExposureStatus();
