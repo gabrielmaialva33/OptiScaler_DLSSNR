@@ -623,6 +623,10 @@ DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSn
     if (cfg.DlssNrPeripheryCompression.value_or_default())
         contract += std::format(" periphery=[centre={},work={}]", cfg.DlssNrPeripheryCenter.value_or_default(),
                                 cfg.DlssNrPeripheryWork.value_or_default());
+    // Highlight recovery, only when the resolve is sent it (on, and the buffer is linear HDR), for the same reason:
+    // it adds work per bright pixel, and off keeps the default contract's text and hash.
+    if (linearHdr && cfg.DlssNrHighlightRecovery.value_or_default())
+        contract += " highlight_recovery=1";
     static std::string previous;
     static uint64_t generation = 0;
     static uint64_t hash = 0;
@@ -1055,6 +1059,10 @@ std::atomic<const char*> g_chainStatus { "Single pass (master settings)" };
 // history of whatever was on screen when it was switched off. Atomic because the entry points that
 // see "off" do not take the lock Dispatch runs under.
 std::atomic<bool> g_resetOnReturn { false };
+
+// Whether the buffer the last Dispatch worked on was linear HDR (the colour transform on). For the menu,
+// which offers highlight recovery only where it can act. False until something has run.
+std::atomic<bool> g_lastLinearHdr { false };
 
 void ChainStatus(const char* reason)
 {
@@ -3926,6 +3934,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // twice otherwise.
     const bool gameSaysHdr = frame.ColourIsLinearHdr;
     const bool isHdrBuffer = gameSaysHdr && FormatCanHoldLinearHdr(desc.Format);
+    g_lastLinearHdr.store(isHdrBuffer);
 
     static bool reportedHdr = false;
 
@@ -4995,6 +5004,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         resolveParams.CompareSplit = cfg.DlssNrCompareSplit.value_or_default();
         resolveParams.CompareZoom = std::max(1.0f, cfg.DlssNrCompareZoom.value_or_default());
         resolveParams.CompareSwap = cfg.DlssNrCompareSwap.value_or_default() ? 1u : 0u;
+        // Only where the encode compressed anything: on a frame the game already tone mapped the model saw the
+        // frame as it is (design/hdr-highlight-recovery.md). The shader gates on passthrough as well.
+        resolveParams.HighlightRecovery = isHdrBuffer && cfg.DlssNrHighlightRecovery.value_or_default() ? 1u : 0u;
 
         // The output stabilizer's two numbers, clamped to what its controls offer, so a hand-edited ini
         // cannot hand the shader a negative strength or a NaN. Read here because the composition report
@@ -5020,6 +5032,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             float transfer;
             float colour;
             float maxRatio;
+            unsigned int highlightRecovery;
             unsigned int passthrough;
             unsigned int debugView;
             unsigned int compareMode;
@@ -5044,12 +5057,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             bool SameShape(const ComposeReport& other) const
             {
                 return transfer == other.transfer && colour == other.colour && maxRatio == other.maxRatio &&
-                       passthrough == other.passthrough && debugView == other.debugView &&
-                       compareMode == other.compareMode && residual == other.residual && workW == other.workW &&
-                       workH == other.workH && whiteSource == other.whiteSource && whiteScale == other.whiteScale &&
-                       whiteTrim == other.whiteTrim && scanInverted == other.scanInverted &&
-                       scanTrim == other.scanTrim && scanEnabled == other.scanEnabled && hold == other.hold &&
-                       stabilizer == other.stabilizer && stabilizerTolerance == other.stabilizerTolerance &&
+                       highlightRecovery == other.highlightRecovery && passthrough == other.passthrough &&
+                       debugView == other.debugView && compareMode == other.compareMode && residual == other.residual &&
+                       workW == other.workW && workH == other.workH && whiteSource == other.whiteSource &&
+                       whiteScale == other.whiteScale && whiteTrim == other.whiteTrim &&
+                       scanInverted == other.scanInverted && scanTrim == other.scanTrim &&
+                       scanEnabled == other.scanEnabled && hold == other.hold && stabilizer == other.stabilizer &&
+                       stabilizerTolerance == other.stabilizerTolerance &&
                        std::equal(anchors.begin(), anchors.end(), other.anchors.begin(), other.anchors.end(),
                                   [](const auto& a, const auto& b) { return a.scan == b.scan && a.white == b.white; });
             }
@@ -5071,6 +5085,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             resolveParams.TransferStrength,
             resolveParams.ColourStrength,
             resolveParams.MaxRatio,
+            resolveParams.HighlightRecovery,
             resolveParams.Passthrough,
             resolveParams.DebugView,
             resolveParams.CompareMode,
@@ -5092,9 +5107,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (composeReporter.Observe(composeNow, DlssNr::LogRate::Clock::now()))
         {
             LOG_INFO("DLSS-NR composition: paper white {:.2f}x, detail {:.2f}, colour {:.2f}, guard "
-                     "{:.1f}x, colour transform {}, transfer {}, model {}x{}, debug view {}, compare {}, "
-                     "stabilizer {:.2f} (tolerance {:.2f})",
+                     "{:.1f}x, highlight recovery {}, colour transform {}, transfer {}, model {}x{}, debug view {}, "
+                     "compare {}, stabilizer {:.2f} (tolerance {:.2f})",
                      composeNow.whitePoint, composeNow.transfer, composeNow.colour, composeNow.maxRatio,
+                     composeNow.highlightRecovery != 0 ? "on" : "off",
                      composeNow.passthrough != 0 ? "off (frame already tone mapped)" : "on (linear HDR)",
                      composeNow.residual == 1   ? "matched residual"
                      : composeNow.residual == 2 ? "matched residual + DLSS"
@@ -8185,6 +8201,7 @@ unsigned int ActivePassCount() { return g_activePasses.load(); }
 const char* MultipassStatus() { return g_chainStatus.load(); }
 const char* CadenceStatus() { return g_cadenceStatus.load(); }
 bool CadenceAvailable() { return DlssNr_Cadence_Dx12::Available(); }
+bool BufferIsLinearHdr() { return g_lastLinearHdr.load(); }
 
 PeripheryState PeripheryStatus()
 {

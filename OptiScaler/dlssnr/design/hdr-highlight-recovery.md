@@ -1,6 +1,7 @@
 # HDR highlight recovery: NVIDIA's mask over the composed frame
 
-Status: **design; implementation follows on this branch.** `[DlssNr] HighlightRecovery=false` by default.
+Status: **implemented, opt-in, not yet judged in a game.** `[DlssNr] HighlightRecovery=false` by default.
+Shader behaviour measured on a real GPU through vkd3d-proton (§5.1), which is not a D3D12 validator.
 
 Line numbers on our side are against `758db3bc`, the parent of this change. On NVIDIA's side they are
 against NVIDIAGameWorks/dxvk-remix `ecf646d3ea` (2026-09-18, "DLSS 3D-Guided Neural Generation
@@ -126,10 +127,12 @@ From that:
 - **Our `normalized` is Remix's exposed HDR.** It is `O x exposure / (PreExposure x trim)`, the game's
   own exposed value: the number the game's tonemapper takes, divided by the trim. That is the same
   quantity as `toneMappingInput` in §2.3, up to the trim.
-- **Every pixel whose max channel is at or above paper white is shown to the model with its peak at
-  exactly 1.** Hue is kept, because one scalar is applied to the whole triple. "Scene 2 and scene 4
-  arrive ~0.001 apart" (`:403-404`).
-- Neutwo and Hybrid (`:415-477`) do not clip, but still compress toward 1.
+- **With the soft knee, everything above paper white is squeezed into a thin band at white.**
+  - A saturated pixel's peak is divided down to exactly 1 (`:391-394`).
+  - A near-neutral one is rolled by the luminance knee first, to 0.908 at 1x and 0.998 at 2x.
+  - Hue is kept, because one scalar is applied to the whole triple.
+  - "Scene 2 and scene 4 arrive ~0.001 apart" (`:403-404`).
+- Neutwo and Hybrid (`:415-477`) do not clip, but still compress toward 1: 1x lands at 0.707 and 0.927.
 - The model answers in sRGB `[0, 1]`, and the resolve decodes it with a saturate (`:279`, `:849`). The
   model cannot express anything brighter than white.
 
@@ -308,7 +311,8 @@ of them, so `smoothstep(1, 8, max channel)` decides.
 `uint HighlightRecovery` is appended **at the end** of both `DlssNrConstants` (`DlssNr_Common.h`) and the
 `Params` cbuffer (`dlssnr.hlsl`) (rule 5).
 
-- The list grows from 25 to 26 four-byte scalars, from 100 to 104 bytes.
+- The list grows from 24 to 25 four-byte scalars, from 96 to 100 bytes; the new field sits at offset 96 in
+  both the C++ struct and the SPIR-V `Params` block.
 - `alignas(256)` keeps `sizeof(DlssNrConstants) == 256`, so the constant-buffer view size is unchanged.
 - The Vulkan slot stride is `sizeof` rounded up to the device alignment (`DlssNr_Vk.h:37`), and is unchanged
   too.
@@ -333,9 +337,18 @@ constants are a copy of the encode's (`resolve = encode`).
 
 - It is drawn only when the last dispatch's buffer was linear HDR, read from new accessors:
   `DlssNr::BufferIsLinearHdr()` for D3D12 and `DlssNr::LinearHdrVk()` for Vulkan.
-- Before anything has run, and on an SDR or already-tonemapped buffer, there is nothing for it to act
-  on, so there is no control (rule 2).
+- It is not drawn under `UseProxy`, where the D3D12 route returns before the resolve. The Vulkan route
+  ignores `UseProxy`.
+- Before anything has run, on an SDR or already-tonemapped buffer, and under the proxy, there is nothing
+  for it to act on, so there is no control (rule 2).
+- The flag is "the last dispatch", and is not cleared when the pass is switched off. The panel's other
+  Colour controls stay visible then too.
 - Its strings have pt-BR entries.
+
+**GPU timing.** The timing contract gains ` highlight_recovery=1` only when the resolve is sent it: on,
+over a linear HDR buffer. Samples either side of the toggle therefore fall into separate contracts, and the
+default contract keeps its text and hash. This follows the pattern of `cadence=` and `periphery=`, and is
+tested in `nr-timing-boundary`.
 
 **Log.** The composition line gains `highlight recovery on|off`.
 
@@ -389,9 +402,47 @@ constants are a copy of the encode's (`resolve = encode`).
   - With the switch off, the shader executes the code it executed before. The new block is skipped on a
     uniform branch, and nothing before it changed.
   - The bytecode changes, because the shader grew. Every appended constant has landed that way.
-  - `tests/dlssnr-loopback --present-nr --transfer-ab` is the established way to show the default path's
-    output byte-identical across two bytecodes on a real device (`sharp-residual.md`). Its harness
-    zero-initialises the constants, so it runs this change switched off.
+  - Shown on a real device rather than argued: §5.1.
+
+### 5.1 Measured on a real GPU through vkd3d-proton (2026-10-12)
+
+A throwaway harness, not committed, ran the shader's encode, downsample and resolve on vkd3d-proton
+(GE-Proton11-7) on the RTX 4090, with the parent's bytecode and this branch's side by side.
+
+- **Build and run.** It is built the way `tests/nr-gpu-timing-d3d12` builds, through a reflinked copy of
+  the toolchain prefix, never the compiler prefix itself, and run in its own Wine prefix with no NGX.
+- **Bindings.** As `DispatchPass` binds the pass: five SRVs, two UAVs, the constants and the linear clamp
+  sampler.
+- **Fixture.** A 256x128 RGBA16F frame with a white point of 2: a neutral ramp from 1/128x to 11x paper
+  white, eight saturated hues rising to about 10x, noisy tinted texture, and negative channels, zeros and
+  values up to about 56x.
+- **The "model".** It whitens anything near white, textures everything, darkens a band and leaves a block
+  empty.
+
+Results:
+
+- **Off is byte-identical.** 380 of 380 resolve configurations match the parent's output half for half.
+  - The configurations cover `ReversibleMode` 0-4, `Transfer` 0-3, the model at full and half size,
+    linear and passthrough, and detail/colour at 1/1, 2/2, 0.5/0 and 0/1.
+  - They also cover debug views 1-3, both compare modes, and `ApplyModel` off.
+  - The encode and the downsample match too.
+- **On, where it must not act, nothing moves.** 190 passthrough configurations are identical to off, and so
+  are 60 early-out ones (strength 0, a debug view, `ApplyModel` off).
+  - 1,994,160 pixel checks at or below paper white are identical to off.
+- **On, at and above 8x paper white, the pixel is the frame bit for bit.** That is 657,600 pixel checks,
+  including channels that are negative.
+  - This holds for this fixture: an RGBA16F output and a white point of 2, a power of two.
+  - In general a recovered pixel is the frame up to the `x / W * W` rounding of §4.1. That is one fp32 ulp,
+    which an FP16 or R11G11B10 output absorbs, and which can show on an R32G32B32A32 buffer with an
+    arbitrary W.
+- **In between, it is Remix's blend.** In 1,280,400 pixel checks the output is `lerp(output when off,
+  frame, mask)`, with the mask computed on the CPU from §4.1. The worst relative error is 9.6e-4, which is
+  half-float rounding.
+- **The comparison is not vacuous.** With the switch on, 1,513,645 pixels changed, so the same comparison
+  that found nothing with it off does see a difference when there is one.
+
+What this does not show: how it looks in a game, its cost, and anything about the Vulkan SPIR-V beyond its
+layout. `spirv-val` passes, and the member offsets match the C++ struct.
 
 ## 6. Attribution
 

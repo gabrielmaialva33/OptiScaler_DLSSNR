@@ -1568,6 +1568,31 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nlight turning into a string of coloured cells. Raise it only if bright areas"
                            "\nlook clipped.");
 
+                // Highlight recovery (design/hdr-highlight-recovery.md), beside the guard because both decide how
+                // highlights come back. Only where it can act: a linear HDR buffer, which the encode compresses,
+                // and a route that runs the resolve. On a frame the game already tone mapped, before anything has
+                // run, and under the driver proxy (D3D12 only; it returns before the resolve) there is nothing for
+                // it to do, so there is no control (DEVELOPMENT.md rule 2).
+                if (nativeVulkan ? DlssNr::LinearHdrVk()
+                                 : !config->DlssNrUseProxy.value_or_default() && DlssNr::BufferIsLinearHdr())
+                {
+                    bool recovery = config->DlssNrHighlightRecovery.value_or_default();
+                    if (ImGui::Checkbox(Localization::Label("Highlight recovery"), &recovery))
+                        config->DlssNrHighlightRecovery = recovery;
+
+                    HelpMarker("NVIDIA's highlight recovery, from RTX Remix. The model is shown everything"
+                               "\nbrighter than paper white squeezed into the top of its range, so its"
+                               "\nverdict there -- above all its colour -- is made without knowing how"
+                               "\nbright the pixel really is. This hands pixels that were very bright (one"
+                               "\nto eight times paper white) back to the game's own frame, a little at"
+                               "\nfirst and wholly at the top, so a fire keeps its orange and a coloured"
+                               "\nlight keeps its brightness."
+                               "\n\nIt costs some of the model's detail in bright areas. Shadows and"
+                               "\nmidtones are untouched. Off is the composition as it always was."
+                               "\n\nOnly offered on a linear HDR buffer, the one case where the model was"
+                               "\nshown a compressed picture.");
+                }
+
                 // Directly under the white point, because that is the number it moves and the number the
                 // anchor captures. It used to sit under Inspect, a whole section away from the slider it
                 // reads, which left "Anchor here" looking like a control for something else entirely.

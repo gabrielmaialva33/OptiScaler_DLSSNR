@@ -63,6 +63,10 @@ std::optional<double> LastGpuTimeVk();
 bool ExposureOfferedVk();
 bool ExposureLatchedVk();
 
+// Whether the last evaluate's buffer was linear HDR (the colour transform on). False until something has run.
+// For the menu: highlight recovery acts only there (design/hdr-highlight-recovery.md).
+bool LinearHdrVk();
+
 void ShutdownVk(bool deviceAlive = true);
 
 } // namespace DlssNr

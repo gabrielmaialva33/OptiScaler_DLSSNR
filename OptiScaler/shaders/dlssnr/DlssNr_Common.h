@@ -281,6 +281,12 @@ struct alignas(256) DlssNrConstants
     // proxy that had been packed and unpacked. Zero everywhere else, which is the path the shader took
     // before this existed. Trailing scalar, mirrored in the shader cbuffer.
     uint32_t ForceResidual;
+
+    // NVIDIA's highlight recovery from RTX Remix ([DlssNr] HighlightRecovery): after the composition, pixels
+    // that were very bright and that the encode compressed hard are blended back toward the frame. 1 only on
+    // a linear HDR buffer with the key on; zero everywhere else, which is the path the shader took before
+    // this existed. dlssnr/design/hdr-highlight-recovery.md. Trailing scalar, mirrored in the shader cbuffer.
+    uint32_t HighlightRecovery;
 };
 
 class DlssNr_Common

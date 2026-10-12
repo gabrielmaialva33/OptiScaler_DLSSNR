@@ -30,6 +30,7 @@ cbuffer Params : register(b0)
     uint  gUseGameExposure;// D3D12 source-1 only: 1 = read the game's live exposure in-shader (t4)
     float gExposurePreMul; // preExposure * trim, so the live white point is gExposurePreMul / exposure
     uint  gForceResidual;  // 1 = matched residual even at the frame's size (peripheral compression), else 0
+    uint  gHighlightRecovery; // 1 = NVIDIA's highlight recovery after the composition (linear HDR only), else 0
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -1203,6 +1204,52 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         result = gPassthrough != 0 ? modelDirect : NeutwoDecode(modelDirect);
     else if (gReversibleMode == 4)
         result = gPassthrough != 0 ? modelDirect : HybridDecode(modelDirect);
+
+    // Highlight recovery, off by default ([DlssNr] HighlightRecovery; dlssnr/design/hdr-highlight-recovery.md).
+    //
+    // The model was shown everything above paper white squeezed into the top of its range -- with the soft knee,
+    // a saturated pixel's peak divided down to exactly 1 and a near-neutral one rolled to 0.91 at 1x and 0.998 at
+    // 2x -- so its verdict on such a pixel, above all its colour, was made without knowing how bright it is. The
+    // composition above already keeps a highlight's luminance (the headroom term is additive, and the
+    // guard's floor is 1 above 1.1x paper white), but it keys that on luminance, which weighs blue at 7%,
+    // and it takes the model's colour whole. Here the pixels that were very bright AND that the encode
+    // compressed hard are blended back to the frame, in proportion to how much of both they are.
+    //
+    // Taken from NVIDIA's DLSS-NR integration in RTX Remix (dxvk-remix ecf646d3ea,
+    // tonemapping_inverse_tonemapping.comp.slang:84-106), with its default thresholds. Their two inputs are
+    // the exposed HDR frame and what the model was shown; ours are `original` (the frame over the white
+    // point, which under the game's exposure is the game's own exposed value) and the encode's curve
+    // reproduced for this pixel at the frame's size. See Licenses/RTXRemix_ATTRIBUTION.txt.
+    //
+    // Linear HDR only: an already tone-mapped frame was shown to the model as it is, so nothing in it was
+    // compressed and nothing is recovered. The host also sends 0 for such a frame.
+    if (gHighlightRecovery != 0 && gPassthrough == 0)
+    {
+        const float hdrIntensity = max(original.r, max(original.g, original.b));
+
+        // smoothstep(1, 8, x) is zero at and below paper white, so nothing below it pays for the rest.
+        if (hdrIntensity > 1.0)
+        {
+            // What the encode showed the model for this pixel: the same curve on the same normalised frame,
+            // sRGB-encoded as it was handed over (the encode's gMode == 0 branch above). Recomputed rather than
+            // read back, because at a reduced working scale the proxy texture is not this pixel.
+            const float3 shownCurve = gReversibleMode == 0   ? SoftKnee(original)
+                                      : gReversibleMode >= 3 ? HybridEncode(original)
+                                                             : NeutwoEncode(original);
+            const float3 shown = LinearToSrgb(shownCurve);
+            const float shoulderSignal = max(shown.r, max(shown.g, shown.b));
+
+            // "Was this very bright?" times "did the curve compress it heavily?". Remix's thresholds: exposed
+            // max channel 1 -> 8, shown max channel 0.75 -> 0.99. A non-finite mask leaves the pixel as composed.
+            const float highlightMask =
+                SanitizeFinite(smoothstep(1.0, 8.0, hdrIntensity) * smoothstep(0.75, 0.99, shoulderSignal), 0.0);
+
+            if (highlightMask >= 1.0)
+                result = original;
+            else if (highlightMask > 0.0)
+                result = lerp(result, original, highlightMask);
+        }
+    }
 
     // Back out of the normalised space the composition worked in, still non-negative as it always was, and
     // give the frame back what the composition never saw.
