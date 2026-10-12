@@ -39,10 +39,26 @@ struct alignas(16) ReprojectionParams
     float InvTanHalfFovX;
     float InvTanHalfFovY;
 
-    // Inverse reprojection rotation matrix
-    DirectX::XMFLOAT4 ReprojectionRow0;
-    DirectX::XMFLOAT4 ReprojectionRow1;
-    DirectX::XMFLOAT4 ReprojectionRow2;
+    // Inputs for the latch pass which builds the reprojection rotation on the GPU
+    DirectX::XMFLOAT4 CameraRight;   // xyz, normalized
+    DirectX::XMFLOAT4 CameraUp;      // xyz, normalized
+    DirectX::XMFLOAT4 CameraForward; // xyz, normalized
+    DirectX::XMFLOAT4 Calibration;   // yawFromX, yawFromY, pitchFromX, pitchFromY
+
+    float PixelAngle;
+    float YawSign;
+    float PitchSign;
+    uint32_t LateLatch; // 1 = read mouse from the live buffer when the GPU executes, 0 = use MouseDelta
+
+    DirectX::XMINT2 MouseDelta;    // mouse delta since sim start, captured on the CPU
+    DirectX::XMINT2 SimStartMouse; // running mouse total at sim start, for late latching
+};
+
+// Written by the CPU on every mouse event, read by the latch pass
+struct alignas(16) ReprojectionLiveInput
+{
+    DirectX::XMINT2 Mouse; // running mouse total, see InputCollection
+    uint32_t _Pad0[2];
 };
 
 struct FilloutData
@@ -64,6 +80,10 @@ struct FilloutData
 
     DirectX::XMINT2 mouseDeltaSinceSim; // for reprojection
     DirectX::XMINT2 mouseDeltaSimToSim; // for calibration
+
+    // Late latching, mouseDeltaSinceSim gets replaced by (live mouse - simStartMouse) when the GPU executes
+    bool lateLatch = false;
+    DirectX::XMINT2 simStartMouse {};
 };
 
 struct CalibrationState
@@ -113,13 +133,29 @@ class Reproject_Dx12 : public Shader_Dx12
   private:
     FrameDescriptorHeap _frameHeaps[Reproject_NUM_OF_HEAPS];
 
+    // Late latching
+    ID3D12PipelineState* _latchPipeline = nullptr;
+    ID3D12Resource* _liveInput = nullptr; // upload heap, persistently mapped, written by the input thread
+    void* _liveInputMapped = nullptr;
+    ID3D12Resource* _latchedOutput = nullptr; // rotation rows + used mouse delta, written by the latch pass
+
     ID3D12Resource* _buffer[Reproject_NUM_OF_HEAPS] = {};
+    ID3D12Resource* _constantBuffers[Reproject_NUM_OF_HEAPS] = {};
+
+    // Depth cutout mask prepass, separable dilation by CutoffExpandPx
+    // Both are kept in D3D12_RESOURCE_STATE_UNORDERED_ACCESS between dispatches
+    ID3D12PipelineState* _maskPipelineH = nullptr;
+    ID3D12PipelineState* _maskPipelineV = nullptr;
+    ID3D12Resource* _depthMaskTemp = nullptr;
+    ID3D12Resource* _depthMask = nullptr;
 
     uint32_t InNumThreadsX = 16;
     uint32_t InNumThreadsY = 16;
 
     CalibrationState _calibration;
     bool _isFirstFrame = true;
+
+    bool CreateMaskResource(ID3D12Resource** resource, uint32_t width, uint32_t height, const wchar_t* name);
 
     static void ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
                                 D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState);

@@ -279,6 +279,11 @@ bool Config::Reload(std::filesystem::path iniPath)
             if (FGXeFGInterpolationCount.has_value() && FGXeFGInterpolationCount.value() < 1)
                 FGXeFGInterpolationCount.reset();
 
+            FGXeFGOverrideInterpolationCount.set_from_config(readInt("XeFG", "OverrideInterpolationCount"));
+            if (FGXeFGOverrideInterpolationCount.has_value() &&
+                (FGXeFGOverrideInterpolationCount.value() < 0 || FGXeFGOverrideInterpolationCount.value() > 5))
+                FGXeFGOverrideInterpolationCount.reset();
+
             FGXeFGIgnoreInitChecks.set_from_config(readBool("XeFG", "IgnoreInitChecks"));
             FGXeFGUIComposition.set_from_config(readBool("XeFG", "UIComposition"));
             FGXeFGDepthInverted.set_from_config(readBool("XeFG", "DepthInverted"));
@@ -315,6 +320,7 @@ bool Config::Reload(std::filesystem::path iniPath)
 
             ReprojectionDepthCutoff.set_from_config(readFloat("Reprojection", "DepthCutoff"));
             ReprojectionCutoffExpand.set_from_config(readUInt("Reprojection", "CutoffExpand"));
+            ReprojectionLateLatch.set_from_config(readBool("Reprojection", "LateLatch"));
         }
 
         // FSR FG Inputs
@@ -635,6 +641,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             if (auto setting = readFloat("Menu", "Scale"); setting.has_value())
                 MenuScale.set_from_config(std::clamp(setting.value(), 0.5f, 2.0f));
 
+            if (auto setting = readFloat("Menu", "Height"); setting.has_value())
+                MenuHeight.set_from_config(std::max(setting.value(), 300.0f));
+
             // Don't enable again if set false because of Linux issue
             OverlayMenu.set_from_config(readBool("Menu", "OverlayMenu"));
             ShortcutKey.set_from_config(readInt("Menu", "ShortcutKey"));
@@ -678,6 +687,10 @@ bool Config::Reload(std::filesystem::path iniPath)
             MenuBGColorG.set_from_config(readFloat("Menu", "BGColorG"));
             MenuBGColorB.set_from_config(readFloat("Menu", "BGColorB"));
             MenuBGColorA.set_from_config(readFloat("Menu", "BGColorA"));
+            MenuBlur.set_from_config(readBool("Menu", "Blur"));
+
+            if (auto setting = readFloat("Menu", "BlurStrength"); setting.has_value())
+                MenuBlurStrength.set_from_config(std::clamp(setting.value(), 0.0f, 4.0f));
             CustomTabEnabled.set_from_config(readBool("Menu", "CustomTabEnabled"));
             CustomTabCards.set_from_config(readString("Menu", "CustomTabCards"));
         }
@@ -908,6 +921,19 @@ bool Config::Reload(std::filesystem::path iniPath)
                 FN_ForceReflex.set_from_config(*v);
             else
                 FN_ForceReflex.reset();
+
+            // 0 was none, it's the default now
+            if (auto v = readUInt("fakenvapi", "LowLatencyInput");
+                v.has_value() && *v > (uint32_t) ::LowLatencyInput::Auto && *v < (uint32_t) ::LowLatencyInput::_)
+                LowLatencyInput.set_from_config((::LowLatencyInput) *v);
+            else
+                LowLatencyInput.reset();
+
+            if (auto v = readUInt("fakenvapi", "LowLatencyOutput");
+                v.has_value() && *v > (uint32_t) LowLatencyMode::Auto && *v < (uint32_t) LowLatencyMode::_)
+                LowLatencyOutput.set_from_config((LowLatencyMode) *v);
+            else
+                LowLatencyOutput.reset();
 
             // DMFG is a mess with our reflex implementations, disable by default
             if (FGDLSSGOverrideForceDMFG.value_or_default() && !FN_ForceReflex.has_value())
@@ -1172,6 +1198,8 @@ bool Config::SaveIni()
     {
         ini.SetValue("XeFG", "InterpolationCount",
                      GetIntValue(Instance()->FGXeFGInterpolationCount.value_for_config()).c_str());
+        ini.SetValue("XeFG", "OverrideInterpolationCount",
+                     GetIntValue(Instance()->FGXeFGOverrideInterpolationCount.value_for_config()).c_str());
         ini.SetValue("XeFG", "IgnoreInitChecks",
                      GetBoolValue(Instance()->FGXeFGIgnoreInitChecks.value_for_config()).c_str());
         ini.SetValue("XeFG", "UIComposition", GetBoolValue(Instance()->FGXeFGUIComposition.value_for_config()).c_str());
@@ -1211,6 +1239,8 @@ bool Config::SaveIni()
                      GetFloatValue(Instance()->ReprojectionDepthCutoff.value_for_config()).c_str());
         ini.SetValue("Reprojection", "CutoffExpand",
                      GetIntValue(Instance()->ReprojectionCutoffExpand.value_for_config()).c_str());
+        ini.SetValue("Reprojection", "LateLatch",
+                     GetBoolValue(Instance()->ReprojectionLateLatch.value_for_config()).c_str());
     }
 
     // OptiFG
@@ -1564,6 +1594,7 @@ bool Config::SaveIni()
     // Menu
     {
         ini.SetValue("Menu", "Scale", GetFloatValue(Instance()->MenuScale).c_str());
+        ini.SetValue("Menu", "Height", GetFloatValue(Instance()->MenuHeight).c_str());
         ini.SetValue("Menu", "OverlayMenu", GetBoolValue(Instance()->OverlayMenu.value_for_config()).c_str());
 
         auto setting = Instance()->ShortcutKey.value_for_config();
@@ -1606,6 +1637,8 @@ bool Config::SaveIni()
         ini.SetValue("Menu", "BGColorG", GetFloatValue(Instance()->MenuBGColorG.value_for_config()).c_str());
         ini.SetValue("Menu", "BGColorB", GetFloatValue(Instance()->MenuBGColorB.value_for_config()).c_str());
         ini.SetValue("Menu", "BGColorA", GetFloatValue(Instance()->MenuBGColorA.value_for_config()).c_str());
+        ini.SetValue("Menu", "Blur", GetBoolValue(Instance()->MenuBlur.value_for_config()).c_str());
+        ini.SetValue("Menu", "BlurStrength", GetFloatValue(Instance()->MenuBlurStrength.value_for_config()).c_str());
         ini.SetValue("Menu", "CustomTabEnabled", GetBoolValue(Instance()->CustomTabEnabled.value_for_config()).c_str());
         ini.SetValue("Menu", "CustomTabCards", Instance()->CustomTabCards.value_for_config_or("auto").c_str());
     }
@@ -1841,6 +1874,10 @@ bool Config::SaveIni()
         ini.SetValue("fakenvapi", "LatencyFlexMode",
                      GetIntValue(Instance()->FN_LatencyFlexMode.value_for_config()).c_str());
         ini.SetValue("fakenvapi", "ForceReflex", GetIntValue(Instance()->FN_ForceReflex.value_for_config()).c_str());
+        ini.SetValue("fakenvapi", "LowLatencyInput",
+                     GetIntValue(Instance()->LowLatencyInput.value_for_config()).c_str());
+        ini.SetValue("fakenvapi", "LowLatencyOutput",
+                     GetIntValue(Instance()->LowLatencyOutput.value_for_config()).c_str());
     }
 
     // inputs
@@ -1988,6 +2025,35 @@ void Config::CheckUpscalerFiles()
     {
         LOG_INFO("libxess.dll found in game folder");
     }
+}
+
+bool Config::FGCanFollowGame()
+{
+    // SL1 has no slDLSSGSetOptions so we never learn what the game wants
+    const auto& state = State::Instance();
+    return state.activeFgInput == FGInput::DLSSG && state.streamlineVersion.major >= 2;
+}
+
+bool Config::FGFollowsGame() const { return !FGEnabled.has_value() && FGCanFollowGame(); }
+
+bool Config::IsFGEnabled() const
+{
+    // Force DMFG overrides the FG mode
+    if (FGDLSSGForceDMFG.value_or_default() && State::Instance().activeFgOutput == FGOutput::DLSSG)
+        return true;
+
+    if (FGFollowsGame())
+        return State::Instance().dlssgInputGameEnabled;
+
+    return FGEnabled.value_or_default();
+}
+
+int Config::FGInterpolationCount(int outputCount) const
+{
+    if (FGFollowsGame())
+        return State::Instance().dlssgInputGameInterpolationCount;
+
+    return outputCount;
 }
 
 std::vector<std::string> Config::GetConfigLog() { return _log; }

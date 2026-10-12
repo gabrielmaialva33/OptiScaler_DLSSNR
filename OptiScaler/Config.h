@@ -211,6 +211,7 @@ enum class LowLatencyInput : uint32_t
     Reflex,
     XeLL,
     UeLowLatency,
+    OptiScaler, // OptiScaler's own Streamline (DLSSG output) when the game has no low latency of its own
     _
 };
 
@@ -222,7 +223,9 @@ enum class LowLatencyMode : uint32_t
     AntiLag2,
     XeLL,
     AntiLagVk,
-    Reflex
+    Reflex,
+    FpsLimiter,
+    _
 };
 
 enum class ReprojectionFill : uint32_t
@@ -715,6 +718,7 @@ class Config
 
     // Menu
     CustomOptional<float, NoDefault> MenuScale;
+    CustomOptional<float, NoDefault> MenuHeight; // Unscaled, no value means default height
     CustomOptional<bool> OverlayMenu { true };
     CustomOptional<int> ShortcutKey { VK_INSERT };
     CustomOptional<bool> ExtendedLimits { false };
@@ -743,9 +747,13 @@ class Config
     CustomOptional<float> MenuBGColorR { 0.0f };
     CustomOptional<float> MenuBGColorG { 0.0f };
     CustomOptional<float> MenuBGColorB { 0.0f };
-    CustomOptional<float> MenuBGColorA { 0.99f };
-    CustomOptional<bool> CustomTabEnabled { false };
-    CustomOptional<std::string> CustomTabCards { "" }; // Comma separated ids of the boxes
+    CustomOptional<float> MenuBGColorA { 0.93f };
+    CustomOptional<bool> MenuBlur { true };
+    CustomOptional<float> MenuBlurStrength { 1.0f };
+    CustomOptional<bool> CustomTabEnabled { true };
+    CustomOptional<std::string> CustomTabCards { "upscaler,sharpness,fg_selection,fg_fsrfg,fg_xefg,fg_dlssg,fg_"
+                                                 "reprojection,fg_optifg,fg_nvngx,fg_fsrfg_inputs,fg_sl_"
+                                                 "inputs,framerate" }; // Comma separated ids of the boxes
 
     // Hooks
     CustomOptional<bool> HookOriginalNvngxOnly { false };
@@ -940,7 +948,8 @@ class Config
     CustomOptional<bool> FGReprojectionEnabled { false }; // WIP Not saved or loaded
 
     // OptiFG
-    CustomOptional<bool> FGEnabled { false };
+    // Unset (auto) follows the game's DLSSG state when FG Input is DLSSG, use IsFGEnabled() to read
+    CustomOptional<bool, SoftDefault> FGEnabled { false };
     CustomOptional<bool> FGUseMutexForSwapchain { true };
     CustomOptional<bool> FGMakeMVCopy { true };
     CustomOptional<bool> FGMakeDepthCopy { true };
@@ -1001,6 +1010,7 @@ class Config
     // XeFG
     CustomOptional<bool> FGXeFGIgnoreInitChecks { false };
     CustomOptional<int> FGXeFGInterpolationCount { 1 };
+    CustomOptional<int, NoDefault> FGXeFGOverrideInterpolationCount; // Game's own XeFG (XeFG input), 0 = off
     CustomOptional<bool> FGXeFGUIComposition { false };
     CustomOptional<bool> FGXeFGDepthInverted { true };
     CustomOptional<bool> FGXeFGJitteredMV { false };
@@ -1031,7 +1041,8 @@ class Config
     // Reprojection
     CustomOptional<ReprojectionFill> ReprojectionFillMode { ReprojectionFill::Dithering };
     CustomOptional<float> ReprojectionDepthCutoff { 0.1f };
-    CustomOptional<uint32_t> ReprojectionCutoffExpand { 0 };
+    CustomOptional<uint32_t> ReprojectionCutoffExpand { 1 };
+    CustomOptional<bool> ReprojectionLateLatch { true };
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033
@@ -1065,7 +1076,7 @@ class Config
     CustomOptional<bool> FN_ForceLatencyFlex { false };
     CustomOptional<LFXMode> FN_LatencyFlexMode { LFXMode::Conservative };
     CustomOptional<ForceReflex> FN_ForceReflex { ForceReflex::InGame };
-    CustomOptional<LowLatencyInput> LowLatencyInput { LowLatencyInput::Auto }; // TODO: no reading/saving to config
+    CustomOptional<LowLatencyInput> LowLatencyInput { LowLatencyInput::Auto };
     CustomOptional<LowLatencyMode> LowLatencyOutput { LowLatencyMode::Auto };
 
     // Inputs
@@ -1104,6 +1115,12 @@ class Config
     bool SaveXeFG();
 
     void CheckUpscalerFiles();
+
+    // FG on/off and interpolation count, following the game's DLSSG state when FGEnabled is unset
+    static bool FGCanFollowGame();
+    bool FGFollowsGame() const;
+    bool IsFGEnabled() const;
+    int FGInterpolationCount(int outputCount) const;
 
     std::vector<std::string> GetConfigLog();
 

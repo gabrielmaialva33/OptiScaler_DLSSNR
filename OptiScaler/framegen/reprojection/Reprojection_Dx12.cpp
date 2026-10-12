@@ -181,7 +181,7 @@ void Reprojection_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgCons
 
     _constants = fgConstants;
 
-    if (Config::Instance()->FGEnabled.value_or_default())
+    if (Config::Instance()->IsFGEnabled())
     {
         if (_device == nullptr)
             CreateContext(device, fgConstants);
@@ -286,6 +286,8 @@ bool Reprojection_Dx12::Present()
                 data.diffThreshold = 0.01f;
                 data.mouseDeltaSinceSim = mouseDeltaSinceSim;
                 data.mouseDeltaSimToSim = mouseDeltaSimToSim;
+                data.lateLatch = Config::Instance()->ReprojectionLateLatch.value_or_default();
+                data.simStartMouse = InputCollection::getInstance().readCumulativeAtSim(_frameCount);
                 data.screenWidth = (uint32_t) _interpolationWidth[fIndex];
                 data.screenHeight = (uint32_t) _interpolationHeight[fIndex];
                 data.depthWidth = (uint32_t) depth->width;

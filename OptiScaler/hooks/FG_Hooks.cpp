@@ -17,6 +17,7 @@
 
 #include <misc/IdentifyGpu.h>
 #include <hooks/Reflex_Hooks.h>
+#include <low_latency/input/input_common.h>
 #include <menu/menu_overlay_dx.h>
 
 #include <d3d12.h>
@@ -1360,7 +1361,10 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
                 tokenResult = StreamlineProxy::GetNewFrameToken()(localToken, &frameId);
 
                 if (tokenResult == sl::Result::eOk)
+                {
+                    ScopedOptiScalerReflex optiScalerCall {};
                     StreamlineProxy::PCLSetMarker()(sl::PCLMarker::ePresentStart, *localToken);
+                }
             }
         }
     }
@@ -1454,11 +1458,50 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     if (willPresent && state.currentFG != nullptr && SynthD3D12Wanted())
         FinishSynthD3D12(This, state.currentFG);
 
+#ifdef LOW_LATENCY_INPUTS
+    // FSR-FG and XeFG with the Reflex output: the game's present as DLSSG reports it
+    ID3D12CommandQueue* gameQueue = nullptr;
+    uint32_t frameMultiplier = 1;
+    void* xefgContext = nullptr;
+    uint64_t xefgFrameId = 0;
+
+    if (auto fg = state.currentFG; willPresent && fg != nullptr &&
+                                   (state.activeFgOutput == FGOutput::FSRFG || state.activeFgOutput == FGOutput::XeFG))
+    {
+        gameQueue = fg->GetCommandQueue();
+        frameMultiplier = fg->IsActive() && !fg->IsPaused() ? fg->GetInterpolatedFrameCount() + 1 : 1;
+        InputCommon::fg_game_present(gameQueue, false, frameMultiplier);
+
+        if (state.activeFgOutput == FGOutput::XeFG)
+        {
+            xefgContext = fg->SwapchainContext();
+            xefgFrameId = InputCommon::xefg_marked_frame_id();
+        }
+    }
+#endif
+
     HRESULT result;
     if (pPresentParameters == nullptr)
         result = o_FGSCPresent(This, SyncInterval, Flags);
     else
         result = o_FGSCPresent1((IDXGISwapChain1*) This, SyncInterval, Flags, pPresentParameters);
+
+#ifdef LOW_LATENCY_INPUTS
+    if (gameQueue != nullptr)
+        InputCommon::fg_game_present(gameQueue, true, frameMultiplier);
+
+    // How many frames XeFG sends to its presenter for the batch it marked in this present
+    if (xefgContext != nullptr && XeFGProxy::GetLastPresentStatus() != nullptr)
+    {
+        xefg_swapchain_present_status_t status {};
+
+        if (XeFGProxy::GetLastPresentStatus()((xefg_swapchain_handle_t) xefgContext, &status) ==
+            XEFG_SWAPCHAIN_RESULT_SUCCESS)
+        {
+            InputCommon::xefg_present_status(xefgFrameId, status.framesPresented);
+        }
+    }
+#endif
 
     if (result == S_OK)
     {
@@ -1475,17 +1518,22 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         willPresent && state.activeFgOutput == FGOutput::DLSSG)
     {
         if (StreamlineProxy::PCLSetMarker() != nullptr)
+        {
+            ScopedOptiScalerReflex optiScalerCall {};
             StreamlineProxy::PCLSetMarker()(sl::PCLMarker::ePresentEnd, *localToken);
+        }
 
         LOG_DEBUG("Calling ReflexSleep");
+        ScopedOptiScalerReflex optiScalerCall {};
         StreamlineProxy::ReflexSleep()(*localToken);
     }
 
     if (state.swapchainInteropApi == SwapchainInteropApi::None)
         Hudfix_Dx12::PresentEnd();
 
+    // DXVK's DXGI presents through Vulkan where the limiter already sleeps
     if (willPresent && !state.reflexLimitsFps && state.activeFgOutput != FGOutput::NoFG &&
-        !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
+        !IdentifyGpu::getPrimaryGpu().dxgiIsDxvk && !XellHooks::canLimit() && !InputCommon::can_limit_fps())
     {
         FrameLimit::sleep(fg != nullptr ? fg->IsActive() && !fg->IsPaused() : false);
     }

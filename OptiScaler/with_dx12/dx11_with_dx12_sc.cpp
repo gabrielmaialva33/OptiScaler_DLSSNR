@@ -13,6 +13,7 @@
 
 #include <Util.h>
 #include <Config.h>
+#include <misc/IdentifyGpu.h>
 
 #include <d3d11.h>
 #include <d3d11_4.h>
@@ -791,7 +792,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
               dx11Index, _real3 != nullptr ? _real3->GetCurrentBackBufferIndex() : 0xFFFFFFFF, _currentFakeIndex,
               _bufferCount);
 
-    if (_real != nullptr)
+    // Some memes with Vk swapchains on Lunyx and overlays
+    if (_real != nullptr && !State::Instance().isRunningOnLinux)
     {
         UINT realFlags = Flags;
 
@@ -1263,7 +1265,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     {
         _RefreshCachedSwapchainDesc();
 
-        if (Config::Instance()->FGEnabled.value_or_default())
+        if (Config::Instance()->IsFGEnabled())
         {
             State::Instance().fgResetCapturedResources = true;
             State::Instance().fgOnlyUseCapturedResources = false;
@@ -1548,7 +1550,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     {
         _RefreshCachedSwapchainDesc();
 
-        if (Config::Instance()->FGEnabled.value_or_default())
+        if (Config::Instance()->IsFGEnabled())
         {
             State::Instance().fgResetCapturedResources = true;
             State::Instance().fgOnlyUseCapturedResources = false;
@@ -2043,6 +2045,12 @@ bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue()
         return false;
 
     if (_lastInteropCopyFenceValue == 0)
+        return true;
+
+    // The copy was submitted on this very queue, so queue order already puts it before the present
+    // (upstream d14b6303 skips the self-wait as well). An NR-only bridge lands here: with no FG queue,
+    // _PresentQueueForFrame hands back _dx12CommandQueue.
+    if (_presentQueue == _dx12CommandQueue)
         return true;
 
     auto result = _presentQueue->Wait(_copyFence, _lastInteropCopyFenceValue);

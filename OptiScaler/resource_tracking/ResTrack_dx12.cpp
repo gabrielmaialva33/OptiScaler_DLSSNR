@@ -527,10 +527,9 @@ static bool IsDescriptorEnabled(ResourceType type)
 
 bool ResTrack_Dx12::IsHudFixActive()
 {
-    if (!Config::Instance()->FGEnabled.value_or_default() || !Config::Instance()->FGHUDFix.value_or_default())
+    if (!Config::Instance()->IsFGEnabled() || !Config::Instance()->FGHUDFix.value_or_default())
     {
-        LOG_TRACK(
-            "!Config::Instance()->FGEnabled.value_or_default() || !Config::Instance()->FGHUDFix.value_or_default()");
+        LOG_TRACK("!Config::Instance()->IsFGEnabled() || !Config::Instance()->FGHUDFix.value_or_default()");
         return false;
     }
 

@@ -29,17 +29,30 @@ cbuffer Params : register(b0)
     float InvTanHalfFovX;
     float InvTanHalfFovY;
     
-    float4 ReprojectionMatrixRow0;
-    float4 ReprojectionMatrixRow1;
-    float4 ReprojectionMatrixRow2;
+    float4 CameraRight;
+    float4 CameraUp;
+    float4 CameraForward;
+    float4 Calibration; // yawFromX, yawFromY, pitchFromX, pitchFromY
+
+    float PixelAngle;
+    float YawSign;
+    float PitchSign;
+    uint LateLatch;
+
+    int2 MouseDelta;
+    int2 SimStartMouse;
 };
 
 Texture2D<float3> Hudless : register(t0);
 Texture2D<float3> PresentCopy : register(t1);
 Texture2D<float> Depth : register(t2);
 Texture2D<float3> FakePresent : register(t3);
+Texture2D<float> DepthMask : register(t4);
 
 RWTexture2D<float3> Present : register(u0);
+
+// Rows of the reprojection rotation, written once per dispatch by the latch pass
+RWStructuredBuffer<float4> Latched : register(u3);
 SamplerState LinearClampSampler : register(s0);
 
 float Bayer4x4(uint2 p)
@@ -64,33 +77,11 @@ float HashNoise(uint2 p)
     return n * (1.0f / 4294967295.0f);
 }
 
-bool IsDepthCutoutExpanded(float2 uv, int radius)
+// Depth cutout mask is built by the reproject_mask_h/reproject_mask_v prepass (already expanded by CutoffExpandPx)
+bool IsDepthCutout(float2 uv)
 {
-    int2 basePixel = int2(uv * float2(DepthWidth - 1, DepthHeight - 1));
-    
-    if (radius == 0)
-    {
-        float d = Depth.Load(int3(basePixel, 0));
-        return InvertedDepth ? (d > DepthCutoff) : (d < DepthCutoff);
-    }
-
-    for (int y = -radius; y <= radius; ++y)
-    {
-        for (int x = -radius; x <= radius; ++x)
-        {
-            // Clamp coordinates to prevent reading outside the texture
-            int2 sampleCoord = clamp(basePixel + int2(x, y), int2(0, 0), int2(DepthWidth - 1, DepthHeight - 1));
-            
-            float d = Depth.Load(int3(sampleCoord, 0));
-            bool isCutout = InvertedDepth ? (d > DepthCutoff) : (d < DepthCutoff);
-            
-            if (isCutout)
-            {
-                return true;
-            }
-        }
-    }
-    return false;
+    int2 maskPixel = int2(uv * float2(DepthWidth - 1, DepthHeight - 1));
+    return DepthMask.Load(int3(maskPixel, 0)) > 0.5f;
 }
 
 [numthreads(16, 16, 1)]
@@ -112,8 +103,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float uiMask = smoothstep(UiDiffThreshold, UiDiffThreshold * 2.0f, delta);
     
     // Add depth cutout mask to the uiMask
-    // float depth = Depth.Load(int3(pixelCoord, 0));
-    bool isCutout = IsDepthCutoutExpanded(uv, CutoffExpandPx);
+    bool isCutout = IsDepthCutout(uv);
     uiMask = max(uiMask, isCutout ? 1.0f : 0.0f);
        
     float3 reprojectedGame = 0.0f; // Black
@@ -123,11 +113,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 ray = float3(ndc * float2(TanHalfFovX, TanHalfFovY), 1.0f);
 
     // sourceUV is the reprojected position of the pixel that we want
-    float3 sourceRay = float3(
-        dot(ReprojectionMatrixRow0.xyz, ray),
-        dot(ReprojectionMatrixRow1.xyz, ray),
-        dot(ReprojectionMatrixRow2.xyz, ray)
-    );
+    float3 sourceRay = ray.x * Latched[0].xyz + ray.y * Latched[1].xyz + ray.z * Latched[2].xyz;
 
     // Perspective Divide & Source UV Calculation
     float2 sourceUV = 0.0f;
@@ -154,7 +140,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     if (inside)
     {
         // Depth cutoff
-        bool isCutoutReprojected = IsDepthCutoutExpanded(sourceUV, CutoffExpandPx);
+        bool isCutoutReprojected = IsDepthCutout(sourceUV);
                 
         if (isCutoutReprojected)
         {
@@ -221,5 +207,228 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         composedImage = lerp(composedImage, pink, uv.x < 0.02);
     
     Present[pixelCoord] = lerp(composedImage, pink, uiMask * 0.6f * ShowStaticElements);
+}
+)";
+
+static std::string maskHShaderCode = R"(
+cbuffer Params : register(b0)
+{
+    uint ScreenWidth;
+    uint ScreenHeight;
+    float InvScreenWidth;
+    float InvScreenHeight;
+    
+    uint DepthWidth;
+    uint DepthHeight;
+    float2 _Pad0;
+    
+    float UiDiffThreshold;
+    float DepthCutoff;
+    float DitherWidthPx;
+    uint CutoffExpandPx;
+    
+    uint EdgeMode;
+    uint ShowStaticElements;
+    uint InvertedDepth;
+    uint FakeFrame; // need to provide fakePresent
+
+    float TanHalfFovX;
+    float TanHalfFovY;
+    float InvTanHalfFovX;
+    float InvTanHalfFovY;
+    
+    float4 ReprojectionMatrixRow0;
+    float4 ReprojectionMatrixRow1;
+    float4 ReprojectionMatrixRow2;
+};
+
+Texture2D<float> Depth : register(t2);
+
+RWTexture2D<float> DepthMaskTempOut : register(u1);
+RWTexture2D<float> DepthMaskOut : register(u2);
+
+// Depth mask prepass, horizontal part
+// Thresholds depth and expands the cutout by CutoffExpandPx along X
+// With CutoffExpandPx == 0 the vertical pass is skipped and the result goes straight to the final mask
+[numthreads(16, 16, 1)]
+void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    int2 pixelCoord = int2(dispatchThreadID.xy);
+
+    if (pixelCoord.x >= int(DepthWidth) || pixelCoord.y >= int(DepthHeight))
+        return;
+
+    int radius = int(CutoffExpandPx);
+    int maxX = int(DepthWidth) - 1;
+
+    // Cutout if any depth in the window crosses the cutoff, so only min/max is needed
+    float minDepth = 1.0f;
+    float maxDepth = 0.0f;
+
+    for (int x = -radius; x <= radius; ++x)
+    {
+        int sampleX = clamp(pixelCoord.x + x, 0, maxX);
+        float d = Depth.Load(int3(sampleX, pixelCoord.y, 0));
+        minDepth = min(minDepth, d);
+        maxDepth = max(maxDepth, d);
+    }
+
+    bool isCutout = InvertedDepth ? (maxDepth > DepthCutoff) : (minDepth < DepthCutoff);
+    float mask = isCutout ? 1.0f : 0.0f;
+
+    if (radius == 0)
+        DepthMaskOut[pixelCoord] = mask;
+    else
+        DepthMaskTempOut[pixelCoord] = mask;
+}
+)";
+
+static std::string maskVShaderCode = R"(
+cbuffer Params : register(b0)
+{
+    uint ScreenWidth;
+    uint ScreenHeight;
+    float InvScreenWidth;
+    float InvScreenHeight;
+    
+    uint DepthWidth;
+    uint DepthHeight;
+    float2 _Pad0;
+    
+    float UiDiffThreshold;
+    float DepthCutoff;
+    float DitherWidthPx;
+    uint CutoffExpandPx;
+    
+    uint EdgeMode;
+    uint ShowStaticElements;
+    uint InvertedDepth;
+    uint FakeFrame; // need to provide fakePresent
+
+    float TanHalfFovX;
+    float TanHalfFovY;
+    float InvTanHalfFovX;
+    float InvTanHalfFovY;
+    
+    float4 ReprojectionMatrixRow0;
+    float4 ReprojectionMatrixRow1;
+    float4 ReprojectionMatrixRow2;
+};
+
+Texture2D<float> DepthMaskTemp : register(t5);
+
+RWTexture2D<float> DepthMaskOut : register(u2);
+
+// Depth mask prepass, vertical part
+// Expands the horizontally expanded mask by CutoffExpandPx along Y
+[numthreads(16, 16, 1)]
+void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    int2 pixelCoord = int2(dispatchThreadID.xy);
+
+    if (pixelCoord.x >= int(DepthWidth) || pixelCoord.y >= int(DepthHeight))
+        return;
+
+    int radius = int(CutoffExpandPx);
+    int maxY = int(DepthHeight) - 1;
+
+    float mask = 0.0f;
+
+    for (int y = -radius; y <= radius; ++y)
+    {
+        int sampleY = clamp(pixelCoord.y + y, 0, maxY);
+        mask = max(mask, DepthMaskTemp.Load(int3(pixelCoord.x, sampleY, 0)));
+    }
+
+    DepthMaskOut[pixelCoord] = mask;
+}
+)";
+
+static std::string latchShaderCode = R"(
+cbuffer Params : register(b0)
+{
+    uint ScreenWidth;
+    uint ScreenHeight;
+    float InvScreenWidth;
+    float InvScreenHeight;
+    
+    uint DepthWidth;
+    uint DepthHeight;
+    float2 _Pad0;
+    
+    float UiDiffThreshold;
+    float DepthCutoff;
+    float DitherWidthPx;
+    uint CutoffExpandPx;
+    
+    uint EdgeMode;
+    uint ShowStaticElements;
+    uint InvertedDepth;
+    uint FakeFrame; // need to provide fakePresent
+
+    float TanHalfFovX;
+    float TanHalfFovY;
+    float InvTanHalfFovX;
+    float InvTanHalfFovY;
+    
+    float4 CameraRight;
+    float4 CameraUp;
+    float4 CameraForward;
+    float4 Calibration; // yawFromX, yawFromY, pitchFromX, pitchFromY
+
+    float PixelAngle;
+    float YawSign;
+    float PitchSign;
+    uint LateLatch;
+
+    int2 MouseDelta;
+    int2 SimStartMouse;
+};
+
+// Running mouse total, written by the CPU on every mouse event
+cbuffer LiveInput : register(b1)
+{
+    int2 LiveMouse;
+    int2 _LivePad;
+};
+
+RWStructuredBuffer<float4> Latched : register(u3);
+
+// Same as XMMatrixRotationNormal, row vector convention
+float3x3 RotationNormal(float3 n, float angle)
+{
+    float s, c;
+    sincos(angle, s, c);
+    float c2 = 1.0f - c;
+
+    return float3x3(
+        n.x * n.x * c2 + c,       n.x * n.y * c2 + n.z * s, n.x * n.z * c2 - n.y * s,
+        n.x * n.y * c2 - n.z * s, n.y * n.y * c2 + c,       n.y * n.z * c2 + n.x * s,
+        n.x * n.z * c2 + n.y * s, n.y * n.z * c2 - n.x * s, n.z * n.z * c2 + c
+    );
+}
+
+// Late latch pass, runs right before the reprojection so that it can use the newest mouse data
+// that has reached the GPU, and builds the rotation once so the whole image uses the same value
+[numthreads(1, 1, 1)]
+void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    // int subtraction wraps around just like the running total on the CPU
+    int2 delta = LateLatch != 0 ? LiveMouse - SimStartMouse : MouseDelta;
+
+    float2 mouse = float2(delta) * PixelAngle;
+    float yaw = mouse.x * Calibration.x + mouse.y * Calibration.y;
+    float pitch = mouse.x * Calibration.z + mouse.y * Calibration.w;
+
+    float3x3 viewToWorld = float3x3(CameraRight.xyz, CameraUp.xyz, CameraForward.xyz);
+    float3x3 rotPitch = RotationNormal(CameraRight.xyz, pitch * PitchSign);
+    float3x3 rotYaw = RotationNormal(float3(0.0f, 0.0f, 1.0f), yaw * YawSign);
+
+    float3x3 rotation = mul(mul(mul(viewToWorld, rotPitch), rotYaw), transpose(viewToWorld));
+
+    Latched[0] = float4(rotation[0], 0.0f);
+    Latched[1] = float4(rotation[1], 0.0f);
+    Latched[2] = float4(rotation[2], 0.0f);
+    Latched[3] = float4(float2(delta), 0.0f, 0.0f); // for debugging
 }
 )";

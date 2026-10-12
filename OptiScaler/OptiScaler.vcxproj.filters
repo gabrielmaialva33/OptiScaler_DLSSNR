@@ -368,6 +368,15 @@
     <ClInclude Include="OwnedMutex.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="shaders\camera_motion\CM_Common.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\camera_motion\CM_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\camera_motion\precompiled\CM_Shader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="shaders\depth_scale\DS_Common.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -593,6 +602,9 @@
     <ClInclude Include="inputs\FG\FfxApi_Dx12_FG.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="inputs\FG\XeFG_Inputs_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="fsr4\FSR4ModelSelection.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -633,9 +645,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="hooks\D3D11_Hooks.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="upscaler_time\UpscalerTime_Vk.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="hooks\DxgiFactory_WrappedCalls.h">
@@ -827,6 +836,15 @@
     <ClInclude Include="low_latency\low_latency_tech\ll_latencyflex.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="low_latency\low_latency_tech\ll_fps_limiter.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="low_latency\low_latency_tech\ll_reflex.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="low_latency\low_latency_tech\ll_reflex_vk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="low_latency\low_latency_tech\ll_xell.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -905,6 +923,12 @@
     <ClInclude Include="low_latency\input\input_reflex.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="low_latency\input\input_reflex_vk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="low_latency\input\input_antilag_vk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="shaders\rcas\precompile\da_das_sharpen_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -974,6 +998,27 @@
     <ClInclude Include="shaders\magnifier\Magnifier_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="shaders\menu_blur\MenuBlur_Common.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\menu_blur\MenuBlur_Dx11.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\menu_blur\MenuBlur_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\menu_blur\MenuBlur_Vk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\menu_blur\precompile\MenuBlur_Shader_Dx11.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\menu_blur\precompile\MenuBlur_Shader_Vk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\menu_blur\precompile\MenuBlur_Shader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="low_latency\input\input_uell.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1025,6 +1070,9 @@
     <ClInclude Include="misc\SkipSpoof.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="misc\GameConfigs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="shaders\Shader_Dx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1035,6 +1083,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="gpu_time\GpuTime_Dx11.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="gpu_time\GpuTime_Vk.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="shaders\magnifier\Magnifier_Vk.h">
@@ -1271,6 +1322,9 @@
     <ClCompile Include="menu\menu_overlay_vk.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="shaders\camera_motion\CM_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="shaders\depth_scale\DS_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1373,6 +1427,9 @@
     <ClCompile Include="inputs\FG\FfxApi_Dx12_FG.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="inputs\FG\XeFG_Inputs_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="fsr4\FSR4ModelSelection.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1407,9 +1464,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="hooks\D3D11_Hooks.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="upscaler_time\UpscalerTime_Vk.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="hooks\DxgiFactory_WrappedCalls.cpp">
@@ -1496,6 +1550,15 @@
     <ClCompile Include="low_latency\low_latency_tech\ll_latencyflex.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="low_latency\low_latency_tech\ll_fps_limiter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="low_latency\low_latency_tech\ll_reflex.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="low_latency\low_latency_tech\ll_reflex_vk.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="low_latency\low_latency_tech\ll_xell.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1563,6 +1626,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="low_latency\input\input_reflex.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="low_latency\input\input_reflex_vk.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="low_latency\input\input_antilag_vk.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="low_latency\input\input_common.cpp">
@@ -1640,6 +1709,15 @@
     <ClCompile Include="shaders\magnifier\Magnifier_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="shaders\menu_blur\MenuBlur_Dx11.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="shaders\menu_blur\MenuBlur_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="shaders\menu_blur\MenuBlur_Vk.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="shaders\magnifier\Magnifier_Common.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1661,6 +1739,9 @@
     <ClCompile Include="misc\SkipSpoof.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="misc\GameConfigs.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="shaders\Shader_Dx11.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1671,6 +1752,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="gpu_time\GpuTime_Dx11.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="gpu_time\GpuTime_Vk.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="upscalers\IFeature_Vk.cpp">

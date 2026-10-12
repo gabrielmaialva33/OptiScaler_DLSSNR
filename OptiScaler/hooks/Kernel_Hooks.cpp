@@ -438,7 +438,10 @@ VALIDATE_HOOK(hk_K32_FreeLibrary, Kernel32Proxy::PFN_FreeLibrary)
 BOOL KernelHooks::hk_K32_FreeLibrary(HMODULE lpLibrary)
 {
     if (lpLibrary == nullptr)
-        return STATUS_INVALID_PARAMETER;
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
 
 #ifdef _DEBUG
     // LOG_TRACE("{:X}", (size_t) lpLibrary);
@@ -452,5 +455,9 @@ BOOL KernelHooks::hk_K32_FreeLibrary(HMODULE lpLibrary)
             return result.value() == TRUE;
     }
 
-    return o_K32_FreeLibrary(lpLibrary);
+    auto freeResult = o_K32_FreeLibrary(lpLibrary);
+
+    LibraryLoadHooks::AfterFreeLibrary(lpLibrary);
+
+    return freeResult;
 }

@@ -117,6 +117,7 @@ bool DLSSG_Dx12::CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQue
     sl::DLSSGOptions dlssgOptions {};
     if (StreamlineProxy::DLSSGGetState()(viewport, dlssgState, &dlssgOptions) == sl::Result::eOk)
     {
+        State::Instance().dlssgMfgMax = dlssgState.numFramesToGenerateMax;
         _maxInterpolationCount = dlssgState.numFramesToGenerateMax;
         LOG_INFO("Max supported interpolations: {}", dlssgState.numFramesToGenerateMax);
 
@@ -213,6 +214,7 @@ bool DLSSG_Dx12::CreateSwapchain1Internal(IDXGIFactory* factory, ID3D12CommandQu
     sl::DLSSGOptions dlssgOptions {};
     if (StreamlineProxy::DLSSGGetState()(viewport, dlssgState, &dlssgOptions) == sl::Result::eOk)
     {
+        State::Instance().dlssgMfgMax = dlssgState.numFramesToGenerateMax;
         _maxInterpolationCount = dlssgState.numFramesToGenerateMax;
         LOG_INFO("Max supported interpolations: {}", dlssgState.numFramesToGenerateMax);
 
@@ -266,12 +268,17 @@ void DLSSG_Dx12::Deactivate()
         sl::DLSSGOptions options {};
         options.mode = sl::DLSSGMode::eOff;
         options.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
-        StreamlineProxy::DLSSGSetOptions()(viewport, options); // Potential crash point on exit
+
+        if (StreamlineProxy::DLSSGSetOptions() != nullptr)
+            StreamlineProxy::DLSSGSetOptions()(viewport, options); // Potential crash point on exit
 
         sl::ReflexOptions reflexConst = {};
         reflexConst.mode = sl::ReflexMode::eOff;
         reflexConst.useMarkersToOptimize = false;
-        StreamlineProxy::ReflexSetOptions()(reflexConst);
+        ScopedOptiScalerReflex optiScalerCall {};
+
+        if (StreamlineProxy::ReflexSetOptions() != nullptr)
+            StreamlineProxy::ReflexSetOptions()(reflexConst);
 
         // The cache mirrors what the plugin now holds (eOff), so the next Dispatch re-sends the
         // active values instead of assuming they are still latched from before the deactivate.
@@ -338,12 +345,15 @@ bool DLSSG_Dx12::Dispatch()
                  _maxInterpolationCount);
     }
 
-    if (_framesToInterpolate != Config::Instance()->FGDLSSGInterpolationCount.value_or_default())
-    {
-        LOG_INFO("Interpolation count changed {} -> {}", _framesToInterpolate,
-                 Config::Instance()->FGDLSSGInterpolationCount.value_or_default());
+    const int targetCount = std::clamp(
+        Config::Instance()->FGInterpolationCount(Config::Instance()->FGDLSSGInterpolationCount.value_or_default()), 1,
+        std::max(_maxInterpolationCount, 1));
 
-        _framesToInterpolate = Config::Instance()->FGDLSSGInterpolationCount.value_or_default();
+    if (_framesToInterpolate != targetCount)
+    {
+        LOG_INFO("Interpolation count changed {} -> {}", _framesToInterpolate, targetCount);
+
+        _framesToInterpolate = targetCount;
 
         // The SL plugin only latches numFramesToGenerate on an eOff -> eOn transition
         // (its presentCommon "DLSS-G interpolation state changed" / the NGX
@@ -425,6 +435,7 @@ bool DLSSG_Dx12::Dispatch()
     if (reflexConst.mode != _lastReflexMode || reflexConst.useMarkersToOptimize != _lastReflexMarkers ||
         reflexGeneration != _lastReflexGeneration)
     {
+        ScopedOptiScalerReflex optiScalerCall {};
         auto reflexSetOptionsResult = StreamlineProxy::ReflexSetOptions()(reflexConst);
 
         if (reflexSetOptionsResult != sl::Result::eOk)
@@ -497,27 +508,37 @@ bool DLSSG_Dx12::Dispatch()
         constData.cameraFwd = { 1.0f, 0.0f, 0.0f };
         constData.cameraPinholeOffset = { 0.0f, 0.0f };
 
+        auto prev = XMMatrixIdentity();
+
+        XMFLOAT4X4 temp;
+        XMStoreFloat4x4(&temp, prev);
+        memcpy(&constData.clipToLensClip, &temp, sizeof(sl::float4x4));
+        memcpy(&constData.clipToPrevClip, &temp, sizeof(sl::float4x4));
+        memcpy(&constData.prevClipToClip, &temp, sizeof(sl::float4x4));
+    }
+
+    {
         XMMATRIX cameraViewToClip {};
+        XMMATRIX clipToCameraView {};
+
+        float vFov = _cameraVFov[fIndex];
 
         // XMMatrixPerspectiveFovRH will fail if input values are incorrect
-        if (_cameraNear[fIndex] > 0.f && _cameraFar[fIndex] > 0.f &&
-            !XMScalarNearEqual(_cameraVFov[fIndex], 0.0f, 0.00001f) &&
+        if (_cameraNear[fIndex] > 0.f && _cameraFar[fIndex] > 0.f && std::isfinite(_cameraNear[fIndex]) &&
+            std::isfinite(_cameraFar[fIndex]) && !XMScalarNearEqual(vFov, 0.0f, 0.00001f) &&
             !XMScalarNearEqual(_cameraAspectRatio[fIndex], 0.0f, 0.00001f))
         {
             if (XMScalarNearEqual(_cameraNear[fIndex], _cameraFar[fIndex], 0.00001f))
                 _cameraFar[fIndex]++;
 
-            cameraViewToClip = XMMatrixPerspectiveFovRH(_cameraVFov[fIndex], _cameraAspectRatio[fIndex],
-                                                        _cameraNear[fIndex], _cameraFar[fIndex]);
+            cameraViewToClip =
+                XMMatrixPerspectiveFovRH(vFov, _cameraAspectRatio[fIndex], _cameraNear[fIndex], _cameraFar[fIndex]);
+            clipToCameraView = XMMatrixInverse(nullptr, cameraViewToClip);
         }
         else
         {
             LOG_WARN("Can't calculate projectionMatrix");
         }
-
-        XMMATRIX clipToCameraView = XMMatrixInverse(nullptr, cameraViewToClip);
-
-        auto prev = XMMatrixIdentity();
 
         // Convert to sl::float4x4 for Streamline
         XMFLOAT4X4 temp;
@@ -525,11 +546,6 @@ bool DLSSG_Dx12::Dispatch()
         memcpy(&constData.cameraViewToClip, &temp, sizeof(sl::float4x4));
         XMStoreFloat4x4(&temp, clipToCameraView);
         memcpy(&constData.clipToCameraView, &temp, sizeof(sl::float4x4));
-
-        XMStoreFloat4x4(&temp, prev);
-        memcpy(&constData.clipToLensClip, &temp, sizeof(sl::float4x4));
-        memcpy(&constData.clipToPrevClip, &temp, sizeof(sl::float4x4));
-        memcpy(&constData.prevClipToClip, &temp, sizeof(sl::float4x4));
     }
 
     constData.cameraAspectRatio = _cameraAspectRatio[fIndex];
@@ -628,7 +644,8 @@ void DLSSG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
     auto& state = State::Instance();
 
     // If needed hooks are missing or XeFG proxy is not inited or FG swapchain is not created
-    if (!StreamlineProxy::LoadStreamline() || state.currentFGSwapchain == nullptr)
+    // currentFGSwapchain can also be a plain fallback swapchain, so check that DLSSG created its own
+    if (!StreamlineProxy::LoadStreamline() || state.currentFGSwapchain == nullptr || _swapChain == nullptr)
         return;
 
     if (state.isShuttingDown)
@@ -639,7 +656,7 @@ void DLSSG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
     _constants = fgConstants;
 
     // If FG Enabled from menu
-    if (Config::Instance()->FGEnabled.value_or_default())
+    if (Config::Instance()->IsFGEnabled())
     {
         if (_device == nullptr)
         {

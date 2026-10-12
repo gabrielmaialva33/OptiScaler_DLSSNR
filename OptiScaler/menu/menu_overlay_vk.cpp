@@ -14,6 +14,9 @@
 #include <vector>
 #include <misc/IdentifyGpu.h>
 
+#include "menu_common.h"
+#include <shaders/menu_blur/MenuBlur_Vk.h>
+
 // Vulkan overlay code adopted from here:
 // https://gist.github.com/mem99/0ec31ca302927457f86b1d6756aaa8c4
 // Need to check resize & recreate fixes
@@ -325,9 +328,29 @@ static bool DestroyVulkanObjectsLocked(bool shutdown);
 // only once a wrapped DXGI swapchain has presented from a D3D12 queue, which under Proton means
 // vkd3d-proton; MenuOverlayDx draws those titles on the game's own queue. Ordering holds: the game's
 // first Present sets swapchainApi before vkd3d creates the VkSwapchain inside it.
+//
+// Since upstream 1cc9d5a1 the Vulkan hooks already skip this overlay for presents and swapchains that
+// come from dxgi/d3d11/d3d12 (IsDxgiBackedCaller), so this is the second guard, not the only one.
+// dxgiIsDxvk is ac7a0111's name for what was usesDxvk: DXGI is DXVK's, whatever the game's API.
 static bool DxOverlayOwnsBackend()
 {
-    return State::Instance().swapchainApi == API::DX12 && IdentifyGpu::getPrimaryGpu().usesDxvk;
+    return State::Instance().swapchainApi == API::DX12 && IdentifyGpu::getPrimaryGpu().dxgiIsDxvk;
+}
+
+// menu background blur
+// Raw pointer, static destruction at exit would use an already destroyed device
+static MenuBlur_Vk* _menuBlur = nullptr;
+static VkFormat _scFormat = VK_FORMAT_UNDEFINED;
+static VkExtent2D _scExtent {};
+static VkImageUsageFlags _scUsage = 0;
+
+// Uses a descriptor from the ImGui pool, needs to go before ImGui_ImplVulkan_Shutdown
+static void DestroyMenuBlur()
+{
+    MenuCommon::SetBackgroundBlur(ImTextureID_Invalid);
+
+    delete _menuBlur;
+    _menuBlur = nullptr;
 }
 
 static void SetVkObjectName(VkDevice device, VkInstance instance, VkObjectType objectType, uint64_t objectHandle,
@@ -416,6 +439,10 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize.x = static_cast<float>(pCreateInfo->imageExtent.width);
     io.DisplaySize.y = static_cast<float>(pCreateInfo->imageExtent.height);
+
+    _scFormat = pCreateInfo->imageFormat;
+    _scExtent = pCreateInfo->imageExtent;
+    _scUsage = pCreateInfo->imageUsage;
 
     VkResult result;
 
@@ -899,6 +926,19 @@ static bool DestroyVulkanObjectsLocked(bool shutdown)
 
     _vulkanDeviceLost = result == VK_ERROR_DEVICE_LOST;
 
+    // The blur's ImGui texture is a descriptor from ImGui's pool, so the blur goes before the backend.
+    // Destroyed only on a drained device; on device loss it is abandoned like the backend below, and at
+    // process shutdown it is left alone, as upstream does there.
+    if (!_vulkanDeviceLost && !shutdown)
+    {
+        DestroyMenuBlur();
+    }
+    else
+    {
+        MenuCommon::SetBackgroundBlur(ImTextureID_Invalid);
+        _menuBlur = nullptr;
+    }
+
     // ImGui also owns Vulkan objects: shut it down only after a successful drain. On device loss its
     // backend is deliberately abandoned and this overlay stays disabled for the rest of the session.
     if (!_vulkanDeviceLost && _vulkanBackendInited)
@@ -1023,6 +1063,37 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
 
     if (State::Instance().delayMenuRenderBy > 0)
         State::Instance().delayMenuRenderBy--;
+
+    // Menu background blur (upstream f72e47b9). Its images are created once the menu is first opened,
+    // and the menu decides whether a frame uses them.
+    //
+    // Not on the cross-family path below (id Tech 7 presents from a compute family, so the menu is drawn
+    // on the graphics family with an ownership transfer around it). The blur's first barrier, PRESENT_SRC
+    // to TRANSFER_SRC with source stages TRANSFER|COMPUTE|FRAGMENT, does not chain after that path's
+    // acquire, whose destination stage is COLOR_ATTACHMENT_OUTPUT, so its copy would not be ordered after
+    // the queue-family acquire. Off there until that is worked out and measured on DOOM Eternal; the
+    // three-submit chain stays exactly as it was.
+    bool blurReady = false;
+    {
+        uint32_t family = UINT32_MAX;
+        const bool knownFamily = FamilyOfQueue(queue, &family);
+        const bool graphicsFamily =
+            family < _familyProps.size() && (_familyProps[family].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
+        const bool crossFamilyPresent = family != _overlayQueueFamily && !graphicsFamily;
+
+        if (knownFamily && !crossFamilyPresent && (_menuBlur != nullptr || MenuOverlayBase::IsVisible()))
+        {
+            if (_menuBlur == nullptr)
+                _menuBlur = new MenuBlur_Vk("MenuBlur", _ImVulkan_Info.Device, _ImVulkan_Info.PhysicalDevice);
+
+            blurReady = _menuBlur->Prepare(_scFormat, _scExtent, _scUsage);
+        }
+    }
+
+    if (blurReady)
+        MenuCommon::SetBackgroundBlur(_menuBlur->TextureId(), _menuBlur->UVScale());
+    else
+        MenuCommon::SetBackgroundBlur(ImTextureID_Invalid);
 
     if (!MenuOverlayBase::RenderMenu())
         return true;
@@ -1167,6 +1238,13 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
                              VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                              VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
 
+    // Outside the render pass. blurReady is never set on the cross-family path (see above); the
+    // !crossFamily here only restates that.
+    const bool blurMenu = blurReady && !crossFamily && MenuCommon::BackgroundBlurUsed();
+
+    if (blurMenu)
+        _menuBlur->Dispatch(fd->CommandBuffer, fd->Backbuffer);
+
     {
         VkRenderPassBeginInfo info = {};
         info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -1204,9 +1282,10 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
 
     // The presenting family may be compute-only, where a colour-attachment stage is not a valid wait
     // stage; ALL_COMMANDS is valid on every queue and is what the cross-family path uses throughout.
+    // The blur reads the image with a transfer before the render pass, so it needs the wider wait too.
     for (uint32_t i = 0; i < pPresentInfo->waitSemaphoreCount; i++)
-        waitStages[i] =
-            crossFamily ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        waitStages[i] = (crossFamily || blurMenu) ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
+                                                  : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
     // Indexed by swapchain image, the same index as the fence and the command buffer above. Cycling
     // this on a frame counter instead let the index come round again while an earlier present was
@@ -1370,6 +1449,10 @@ void MenuOverlayVk::CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInst
 
         if (MenuOverlayBase::IsInited())
         {
+            if (_ImVulkan_Info.Device != VK_NULL_HANDLE)
+                vkDeviceWaitIdle(_ImVulkan_Info.Device);
+
+            DestroyMenuBlur();
             ImGui_ImplVulkan_Shutdown(false);
             LOG_DEBUG("MenuOverlayBase::Shutdown();");
             MenuOverlayBase::Shutdown();

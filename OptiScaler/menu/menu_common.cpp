@@ -8,6 +8,7 @@
 #include <cfloat>
 
 #include <dlssnr/DlssNr.h>
+#include <inputs/FG/XeFG_Inputs_Dx12.h>
 
 #include "input/input_system.h"
 
@@ -16,6 +17,7 @@
 #include <proxies/XeSS_Proxy.h>
 #include <proxies/XeFG_Proxy.h>
 #include <proxies/FfxApi_Proxy.h>
+#include <upscalers/ffx/FFXFeature.h>
 #include <proxies/Streamline_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
 
@@ -30,8 +32,6 @@
 #include <BuildInfo.h>
 #include <version_check.h>
 
-#include <upscaler_time/UpscalerTime_Vk.h>
-
 #include <imgui/imgui_internal.h>
 #include <imgui/ImGuiNotify.hpp>
 #include <imgui/imgui_impl_win32.h>
@@ -41,12 +41,15 @@
 #include <cstdarg>
 
 #include <array>
+#include <numeric>
 #include <chrono>
 #include <memory>
 #include <type_traits>
 #include <misc/IdentifyGpu.h>
 #include <hooks/Xell_Hooks.h>
 #include <low_latency/input/input_common.h>
+#include <hooks/Vulkan_Hooks.h>
+#include <low_latency/input/input_xell.h>
 
 enum class UiTargetMode
 {
@@ -69,6 +72,7 @@ static ImVec4 SdrColors[ImGuiCol_COUNT];
 
 static bool inputMenu = false;
 static bool inputFG = false;
+static bool fgHotkeyLeftDefault = false; // FG hotkey temporarily overrode Default (follow game)
 static bool inputFps = false;
 static bool inputFpsCycle = false;
 static uint64_t lastInputTick = 0;
@@ -225,6 +229,7 @@ static int lastKey = 0;
 static bool inputDlssNr = false;
 static bool capturingKey = false;
 static int selectedMenuTab = 0;
+static const char* requestedMenuTab = nullptr; // Label of a tab to switch to on the next frame
 
 template <typename T, size_t N> struct RingBuffer
 {
@@ -408,7 +413,7 @@ ScopedCard::~ScopedCard()
     const ImVec2 max(_min.x + _width, bottom);
 
     _splitter.SetCurrentChannel(drawList, 0);
-    drawList->AddRectFilled(_min, max, ImGui::GetColorU32(ImGuiCol_WindowBg), style.ChildRounding);
+    // drawList->AddRectFilled(_min, max, ImGui::GetColorU32(ImGuiCol_WindowBg), style.ChildRounding);
     drawList->AddRect(_min, max, ImGui::GetColorU32(ImGuiCol_Separator), style.ChildRounding);
     _splitter.Merge(drawList);
 
@@ -681,37 +686,209 @@ void MenuCommon::GetCurrentBackendInfo(const API api, Upscaler& upscaler, std::s
     *name = UpscalerDisplayName(upscaler, api);
 }
 
+// List of upscalers reported by FFX for a given backend, nullptr if the backend doesn't use FFX
+static State::FfxVersionList* GetFfxVersionList(Upscaler upscaler, API api)
+{
+    if (upscaler == Upscaler::FFX_on12 || (upscaler == Upscaler::FFX && api == API::DX12))
+        return &State::Instance().ffxUpscalerVersionsDx12;
+
+    if (upscaler == Upscaler::FFX && api == API::Vulkan)
+        return &State::Instance().ffxUpscalerVersionsVk;
+
+    return nullptr;
+}
+
+static bool IsOn12(Upscaler upscaler)
+{
+    switch (upscaler)
+    {
+    case Upscaler::XeSS_on12:
+    case Upscaler::FSR21_on12:
+    case Upscaler::FSR22_on12:
+    case Upscaler::FFX_on12:
+    case Upscaler::DLSS_on12:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Name without the w/Dx12 suffix, that one is shown as a tag in the list instead
+static std::string ShortUpscalerName(Upscaler upscaler, API api, int ffxIndex)
+{
+    if (auto versions = GetFfxVersionList(upscaler, api);
+        versions != nullptr && ffxIndex >= 0 && ffxIndex < versions->names.size())
+        return StrFmt("FSR %s", versions->names[ffxIndex]);
+
+    switch (upscaler)
+    {
+    case Upscaler::XeSS_on12:
+        return UpscalerDisplayName(Upscaler::XeSS);
+    case Upscaler::FSR21_on12:
+        return UpscalerDisplayName(Upscaler::FSR21);
+    case Upscaler::FSR22_on12:
+        return UpscalerDisplayName(Upscaler::FSR22);
+    case Upscaler::FFX_on12:
+        return UpscalerDisplayName(Upscaler::FFX, API::DX12);
+    case Upscaler::DLSS_on12:
+        return UpscalerDisplayName(Upscaler::DLSS);
+    default:
+        return UpscalerDisplayName(upscaler, api);
+    }
+}
+
+static feature_version UpscalerSortVersion(Upscaler upscaler)
+{
+    switch (upscaler)
+    {
+    case Upscaler::FSR21:
+    case Upscaler::FSR21_on12:
+        return { 2, 1, 2 };
+    case Upscaler::FSR22:
+    case Upscaler::FSR22_on12:
+        return { 2, 2, 1 };
+    case Upscaler::FSR31:
+        return { 3, 1, 2 };
+    case Upscaler::FFX:
+    case Upscaler::FFX_on12:
+        return { 3, 1, 0 };
+    default:
+        return {};
+    }
+}
+
+// Indices into the FFX version list, newest first
+static std::vector<int> FfxVersionsNewestFirst(const State::FfxVersionList& versions)
+{
+    std::vector<int> order(versions.names.size());
+    std::iota(order.begin(), order.end(), 0);
+
+    std::stable_sort(order.begin(), order.end(), [&versions](int a, int b)
+                     { return feature_version(versions.names[b]) < feature_version(versions.names[a]); });
+
+    return order;
+}
+
 void MenuCommon::RenderUpscalerCombo(const API api, Upscaler currentUpscaler, const std::vector<Upscaler>& options)
 {
     auto primaryGpu = IdentifyGpu::getPrimaryGpu();
+    auto config = Config::Instance();
+    const int ffxIndex = config->FfxUpscalerIndex.value_or_default();
 
-    // Determine display name
     Upscaler targetBackend = State::Instance().newBackend;
     if (targetBackend == Upscaler::Reset)
         targetBackend = currentUpscaler;
 
-    std::string selectedName = UpscalerDisplayName(targetBackend, api);
+    // Interop is only shown here, the list uses a tag for it
+    auto selectedName = ShortUpscalerName(targetBackend, api, ffxIndex);
+    if (IsOn12(targetBackend))
+        selectedName += " (Dx12)";
 
-    if (ImGui::BeginCombo("##UpscalerCombo", selectedName.c_str()))
+    if (!ImGui::BeginCombo("##UpscalerCombo", selectedName.c_str(), ImGuiComboFlags_HeightLargest))
+        return;
+
+    struct Entry
     {
-        for (auto opt : options)
+        Upscaler upscaler;
+        int ffxIndex; // Newest upscaler reported by FFX, -1 when not using FFX
+        feature_version version;
+    };
+
+    std::vector<Entry> entries;
+
+    for (auto opt : options)
+    {
+        // Check if GPU is capable of a given backend
+        if ((opt == Upscaler::DLSS || opt == Upscaler::DLSS_on12) && !primaryGpu.dlssCapable)
+            continue;
+
+        // Not all Intel GPUs support native DX11 XeSS but don't think we have a good way to check exactly
+        if (opt == Upscaler::XeSS && api == API::DX11 && primaryGpu.vendorId != VendorId::Intel)
+            continue;
+
+        // Only the newest FFX upscaler is listed here, the rest are in the FFX Upscaler combo
+        if (auto versions = GetFfxVersionList(opt, api); versions != nullptr)
         {
-            // Check if GPU is capable of a given backend
-            if ((opt == Upscaler::DLSS || opt == Upscaler::DLSS_on12) && !primaryGpu.dlssCapable)
-                continue;
+            if (versions == &State::Instance().ffxUpscalerVersionsVk)
+                FFXFeature::EnsureVersionsVulkan();
+            else
+                FFXFeature::EnsureVersionsDx12();
 
-            // Not all Intel GPUs support native DX11 XeSS but don't think we have a good way to check exactly
-            if (opt == Upscaler::XeSS && api == API::DX11 && primaryGpu.vendorId != VendorId::Intel)
-                continue;
-
-            bool isSelected = (currentUpscaler == opt);
-            if (ImGui::Selectable(UpscalerDisplayName(opt, api).c_str(), isSelected))
+            // Fall back to a generic entry if FFX couldn't be queried
+            if (!versions->names.empty())
             {
-                State::Instance().newBackend = opt;
+                auto newest = FfxVersionsNewestFirst(*versions)[0];
+                entries.push_back({ opt, newest, feature_version(versions->names[newest]) });
+                continue;
             }
         }
-        ImGui::EndCombo();
+
+        entries.push_back({ opt, -1, UpscalerSortVersion(opt) });
     }
+
+    // Upscaler of the GPU vendor goes first, FSRs are sorted by version, newest first
+    // Stable sort keeps native ahead of w/Dx12
+    auto group = [&primaryGpu](Upscaler upscaler)
+    {
+        int family = IsFsr(upscaler) ? 1 : (upscaler == Upscaler::DLSS || upscaler == Upscaler::DLSS_on12) ? 2 : 0;
+
+        const int vendorFamily = primaryGpu.vendorId == VendorId::AMD      ? 1
+                                 : primaryGpu.vendorId == VendorId::Nvidia ? 2
+                                                                           : 0;
+
+        return family == vendorFamily ? -1 : family;
+    };
+
+    std::stable_sort(entries.begin(), entries.end(),
+                     [&group](const Entry& a, const Entry& b)
+                     {
+                         if (group(a.upscaler) != group(b.upscaler))
+                             return group(a.upscaler) < group(b.upscaler);
+
+                         return b.version < a.version;
+                     });
+
+    for (size_t i = 0; i < entries.size(); i++)
+    {
+        const auto& entry = entries[i];
+
+        if (i > 0 && group(entry.upscaler) != group(entries[i - 1].upscaler))
+            ImGui::Separator();
+
+        auto label =
+            StrFmt("%s##%d", ShortUpscalerName(entry.upscaler, api, entry.ffxIndex).c_str(), (int) entry.upscaler);
+
+        if (ImGui::Selectable(label.c_str(), currentUpscaler == entry.upscaler))
+        {
+            State::Instance().newBackend = entry.upscaler;
+
+            // Switching to FFX starts with the newest one
+            if (entry.ffxIndex >= 0 && currentUpscaler != entry.upscaler)
+                config->FfxUpscalerIndex = entry.ffxIndex;
+        }
+
+        // Dimmed tags aligned to the right
+        const char* tag = nullptr;
+
+        if (entry.ffxIndex >= 0 && IsOn12(entry.upscaler))
+            tag = "FFX Dx12";
+        else if (entry.ffxIndex >= 0)
+            tag = "FFX";
+        else if (IsOn12(entry.upscaler))
+            tag = "Dx12";
+
+        if (tag != nullptr)
+        {
+            auto& style = ImGui::GetStyle();
+
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() - style.WindowPadding.x -
+                                                                      ImGui::CalcTextSize(tag).x));
+            ImGui::TextDisabled(tag);
+        }
+    }
+
+    ImGui::EndCombo();
 }
 
 void MenuCommon::AddDx11Backends(Upscaler upscaler)
@@ -1672,10 +1849,27 @@ void MenuCommon::HandleMenuShortcuts(RenderMenuContext& ctx)
             if (state.activeFgInput != FGInput::NoFG && state.activeFgOutput != FGOutput::NoFG &&
                 (state.currentFGSwapchain != nullptr || state.activeFgInput == FGInput::NvngxFG))
             {
-                config->FGEnabled = !config->FGEnabled.value_or_default();
-                LOG_DEBUG("FG toggle key pressed, setting FGEnabled to {}", config->FGEnabled.value_or_default());
+                if (fgHotkeyLeftDefault)
+                {
+                    // Second press goes back to following the game
+                    fgHotkeyLeftDefault = false;
+                    config->FGEnabled = std::optional<bool> {};
+                    LOG_DEBUG("FG toggle key pressed, following the game again");
+                }
+                else if (config->FGFollowsGame())
+                {
+                    // Volatile so the ini keeps auto
+                    fgHotkeyLeftDefault = true;
+                    config->FGEnabled.set_volatile_value(!config->IsFGEnabled());
+                    LOG_DEBUG("FG toggle key pressed, overriding the game with {}", config->FGEnabled.value());
+                }
+                else
+                {
+                    config->FGEnabled = !config->IsFGEnabled();
+                    LOG_DEBUG("FG toggle key pressed, setting FGEnabled to {}", config->FGEnabled.value());
+                }
 
-                if (config->FGEnabled.value_or_default())
+                if (config->IsFGEnabled())
                     state.fgChanged = true;
             }
         }
@@ -2149,14 +2343,14 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                              ImGuiWindowFlags_NoNav))
         {
             std::string api;
-            if (IdentifyGpu::getPrimaryGpu().usesDxvk && state.api == DX11)
+            if (IdentifyGpu::gameUsesDxvk())
             {
                 if (state.swapchainInteropApi == SwapchainInteropApi::None)
                     api = "DXVK";
                 else
                     api = "DXVK w/Dx12";
             }
-            else if (IdentifyGpu::getPrimaryGpu().usesVkd3dProton && state.api == DX12)
+            else if (IdentifyGpu::gameUsesVkd3dProton())
             {
                 api = "VKD3D";
             }
@@ -2467,7 +2661,7 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                         if (!timingOpt.has_value())
                             return;
 
-                        auto toneMappedColor = State::Instance().isHdrActive ? toneMapColor(color) : color;
+                        auto toneMappedColor = toneMapColor(color);
 
                         const auto& timing = timingOpt.value();
                         float duration = static_cast<float>(timing.length * rangeInNs / 1000.0);
@@ -2672,9 +2866,9 @@ void MenuCommon::RenderUpscalerStateMessage(RenderMenuContext& ctx)
         ImGui::Spacing();
 
         if (config->UseHQFont.value_or_default())
-            ImGui::PushFontSize(std::round(fontSize * menuResScale * 2.5f));
+            ImGui::PushFontSize(std::round(fontSize * menuResScale * 2.0f));
         else
-            ImGui::SetWindowFontScale(menuResScale * 2.5f);
+            ImGui::SetWindowFontScale(menuResScale * 2.0f);
 
         if (state.nvngxExists || state.nvngxReplacement.has_value() ||
             (state.libxessExists || XeSSProxy::Module() != nullptr))
@@ -2710,9 +2904,10 @@ void MenuCommon::RenderUpscalerStateMessage(RenderMenuContext& ctx)
             }
             else
             {
-                ImGui::Text("Please select %s as upscaler from game\noptions and load a save game "
-                            "to enable Opti settings.\nUpscalers don't always work in menus.",
-                            joinedUpscalers.c_str());
+                ImGui::Text(
+                    "Please select %s as upscaler from game options and load a save game to enable Opti settings.\n"
+                    "Upscalers don't always work in menus.",
+                    joinedUpscalers.c_str());
             }
             ImGui::PopTextWrapPos();
 
@@ -2748,9 +2943,9 @@ void MenuCommon::RenderUpscalerStateMessage(RenderMenuContext& ctx)
         ImGui::Spacing();
 
         if (config->UseHQFont.value_or_default())
-            ImGui::PushFontSize(std::round(fontSize * menuResScale * 2.5f));
+            ImGui::PushFontSize(std::round(fontSize * menuResScale * 2.0f));
         else
-            ImGui::SetWindowFontScale(menuResScale * 2.5f);
+            ImGui::SetWindowFontScale(menuResScale * 2.0f);
 
         ImGui::PushTextWrapPos(0.0f);
         ImGui::Text("%s active, but currently not used by the game\nPlease load into the game",
@@ -2764,6 +2959,8 @@ void MenuCommon::RenderUpscalerStateMessage(RenderMenuContext& ctx)
     }
 }
 
+static const char* ApiName(API api);
+
 void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
@@ -2774,6 +2971,14 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
     // UPSCALERS -----------------------------
     SectionTitle("Upscalers");
+
+    // Row - API | GPU | Upscaler input
+    ImGui::TextWrapped("%s%s | %s | Input: %s", ApiName(state.api),
+                       IdentifyGpu::gameUsesDxvk()          ? " (DXVK)"
+                       : IdentifyGpu::gameUsesVkd3dProton() ? " (VKD3D)"
+                                                            : "",
+                       primaryGpu.name.c_str(), ApiUpscalerInputName(state.currentInputApiName).c_str());
+    ImGui::Spacing();
 
     GetCurrentBackendInfo(state.api, currentBackend, &currentBackendName);
 
@@ -2927,300 +3132,297 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
     // FFX -----------------
     if (!usesDlssd && (currentBackend == Upscaler::FFX || currentBackend == Upscaler::FFX_on12))
     {
-        ImGui::Spacing();
-
-        if (_ffxUpscalerIndex < 0)
-            _ffxUpscalerIndex = config->FfxUpscalerIndex.value_or_default();
-
-        if (currentBackend == Upscaler::FFX ||
-            currentBackend == Upscaler::FFX_on12 && state.ffxUpscalerVersionNames.size() > 0)
+        if (auto versions = GetFfxVersionList(currentBackend, state.api);
+            versions != nullptr && !versions->names.empty())
         {
+            ImGui::Spacing();
+
+            const int ffxIndex = config->FfxUpscalerIndex.value_or_default();
+            auto currentName =
+                ffxIndex >= 0 && ffxIndex < versions->names.size() ? StrFmt("FSR %s", versions->names[ffxIndex]) : "";
+
             ImGui::PushItemWidth(150.0f * menuResScale);
 
-            auto currentName = StrFmt("FSR %s", state.ffxUpscalerVersionNames[_ffxUpscalerIndex]);
             if (ImGui::BeginCombo("FFX Upscaler", currentName.c_str()))
             {
-                for (int n = 0; n < state.ffxUpscalerVersionIds.size(); n++)
+                for (auto n : FfxVersionsNewestFirst(*versions))
                 {
-                    auto name = StrFmt("FSR %s##%d", state.ffxUpscalerVersionNames[n], n);
-                    if (ImGui::Selectable(name.c_str(), config->FfxUpscalerIndex.value_or_default() == n))
-                        _ffxUpscalerIndex = n;
-                }
-
-                ImGui::EndCombo();
-            }
-            ImGui::PopItemWidth();
-
-            ShowTooltip("List of upscalers reported by FFX SDK");
-
-            ImGui::SameLine(0.0f, 6.0f);
-
-            if (_ffxUpscalerIndex != config->FfxUpscalerIndex.value_or_default())
-            {
-                config->FfxUpscalerIndex = _ffxUpscalerIndex;
-                state.newBackend = currentBackend;
-                MARK_ALL_BACKENDS_CHANGED();
-            }
-
-            auto majorFsrVersion = currentFeature->Version().major;
-
-            if (majorFsrVersion >= 4)
-            {
-                ImGui::Spacing();
-
-                // Colorspaces
-                const char* colorSpaces[] = { "Linear (Default)", "Non-Linear", "Non-Linear sRGB", "Non-Linear PQ" };
-                int currentColorSpace = 0;
-                if (config->FsrNonLinearPQ.value_or_default())
-                    currentColorSpace = 3;
-                else if (config->FsrNonLinearSRGB.value_or_default())
-                    currentColorSpace = 2;
-                else if (config->FsrNonLinearColorSpace.value_or_default())
-                    currentColorSpace = 1;
-
-                ImGui::SetNextItemWidth(150.0f * menuResScale);
-                if (ImGui::Combo("Input Color Space", &currentColorSpace, colorSpaces, IM_ARRAYSIZE(colorSpaces)))
-                {
-                    bool isSrgb = (currentColorSpace == 2);
-                    bool isPq = (currentColorSpace == 3);
-
-                    config->FsrNonLinearSRGB = isSrgb;
-                    config->FsrNonLinearPQ = isPq;
-
-                    if (isSrgb || isPq)
+                    if (ImGui::Selectable(StrFmt("FSR %s##%d", versions->names[n], n).c_str(), ffxIndex == n) &&
+                        ffxIndex != n)
                     {
-                        config->FsrNonLinearColorSpace.set_volatile_value(true);
-                    }
-                    else if (currentColorSpace == 1) // Just non-Linear
-                    {
-                        config->FsrNonLinearColorSpace = true;
-                    }
-                    else // Linear
-                    {
-                        config->FsrNonLinearColorSpace = false;
-                    }
-
-                    state.newBackend = currentBackend;
-                    MARK_ALL_BACKENDS_CHANGED();
-                }
-                ShowTooltip("Select the input color space that the game uses.\n"
-                            "Non-Linear / sRGB: Might improve FSR4 upscaling quality, might increase ghosting.\n"
-                            "PQ: Rarest, might increase ghosting and break lights.");
-
-                // FSR 4 Presets
-                const char* presets[] = { "Default",  "Preset 0", "Preset 1", "Preset 2",
-                                          "Preset 3", "Preset 4", "Preset 5" };
-                int currentPresetIdx = config->Fsr4Preset.has_value() ? config->Fsr4Preset.value() + 1 : 0;
-
-                if (currentPresetIdx < 0 || currentPresetIdx >= IM_ARRAYSIZE(presets))
-                    currentPresetIdx = 0;
-
-                ImGui::SetNextItemWidth(150.0f * menuResScale);
-                if (ImGui::Combo("FSR4 Preset", &currentPresetIdx, presets, IM_ARRAYSIZE(presets)))
-                {
-                    if (currentPresetIdx == 0)
-                        config->Fsr4Preset.reset();
-                    else
-                        config->Fsr4Preset = currentPresetIdx - 1;
-
-                    state.newBackend = currentBackend;
-                    MARK_ALL_BACKENDS_CHANGED();
-                }
-                ShowTooltip("Each internal FSR4 preset is tuned for a specific resolution.\n"
-                            "Selecting an FSR4 preset won't change the in-game\nupscaler preset!!!\n\n"
-                            "Preset 0 is meant for FSR Native AA\n"
-                            "Preset 1 is meant for Quality/Ultra Quality\n"
-                            "Preset 2 is meant for Balanced\n"
-                            "Preset 3 is meant for Performance\n"
-                            "Preset 4 is meant for DRS\n"
-                            "Preset 5 is meant for Ultra Performance");
-
-                // Display the active preset right next to the combo box instead of using a table
-                ImGui::SameLine();
-                if (state.currentFsr4Preset.has_value())
-                    ImGui::TextDisabled("(Active: %d)", state.currentFsr4Preset.value());
-                else if (FSR4ModelSelection::IsInt8FsrHooked())
-                    ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "(Potential FSR3 fallback)");
-                else
-                    ImGui::TextDisabled("(Failed to hook)");
-            }
-
-            if (majorFsrVersion >= 3)
-            {
-                ImGui::Spacing();
-
-                bool debugView = config->FsrDebugView.value_or_default();
-                if (ImGui::Checkbox("Upscaler Debug View", &debugView))
-                {
-                    config->FsrDebugView = debugView;
-
-                    // FSR 4's debug view requires backend reinit
-                    if (majorFsrVersion > 3)
-                    {
+                        config->FfxUpscalerIndex = n;
                         state.newBackend = currentBackend;
                         MARK_ALL_BACKENDS_CHANGED();
                     }
                 }
 
-                if (majorFsrVersion > 3)
+                ImGui::EndCombo();
+            }
+
+            ImGui::PopItemWidth();
+
+            ShowTooltip("List of upscalers reported by FFX SDK");
+        }
+
+        auto majorFsrVersion = currentFeature->Version().major;
+
+        if (majorFsrVersion >= 4)
+        {
+            ImGui::Spacing();
+
+            // Colorspaces
+            const char* colorSpaces[] = { "Linear (Default)", "Non-Linear", "Non-Linear sRGB", "Non-Linear PQ" };
+            int currentColorSpace = 0;
+            if (config->FsrNonLinearPQ.value_or_default())
+                currentColorSpace = 3;
+            else if (config->FsrNonLinearSRGB.value_or_default())
+                currentColorSpace = 2;
+            else if (config->FsrNonLinearColorSpace.value_or_default())
+                currentColorSpace = 1;
+
+            ImGui::SetNextItemWidth(150.0f * menuResScale);
+            if (ImGui::Combo("Input Color Space", &currentColorSpace, colorSpaces, IM_ARRAYSIZE(colorSpaces)))
+            {
+                bool isSrgb = (currentColorSpace == 2);
+                bool isPq = (currentColorSpace == 3);
+
+                config->FsrNonLinearSRGB = isSrgb;
+                config->FsrNonLinearPQ = isPq;
+
+                if (isSrgb || isPq)
                 {
-                    ShowTooltip("Top left: Dilated Motion Vectors\n"
-                                "Top right: Predicted Blend Factor");
+                    config->FsrNonLinearColorSpace.set_volatile_value(true);
                 }
+                else if (currentColorSpace == 1) // Just non-Linear
+                {
+                    config->FsrNonLinearColorSpace = true;
+                }
+                else // Linear
+                {
+                    config->FsrNonLinearColorSpace = false;
+                }
+
+                state.newBackend = currentBackend;
+                MARK_ALL_BACKENDS_CHANGED();
+            }
+            ShowTooltip("Select the input color space that the game uses.\n"
+                        "Non-Linear / sRGB: Might improve FSR4 upscaling quality, might increase ghosting.\n"
+                        "PQ: Rarest, might increase ghosting and break lights.");
+
+            // FSR 4 Presets
+            const char* presets[] = {
+                "Default", "Preset 0", "Preset 1", "Preset 2", "Preset 3", "Preset 4", "Preset 5"
+            };
+            int currentPresetIdx = config->Fsr4Preset.has_value() ? config->Fsr4Preset.value() + 1 : 0;
+
+            if (currentPresetIdx < 0 || currentPresetIdx >= IM_ARRAYSIZE(presets))
+                currentPresetIdx = 0;
+
+            ImGui::SetNextItemWidth(150.0f * menuResScale);
+            if (ImGui::Combo("FSR4 Preset", &currentPresetIdx, presets, IM_ARRAYSIZE(presets)))
+            {
+                if (currentPresetIdx == 0)
+                    config->Fsr4Preset.reset();
                 else
-                {
-                    ShowTooltip("Top left: Dilated Motion Vectors\n"
-                                "Top middle: Protected Areas\n"
-                                "Top right: Dilated Depth\n"
-                                "Middle: Upscaled frame\n"
-                                "Bottom left: Disocclusion mask\n"
-                                "Bottom middle: Reactiveness\n"
-                                "Bottom right: Detail Protection Takedown");
-                }
+                    config->Fsr4Preset = currentPresetIdx - 1;
 
+                state.newBackend = currentBackend;
+                MARK_ALL_BACKENDS_CHANGED();
+            }
+            ShowTooltip("Each internal FSR4 preset is tuned for a specific resolution.\n"
+                        "Selecting an FSR4 preset won't change the in-game\nupscaler preset!!!\n\n"
+                        "Preset 0 is meant for FSR Native AA\n"
+                        "Preset 1 is meant for Quality/Ultra Quality\n"
+                        "Preset 2 is meant for Balanced\n"
+                        "Preset 3 is meant for Performance\n"
+                        "Preset 4 is meant for DRS\n"
+                        "Preset 5 is meant for Ultra Performance");
+
+            // Display the active preset right next to the combo box instead of using a table
+            ImGui::SameLine();
+            if (state.currentFsr4Preset.has_value())
+                ImGui::TextDisabled("(Active: %d)", state.currentFsr4Preset.value());
+            else if (FSR4ModelSelection::IsInt8FsrHooked())
+                ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "(Potential FSR3 fallback)");
+            else
+                ImGui::TextDisabled("(Failed to hook)");
+        }
+
+        if (majorFsrVersion >= 3)
+        {
+            ImGui::Spacing();
+
+            bool debugView = config->FsrDebugView.value_or_default();
+            if (ImGui::Checkbox("Upscaler Debug View", &debugView))
+            {
+                config->FsrDebugView = debugView;
+
+                // FSR 4's debug view requires backend reinit
                 if (majorFsrVersion > 3)
                 {
-                    ImGui::SameLine(0.0f, 20.0f * menuResScale);
-                    bool fsr4wm = config->Fsr4EnableWatermark.value_or_default();
-                    if (ImGui::Checkbox("Watermark", &fsr4wm))
-                    {
-                        LOG_DEBUG("FSR4 Watermark set to {}", fsr4wm);
-                        config->Fsr4EnableWatermark = fsr4wm;
-                    }
-
-                    ShowTooltip("After changing this option, please Save Settings.\n"
-                                "It will be applied on next launch.");
+                    state.newBackend = currentBackend;
+                    MARK_ALL_BACKENDS_CHANGED();
                 }
             }
 
-            if (currentFeature->Version() >= feature_version { 3, 1, 1 } &&
-                currentFeature->Version() < feature_version { 4, 0, 0 })
+            if (majorFsrVersion > 3)
             {
-                ImGui::Spacing();
+                ShowTooltip("Top left: Dilated Motion Vectors\n"
+                            "Top right: Predicted Blend Factor");
+            }
+            else
+            {
+                ShowTooltip("Top left: Dilated Motion Vectors\n"
+                            "Top middle: Protected Areas\n"
+                            "Top right: Dilated Depth\n"
+                            "Middle: Upscaled frame\n"
+                            "Bottom left: Disocclusion mask\n"
+                            "Bottom middle: Reactiveness\n"
+                            "Bottom right: Detail Protection Takedown");
+            }
 
-                if (currentFeature != nullptr)
+            if (majorFsrVersion > 3)
+            {
+                ImGui::SameLine(0.0f, 20.0f * menuResScale);
+                bool fsr4wm = config->Fsr4EnableWatermark.value_or_default();
+                if (ImGui::Checkbox("Watermark", &fsr4wm))
                 {
-                    ImGui::Text("FSR 3.1 Presets:");
-
-                    ImGui::SameLine(0.0f, 6.0f);
-
-                    // This will be applied by default
-                    if (ImGui::Button("Stability"))
-                    {
-                        auto const scaleRatioX =
-                            (float) currentFeature->TargetWidth() / (float) currentFeature->RenderWidth();
-                        auto const scaleRatioY =
-                            (float) currentFeature->TargetHeight() / (float) currentFeature->RenderHeight();
-                        auto const scaleRatio = std::max(scaleRatioX, scaleRatioY);
-
-                        config->FsrVelocity = 0.5f;
-                        config->FsrReactiveScale = 0.25f;
-
-                        config->FsrShadingScale.reset();
-                        config->FsrAccAddPerFrame.reset();
-                        config->FsrMinDisOccAcc.reset();
-                        config->FsrShadingScale.set_volatile_value(0.5f / scaleRatio);
-                        config->FsrAccAddPerFrame.set_volatile_value(scaleRatio / 10.0f);
-                        config->FsrMinDisOccAcc.set_volatile_value(scaleRatio / 20.0f);
-                    }
-
-                    ImGui::SameLine(0.0f, 6.0f);
-
-                    if (ImGui::Button("Motion"))
-                    {
-                        auto const scaleRatioX =
-                            (float) currentFeature->TargetWidth() / (float) currentFeature->RenderWidth();
-                        auto const scaleRatioY =
-                            (float) currentFeature->TargetHeight() / (float) currentFeature->RenderHeight();
-                        auto const scaleRatio = std::max(scaleRatioX, scaleRatioY);
-
-                        config->FsrVelocity = 1.0f;
-                        config->FsrReactiveScale = 0.5f;
-
-                        config->FsrShadingScale.reset();
-                        config->FsrAccAddPerFrame.reset();
-                        config->FsrMinDisOccAcc.reset();
-                        config->FsrShadingScale.set_volatile_value(1.0f / scaleRatio);
-                        config->FsrAccAddPerFrame.set_volatile_value(scaleRatio / 10.0f);
-                        config->FsrMinDisOccAcc.set_volatile_value(scaleRatio / 20.0f);
-                    }
-
-                    ImGui::SameLine(0.0f, 6.0f);
-
-                    if (ImGui::Button("Default"))
-                    {
-                        config->FsrVelocity = 1.0f;
-                        config->FsrReactiveScale = 1.0f;
-                        config->FsrShadingScale = 1.0f;
-                        config->FsrAccAddPerFrame = 0.333f;
-                        config->FsrMinDisOccAcc = -0.333f;
-                    }
+                    LOG_DEBUG("FSR4 Watermark set to {}", fsr4wm);
+                    config->Fsr4EnableWatermark = fsr4wm;
                 }
 
+                ShowTooltip("After changing this option, please Save Settings.\n"
+                            "It will be applied on next launch.");
+            }
+        }
+
+        if (currentFeature->Version() >= feature_version { 3, 1, 1 } &&
+            currentFeature->Version() < feature_version { 4, 0, 0 })
+        {
+            ImGui::Spacing();
+
+            if (currentFeature != nullptr)
+            {
+                ImGui::Text("FSR 3.1 Presets:");
+
+                ImGui::SameLine(0.0f, 6.0f);
+
+                // This will be applied by default
+                if (ImGui::Button("Stability"))
+                {
+                    auto const scaleRatioX =
+                        (float) currentFeature->TargetWidth() / (float) currentFeature->RenderWidth();
+                    auto const scaleRatioY =
+                        (float) currentFeature->TargetHeight() / (float) currentFeature->RenderHeight();
+                    auto const scaleRatio = std::max(scaleRatioX, scaleRatioY);
+
+                    config->FsrVelocity = 0.5f;
+                    config->FsrReactiveScale = 0.25f;
+
+                    config->FsrShadingScale.reset();
+                    config->FsrAccAddPerFrame.reset();
+                    config->FsrMinDisOccAcc.reset();
+                    config->FsrShadingScale.set_volatile_value(0.5f / scaleRatio);
+                    config->FsrAccAddPerFrame.set_volatile_value(scaleRatio / 10.0f);
+                    config->FsrMinDisOccAcc.set_volatile_value(scaleRatio / 20.0f);
+                }
+
+                ImGui::SameLine(0.0f, 6.0f);
+
+                if (ImGui::Button("Motion"))
+                {
+                    auto const scaleRatioX =
+                        (float) currentFeature->TargetWidth() / (float) currentFeature->RenderWidth();
+                    auto const scaleRatioY =
+                        (float) currentFeature->TargetHeight() / (float) currentFeature->RenderHeight();
+                    auto const scaleRatio = std::max(scaleRatioX, scaleRatioY);
+
+                    config->FsrVelocity = 1.0f;
+                    config->FsrReactiveScale = 0.5f;
+
+                    config->FsrShadingScale.reset();
+                    config->FsrAccAddPerFrame.reset();
+                    config->FsrMinDisOccAcc.reset();
+                    config->FsrShadingScale.set_volatile_value(1.0f / scaleRatio);
+                    config->FsrAccAddPerFrame.set_volatile_value(scaleRatio / 10.0f);
+                    config->FsrMinDisOccAcc.set_volatile_value(scaleRatio / 20.0f);
+                }
+
+                ImGui::SameLine(0.0f, 6.0f);
+
+                if (ImGui::Button("Default"))
+                {
+                    config->FsrVelocity = 1.0f;
+                    config->FsrReactiveScale = 1.0f;
+                    config->FsrShadingScale = 1.0f;
+                    config->FsrAccAddPerFrame = 0.333f;
+                    config->FsrMinDisOccAcc = -0.333f;
+                }
+            }
+
+            ImGui::Spacing();
+
+            if (auto ch = ScopedCollapsingHeader(Localization::Label("FSR 3 Upscaler Manual Tuning"));
+                ch.IsHeaderOpen())
+            {
+                ScopedIndent indent {};
+                ImGui::Spacing();
                 ImGui::Spacing();
 
-                if (auto ch = ScopedCollapsingHeader(Localization::Label("FSR 3 Upscaler Manual Tuning"));
-                    ch.IsHeaderOpen())
+                ImGui::PushItemWidth(220.0f * menuResScale);
+
+                float velocity = config->FsrVelocity.value_or_default();
+                if (ImGui::SliderFloat("Velocity Factor", &velocity, 0.00f, 1.0f, "%.2f"))
+                    config->FsrVelocity = velocity;
+
+                ShowTooltip("Value of 0.0f can improve temporal stability of bright pixels\n"
+                            "Lower values are more stable with ghosting\n"
+                            "Higher values are more pixelly, but less ghosting");
+
+                if (currentFeature->Version() >= feature_version { 3, 1, 4 })
                 {
-                    ScopedIndent indent {};
-                    ImGui::Spacing();
-                    ImGui::Spacing();
+                    // Reactive Scale
+                    float reactiveScale = config->FsrReactiveScale.value_or_default();
+                    if (ImGui::SliderFloat("Reactive Scale", &reactiveScale, 0.0f, 1.0f, "%.3f"))
+                        config->FsrReactiveScale = reactiveScale;
 
-                    ImGui::PushItemWidth(220.0f * menuResScale);
+                    ShowTooltip("Meant for development purpose to test if\n"
+                                "writing a larger value to reactive mask, reduces ghosting.");
 
-                    float velocity = config->FsrVelocity.value_or_default();
-                    if (ImGui::SliderFloat("Velocity Factor", &velocity, 0.00f, 1.0f, "%.2f"))
-                        config->FsrVelocity = velocity;
+                    // Shading Scale
+                    float shadingScale = config->FsrShadingScale.value_or_default();
+                    if (ImGui::SliderFloat("Shading Scale", &shadingScale, 0.0f, 1.0f, "%.3f"))
+                        config->FsrShadingScale = shadingScale;
 
-                    ShowTooltip("Value of 0.0f can improve temporal stability of bright pixels\n"
-                                "Lower values are more stable with ghosting\n"
-                                "Higher values are more pixelly, but less ghosting");
+                    ShowTooltip("Increasing this scales FSR3.1 computed shading\n"
+                                "change value at read to have higher reactiveness.");
 
-                    if (currentFeature->Version() >= feature_version { 3, 1, 4 })
-                    {
-                        // Reactive Scale
-                        float reactiveScale = config->FsrReactiveScale.value_or_default();
-                        if (ImGui::SliderFloat("Reactive Scale", &reactiveScale, 0.0f, 1.0f, "%.3f"))
-                            config->FsrReactiveScale = reactiveScale;
+                    // Accumulation Added Per Frame
+                    float accAddPerFrame = config->FsrAccAddPerFrame.value_or_default();
+                    if (ImGui::SliderFloat("Acc. Added Per Frame", &accAddPerFrame, 0.0f, 1.0f, "%.3f"))
+                        config->FsrAccAddPerFrame = accAddPerFrame;
 
-                        ShowTooltip("Meant for development purpose to test if\n"
-                                    "writing a larger value to reactive mask, reduces ghosting.");
+                    ShowTooltip("Corresponds to amount of accumulation added per frame\n"
+                                "at pixel coordinate where disocclusion occured or when\n"
+                                "reactive mask value is > 0.0f. Decreasing this and \n"
+                                "drawing the ghosting object (IE no mv) to reactive mask \n"
+                                "with value close to 1.0f can decrease temporal ghosting.\n"
+                                "Decreasing this could result in more thin feature pixels flickering.");
 
-                        // Shading Scale
-                        float shadingScale = config->FsrShadingScale.value_or_default();
-                        if (ImGui::SliderFloat("Shading Scale", &shadingScale, 0.0f, 1.0f, "%.3f"))
-                            config->FsrShadingScale = shadingScale;
+                    // Min Disocclusion Accumulation
+                    float minDisOccAcc = config->FsrMinDisOccAcc.value_or_default();
+                    if (ImGui::SliderFloat("Min. Disocclusion Acc.", &minDisOccAcc, -1.0f, 1.0f, "%.3f"))
+                        config->FsrMinDisOccAcc = minDisOccAcc;
 
-                        ShowTooltip("Increasing this scales FSR3.1 computed shading\n"
-                                    "change value at read to have higher reactiveness.");
-
-                        // Accumulation Added Per Frame
-                        float accAddPerFrame = config->FsrAccAddPerFrame.value_or_default();
-                        if (ImGui::SliderFloat("Acc. Added Per Frame", &accAddPerFrame, 0.0f, 1.0f, "%.3f"))
-                            config->FsrAccAddPerFrame = accAddPerFrame;
-
-                        ShowTooltip("Corresponds to amount of accumulation added per frame\n"
-                                    "at pixel coordinate where disocclusion occured or when\n"
-                                    "reactive mask value is > 0.0f. Decreasing this and \n"
-                                    "drawing the ghosting object (IE no mv) to reactive mask \n"
-                                    "with value close to 1.0f can decrease temporal ghosting.\n"
-                                    "Decreasing this could result in more thin feature pixels flickering.");
-
-                        // Min Disocclusion Accumulation
-                        float minDisOccAcc = config->FsrMinDisOccAcc.value_or_default();
-                        if (ImGui::SliderFloat("Min. Disocclusion Acc.", &minDisOccAcc, -1.0f, 1.0f, "%.3f"))
-                            config->FsrMinDisOccAcc = minDisOccAcc;
-
-                        ShowTooltip("Increasing this value may reduce white pixel temporal\n"
-                                    "flickering around swaying thin objects that are disoccluding \n"
-                                    "one another often. Too high value may increase ghosting.");
-                    }
-
-                    ImGui::PopItemWidth();
-
-                    ImGui::Spacing();
-                    ImGui::Spacing();
+                    ShowTooltip("Increasing this value may reduce white pixel temporal\n"
+                                "flickering around swaying thin objects that are disoccluding \n"
+                                "one another often. Too high value may increase ghosting.");
                 }
+
+                ImGui::PopItemWidth();
+
+                ImGui::Spacing();
+                ImGui::Spacing();
             }
         }
     }
@@ -3369,6 +3571,28 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
     }
 }
 
+// Slider for overriding the game's FG ratio: Off, Default (no override), 2X, 3X... up to maxInterpolationCount
+static bool RenderRatioOverrideSlider(const char* label, CustomOptional<int, NoDefault>& setting,
+                                      int maxInterpolationCount)
+{
+    // 0 = Off, 1 = Default, 2+ = ratio (interpolated frame count + 1)
+    int index = 1;
+    if (setting.has_value())
+        index = setting.value() == 0 ? 0 : std::min(setting.value(), maxInterpolationCount) + 1;
+
+    const std::string preview = index == 0 ? "Off" : index == 1 ? "Default" : std::format("{}X", index);
+
+    if (!ImGui::SliderInt(label, &index, 0, maxInterpolationCount + 1, preview.c_str(), ImGuiSliderFlags_NoInput))
+        return false;
+
+    if (index == 1)
+        setting.reset();
+    else
+        setting = index == 0 ? 0 : index - 1;
+
+    return true;
+}
+
 void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
@@ -3395,7 +3619,8 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             "Can be used with any FG Output\n\nRequires enabling FSR-FG in game settings\nSupports HUDless out of the box" },
         { FGInput::FSRFG30, "FSR 3.0 FG",
             "Can be used with any FG Output\n\nRequires enabling FSR-FG in game settings\nSupports HUDless out of the box" },
-        { FGInput::XeFG, "XeFG" },
+        { FGInput::XeFG, "XeFG",
+            "Can be used with any FG Output\n\nRequires enabling XeSS-FG in game settings\nSupports HUDless out of the box" },
         { FGInput::Synthesized, "Synthesized",
             "Experimental, for games with no upscaler\n\nNo motion vectors needed, uses only the presented image\nD3D11 and D3D12 games, FSR FG or DLSSG output\n\nDLSSG needs an RTX 40 or newer, the Streamline files\nand the None (Real DLSSG) Nvngx replacement" }
     };
@@ -3406,7 +3631,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     // XeFG input requirements
     auto constexpr xefgInputIndex = (uint32_t) FGInput::XeFG;
-    inputOptions[xefgInputIndex].set_disabled(true, "Support not implemented, they meant FG Output");
+    inputOptions[xefgInputIndex].set_disabled(state.swapchainApi != API::DX12, "Unsupported API");
 
     // OptiFG requirements
     auto constexpr optiFgIndex = (uint32_t) FGInput::Upscaler;
@@ -3618,14 +3843,15 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                 ShowTooltip("The FG that you will actually be using");
             }
 
-            ImGui::EndTable();
-        }
+            if (showNvngxFgDowndown)
+            {
+                ImGui::TableNextColumn();
 
-        // Should be on a new line
-        if (showNvngxFgDowndown)
-        {
-            PopulateCombo("FG Nvngx Replacement", config->FGNvngxReplacement, nvngxOptions);
-            ShowTooltip("What backend to use instead of the real DLSSG");
+                PopulateCombo("FG Nvngx Replacement", config->FGNvngxReplacement, nvngxOptions);
+                ShowTooltip("What backend to use instead of the real DLSSG");
+            }
+
+            ImGui::EndTable();
         }
 
         // Try to avoid having None selected when the gpu doesn't support DLSSG + some fallbacks
@@ -3644,7 +3870,13 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
         const bool nvngxFgChanged = (replaceFgOutputWithNvngx || showNvngxFgDowndown) &&
                                     state.activeFgNvngx != config->FGNvngxReplacement.value_or_default();
-        state.fgSettingsChanged = state.activeFgOutput != config->FGOutput.value_or_default() ||
+        // XeFG input to XeFG output runs without OptiScaler's FG output
+        auto configFgOutput = config->FGOutput.value_or_default();
+
+        if (config->FGInput.value_or_default() == FGInput::XeFG && configFgOutput == FGOutput::XeFG)
+            configFgOutput = FGOutput::NoFG;
+
+        state.fgSettingsChanged = state.activeFgOutput != configFgOutput ||
                                   state.activeFgInput != config->FGInput.value_or_default() || nvngxFgChanged;
 
         if (state.fgSettingsChanged)
@@ -3745,70 +3977,35 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             ImGui::PopItemWidth();
         }
 
+        // XeFG input to XeFG output: the game's own XeFG, like Override DLSSG Ratio
+        if (XeFGInputs::Passthrough() && XeFGInputs::MaxInterpolations() >= 1)
+        {
+            ImGui::PushItemWidth(150.0f * menuResScale);
+            RenderRatioOverrideSlider("Override XeFG Ratio", config->FGXeFGOverrideInterpolationCount,
+                                      (int) XeFGInputs::MaxInterpolations());
+            ImGui::PopItemWidth();
+        }
+
         const bool dlssgInputOrOutput =
             state.activeFgOutput == FGOutput::DLSSG || state.activeFgInput == FGInput::DLSSG;
 
         ImGui::BeginDisabled(state.dlssgGameDMFGSupported && config->FGDLSSGOverrideForceDMFG.value_or_default());
         if (state.dlssgMfgMax.has_value() && state.dlssgMfgMax.value() >= 1 && !dlssgInputOrOutput)
         {
-            auto maxInterpolationCount = state.dlssgMfgMax.value();
+            ImGui::PushItemWidth(150.0f * menuResScale);
 
-            if (maxInterpolationCount >= 1)
+            if (RenderRatioOverrideSlider("Override DLSSG Ratio", config->FGDLSSGOverrideInterpolationCount,
+                                          state.dlssgMfgMax.value()))
             {
-                // Map config value to UI index
-                int currentSet = 0;
-                if (config->FGDLSSGOverrideInterpolationCount.has_value())
-                {
-                    currentSet = config->FGDLSSGOverrideInterpolationCount.value() + 1;
-                }
+                LOG_DEBUG("DLSSG Interpolation Count set to: {}",
+                          config->FGDLSSGOverrideInterpolationCount.has_value()
+                              ? std::to_string(config->FGDLSSGOverrideInterpolationCount.value())
+                              : std::string("Default"));
 
-                std::string currentIntCountStr;
-                if (currentSet == 0)
-                    currentIntCountStr = "Default";
-                else if (currentSet == 1)
-                    currentIntCountStr = "Off";
-                else
-                    currentIntCountStr = std::to_string(currentSet) + "X";
-
-                ImGui::PushItemWidth(95.0f * menuResScale);
-
-                if (ImGui::BeginCombo("Override DLSSG Ratio", currentIntCountStr.c_str()))
-                {
-                    for (int i = 0; i <= maxInterpolationCount + 1; i++)
-                    {
-                        std::string modeStr;
-                        if (i == 0)
-                            modeStr = "Default";
-                        else if (i == 1)
-                            modeStr = "Off";
-                        else
-                            modeStr = std::to_string(i) + "X";
-
-                        if (ImGui::Selectable(modeStr.c_str(), (currentSet == i)))
-                        {
-                            if (i == 0)
-                            {
-                                // Default, no override
-                                config->FGDLSSGOverrideInterpolationCount.reset();
-                            }
-                            else
-                            {
-                                // UI index, store value
-                                int framesToGenerate = i - 1;
-
-                                LOG_DEBUG("DLSSG Interpolation Count set to: {}", framesToGenerate);
-                                config->FGDLSSGOverrideInterpolationCount = framesToGenerate;
-                            }
-
-                            StreamlineHooks::updateDlssgOptions();
-                        }
-                    }
-
-                    ImGui::EndCombo();
-                }
-
-                ImGui::PopItemWidth();
+                StreamlineHooks::updateDlssgOptions();
             }
+
+            ImGui::PopItemWidth();
         }
 
         ImGui::EndDisabled();
@@ -3826,7 +4023,8 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
             ImGui::BeginDisabled(state.dlssgLastSetMode != sl::DLSSGMode::eDynamic);
             static float fpsTarget = config->FGDLSSGFramerateTargetDMFG.value_or_default();
-            ImGui::SliderFloat("DMFG FPS Target", &fpsTarget, 0, 200, "%.0f");
+            const float fpsSliderMax = (float) std::max(200, refreshRate);
+            ImGui::SliderFloat("DMFG FPS Target", &fpsTarget, 0, fpsSliderMax, "%.0f");
 
             ShowTooltip("An active limit of 0 means auto-detect the display refresh rate");
 
@@ -3884,9 +4082,9 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             ImGui::EndDisabled();
         }
 
-        const bool showOutputSpecificFGSettings = state.activeFgInput == FGInput::DLSSG ||
-                                                  state.activeFgInput == FGInput::FSRFG ||
-                                                  state.activeFgInput == FGInput::FSRFG30;
+        const bool showOutputSpecificFGSettings =
+            state.activeFgInput == FGInput::DLSSG || state.activeFgInput == FGInput::FSRFG ||
+            state.activeFgInput == FGInput::FSRFG30 || state.activeFgInput == FGInput::XeFG;
 
         const bool showHudCutoff = state.activeFgInput == FGInput::NvngxFG || state.activeFgOutput == FGOutput::FSRFG;
 
@@ -4038,6 +4236,91 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     }
 }
 
+// Replaces the Active checkbox + MFG combo of FG outputs with a single slider
+// maxInterpolationCount of 0 means the output doesn't generate frames, "On" is shown instead of "2X"
+void MenuCommon::RenderFGModeSlider(RenderMenuContext& ctx, const char* label, int maxInterpolationCount,
+                                    CustomOptional<int>* countConfig)
+{
+    auto& state = ctx.state;
+    auto config = ctx.config;
+
+    // -1 = Default (follow game), 0 = Off, >0 = interpolated frame count
+    auto modeName = [&](int mode) -> std::string
+    {
+        if (mode < 0)
+            return "Default";
+
+        if (mode == 0)
+            return "Off";
+
+        if (maxInterpolationCount == 0)
+            return "On";
+
+        return std::format("{}X", mode + 1);
+    };
+
+    const int maxMode = std::max(maxInterpolationCount, 1);
+
+    int current = 0;
+    if (config->FGFollowsGame())
+        current = -1;
+    else if (config->FGEnabled.value_or_default())
+        current = countConfig != nullptr ? std::clamp(countConfig->value_or_default(), 1, maxMode) : 1;
+
+    // Slider order: Off, (Default), 2X, 3X... up to the output's max
+    std::vector<int> modes { 0 };
+    if (Config::FGCanFollowGame())
+        modes.push_back(-1);
+
+    for (int mode = 1; mode <= maxMode; mode++)
+        modes.push_back(mode);
+
+    int index = (int) (std::find(modes.begin(), modes.end(), current) - modes.begin());
+    if (index >= (int) modes.size())
+        index = 0;
+
+    std::string preview = modeName(current);
+    if (current < 0)
+    {
+        const int gameMode =
+            state.dlssgInputGameEnabled ? std::min(state.dlssgInputGameInterpolationCount, maxMode) : 0;
+        preview += std::format(" ({})", modeName(gameMode));
+    }
+
+    ImGui::PushItemWidth(150.0f * ctx.menuResScale);
+
+    if (ImGui::SliderInt(label, &index, 0, (int) modes.size() - 1, preview.c_str(), ImGuiSliderFlags_NoInput) &&
+        modes[index] != current)
+    {
+        const int mode = modes[index];
+        fgHotkeyLeftDefault = false;
+
+        if (mode < 0)
+        {
+            config->FGEnabled = std::optional<bool> {};
+        }
+        else
+        {
+            config->FGEnabled = mode > 0;
+
+            if (mode > 0 && countConfig != nullptr)
+                *countConfig = mode;
+        }
+
+        LOG_DEBUG("FG mode set to: {}", modeName(mode));
+
+        if (config->IsFGEnabled())
+            state.fgChanged = true;
+    }
+
+    ImGui::PopItemWidth();
+
+    if (Config::FGCanFollowGame())
+        ShowTooltip("Frame Generation mode\nDefault follows the game's DLSS FG setting");
+    else
+        ShowTooltip("Frame Generation mode");
+}
+
 void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
@@ -4064,16 +4347,21 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
             if (state.ffxFGVersionNames.size() > 0)
             {
-                ImGui::PushItemWidth(135.0f * menuResScale);
+                ImGui::PushItemWidth(115.0f * menuResScale);
 
                 auto currentName = StrFmt("FSR %s", state.ffxFGVersionNames[_ffxFGIndex]);
-                if (ImGui::BeginCombo("FFX FG", currentName.c_str()))
+                if (ImGui::BeginCombo("FFX FG Version", currentName.c_str()))
                 {
                     for (int n = 0; n < state.ffxFGVersionIds.size(); n++)
                     {
                         auto name = StrFmt("FSR %s", state.ffxFGVersionNames[n]);
                         if (ImGui::Selectable(name.c_str(), config->FfxFGIndex.value_or_default() == n))
+                        {
                             _ffxFGIndex = n;
+                            config->FfxFGIndex = _ffxFGIndex;
+                            state.fgChanged = true;
+                            state.scChanged = true;
+                        }
                     }
 
                     ImGui::EndCombo();
@@ -4081,34 +4369,16 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 ImGui::PopItemWidth();
 
                 ShowTooltip("List of FGs reported by FFX SDK");
-
-                ImGui::SameLine(0.0f, 6.0f);
-
-                if (ImGui::Button("Change FG") && _ffxFGIndex != config->FfxFGIndex.value_or_default())
-                {
-                    config->FfxFGIndex = _ffxFGIndex;
-                    state.fgChanged = true;
-                    state.scChanged = true;
-                }
             }
 
-            bool fgActive = config->FGEnabled.value_or_default();
-            if (ImGui::Checkbox("Active##2", &fgActive))
-            {
-                config->FGEnabled = fgActive;
-                LOG_DEBUG("FGEnabled set FGEnabled: {}", fgActive);
-
-                if (config->FGEnabled.value_or_default())
-                    state.fgChanged = true;
-            }
-            ShowTooltip("Enable Frame Generation");
+            RenderFGModeSlider(ctx, "Frame Gen##fsrfg", 1, nullptr);
 
             bool fgAsync = config->FGAsync.value_or_default();
             if (ImGui::Checkbox("Allow Async", &fgAsync))
             {
                 config->FGAsync = fgAsync;
 
-                if (config->FGEnabled.value_or_default())
+                if (config->IsFGEnabled())
                 {
                     state.fgChanged = true;
                     state.scChanged = true;
@@ -4124,7 +4394,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             {
                 config->FGDebugView = fgDV;
 
-                if (config->FGEnabled.value_or_default())
+                if (config->IsFGEnabled())
                 {
                     state.fgChanged = true;
                     LOG_DEBUG("DebugView set FGChanged");
@@ -4320,7 +4590,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
         if (!correctMVs || state.realExclusiveFullscreen)
         {
-            config->FGEnabled.reset();
+            config->FGEnabled.set_volatile_value(false);
             config->FGXeFGDebugView.reset();
         }
 
@@ -4369,62 +4639,8 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
         ImGui::BeginDisabled(!correctMVs || cantActivate);
 
-        bool fgActive = config->FGEnabled.value_or_default();
-        if (ImGui::Checkbox("Active##3", &fgActive))
-        {
-            config->FGEnabled = fgActive;
-            LOG_DEBUG("Enabled set FGEnabled: {}", fgActive);
-
-            if (config->FGEnabled.value_or_default())
-                state.fgChanged = true;
-        }
-
-        ShowTooltip("Enable Frame Generation");
-
-        auto maxInterpolationCount = fgOutput->GetMaxInterpolationCount();
-
-        if (maxInterpolationCount > 1)
-        {
-            ImGui::SameLine(0.0f, 16.0f);
-
-            auto currentSet = fgOutput->GetInterpolatedFrameCount() - 1;
-
-            std::string currentIntCountStr = std::to_string(currentSet + 2) + "X";
-
-            ImGui::PushItemWidth(95.0f * menuResScale);
-
-            if (ImGui::BeginCombo("MFG", currentIntCountStr.c_str()))
-            {
-                for (int i = 0; i < maxInterpolationCount; i++)
-                {
-                    std::string modeStr = std::to_string(i + 2) + "X";
-
-                    if (ImGui::Selectable(modeStr.c_str(), (currentSet == i)))
-                    {
-                        LOG_DEBUG("XeFG Interpolation Count set to: {}", i + 1);
-                        state.fgChanged = true;
-                        config->FGXeFGInterpolationCount = i + 1;
-                    }
-                }
-
-                ImGui::EndCombo();
-            }
-
-            ImGui::PopItemWidth();
-
-            ShowTooltip("Set XeFG interpolation count");
-        }
-
-        ImGui::SameLine(0.0f, 16.0f);
-        ImGui::BeginDisabled(!fgOutput->IsUsingHudlessAny() || XeFGProxy::SetUiCompositionState() == nullptr);
-        bool fgCompositeUI = config->FGXeFGUIComposition.value_or_default();
-        if (ImGui::Checkbox("UI Composition", &fgCompositeUI))
-            config->FGXeFGUIComposition = fgCompositeUI;
-
-        ShowTooltip("Disable HUD/UI interpolation\n"
-                    "Reverts back to previous XeFG 2 behaviour\n\n"
-                    "Fixes artifacting transparent HUD/UI");
-        ImGui::EndDisabled();
+        RenderFGModeSlider(ctx, "Frame Gen##xefg", fgOutput->GetMaxInterpolationCount(),
+                           &config->FGXeFGInterpolationCount);
 
         bool fgDV = config->FGXeFGDebugView.value_or_default();
         if (ImGui::Checkbox("Debug View##2", &fgDV))
@@ -4451,6 +4667,17 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                     "resolution to your display resolution\n"
                     "Might cause some instability issues.\n\n"
                     "NEEDS GAME RESTART TO BE ACTIVE!");
+
+        ImGui::SameLine(0.0f, 16.0f);
+        ImGui::BeginDisabled(!fgOutput->IsUsingHudlessAny() || XeFGProxy::SetUiCompositionState() == nullptr);
+        bool fgCompositeUI = config->FGXeFGUIComposition.value_or_default();
+        if (ImGui::Checkbox("UI Composition", &fgCompositeUI))
+            config->FGXeFGUIComposition = fgCompositeUI;
+
+        ShowTooltip("Disable HUD/UI interpolation\n"
+                    "Reverts back to previous XeFG 2 behaviour\n\n"
+                    "Fixes artifacting transparent HUD/UI");
+        ImGui::EndDisabled();
 
         // Disable this for now
         // ImGui::SameLine(0.0f, 16.0f);
@@ -4534,54 +4761,11 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.f, 0.f, 1.f)), "OFF");
         }
 
-        bool fgActive = config->FGEnabled.value_or_default();
-        if (ImGui::Checkbox("Active##4", &fgActive))
+        RenderFGModeSlider(ctx, "Frame Gen##dlssg", fgOutput->GetMaxInterpolationCount(),
+                           &config->FGDLSSGInterpolationCount);
+
+        if (fgOutput->GetMaxInterpolationCount() > 1)
         {
-            config->FGEnabled = fgActive;
-            LOG_DEBUG("Enabled set FGEnabled: {}", fgActive);
-
-            if (config->FGEnabled.value_or_default())
-                state.fgChanged = true;
-        }
-
-        ShowTooltip("Enable Frame Generation");
-
-        auto maxInterpolationCount = fgOutput->GetMaxInterpolationCount();
-
-        if (maxInterpolationCount > 1)
-        {
-            ImGui::SameLine(0.0f, 16.0f);
-
-            ImGui::BeginDisabled(config->FGDLSSGForceDMFG.value_or_default());
-
-            auto currentSet = fgOutput->GetInterpolatedFrameCount() - 1;
-
-            std::string currentIntCountStr = std::to_string(currentSet + 2) + "X";
-
-            ImGui::PushItemWidth(95.0f * menuResScale);
-
-            if (ImGui::BeginCombo("MFG", currentIntCountStr.c_str()))
-            {
-                for (int i = 0; i < maxInterpolationCount; i++)
-                {
-                    std::string modeStr = std::to_string(i + 2) + "X";
-
-                    if (ImGui::Selectable(modeStr.c_str(), (currentSet == i)))
-                    {
-                        LOG_DEBUG("DLSSG Interpolation Count set to: {}", i + 1);
-                        config->FGDLSSGInterpolationCount = i + 1;
-                    }
-                }
-
-                ImGui::EndCombo();
-            }
-
-            ImGui::PopItemWidth();
-
-            ShowTooltip("Set DLSSG interpolation count");
-
-            ImGui::EndDisabled();
-
             if (fgOutput->GetDMFGSupport())
             {
                 ImGui::SameLine(0.0f, 16.0f);
@@ -4590,11 +4774,13 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                     ImGui::Checkbox("Force Dynamic MFG", &dynamicMFG))
                 {
                     config->FGDLSSGForceDMFG = dynamicMFG;
+                    state.fgChanged = true;
                 }
 
                 ImGui::BeginDisabled(!config->FGDLSSGForceDMFG.value_or_default());
                 static float fpsTarget = config->FGDLSSGFramerateTargetDMFG.value_or_default();
-                ImGui::SliderFloat("DMFG FPS Target", &fpsTarget, 0, 200, "%.0f");
+                float fpsSliderMax = (float) std::max(200, refreshRate);
+                ImGui::SliderFloat("DMFG FPS Target", &fpsTarget, 0, fpsSliderMax, "%.0f");
 
                 ShowTooltip("An active limit of 0 means auto-detect the display refresh rate");
 
@@ -4651,15 +4837,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
         if (state.activeFgOutput == FGOutput::Reprojection)
         {
-            bool fgActive = config->FGEnabled.value_or_default();
-            if (ImGui::Checkbox("Active##2", &fgActive))
-            {
-                config->FGEnabled = fgActive;
-                LOG_DEBUG("Reprojection enabled: {}", fgActive);
-
-                if (config->FGEnabled.value_or_default())
-                    state.fgChanged = true;
-            }
+            RenderFGModeSlider(ctx, "Reprojection##mode", 0, nullptr);
         }
         else
         {
@@ -4669,8 +4847,8 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 config->FGReprojectionEnabled = reprojectionActive;
                 LOG_DEBUG("Reprojection enabled: {}", reprojectionActive);
             }
+            ShowTooltip("Enable reprojection");
         }
-        ShowTooltip("Enable reprojection");
 
         ImGui::SameLine();
 
@@ -4710,10 +4888,19 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                     "Cyberpunk is around 0.02");
 
         uint32_t cutoffExpandPx = config->ReprojectionCutoffExpand.value_or_default();
-        if (SliderUInt("Cutoff expand", &cutoffExpandPx, 0, 2))
+        if (SliderUInt("Cutoff expand", &cutoffExpandPx, 0, 8))
             config->ReprojectionCutoffExpand = cutoffExpandPx;
-        ShowTooltip("A toddler implemented this so it's super slow\n"
+        ShowTooltip("Expands the cutoff area by this many depth pixels\n"
                     "Use only when you see an outline left by the cutoff process");
+
+        if (bool lateLatch = config->ReprojectionLateLatch.value_or_default();
+            ImGui::Checkbox("Late latch mouse", &lateLatch))
+        {
+            config->ReprojectionLateLatch = lateLatch;
+        }
+        ShowTooltip("Reads the mouse right when the GPU starts the reprojection\n"
+                    "instead of when the frame is presented on the CPU.\n"
+                    "Lowers latency, especially when GPU bound");
     }
 
     // OptiFG
@@ -5116,7 +5303,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 const bool isDllProxyNvngxType =
                     activeNvngxFg == FGNvngxReplacement::Nukems || activeNvngxFg == FGNvngxReplacement::Arturs;
                 if (isDllProxyNvngxType && !primaryGpu.dlssCapable && primaryGpu.fsr4Support == FSR4Support::None &&
-                    !primaryGpu.usesVkd3dProton && !isUnrealEngine)
+                    !primaryGpu.d3d12IsVkd3dProton && !isUnrealEngine)
                 {
                     if (bool makeDepthCopy = config->NvngxFGMakeDepthCopy.value_or_default();
                         ImGui::Checkbox("Fix broken visuals", &makeDepthCopy))
@@ -5280,7 +5467,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 {
                     config->FGAsync = fgAsync;
 
-                    if (config->FGEnabled.value_or_default())
+                    if (config->IsFGEnabled())
                     {
                         state.fgChanged = true;
                         LOG_DEBUG("Async set FGChanged");
@@ -5294,7 +5481,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 {
                     config->FGDebugView = fgDV;
 
-                    if (config->FGEnabled.value_or_default())
+                    if (config->IsFGEnabled())
                     {
                         state.fgChanged = true;
                         LOG_DEBUG("DebugView set FGChanged");
@@ -5531,6 +5718,16 @@ void MenuCommon::RenderFramerateSettings(RenderMenuContext& ctx)
         {
             fakenvapiMode = fakenvapi::getCurrentMode();
 
+#ifdef LOW_LATENCY_INPUTS
+            // The D3D Reflex output limits through the driver's Reflex, fakenvapi's mode is only its own
+            LowLatencyInput activeInput {};
+            LowLatencyMode activeOutput {};
+            InputCommon::get_currently_active(activeInput, activeOutput);
+
+            if (activeOutput == LowLatencyMode::Reflex)
+                fakenvapiMode = LowLatencyMode::None;
+#endif
+
             if (fakenvapiMode == LowLatencyMode::AntiLag2)
                 currentMethod = "FSR Anti-Lag 2.0";
             else if (fakenvapiMode == LowLatencyMode::LatencyFlex)
@@ -5552,6 +5749,26 @@ void MenuCommon::RenderFramerateSettings(RenderMenuContext& ctx)
                 ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
                                    "Using RTSS Reflex injection with FSR Anti-Lag 2.0 and FSR FG "
                                    "might cause issues");
+        }
+        else if (InputCommon::can_limit_fps())
+        {
+            fakenvapiMode = InputCommon::active_output();
+
+            // The game's XeFG with its own XeLL
+            if (InputXeLL::IsNative())
+                currentMethod = "Game's XeLL";
+            else if (fakenvapiMode == LowLatencyMode::AntiLag2)
+                currentMethod = "FSR Anti-Lag 2.0";
+            else if (fakenvapiMode == LowLatencyMode::LatencyFlex)
+                currentMethod = "LatencyFlex";
+            else if (fakenvapiMode == LowLatencyMode::AntiLagVk)
+                currentMethod = "Vulkan AntiLag";
+            else if (fakenvapiMode == LowLatencyMode::Reflex)
+                currentMethod = "Reflex";
+            else if (fakenvapiMode == LowLatencyMode::FpsLimiter)
+                currentMethod = "FPS Limiter";
+            else
+                currentMethod = "XeLL";
         }
         else
         {
@@ -5737,19 +5954,24 @@ void MenuCommon::RenderLowLatencySettings(RenderMenuContext& ctx)
     SectionTitle("Low Latency");
 
     static std::vector<MenuOption<LowLatencyInput>> lowLatencyInput = {
-        { LowLatencyInput::None, "None (Off)" },    { LowLatencyInput::Auto, "Auto" },
-        { LowLatencyInput::AntiLag2, "AntiLag 2" }, { LowLatencyInput::Reflex, "Reflex" },
-        { LowLatencyInput::XeLL, "XeLL" },          { LowLatencyInput::UeLowLatency, "UeLowLatency" },
+        { LowLatencyInput::None, "None" },
+        { LowLatencyInput::Auto, "Default" },
+        { LowLatencyInput::AntiLag2, "FSR Anti-Lag 2.0" },
+        { LowLatencyInput::Reflex, "Reflex" },
+        { LowLatencyInput::XeLL, "XeLL" },
+        { LowLatencyInput::UeLowLatency, "UeLowLatency" },
+        { LowLatencyInput::OptiScaler, "OptiScaler" },
     };
 
     static std::vector<MenuOption<LowLatencyMode>> lowLatencyOutput = {
-        { LowLatencyMode::None, "None (Off)" },
+        { LowLatencyMode::None, "None" },
         { LowLatencyMode::Auto, "Auto" },
         { LowLatencyMode::LatencyFlex, "LatencyFlex" },
-        { LowLatencyMode::AntiLag2, "AntiLag 2" },
+        { LowLatencyMode::AntiLag2, "FSR Anti-Lag 2.0" },
         { LowLatencyMode::XeLL, "XeLL" },
         { LowLatencyMode::AntiLagVk, "AntiLag Vk" },
         { LowLatencyMode::Reflex, "Reflex" },
+        { LowLatencyMode::FpsLimiter, "FPS Limiter", "Only limits the FPS" },
     };
 
     LowLatencyInput activeInput {};
@@ -5776,30 +5998,149 @@ void MenuCommon::RenderLowLatencySettings(RenderMenuContext& ctx)
 
         auto avalibleInputs = InputCommon::get_avaliable_inputs();
 
-        lowLatencyInput[(uint32_t) LowLatencyInput::AntiLag2].set_disabled(!avalibleInputs[LowLatencyInput::AntiLag2]);
-        lowLatencyInput[(uint32_t) LowLatencyInput::Reflex].set_disabled(!avalibleInputs[LowLatencyInput::Reflex]);
-        lowLatencyInput[(uint32_t) LowLatencyInput::XeLL].set_disabled(!avalibleInputs[LowLatencyInput::XeLL]);
-        lowLatencyInput[(uint32_t) LowLatencyInput::UeLowLatency].set_disabled(
-            !avalibleInputs[LowLatencyInput::UeLowLatency]);
+        // Inputs become available as the game starts sending them
+        for (auto type : { LowLatencyInput::AntiLag2, LowLatencyInput::Reflex, LowLatencyInput::XeLL,
+                           LowLatencyInput::UeLowLatency })
+        {
+            auto& option = lowLatencyInput[(uint32_t) type];
+            option.disabled = !avalibleInputs[type];
+            option.tooltip = option.disabled ? "The game doesn't send it" : "";
+        }
 
-        // need to have a value before combo
-        if (!config->LowLatencyInput.has_value())
-            config->LowLatencyInput = config->LowLatencyInput.value_or_default();
+        auto defaultInput = InputCommon::default_input();
+        lowLatencyInput[(uint32_t) LowLatencyInput::None].set_hidden(true);
 
-        PopulateCombo("Input", config->LowLatencyInput, lowLatencyInput);
+        // Only the default when the game has nothing of its own
+        lowLatencyInput[(uint32_t) LowLatencyInput::OptiScaler].set_hidden(true);
+        lowLatencyInput[(uint32_t) LowLatencyInput::Auto].label = "Auto";
+        lowLatencyInput[(uint32_t) LowLatencyInput::Auto].tooltip =
+            "The best input the game sends: Reflex, XeLL when enabled in the game, AntiLag 2, UE, XeLL.\n"
+            "AntiLag 2 first while the game's FSR-FG reports its frames through it.\n"
+            "Without any, OptiScaler's own with the DLSSG output.";
+
+        auto forcedInput = InputCommon::forced_input();
+        auto input = forcedInput.value_or(config->LowLatencyInput.value_or_default());
+
+        if (input == LowLatencyInput::None)
+            input = LowLatencyInput::Auto;
+
+        auto selectedInput = input;
+
+        ImGui::BeginDisabled(forcedInput.has_value());
+        PopulateCombo("Input", selectedInput, lowLatencyInput);
+        ImGui::EndDisabled();
+
+        if (forcedInput.has_value() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Set by XeFG: the game's own keeps its XeLL");
+        else if (selectedInput != input)
+            config->LowLatencyInput = selectedInput;
 
         ImGui::TableNextColumn();
 
-        lowLatencyOutput[(uint32_t) LowLatencyMode::AntiLagVk].set_disabled(true, "No support");
-        lowLatencyOutput[(uint32_t) LowLatencyMode::Reflex].set_disabled(true, "No support");
+        lowLatencyOutput[(uint32_t) LowLatencyMode::None].set_hidden(true);
 
-        // need to have a value before combo
-        if (!config->LowLatencyOutput.has_value())
-            config->LowLatencyOutput = config->LowLatencyOutput.value_or_default();
+        // Each API has its own, the other API's selection maps to it. The API can change, so no sticky setters.
+        const auto api = InputCommon::uses_api();
+        const bool vulkan = api == API::Vulkan;
+        const bool outputForced = InputCommon::forced_output().has_value();
+        const auto vendorId = IdentifyGpu::getPrimaryGpu().vendorId;
+        const bool nvidia = vendorId == VendorId::Nvidia;
 
-        PopulateCombo("Output", config->LowLatencyOutput, lowLatencyOutput);
+        // OptiScaler's XeFG paces with XeLL on D3D12 (also for D3D11 games through interop), the GPU's Reflex or
+        // AntiLag 2 output can sleep instead while XeFG keeps an XeLL context of its own
+        const bool optiXefg = state.activeFgOutput == FGOutput::XeFG;
+
+        lowLatencyOutput[(uint32_t) LowLatencyMode::AntiLag2].hidden = vulkan;
+        lowLatencyOutput[(uint32_t) LowLatencyMode::XeLL].hidden =
+            !outputForced && !optiXefg && (vulkan || api == API::DX11);
+        lowLatencyOutput[(uint32_t) LowLatencyMode::AntiLagVk].hidden = !vulkan;
+
+        auto disable = [](MenuOption<LowLatencyMode>& option, bool condition, const char* reason)
+        {
+            option.disabled = condition;
+            option.tooltip = condition ? reason : "";
+        };
+
+        disable(lowLatencyOutput[(uint32_t) LowLatencyMode::AntiLagVk], VulkanHooks::o_vkAntiLagUpdateAMD == nullptr,
+                "Needs an AMD GPU with VK_AMD_anti_lag");
+
+        if (vulkan)
+        {
+            disable(lowLatencyOutput[(uint32_t) LowLatencyMode::Reflex],
+                    !nvidia || VulkanHooks::o_vkSetLatencySleepModeNV == nullptr,
+                    "Needs an Nvidia GPU with VK_NV_low_latency2");
+        }
+        else
+        {
+            disable(lowLatencyOutput[(uint32_t) LowLatencyMode::Reflex], !nvidia || fakenvapi::isUsingAsMainNvapi(),
+                    "Needs an Nvidia GPU");
+        }
+
+        disable(lowLatencyOutput[(uint32_t) LowLatencyMode::AntiLag2], vendorId != VendorId::AMD, "Needs an AMD GPU");
+        disable(lowLatencyOutput[(uint32_t) LowLatencyMode::LatencyFlex], optiXefg, "Not with XeFG");
+
+        lowLatencyOutput[(uint32_t) LowLatencyMode::Auto].label = "Auto";
+        lowLatencyOutput[(uint32_t) LowLatencyMode::Auto].tooltip =
+            vulkan ? "The GPU's own: AntiLag on AMD, Reflex on Nvidia, LatencyFlex otherwise"
+            : api == API::DX11
+                ? "The GPU's own: AntiLag 2 on AMD, Reflex on Nvidia, LatencyFlex otherwise"
+                : "The GPU's own: AntiLag 2 on AMD, Reflex on Nvidia, XeLL on Intel, LatencyFlex otherwise";
+
+        if (optiXefg)
+        {
+            auto& autoTooltip = lowLatencyOutput[(uint32_t) LowLatencyMode::Auto].tooltip;
+            autoTooltip = "XeLL, XeFG paces with it.";
+
+            if (!lowLatencyOutput[(uint32_t) LowLatencyMode::Reflex].disabled)
+                autoTooltip += "\nReflex can do the sleeping instead, XeFG keeps an XeLL context of its own.";
+            else if (!lowLatencyOutput[(uint32_t) LowLatencyMode::AntiLag2].disabled)
+                autoTooltip += "\nAntiLag 2 can do the sleeping instead, XeFG keeps an XeLL context of its own.";
+        }
+
+        // Frame generation decides the output it works with
+        auto forcedOutput = InputCommon::forced_output();
+        auto output = forcedOutput.value_or(config->LowLatencyOutput.value_or_default());
+
+        // An output the GPU can't run works as Auto
+        if (output == LowLatencyMode::None || InputCommon::output_unavailable(output, api))
+            output = LowLatencyMode::Auto;
+
+        // The other API's AntiLag
+        if (vulkan && output == LowLatencyMode::AntiLag2)
+            output = LowLatencyMode::AntiLagVk;
+        else if (!vulkan && output == LowLatencyMode::AntiLagVk)
+            output = LowLatencyMode::AntiLag2;
+
+        // No XeLL on D3D11 unless OptiScaler's XeFG runs it on D3D12, Auto picks the GPU's own
+        if (!forcedOutput.has_value() && !optiXefg && api == API::DX11 && output == LowLatencyMode::XeLL)
+            output = LowLatencyMode::Auto;
+
+        auto selectedOutput = output;
+
+        ImGui::BeginDisabled(forcedOutput.has_value());
+        PopulateCombo("Output", selectedOutput, lowLatencyOutput);
+        ImGui::EndDisabled();
+
+        if (forcedOutput.has_value() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Set by XeFG: the game's own keeps its XeLL (only the FPS limit is OptiScaler's)");
+        else if (selectedOutput != output)
+            config->LowLatencyOutput = selectedOutput;
 
         ImGui::EndTable();
+    }
+
+    if (InputCommon::xefg_output_change_pending())
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)));
+        ImGui::TextWrapped("Save Settings and restart the game: XeFG keeps the low latency output it started with");
+        ImGui::PopStyleColor();
+    }
+
+    if (auto reason = InputCommon::incompatibility(activeInput, activeOutput))
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)));
+        ImGui::TextWrapped("Incompatible: %s", reason);
+        ImGui::PopStyleColor();
     }
 
     if (activeOutput == LowLatencyMode::LatencyFlex)
@@ -6629,17 +6970,17 @@ void MenuCommon::RenderAdvancedSettings(RenderMenuContext& ctx)
                 MARK_ALL_BACKENDS_CHANGED();
             }
 
+            // DRS
+            ImGui::TableNextColumn();
+            ConfigCheckbox("DRS Override Minimum", config->DrsMinOverrideEnabled,
+                           "Dynamic Resolution Scaling\nFix for games ignoring official DRS limits");
+
             ImGui::TableNextColumn();
             if (upscalerActive)
                 ConfigCheckbox("Enable Extended Limits", config->ExtendedLimits,
                                "Extended sliders limit for quality presets\n\n"
                                "Using this option changes resolution detection logic\n"
                                "and might cause issues and crashes!");
-
-            // DRS
-            ImGui::TableNextColumn();
-            ConfigCheckbox("DRS Override Minimum", config->DrsMinOverrideEnabled,
-                           "Dynamic Resolution Scaling\nFix for games ignoring official DRS limits");
 
             ImGui::TableNextColumn();
             ConfigCheckbox("DRS Override Maximum", config->DrsMaxOverrideEnabled,
@@ -7180,6 +7521,20 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
         {
             config->MenuBGColorA = alpha;
             ApplyThemeStyle();
+        }
+
+        if (_bgBlurTexture != ImTextureID_Invalid)
+        {
+            ConfigCheckbox("Background Blur", config->MenuBlur,
+                           "Blur the game behind the menu\nOnly visible when Background Alpha is below 1");
+
+            ImGui::BeginDisabled(!config->MenuBlur.value_or_default());
+
+            auto blurStrength = config->MenuBlurStrength.value_or_default();
+            if (ImGui::SliderFloat("Blur Strength", &blurStrength, 0.0f, 4.0f, "%.2f"))
+                config->MenuBlurStrength = blurStrength;
+
+            ImGui::EndDisabled();
         }
 
         ImGui::Spacing();
@@ -7833,7 +8188,7 @@ void MenuCommon::RenderDetectedInfo(RenderMenuContext& ctx)
 
     ScopedCard card { "Detected" };
 
-    if (ImGui::BeginTable("statusDetected", 4, ImGuiTableFlags_SizingStretchSame))
+    if (ImGui::BeginTable("statusDetected", 4, ImGuiTableFlags_SizingStretchProp))
     {
         StatusFlag("nvngx.dll", state.nvngxExists);
         StatusFlag("nvngx_dlss", state.NVNGX_DLSS_Path.has_value());
@@ -7951,7 +8306,10 @@ void MenuCommon::RenderStatusInfo(RenderMenuContext& ctx)
         {
             setupPairs();
 
-            pair("API", StrFmt("%s%s", ApiName(state.api), primaryGpu.usesDxvk ? " (DXVK)" : ""));
+            pair("API", StrFmt("%s%s", ApiName(state.api),
+                               IdentifyGpu::gameUsesDxvk()          ? " (DXVK)"
+                               : IdentifyGpu::gameUsesVkd3dProton() ? " (VKD3D)"
+                                                                    : ""));
             pair("Swapchain", ApiName(state.swapchainApi));
             pair("Input", ApiUpscalerInputName(state.currentInputApiName));
 
@@ -8076,7 +8434,7 @@ void MenuCommon::RenderStatusInfo(RenderMenuContext& ctx)
 
 static bool IsUpscalerActive(IFeature* feature) { return feature != nullptr && !feature->IsFrozen(); }
 
-static float FooterPlotHeight() { return ImGui::GetFrameHeight() * 2.0f; }
+static float FooterPlotHeight() { return ImGui::GetFrameHeight() * 1.0f; }
 
 // Everything RenderMainMenuFooter draws, every item is followed by the item spacing
 static float FooterHeight()
@@ -8220,6 +8578,15 @@ void MenuCommon::RenderCustomTab(RenderMenuContext& ctx)
         anyPinned = true;
 
         ImGui::PushID(boxes[i].id);
+
+        // Explains why the upscaler settings are missing, the Upscaling tab draws it above its boxes
+        if (strcmp(boxes[i].id, "upscaler") == 0)
+        {
+            auto feature = ctx.currentFeature;
+            if (feature == nullptr || !feature->IsInited() || feature->IsFrozen())
+                RenderCard(ctx, RenderUpscalerStateMessage);
+        }
+
         RenderMenuBox(ctx, boxes[i]);
         ImGui::PopID();
     }
@@ -8229,6 +8596,21 @@ void MenuCommon::RenderCustomTab(RenderMenuContext& ctx)
         ImGui::TextDisabled("Nothing picked yet, choose the boxes in Menu > Custom Tab");
     else if (ImGui::GetCursorPosY() == startY)
         ImGui::TextDisabled("None of the picked boxes are available right now");
+
+    // Hint pinned to the bottom of the tab
+    const float hintHeight = ImGui::GetFrameHeight();
+    const float gap = ImGui::GetContentRegionAvail().y - hintHeight - ImGui::GetStyle().ItemSpacing.y;
+    if (gap > 0.0f)
+        ImGui::Dummy(ImVec2(0.0f, gap));
+    else
+        ImGui::Spacing();
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    if (ImGui::SmallButton("Customise this tab"))
+        requestedMenuTab = "Menu";
+    ImGui::PopStyleColor(2);
 }
 
 void MenuCommon::RenderCustomTabSettings(RenderMenuContext& ctx)
@@ -8318,6 +8700,7 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
         const char* description;
         DrawFn draw; // Drawn above the boxes of the tab
         bool hideLabelInMenu;
+        bool (*visible)(RenderMenuContext&) = nullptr; // Tab hidden when returned false
     };
 
     // Boxes of a tab come from GetMenuBoxes, by the label of the tab
@@ -8331,6 +8714,9 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
         { "SYSTEM", "Textures", "Mipmap bias and anisotropic filtering." },
         { "SYSTEM", "Compatibility", "Init flags, hooks, plugins and game specific workarounds." },
         { "ADVANCED", "Menu", "Menu scale, theme, FPS overlay and keybinds." },
+        { "ADVANCED", "Quirks", "Game specific quirks applied by OptiScaler.",
++          [](RenderMenuContext& c) { RenderCard(c, RenderQuirksSettings); }, false,
++          [](RenderMenuContext& c) { return !c.state.detectedQuirks.empty(); } },
         { "ADVANCED", "Help / Status", "Support info. Filled dot: on or found, hollow dot: off or missing.", nullptr, true },
     };
     // clang-format on
@@ -8338,16 +8724,44 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
     constexpr int customTab = 0;
     const bool customTabEnabled = config->CustomTabEnabled.value_or_default();
 
+    auto isTabVisible = [&](int i)
+    {
+        if (i == customTab)
+            return customTabEnabled;
+        return tabs[i].visible == nullptr || tabs[i].visible(ctx);
+    };
+
+    if (requestedMenuTab != nullptr)
+    {
+        for (int i = 0; i < (int) std::size(tabs); i++)
+        {
+            if (strcmp(tabs[i].label, requestedMenuTab) == 0)
+                selectedMenuTab = i;
+        }
+
+        requestedMenuTab = nullptr;
+    }
+
     selectedMenuTab = std::clamp(selectedMenuTab, 0, (int) std::size(tabs) - 1);
 
-    if (selectedMenuTab == customTab && !customTabEnabled)
-        selectedMenuTab = customTab + 1;
+    // Selected tab can disappear, pick the first one that's visible
+    if (!isTabVisible(selectedMenuTab))
+    {
+        for (int i = 0; i < (int) std::size(tabs); i++)
+        {
+            if (isTabVisible(i))
+            {
+                selectedMenuTab = i;
+                break;
+            }
+        }
+    }
 
     const auto& style = ImGui::GetStyle();
 
     // Space kept free below for the frametime graph and the buttons
     const float footerHeight = FooterHeight();
-    // Never narrower than the original 120, and wide enough for the longest name: a translated one, or
+    // Never narrower than upstream's 130, and wide enough for the longest name: a translated one, or
     // a long tab, would otherwise run under the edge. The label is drawn 10 in from the item's left
     float labelsWidth = 0.0f;
     for (const Tab& tab : tabs)
@@ -8355,7 +8769,7 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
         labelsWidth = std::max(labelsWidth, ImGui::CalcTextSize(Localization::Tr(tab.label)).x + 10.0f * menuResScale);
         labelsWidth = std::max(labelsWidth, ImGui::CalcTextSize(Localization::Tr(tab.group)).x);
     }
-    const float sidebarWidth = std::max(120.0f * menuResScale, labelsWidth + 2.0f * style.WindowPadding.x);
+    const float sidebarWidth = std::max(130.0f * menuResScale, labelsWidth + 2.0f * style.WindowPadding.x);
     const float tabHeight = ImGui::GetFrameHeight() * 1.35f;
 
     // Sidebar -----------------------------
@@ -8367,7 +8781,7 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
 
         for (int i = 0; i < (int) std::size(tabs); i++)
         {
-            if (i == customTab && !customTabEnabled)
+            if (!isTabVisible(i))
                 continue;
 
             if (lastGroup == nullptr || strcmp(lastGroup, tabs[i].group) != 0)
@@ -8400,8 +8814,12 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
                 ImGui::GetColorU32(ImGuiCol_Text), Localization::Tr(tabs[i].label));
         }
 
+        // OptiPatcher status only visible when used
+        const bool optiPatcher = state.isOptiPatcherSucceed;
+
         // Compact state of the upscaler and FG pinned to the bottom of the sidebar
-        const float statusHeight = 1.0f + ImGui::GetTextLineHeightWithSpacing() * 2.0f + style.ItemSpacing.y;
+        const float statusLines = 3.0f + (optiPatcher ? 1.0f : 0.0f);
+        const float statusHeight = 1.0f + ImGui::GetTextLineHeightWithSpacing() * statusLines + style.ItemSpacing.y;
         const float gap = ImGui::GetContentRegionAvail().y - statusHeight - style.ItemSpacing.y;
         if (gap > 0.0f)
             ImGui::Dummy(ImVec2(0.0f, gap));
@@ -8416,17 +8834,73 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
         else if (currentFeature->IsFrozen())
             ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Idle");
         else
-            ImGui::TextColored(toneMapColor(ImVec4(0.35f, 0.85f, 0.45f, 1.f)), "%s",
-                               currentFeature->ShortName().c_str());
+        {
+            const float renderWidth = (float) currentFeature->RenderWidth();
+            const float upscaleRatio = renderWidth > 0.0f ? (float) currentFeature->TargetWidth() / renderWidth : 0.0f;
+
+            ImGui::TextColored(toneMapColor(ImVec4(0.35f, 0.85f, 0.45f, 1.f)), "%s (%.2f)",
+                               currentFeature->ShortName().c_str(), upscaleRatio);
+        }
 
         ImGui::TextDisabled("FG");
         ImGui::SameLine(0.0f, 8.0f * menuResScale);
         auto fg = state.currentFG;
-        if (fg != nullptr && fg->IsActive() && !fg->IsPaused())
-            ImGui::TextColored(toneMapColor(ImVec4(0.35f, 0.85f, 0.45f, 1.f)), "%s", std::string(fg->Name()).c_str());
+
+        // Nvngx replacements don't use currentFG, have to use the DLSSG state detected from the game
+        const FGNvngxReplacement activeNvngxFg = state.activeFgNvngx;
+
+        if (activeNvngxFg != FGNvngxReplacement::None)
+        {
+            const char* nvngxName = activeNvngxFg == FGNvngxReplacement::Nukems   ? "Nukems"
+                                    : activeNvngxFg == FGNvngxReplacement::Arturs ? "Enabler"
+                                    : activeNvngxFg == FGNvngxReplacement::FFX    ? "FFX"
+                                                                                  : "Combo";
+            const int detectedCount = state.dlssgDetectedInterpolationCount;
+
+            if (detectedCount <= 0)
+            {
+                ImGui::TextDisabled("Off");
+            }
+
+            else
+            {
+                const bool unsupported = detectedCount > Nvngx_FG::getMaxFakeFramesCount();
+                const ImVec4 color = unsupported ? ImVec4(1.f, 0.8f, 0.f, 1.f) : ImVec4(0.35f, 0.85f, 0.45f, 1.f);
+                ImGui::TextColored(toneMapColor(color), "%s %dx", nvngxName, detectedCount + 1);
+            }
+        }
+
+        else if (fg != nullptr && fg->IsActive() && !fg->IsPaused())
+        {
+            const UINT multiplier = fg->GetInterpolatedFrameCount() + 1;
+
+            // XeFG already has multiplier in name when MFG detected
+            std::string fgName = fg->Name();
+            const std::string multiplierSuffix = StrFmt(" %ux", multiplier);
+            if (fgName.ends_with(multiplierSuffix))
+                fgName.erase(fgName.size() - multiplierSuffix.size());
+
+            ImGui::TextColored(toneMapColor(ImVec4(0.35f, 0.85f, 0.45f, 1.f)), "%s %ux", fgName.c_str(), multiplier);
+        }
         else
             ImGui::TextDisabled("Off");
+
+        const bool spoofing = config->DxgiSpoofing.value_or_default();
+        ImGui::TextDisabled("Spoof");
+        ImGui::SameLine(0.0f, 8.0f * menuResScale);
+        if (spoofing)
+            ImGui::TextColored(toneMapColor(ImVec4(0.35f, 0.85f, 0.45f, 1.f)), "Yes");
+        else
+            ImGui::TextDisabled("No");
+
+        if (optiPatcher)
+        {
+            ImGui::TextDisabled("OP");
+            ImGui::SameLine(0.0f, 8.0f * menuResScale);
+            ImGui::TextColored(toneMapColor(ImVec4(0.35f, 0.85f, 0.45f, 1.f)), "Yes");
+        }
     }
+
     ImGui::EndChild();
 
     ImGui::SameLine();
@@ -8491,26 +8965,26 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
     ImGui::PopStyleColor();
 }
 
-void MenuCommon::PlotLinesWithFancyText(const char* label, float (*values_getter)(void* data, int idx), void* data,
-                                        int values_count, int values_offset, const char* overlay_text, float scale_min,
-                                        float scale_max, ImVec2 graph_size, float padding)
+void MenuCommon::PlotLinesWithRange(const char* label, float (*values_getter)(void* data, int idx), void* data,
+                                    int values_count, int values_offset, const char* overlay_text, ImVec2 graph_size,
+                                    float padding)
 {
-    ImGui::PlotEx(ImGuiPlotType_Lines, label, values_getter, data, values_count, values_offset, nullptr, scale_min,
-                  scale_max, graph_size);
+    float v_min = FLT_MAX;
+    float v_max = -FLT_MAX;
+    for (int i = 0; i < plotWidth; i++)
+    {
+        const float v = values_getter(data, i);
+        if (v != v) // Ignore NaN values
+            continue;
+        v_min = ImMin(v_min, v);
+        v_max = ImMax(v_max, v);
+    }
 
-    // Get the rectangle occupied by the PlotLines widget
-    ImVec2 plot_min = ImGui::GetItemRectMin();
-    ImVec2 plot_max = ImGui::GetItemRectMax();
+    ImGui::PlotEx(ImGuiPlotType_Lines, label, values_getter, data, values_count, values_offset, overlay_text, v_min,
+                  v_max, graph_size);
 
-    ImVec2 text_size = ImGui::CalcTextSize(overlay_text);
-
-    ImVec2 bg_min = ImVec2(plot_min.x + 1.0f, plot_min.y + 1.0f);
-    ImVec2 bg_max = ImVec2(bg_min.x + text_size.x + padding * 2.0f, bg_min.y + text_size.y + padding * 2.0f);
-
-    ImDrawList* draw_list = ImGui::GetWindowDrawList();
-    draw_list->AddRectFilled(bg_min, bg_max, ImGui::GetColorU32(ImGuiCol_ChildBg, 0.67f), 3.0f);
-    draw_list->AddText(ImVec2(bg_min.x + padding, bg_min.y + padding), ImGui::GetColorU32(ImGuiCol_TextDisabled),
-                       overlay_text);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Range: %.2f ms - %.2f ms", v_min, v_max);
 }
 
 void MenuCommon::RenderFrameTimeGraph(RenderMenuContext& ctx)
@@ -8518,25 +8992,14 @@ void MenuCommon::RenderFrameTimeGraph(RenderMenuContext& ctx)
     auto& frameTime = ctx.frameTime;
     auto& frameRate = ctx.frameRate;
     auto& menuResScale = ctx.menuResScale;
+    auto& averageFrameTime = ctx.averageFrameTime;
 
-    float v_min = FLT_MAX;
-    float v_max = -FLT_MAX;
-    for (int i = 0; i < plotWidth; i++)
-    {
-        const float v = gFrameTimes.At(i);
-        if (v != v) // Ignore NaN values
-            continue;
-        v_min = ImMin(v_min, v);
-        v_max = ImMax(v_max, v);
-    }
+    ImGui::Text("Frametime: %.2fms / %.1ffps (avg: %.1ffps)", frameTime, frameRate, 1000.f / averageFrameTime);
 
-    ImGui::Text("Frame time: %.2f ms / %.1f fps", frameTime, frameRate);
-
-    auto ft = StrFmt("%.2f - %.2f ms", v_min, v_max);
-    PlotLinesWithFancyText(
+    PlotLinesWithRange(
         "##FrameTime",
         [](void* rb, int idx) -> float { return static_cast<RingBuffer<float, plotWidth>*>(rb)->At(idx); },
-        &gFrameTimes, plotWidth, 0, ft.c_str(), v_min, v_max, ImVec2(0.0f, FooterPlotHeight()), 4.0f * menuResScale);
+        &gFrameTimes, plotWidth, 0, nullptr, ImVec2(0.0f, FooterPlotHeight()), 4.0f * menuResScale);
 }
 
 void MenuCommon::RenderUpscalerTimeGraph(RenderMenuContext& ctx)
@@ -8544,28 +9007,17 @@ void MenuCommon::RenderUpscalerTimeGraph(RenderMenuContext& ctx)
     auto& state = ctx.state;
     auto& currentFeature = ctx.currentFeature;
     auto& menuResScale = ctx.menuResScale;
+    auto& averageUpscalerFT = ctx.averageUpscalerFT;
 
     if (!IsUpscalerActive(currentFeature))
         return;
 
-    float v_min = FLT_MAX;
-    float v_max = -FLT_MAX;
-    for (int i = 0; i < plotWidth; i++)
-    {
-        const float v = gUpscalerTimes.At(i);
-        if (v != v) // Ignore NaN values
-            continue;
-        v_min = ImMin(v_min, v);
-        v_max = ImMax(v_max, v);
-    }
+    ImGui::Text("Upscaler GPU time: %.2fms (avg: %.2fms)", state.upscaleTimes.back(), averageUpscalerFT);
 
-    ImGui::Text("Upscaler GPU time: %.2f ms", state.upscaleTimes.back());
-
-    auto ups = StrFmt("%.2f - %.2f ms", v_min, v_max);
-    PlotLinesWithFancyText(
-        "##UpscalerTime", [](void* rb, int idx) -> float
-        { return static_cast<RingBuffer<float, plotWidth>*>(rb)->At(idx); }, &gUpscalerTimes, plotWidth, 0, ups.c_str(),
-        v_min, v_max, ImVec2(0.0f, FooterPlotHeight()), 4.0f * menuResScale);
+    PlotLinesWithRange(
+        "##UpscalerTime",
+        [](void* rb, int idx) -> float { return static_cast<RingBuffer<float, plotWidth>*>(rb)->At(idx); },
+        &gUpscalerTimes, plotWidth, 0, nullptr, ImVec2(0.0f, FooterPlotHeight()), 4.0f * menuResScale);
 }
 
 void MenuCommon::RenderMainMenuFooter(RenderMenuContext& ctx)
@@ -8672,6 +9124,26 @@ void MenuCommon::RenderMainMenuBottomBar(RenderMenuContext& ctx)
     auto& io = ctx.io;
 
     // BOTTOM LINE ---------------
+    if (ImGui::Button(Localization::Label("Open Wiki")))
+    {
+        auto pIO = &ImGui::GetPlatformIO();
+        auto ctx = ImGui::GetCurrentContext();
+        pIO->Platform_OpenInShellFn(ctx, "https://github.com/optiscaler/OptiScaler/wiki");
+    }
+    ShowTooltip(Localization::Tr("Click to open the OptiScaler Wiki page\nin your default browser\n\n"
+                                 "Compatibility list with known game issues\nand workarounds, FG options explained\n"
+                                 "and other useful info"));
+
+    ImGui::SameLine();
+
+    auto& style = ImGui::GetStyle();
+    // Measured on the text the buttons show, so the alignment holds in a translation too
+    float rightButtonsWidth = ImGui::CalcTextSize(Localization::Tr("Save Settings")).x +
+                              ImGui::CalcTextSize(Localization::Tr("Close")).x + style.FramePadding.x * 4.0f + 6.0f;
+
+    float avail = ImGui::GetContentRegionAvail().x;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - rightButtonsWidth);
+
     if (ImGui::Button(Localization::Label("Save Settings")))
         config->SaveIni();
 
@@ -8690,26 +9162,6 @@ void MenuCommon::RenderMainMenuBottomBar(RenderMenuContext& ctx)
         io.WantCaptureKeyboard = false;
         io.WantCaptureMouse = false;
     }
-
-    ImGui::SameLine();
-
-    auto textSize = ImGui::CalcTextSize("Open Wiki");
-    auto& style = ImGui::GetStyle();
-    textSize.x += style.FramePadding.x * 2.0f;
-
-    float avail = ImGui::GetContentRegionAvail().x;
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - textSize.x);
-
-    // Make button text underline
-    if (ImGui::Button("Open Wiki"))
-    {
-        auto pIO = &ImGui::GetPlatformIO();
-        auto ctx = ImGui::GetCurrentContext();
-        pIO->Platform_OpenInShellFn(ctx, "https://github.com/optiscaler/OptiScaler/wiki");
-    }
-    ShowTooltip("Click to open the OptiScaler Wiki page\nin your default browser\n\n"
-                "Compatibility list with known game issues\nand workarounds, FG options explained\n"
-                "and other useful info");
 }
 
 void MenuCommon::RenderMipmapBiasWindow(RenderMenuContext& ctx, ImGuiWindowFlags flags)
@@ -9020,14 +9472,19 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
         CopyMemory(style.Colors, styleold.Colors, sizeof(style.Colors)); // Restore colors
     }
 
-    // Fixed size, only the tab content scrolls. Keeps the menu from growing or shrinking when tabs change
+    // Fixed width, only the tab content scrolls. Keeps the menu from growing or shrinking when tabs change
+    // Height can be changed by the user with the resize grip and is stored unscaled in the config
     ImGuiWindowFlags mainFlags = ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse |
-                                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |
-                                 ImGuiWindowFlags_NoScrollWithMouse;
+                                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
 
-    ImGui::SetNextWindowSize(ImVec2(std::min(680.0f * menuResScale, io.DisplaySize.x - 20.0f),
-                                    std::min(700.0f * menuResScale, io.DisplaySize.y - 20.0f)),
-                             ImGuiCond_Always);
+    const float menuWidth = std::min(680.0f * menuResScale, io.DisplaySize.x - 20.0f);
+    const float maxMenuHeight = io.DisplaySize.y - 20.0f;
+    const float minMenuHeight = std::min(300.0f * menuResScale, maxMenuHeight);
+    const float menuHeight =
+        std::clamp(config->MenuHeight.value_or(815.0f) * menuResScale, minMenuHeight, maxMenuHeight);
+
+    ImGui::SetNextWindowSize(ImVec2(menuWidth, menuHeight), ImGuiCond_Always);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(menuWidth, minMenuHeight), ImVec2(menuWidth, maxMenuHeight));
 
     // Main menu window
     if (windowTitle.empty())
@@ -9049,6 +9506,11 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
 
         auto winSize = ImGui::GetWindowSize();
         auto winPos = ImGui::GetWindowPos();
+
+        // Menu was resized by the user
+        if (std::abs(winSize.y - menuHeight) > 0.5f)
+            config->MenuHeight = std::round(winSize.y / menuResScale);
+
         if (lastPosition.x < -900.0f || (lastPosition.x >= winPos.x - 1.0f && lastPosition.y >= winPos.y - 1.0f &&
                                          lastPosition.x <= winPos.x + 1.0f && lastPosition.y <= winPos.y + 1.0f))
         {
@@ -9068,6 +9530,21 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
             ImGui::SetWindowPos(ImVec2 { posX, posY });
             lastPosition.x = posX;
             lastPosition.y = posY;
+        }
+
+        // Blurred game image behind the window, the semi transparent window background tints it
+        if (_bgBlurTexture != ImTextureID_Invalid && config->MenuBlur.value_or_default() &&
+            ImGui::GetStyleColorVec4(ImGuiCol_WindowBg).w < 1.0f)
+        {
+            const ImVec2 blurMin = ImGui::GetWindowPos();
+            const ImVec2 blurMax = ImVec2(blurMin.x + ImGui::GetWindowWidth(), blurMin.y + ImGui::GetWindowHeight());
+            const ImVec2 uvMul = ImVec2(_bgBlurUVScale.x / io.DisplaySize.x, _bgBlurUVScale.y / io.DisplaySize.y);
+
+            ImGui::GetBackgroundDrawList()->AddImageRounded(
+                _bgBlurTexture, blurMin, blurMax, ImVec2(blurMin.x * uvMul.x, blurMin.y * uvMul.y),
+                ImVec2(blurMax.x * uvMul.x, blurMax.y * uvMul.y), IM_COL32_WHITE, ImGui::GetStyle().WindowRounding);
+
+            _bgBlurUsed = true;
         }
 
         ImGui::End();
