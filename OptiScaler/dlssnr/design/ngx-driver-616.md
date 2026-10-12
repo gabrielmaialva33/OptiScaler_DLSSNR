@@ -1,7 +1,8 @@
 # NVIDIA 616.64 and the loader's own route to feature 18
 
 **Status (2026-09-28):** implemented behind no switch — a log line at the first feature build, and a
-refusal on the one route that is exposed (`UseProxy`). Not yet checked in a game.
+refusal on the one route that is exposed (`UseProxy`). Not yet checked in a game. *(See 2026-10-12
+update below: 310.8.2.0 is ShortFuse's patched 310.8.0.0, not an NVIDIA release.)*
 
 ## What changed in the driver
 
@@ -93,6 +94,13 @@ A consequence worth measuring: **`UseProxy` may now work.** `FORWARDER_INVESTIGA
 the core "has no feature 18". That was true of the loaders it was measured on and is not true of
 1664 and later, this machine's included. With 310.8.2.0 on such a loader, the core route is the one
 the NR add-on beside dlss5-bridge takes, and check 4 below will show whether it builds here.
+
+## Model provenance update and the "newer model" check (2026-10-12)
+
+The premise above — that 310.8.2.0 is an NVIDIA release newer than 310.8.0.0 that fixed the loader route — is mistaken:
+- **310.8.2.0 is ShortFuse's patched build of 310.8.0.0** ("310.8.SF-v2", 165,830,144 bytes, modified cubins to run on Ada, Ampere and Turing), not an NVIDIA release or fix. NVIDIA has shipped exactly one official DLSS 5 NR model build as of 2026-10-12: `nvngx_dlssnr.dll` 310.8.0.0 (165,840,496 bytes, sha256 `e16bcf15…`, from NBA 2K27).
+- Therefore, the check (`ModelKnownToFaultOnLoaderRoute`, testing `version <= 310.8.0.0`) really means **"not the unpatched 310.8.0.0"**, rather than "a newer NVIDIA build".
+- **Risk:** A future official NVIDIA build numbered above 310.8.0 (e.g. 310.8.1 or 310.9) is completely untested on this route, yet the version check would permit it unconditionally. A different community patched build (e.g. 310.8.3 "Lecram") would likewise be permitted if its PE version header exceeds 310.8.0, but refused if it retained 310.8.0.0. Testing `UseProxy` with 310.8.2.0 or an unverified future model remains risky: if the loader's descriptor-heap handling faults, it crashes inside D3D12 on the game thread beyond OptiScaler's reach.
 
 ## The direct loader
 

@@ -443,7 +443,7 @@ rebuild, no temporal accumulator).
   `tests/nr-model-loader` holds its parameter writes to the forwarder's.
 - **NVIDIA 616.64+ loaders route feature 18 themselves**, this machine's wine `_nvngx.dll` included
   (32.0.16.1691, shipped with Linux 615.71.09). Only `UseProxy` takes that route, and it refuses the
-  known-faulting model (310.8.0.0 and older). The first build logs `DLSS-NR NGX:` lines with the
+  known-faulting model (unpatched 310.8.0.0; the 310.8.2.0 build in use is ShortFuse's patch, not an NVIDIA release). The first build logs `DLSS-NR NGX:` lines with the
   loader, its build, the route and the model. See `dlssnr/design/ngx-driver-616.md`.
 - **The present-time pass had never shipped.** `RunPresentPass` (wrapped swapchain and FG
   present hooks) sat behind `#ifdef DLSS_NEURAL_RENDERING`, a macro no file, project or script ever
