@@ -415,3 +415,7 @@ Measures NR's output on the scene on screen at the current settings for 60 evalu
 Measure detail stopped: this command list cannot be tracked (see the log).	Medir detalhe parou: esta lista de comandos não pode ser rastreada (veja o log).
 Measure detail stopped: no sample completed (see the log).	Medir detalhe parou: nenhuma amostra foi concluída (veja o log).
 Measure detail: the scene moved, too few still frames (turn on Hold frame).	Medir detalhe: a cena se mexeu, poucos quadros parados (ligue o Congelar quadro).
+# 2026-10-12: upstream's Quirks tab (b97dd476) and the Open Wiki button (899b9488), merged from optiscaler/master.
+Quirks	Ajustes do jogo
+Open Wiki	Abrir Wiki
+Click to open the OptiScaler Wiki page\nin your default browser\n\nCompatibility list with known game issues\nand workarounds, FG options explained\nand other useful info	Clique para abrir a página da Wiki do OptiScaler\nno seu navegador padrão\n\nLista de compatibilidade com problemas conhecidos\ne soluções, opções de FG explicadas\ne outras informações úteis
