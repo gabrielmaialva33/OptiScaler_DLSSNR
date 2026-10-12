@@ -230,6 +230,26 @@ void ownershipCases()
     }
 }
 
+// XeFG destroys its context only after every reference to its swapchain is gone, so the bridge drops
+// its own first; FidelityFX documents the reverse, destroying the swapchain context before the last
+// reference goes.
+void fgReleaseOrderCases()
+{
+    for (const auto output : { FGOutput::FSRFG, FGOutput::XeFG })
+    {
+        Fixture f;
+        State::Instance().currentSwapchain = nullptr;
+        State::Instance().currentWrappedSwapchain = nullptr;
+        State::Instance().activeFgOutput = output;
+        f.fg.watched = &f.presenter;
+        f.sc->Release();
+        f.sc = nullptr;
+        assert(f.fg.deactivations == 1 && f.fg.releases == 1);
+        assert(f.fg.watchedReleasesAtRelease == (output == FGOutput::XeFG ? 1 : 0));
+        assert(f.presenter.releases == 1);
+    }
+}
+
 void preservedPresenterCase()
 {
     Fixture f;
@@ -1057,6 +1077,7 @@ int main()
     helperRemovalCases();
     failedSignalCases();
     ownershipCases();
+    fgReleaseOrderCases();
     preservedPresenterCase();
     drainCases();
     partialResizeCase();

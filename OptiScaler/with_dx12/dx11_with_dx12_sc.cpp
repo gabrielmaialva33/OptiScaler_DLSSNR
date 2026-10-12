@@ -631,15 +631,24 @@ void Dx11wDx12SC::_FinishRelease(bool deviceLost)
     _ReleaseInteropObjects();
 
     // FG ownership is presenter identity, not HWND identity or game-facing wrapper identity.
-    // Intel: XeFG's context is destroyed after every reference to its swapchain is gone (else
-    // xefgSwapChainDestroy fails with POINTER_STILL_IN_USE). Deactivate here, but defer
-    // ReleaseSwapchain until our destructor has released _fgSwapChain and _real (janblade 4f2b6a10).
+    // The two backends want opposite orders. Intel: XeFG's context is destroyed after every
+    // reference to its swapchain is gone (else xefgSwapChainDestroy fails with
+    // POINTER_STILL_IN_USE), so its ReleaseSwapchain waits until our destructor has released
+    // _fgSwapChain and _real (janblade 4f2b6a10). FidelityFX documents the reverse: destroy the
+    // swapchain context first, then drop the last reference, which runs the proxy's destructor.
     if (!deviceLost && ownsFg && fgContext != nullptr && fg->Mutex.getOwner() != 1 &&
         fg->SwapchainContext() == fgContext)
     {
         fg->Deactivate();
-        _pendingReleaseFg = fg;
-        _pendingReleaseHandle = _handle;
+        if (State::Instance().activeFgOutput == FGOutput::XeFG)
+        {
+            _pendingReleaseFg = fg;
+            _pendingReleaseHandle = _handle;
+        }
+        else
+        {
+            fg->ReleaseSwapchain(_handle);
+        }
     }
     if (_wasCurrentOnRelease && !deviceLost && (fg == nullptr || fg->Mutex.getOwner() != 1))
         MenuOverlayDx::CleanupRenderTarget(true, _handle);

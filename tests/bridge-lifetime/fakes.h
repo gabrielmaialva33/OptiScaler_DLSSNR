@@ -326,7 +326,15 @@ struct FG
     ID3D12CommandQueue* queue = nullptr;
     ID3D12CommandQueue* GetCommandQueue() { return queue; }
     void Deactivate() { ++deactivations; }
-    void ReleaseSwapchain(HWND) { ++releases; }
+    // The presenter's own release count at the moment ReleaseSwapchain runs: the order the backend sees.
+    Swapchain* watched = nullptr;
+    int watchedReleasesAtRelease = -1;
+    void ReleaseSwapchain(HWND)
+    {
+        ++releases;
+        if (watched != nullptr)
+            watchedReleasesAtRelease = watched->releases;
+    }
     // Upstream's XeFG resize lock asks these; the bridge's own lifetime never depends on them.
     bool active = false;
     int targetUpdates = 0;
