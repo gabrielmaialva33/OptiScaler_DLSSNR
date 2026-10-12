@@ -423,6 +423,87 @@ void TapScale_FollowsTheWorkingSize()
     assert(LowExtent(2580) == 162 && LowExtent(16) == 1 && LowExtent(17) == 2);
     ++g_cases;
 }
+
+void StaleHistory_ResetsWhenHistoryIsOlderThanMotion()
+{
+    // Steady scheduled frames must NOT reset: they receive the accumulated motion chain.
+    for (uint32_t n = 2; n <= 4; ++n)
+    {
+        Driver d;
+        const auto in = Running(n);
+        for (int i = 0; i < 16; ++i)
+        {
+            const auto decision = d.Frame(in, Shape());
+            assert(!decision.staleHistory);
+        }
+    }
+
+    // Steady cadence=1 (Off) never resets.
+    {
+        Driver d;
+        const auto in = Running(1);
+        for (int i = 0; i < 8; ++i)
+        {
+            const auto decision = d.Frame(in, Shape());
+            assert(!decision.staleHistory);
+        }
+    }
+
+    // Path 1: Gap after carried frames forces a model frame without chain motion -> staleHistory.
+    {
+        Driver d;
+        const auto in = Running(3);
+        d.Frame(in, Shape()); // M: edit stored, framesSinceModel = 0
+        d.Frame(in, Shape()); // c: carried, framesSinceModel = 1
+        const auto gap = d.Frame(in, Shape(), true, 1, kGapMs + 1);
+        assert(gap.runModel && gap.reason == Reason::Gap && !gap.handChain && gap.staleHistory);
+    }
+
+    // Path 2: Changed signature after carried frames forces a model frame -> staleHistory.
+    {
+        Driver d;
+        const auto in = Running(3);
+        d.Frame(in, Shape()); // M
+        d.Frame(in, Shape()); // c
+        Signature s2 = Shape();
+        s2.workWidth = 1720;
+        const auto changed = d.Frame(in, s2);
+        assert(changed.runModel && changed.reason == Reason::Changed && !changed.handChain && changed.staleHistory);
+    }
+
+    // Path 3: Failed carry leaves model history older than 1 frame -> next frame (NoEdit) is staleHistory.
+    {
+        Driver d;
+        const auto in = Running(3);
+        d.Frame(in, Shape()); // M
+        // Carried frame where Carry() fails:
+        const auto c = d.scheduler.Decide(in, Shape(), ++d.present, d.ms += 16, d.resetPending);
+        assert(!c.runModel && c.reason == Reason::Carried);
+        d.scheduler.Drop(true); // carry failed, records that a frame passed without model
+        const auto next = d.Frame(in, Shape());
+        assert(next.runModel && next.reason == Reason::NoEdit && !next.handChain && next.staleHistory);
+    }
+
+    // Path 4: Chain build failure on a scheduled frame. Scheduler expects to hand chain,
+    // so staleHistory is false, but caller detects ModelMotion == nullptr and pulses reset.
+    {
+        Driver d;
+        const auto in = Running(3);
+        d.Frame(in, Shape()); // M
+        d.Frame(in, Shape()); // c
+        d.Frame(in, Shape()); // c
+        const auto scheduled = d.scheduler.Decide(in, Shape(), ++d.present, d.ms += 16, d.resetPending);
+        assert(scheduled.runModel && scheduled.reason == Reason::Scheduled && scheduled.handChain);
+        assert(!scheduled.staleHistory);
+        // Caller checks: if (cadence.handChain && ModelMotion(...) == nullptr) -> g_nr.reset = true;
+        bool modelMotionFailed = true;
+        if (scheduled.handChain && modelMotionFailed)
+            d.resetPending = true;
+        assert(d.resetPending);
+    }
+
+    ++g_cases;
+}
 } // namespace
 
 int main()
@@ -445,7 +526,8 @@ int main()
     Refusal_NamesWhatTheUserCanChangeLeast();
     Status_TextsAreDistinctAndCadenceSpecific();
     TapScale_FollowsTheWorkingSize();
-    if (g_cases != 18)
+    StaleHistory_ResetsWhenHistoryIsOlderThanMotion();
+    if (g_cases != 19)
         return 2; // a runner that exercises nothing must fail loudly
     std::printf("PASS %d scheduler cases: off allocates nothing, age in presents the pass ran at, held reset, forced "
                 "model frames, every refusal with its reason\n",

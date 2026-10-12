@@ -4066,6 +4066,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const bool carried = !cadence.runModel;
     PublishCadence(cadence);
 
+    if (cadence.staleHistory)
+    {
+        g_nr.reset = true;
+        for (auto& reset : g_nr.passReset)
+            reset = true;
+    }
+
     // Transfer 2 (design/dlss-enlargement.md): what the resolve is sent this frame, decided before the timing
     // contract so a sample says which enlargement it measured. Any other Transfer passes through unchanged and
     // touches nothing. The driver proxy never reaches the resolve, and peripheral compression hands it an edit
@@ -4781,6 +4788,12 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             modelMotionHeight = workHeight;
             modelMotionBaseX = modelMotionBaseY = 0;
             modelMvScaleX = modelMvScaleY = 1.0f;
+        }
+        else
+        {
+            g_nr.reset = true;
+            for (auto& reset : g_nr.passReset)
+                reset = true;
         }
     }
 
@@ -5543,7 +5556,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     else if (!carried && cadenceRecorded)
         g_cadence.Recorded();
     else
-        g_cadence.Drop();
+        g_cadence.Drop(carried);
 
     // Arm, but do not record the final timestamp yet. All remaining resource/state destructors
     // precede timing's destructor. Partial chains and failed composition never publish success.

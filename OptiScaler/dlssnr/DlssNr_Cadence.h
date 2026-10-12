@@ -234,9 +234,10 @@ template <class T> uint64_t Mix(uint64_t hash, const T& value) { return Mix(hash
 struct Decision
 {
     bool runModel = true;
-    bool handChain = false;  // a scheduled model frame after carried ones: hand the model the summed chain
-    bool chainStart = false; // the first carried frame since a model frame: the chain starts from this frame
-    bool record = false;     // a model frame whose edit is to be stored for the frames that carry it
+    bool handChain = false;    // a scheduled model frame after carried ones: hand the model the summed chain
+    bool chainStart = false;   // the first carried frame since a model frame: the chain starts from this frame
+    bool record = false;       // a model frame whose edit is to be stored for the frames that carry it
+    bool staleHistory = false; // model frame without chain motion while model history is > 0 frames old
     Reason reason = Reason::None;
     uint32_t cadence = 1; // what is in effect: 1 whenever the model runs every frame because of a refusal
     uint32_t age = 0;     // presents the pass ran at since the last model frame, this one included
@@ -251,7 +252,8 @@ class Scheduler
     Signature _signature {};
     uint64_t _lastPresent = 0;
     int64_t _lastMs = 0;
-    uint32_t _carried = 0; // carried frames since the last model frame
+    uint32_t _carried = 0;          // carried frames since the last model frame
+    uint32_t _framesSinceModel = 0; // frames since the last successful model frame; survives Drop()
     bool _seen = false;
     bool _edit = false; // an edit is stored, from the last model frame
 
@@ -295,6 +297,7 @@ class Scheduler
             // A second call in one present is another view: its edit must not be carried onto the first one's
             // next frame, so it is not stored, and the next present runs the model again.
             d.record = forced != Reason::SamePresent;
+            d.staleHistory = _framesSinceModel > 0;
             return d;
         }
 
@@ -304,6 +307,7 @@ class Scheduler
             d.reason = Reason::Scheduled;
             d.handChain = _carried > 0;
             d.record = true;
+            d.staleHistory = !d.handChain && _framesSinceModel > 0;
             return d;
         }
 
@@ -318,19 +322,28 @@ class Scheduler
     {
         _edit = true;
         _carried = 0;
+        _framesSinceModel = 0;
     }
 
     // A carried frame was recorded.
-    void Carried() { ++_carried; }
+    void Carried()
+    {
+        ++_carried;
+        ++_framesSinceModel;
+    }
 
     // Nothing usable is stored: a failed or partial model frame, a failed carry, any forced frame.
-    void Drop()
+    // _framesSinceModel survives Drop() and is zeroed only by Recorded().
+    void Drop(bool carriedFrame = false)
     {
+        if (carriedFrame)
+            ++_framesSinceModel;
         _edit = false;
         _carried = 0;
     }
 
     bool HasEdit() const { return _edit; }
     uint32_t CarriedSinceModel() const { return _carried; }
+    uint32_t FramesSinceModel() const { return _framesSinceModel; }
 };
 } // namespace DlssNr::Cadence
