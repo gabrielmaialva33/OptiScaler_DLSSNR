@@ -52,9 +52,10 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   ownership and deferred release against scripted COM/Win32 fakes, and which FG input and output
   the bridge is built for. Also a refused presenter resize and its recovery, and the D3D12 overlay's
   render-target release under the present-thread race that caused it. No GPU coverage.
-- `vulkan-query-readiness` — production Vulkan upscaler timing, nonblocking
-  readiness retry, error rejection and single consumption. No frame-identity
-  or GPU synchronization coverage.
+- `vulkan-query-readiness` — production Vulkan GPU timer (`GpuTime_Vk`, which upstream put under
+  every `Shader_Vk`, NR's included, in place of the deleted `UpscalerTime_Vk`): its three-pair ring,
+  nonblocking readiness retry, no publication on error, single consumption. No frame-identity or GPU
+  synchronization coverage.
 - `mfg-pattern` — the real MFG byte signatures and scanner matcher against synthetic
   buffers. Runs no patcher and touches no DLL.
 - `sl-log-repeat` — the Streamline log repeat filter against the real `setDynamicMFGParams` line

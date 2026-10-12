@@ -411,6 +411,9 @@ struct Config
     {
         bool value_or_default() { return false; }
     } FGEnabled;
+    // Upstream 13db0069: FG on/off is read through IsFGEnabled(), which can follow the game's DLSS-G
+    // state. Off here, as FGEnabled above.
+    bool IsFGEnabled() { return FGEnabled.value_or_default(); }
     // The two keys the bridge's neural predicates read, at production's defaults.
     ConfigValue<bool> DlssNrEnabled { false };
     ConfigValue<uint32_t> DlssNrHookMethod { 1 };

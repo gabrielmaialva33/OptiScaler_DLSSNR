@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Run the real Vulkan timing class and methods against scripted host API fakes."""
+"""Run the real Vulkan GPU timer class and methods against scripted host API fakes."""
 from pathlib import Path
 import subprocess
 import tempfile
 
 here = Path(__file__).resolve().parent
 root = here.parents[1]
-production = root / 'OptiScaler/upscaler_time'
+production = root / 'OptiScaler/gpu_time'
 
 
 def without_includes(path):
@@ -16,11 +16,10 @@ def without_includes(path):
 
 
 unit = (here / 'fakes.h').read_text()
-unit += without_includes(production / 'UpscalerTime_Vk.h')
-unit += without_includes(production / 'UpscalerTime_Vk.cpp')
+unit += without_includes(production / 'GpuTime_Vk.h')
+unit += without_includes(production / 'GpuTime_Vk.cpp')
 unit += (here / 'cases.cpp').read_text()
-cases = ['inactive', 'not-ready-retry', 'not-ready-pending', 'partial-not-ready', 'errors',
-         'success-once', 'invalid-duration', 'record-again']
+cases = ['inactive', 'start-alone', 'ring', 'not-ready-retry', 'errors', 'reversed', 'lifetime']
 with tempfile.TemporaryDirectory(prefix='optiscaler-vulkan-query-readiness-') as directory:
     cpp = Path(directory) / 'timing.cpp'
     binary = Path(directory) / 'timing'

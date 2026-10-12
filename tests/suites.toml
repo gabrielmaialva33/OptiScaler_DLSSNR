@@ -146,7 +146,7 @@ summary = "Production D3D11/D3D12 swapchain and upscaler fence waits, initializa
 [vulkan-query-readiness]
 tier = "host"
 timeout = 300
-summary = "Production Vulkan upscaler timing: nonblocking NOT_READY retry, error rejection and single consumption under scripted API fakes. No frame-identity or GPU synchronization coverage."
+summary = "Production Vulkan GPU timer (GpuTime_Vk, owned by every Shader_Vk since upstream e199fac4 replaced UpscalerTime_Vk): three-pair ring, nonblocking NOT_READY retry, no publication on error, single consumption, pool lifetime, under scripted API fakes. No frame-identity or GPU synchronization coverage."
 
 [fg-synth-policy]
 tier = "host"

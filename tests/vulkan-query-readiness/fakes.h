@@ -4,7 +4,7 @@
 #include <cstdlib>
 #include <deque>
 #include <iostream>
-#include <mutex>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -16,6 +16,8 @@ static void Check(bool condition, const char* message)
         std::exit(1);
     }
 }
+
+#define LOG_ERROR(...) ((void) 0)
 
 using VkDevice = uintptr_t;
 using VkPhysicalDevice = uintptr_t;
@@ -41,8 +43,11 @@ enum VkResult
 struct VkQueryPoolCreateInfo
 {
     uint32_t sType;
+    const void* pNext;
+    uint32_t flags;
     uint32_t queryType;
     uint32_t queryCount;
+    uint32_t pipelineStatistics;
 };
 struct VkPhysicalDeviceProperties
 {
@@ -54,8 +59,7 @@ struct VkPhysicalDeviceProperties
 
 struct State
 {
-    std::mutex frameTimeMutex;
-    std::deque<double> upscaleTimes { 10.0, 20.0, 30.0 };
+    bool isShuttingDown = false;
     static State& Instance()
     {
         static State state;
@@ -63,16 +67,28 @@ struct State
     }
 };
 
+// GpuTime_Vk keeps three start/end pairs, one per buffered frame.
+static constexpr uint32_t kPairs = 3;
+
 struct Reply
 {
     VkResult result;
     std::array<uint64_t, 2> timestamps;
     unsigned writeCount = 2;
 };
+struct Command
+{
+    char kind; // 'R' reset of a pair, 'T' timestamp
+    uint32_t query;
+    bool operator==(const Command&) const = default;
+};
 static std::deque<Reply> replies;
-static unsigned polls = 0;
+static std::vector<uint32_t> polled; // first query of every vkGetQueryPoolResults
+static std::vector<Command> recorded;
 static float period = 1.0f;
-static std::vector<unsigned> recorded;
+static bool createFails = false;
+static unsigned creates = 0;
+static unsigned destroys = 0;
 static constexpr VkDevice device = 1;
 static constexpr VkPhysicalDevice physicalDevice = 2;
 static constexpr VkCommandBuffer commandBuffer = 3;
@@ -81,10 +97,21 @@ static constexpr VkQueryPool pool = 4;
 static VkResult vkCreateQueryPool(VkDevice d, const VkQueryPoolCreateInfo* info, const void*, VkQueryPool* out)
 {
     Check(d == device && info->sType == VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO &&
-              info->queryType == VK_QUERY_TYPE_TIMESTAMP && info->queryCount == 2,
-          "create the timestamp pair");
+              info->queryType == VK_QUERY_TYPE_TIMESTAMP && info->queryCount == kPairs * 2,
+          "create one timestamp pair per buffered frame");
+    ++creates;
+    if (createFails)
+    {
+        *out = 99; // garbage on failure; production must not keep it
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
     *out = pool;
     return VK_SUCCESS;
+}
+static void vkDestroyQueryPool(VkDevice d, VkQueryPool p, const void*)
+{
+    Check(d == device && p == pool, "destroy the pool that was created");
+    ++destroys;
 }
 static void vkGetPhysicalDeviceProperties(VkPhysicalDevice pd, VkPhysicalDeviceProperties* out)
 {
@@ -93,25 +120,26 @@ static void vkGetPhysicalDeviceProperties(VkPhysicalDevice pd, VkPhysicalDeviceP
 }
 static void vkCmdResetQueryPool(VkCommandBuffer cmd, VkQueryPool p, uint32_t first, uint32_t count)
 {
-    Check(cmd == commandBuffer && p == pool && first == 0 && count == 2, "record pair reset");
-    recorded.push_back(0);
+    Check(cmd == commandBuffer && p == pool && first % 2 == 0 && first < kPairs * 2 && count == 2,
+          "record a reset of one whole pair");
+    recorded.push_back({ 'R', first });
     // Recording a reset does not execute it or change host-visible availability.
 }
 static void vkCmdWriteTimestamp(VkCommandBuffer cmd, uint32_t stage, VkQueryPool p, uint32_t query)
 {
-    Check(cmd == commandBuffer && p == pool && query < 2, "timestamp target");
-    Check(stage == (query == 0 ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT),
-          "timestamp stage");
-    recorded.push_back(query + 1);
+    Check(cmd == commandBuffer && p == pool && query < kPairs * 2, "timestamp target");
+    Check(stage == (query % 2 == 0 ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT),
+          "start at top of pipe, end at bottom of pipe");
+    recorded.push_back({ 'T', query });
 }
 static VkResult vkGetQueryPoolResults(VkDevice d, VkQueryPool p, uint32_t first, uint32_t count, size_t size,
                                       void* data, VkDeviceSize stride, VkQueryResultFlags flags)
 {
-    Check(d == device && p == pool && first == 0 && count == 2, "read the timestamp pair");
+    Check(d == device && p == pool && first % 2 == 0 && first < kPairs * 2 && count == 2, "read one whole pair");
     Check(size == 2 * sizeof(uint64_t) && stride == sizeof(uint64_t), "64-bit pair layout");
     Check(flags == VK_QUERY_RESULT_64_BIT, "nonblocking read, without WAIT or PARTIAL flags");
-    Check(!replies.empty(), "unexpected query poll (already consumed or not armed)");
-    ++polls;
+    Check(!replies.empty(), "unexpected query poll (pair already consumed or never armed)");
+    polled.push_back(first);
     const auto reply = replies.front();
     replies.pop_front();
     auto* timestamps = static_cast<uint64_t*>(data);

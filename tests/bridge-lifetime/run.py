@@ -125,6 +125,7 @@ upscaler_unit += """
     HANDLE Dx12FenceEvent = nullptr;
     UINT64 Dx12FenceValue = 0, Dx12CommandAllocatorFenceValue[DX11WDX12_COMMAND_BUFFER_COUNT] {};
     std::unique_ptr<GpuTime_Dx11> UpscalerTime;
+    Dx11WithDx12::D3D11_UPSCALER_RESOURCE_CACHE_C ResourceCache {};
     unsigned _frameCount = 0;
     struct FakeHandle { unsigned Id = 0; } handle;
     FakeHandle* Handle() { return &handle; }

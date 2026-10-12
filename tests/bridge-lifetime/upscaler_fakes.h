@@ -81,9 +81,13 @@ struct Dx11WithDx12
     {
         bool Success = true, MissingExposure = false, MissingReactive = false;
     };
+    // Per feature since upstream c68727c4; contents never inspected here.
+    struct D3D11_UPSCALER_RESOURCE_CACHE_C
+    {
+    };
     static UINT64 NextUpscalerFrameId() { return 1; }
-    static void SetUpscalerFrameIndex(UINT) {}
-    static Result PrepareUpscalerResources(const NVSDK_NGX_Parameter*, int, UINT, UINT64, bool, bool, bool)
+    static Result PrepareUpscalerResources(D3D11_UPSCALER_RESOURCE_CACHE_C&, const NVSDK_NGX_Parameter*, int, UINT,
+                                           UINT64, bool, bool, bool)
     {
         return {};
     }

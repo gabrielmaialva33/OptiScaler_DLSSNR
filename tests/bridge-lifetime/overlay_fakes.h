@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <memory>
 using HRESULT = int32_t;
 using UINT = unsigned;
 using ULONG = unsigned;
@@ -148,6 +149,18 @@ struct IO
 inline IO io;
 inline IO& GetIO() { return io; }
 } // namespace ImGui
+// Upstream f72e47b9's menu blur. The cleanup drops it before the ImGui backend, because its texture is a
+// descriptor from the ImGui heap; nothing here exercises it, the cleanup only has to compile and run past it.
+using ImTextureID = unsigned long long;
+inline constexpr ImTextureID ImTextureID_Invalid = 0;
+namespace MenuCommon
+{
+inline void SetBackgroundBlur(ImTextureID) {}
+} // namespace MenuCommon
+struct MenuBlur_Dx12
+{
+};
+static std::unique_ptr<MenuBlur_Dx12> g_menuBlur;
 // What another thread does while the cleanup is inside the ImGui backend's shutdown, which is where the
 // cleanup has released the render targets and has not yet cleared the init state.
 inline std::function<void()> duringImGuiShutdown;

@@ -1,72 +1,55 @@
-# Vulkan upscaler query readiness (host)
+# Vulkan GPU timer query readiness (host)
 
 ```bash
 python3 tests/vulkan-query-readiness/run.py
 python3 tests/run_all.py --only vulkan-query-readiness -v
 ```
 
-The runner compiles the actual `UpscalerTime_Vk.h` class and every method in
-`UpscalerTime_Vk.cpp`, removing only their platform includes and `#pragma once`.
-The Vulkan API and `State` are local fakes. It builds with `g++`, C++20,
-`-Wall -Wextra -Werror`, ASan and UBSan in a temporary directory. Each case runs
-in a fresh process so the production class's private static state is not
-replaced or manipulated by the test.
+The runner compiles the actual `GpuTime_Vk.h` classes (`GpuTime_Vk`, `ScopedGpuTime_Vk`) and every
+method in `GpuTime_Vk.cpp`, removing only their platform includes and `#pragma once`. The Vulkan API,
+`State` and `LOG_ERROR` are local fakes. It builds with `g++`, C++20, `-Wall -Wextra -Werror`, ASan and
+UBSan in a temporary directory, and runs each case in a fresh process.
+
+## Subject, and why it moved
+
+Until the 2026-10-12 merge of `optiscaler/master`, this suite held `upscaler_time/UpscalerTime_Vk` to
+our fix `05e0adb8`: publish a Vulkan upscaler time only when `vkGetQueryPoolResults` returns
+`VK_SUCCESS`, because a `VK_NOT_READY` read hands back plausible garbage. Upstream `e199fac4` deleted
+that class and replaced it with `gpu_time/GpuTime_Vk`, which every `Shader_Vk` now owns — the upscaler
+features, RCAS, Output Scaling, the menu blur, and Neural Rendering's `DlssNr_Vk` and its
+supersample legs. `GpuTime_Vk::ReadGpuTime` carries the same status guard, so the suite now holds that
+class to it.
 
 ## Contract exercised
 
-- No pool, no completed recording: no query poll or publication.
-- `VK_NOT_READY` with plausible but unusable data: no history change.
-- `VK_NOT_READY -> VK_SUCCESS`: retain the pending read and publish once.
-  A separate zero-result case isolates premature consumption from publication.
-- Repeated `VK_NOT_READY` with partial or no writes: retain the pending read.
-- Query errors: discard without publication or retry; a new recording can arm
-  another measurement.
-- Success: apply `timestampPeriod`, keep the history size, consume once.
-- Preserve the existing duration filter (zero, reversed sample, 5000 ms).
-  A completed rejected duration is also consumed once.
-- Re-recording uses the same pair in reset/start/end order. Poll flags stay
-  exactly `VK_QUERY_RESULT_64_BIT`; no WAIT or PARTIAL flags are allowed.
+- No device, or a failed `vkCreateQueryPool`: nothing recorded, nothing polled, nothing destroyed.
+  `ScopedGpuTime_Vk` with no timer or no command buffer does nothing.
+- Start without End never arms a read.
+- Three start/end pairs in one pool. Start advances the ring and records a reset of its pair and a
+  top-of-pipe timestamp; End records the bottom-of-pipe timestamp and arms the pair. A read targets
+  the oldest pair, so a recording is read two recordings later.
+- `VK_NOT_READY`, with plausible, partial or no writes: no publication, and the same pair is polled
+  again until it succeeds; a published pair is consumed.
+- Query errors: no publication. The pair stays armed and is read again until it succeeds or the ring
+  records over it (upstream's behaviour; the deleted class consumed an error once).
+- A completed pair whose end precedes its start publishes nothing and is consumed.
+- Success applies `timestampPeriod`. Poll flags are exactly `VK_QUERY_RESULT_64_BIT`: no WAIT or
+  PARTIAL.
+- The pool is destroyed with its timer, once, and abandoned at process shutdown.
 
-The fake intentionally supplies plausible timestamp words with unsuccessful
-results. This makes the original bug deterministic, without depending on
-uninitialized stack contents or expecting ASan/UBSan to detect uninitialized
-reads. Additional partial/no-write cases exercise the corrected status guard.
-
-## Lifecycle and limits
-
-`NVNGX_DLSS_Vk.cpp` initializes the pool, calls `UpscaleStart` before `Evaluate`,
-and normally calls `UpscaleEnd` afterward. `UpscaleStart` records a reset of
-the same two queries and the start timestamp; `UpscaleEnd` records the end and
-arms a host boolean. The fallback branch after a failed/uninitialized
-evaluation can return before `UpscaleEnd`. `hkvkQueuePresentKHR` polls at its
-entry, **before** calling the real `vkQueuePresentKHR`, so that call's GPU wait
-semaphores do not establish readiness for the host poll.
-
-This fix only enforces the return-status contract. It does not establish
-submission, GPU completion, synchronization, or association with a frame.
-The pair is still reused on every start, and the boolean has no generation ID.
-A retained pending read can overlap a new recording (including an aborted
-evaluation); the older sample can be overwritten, or a poll can see older
-available data before the newly recorded reset executes. The `record-again`
-case deliberately asserts no frame identity.
-
-The [Vulkan query-results specification](https://docs.vulkan.org/refpages/latest/refpages/source/vkGetQueryPoolResults.html)
-explicitly describes this stale-availability hazard, including when WAIT is
-used. Recording a reset is not executing a reset. The fake records commands
-without pretending they immediately change GPU availability.
-
-There is no new ring, fence, wait, or change to recording/call sites. The suite
-does not validate a real Vulkan driver, GPU ordering, timestamp valid-bit/wrap
-handling, multiple devices/threads, query-pool lifetime, or in-game statistics.
+Not filtered here, unlike the deleted class: a zero duration, and implausibly long ones. The caller
+filters (`hkvkQueuePresentKHR` drops upscaler times of 100 ms and more).
 
 ## RED / GREEN evidence
 
-Before changing production code, the suite built successfully against the
-original implementation. Five cases failed: `not-ready-retry`,
-`not-ready-pending`, `partial-not-ready`, `errors`, and `record-again`.
-`not-ready-pending` failed because the second poll never happened; the other
-four caught publication from unsuccessful query results. The inactive,
-success-once, and invalid-duration cases already passed.
+With the `result != VK_SUCCESS` return removed from `ReadGpuTime` (a scratch copy, 2026-10-12),
+`not-ready-retry` and `errors` fail on their first publication check; with it, all seven cases pass.
 
-With the status guard, all eight cases pass. This proves the host readiness
-and consumption logic, not the lifecycle properties listed above.
+## Limits
+
+This proves the host readiness and consumption logic only. It does not establish submission, GPU
+completion, synchronization or frame identity: a pair is reused every three recordings, and a
+retained read can overlap a new recording of the same pair (the
+[Vulkan query-results specification](https://docs.vulkan.org/refpages/latest/refpages/source/vkGetQueryPoolResults.html)
+describes this stale-availability hazard). It does not validate a real driver, timestamp valid bits or
+wrap, multiple threads, or in-game statistics.

@@ -1,119 +1,140 @@
-static void Record()
+static void Record(GpuTime_Vk& timer)
 {
-    UpscalerTimeVk::UpscaleStart(commandBuffer);
-    UpscalerTimeVk::UpscaleEnd(commandBuffer);
+    timer.Start(commandBuffer);
+    timer.End(commandBuffer);
 }
 
-static void Unchanged()
+// The ring starts at pair 0 and Start advances before recording, so the first three recordings land on
+// pairs 1, 2, 0, and a read looks at the pair after the current one: the oldest. One recording is
+// therefore read two recordings later, and the first poll after three recordings targets pair 1.
+static void PrimeOldestPair(GpuTime_Vk& timer)
 {
-    Check(State::Instance().upscaleTimes == std::deque<double> { 10.0, 20.0, 30.0 },
-          "unavailable/error/invalid sample must not modify history");
+    Record(timer);
+    Check(!timer.ReadGpuTime().has_value() && polled.empty(), "after one recording the oldest pair is not armed");
+    Record(timer);
+    Check(!timer.ReadGpuTime().has_value() && polled.empty(), "after two recordings the oldest pair is not armed");
+    Record(timer);
 }
 
-static void Published(double expected)
+static void Near(std::optional<double> value, double expected, const char* message)
 {
-    const auto& times = State::Instance().upscaleTimes;
-    Check(times.size() == 3 && times[0] == 20.0 && times[1] == 30.0 && std::abs(times[2] - expected) < 1e-9,
-          "publish exactly one valid sample, preserving rolling history");
+    Check(value.has_value() && std::abs(value.value() - expected) < 1e-9, message);
 }
 
 int main(int argc, char** argv)
 {
-    Check(argc == 2, "one case per process (fresh production static state)");
+    Check(argc == 2, "one case per process (fresh fake state)");
     const std::string_view name = argv[1];
+
     if (name == "inactive")
     {
-        Record(); // No pool: neither recording nor polling is allowed.
-        UpscalerTimeVk::ReadUpscalingTime(device);
-        Check(recorded.empty() && polls == 0, "null pool is inactive");
-        UpscalerTimeVk::Init(device, physicalDevice);
-        UpscalerTimeVk::ReadUpscalingTime(device);
-        UpscalerTimeVk::UpscaleStart(commandBuffer);
-        UpscalerTimeVk::ReadUpscalingTime(device);
-        Check(recorded == std::vector<unsigned> { 0, 1 } && polls == 0, "start alone does not arm a sample");
-        Unchanged();
+        // No device: no pool, no recording, no polling.
+        {
+            GpuTime_Vk timer(VK_NULL_HANDLE, physicalDevice);
+            for (int i = 0; i < 4; ++i)
+                Record(timer);
+            Check(!timer.ReadGpuTime().has_value(), "null device publishes nothing");
+        }
+        // A failed create keeps nothing, not even the handle the driver wrote.
+        createFails = true;
+        {
+            GpuTime_Vk timer(device, physicalDevice);
+            for (int i = 0; i < 4; ++i)
+                Record(timer);
+            Check(!timer.ReadGpuTime().has_value(), "failed create publishes nothing");
+        }
+        Check(creates == 1 && destroys == 0, "a pool that was never created is never destroyed");
+        // The scoped helper does nothing without a timer or a command buffer.
+        createFails = false;
+        GpuTime_Vk timer(device, physicalDevice);
+        {
+            ScopedGpuTime_Vk noTimer(nullptr, commandBuffer);
+            ScopedGpuTime_Vk noList(&timer, 0);
+        }
+        Check(recorded.empty() && polled.empty(), "inactive timers record and poll nothing");
         return 0;
     }
 
     period = 2.0f;
-    UpscalerTimeVk::Init(device, physicalDevice);
-    Record();
-    Check(recorded == std::vector<unsigned> { 0, 1, 2 }, "reset/start/end recording order");
-    if (name == "not-ready-retry" || name == "not-ready-pending" || name == "partial-not-ready")
+    GpuTime_Vk timer(device, physicalDevice);
+
+    if (name == "start-alone")
     {
-        // Deliberately plausible garbage on NOT_READY: deterministic even on the broken code.
-        // Zeroes isolate premature consumption from the bogus-publication failure.
-        replies.push_back({ VK_NOT_READY, name == "not-ready-pending" ? std::array<uint64_t, 2> { 0, 0 }
-                                                                      : std::array<uint64_t, 2> { 100, 1000100 } });
-        UpscalerTimeVk::ReadUpscalingTime(device);
-        Unchanged();
-        if (name == "partial-not-ready")
+        // Start without End records the reset and the start, and never arms a read.
+        for (int i = 0; i < 4; ++i)
+            timer.Start(commandBuffer);
+        Check(!timer.ReadGpuTime().has_value() && polled.empty(), "start alone does not arm a sample");
+        Check(recorded.size() == 8 && recorded[0] == Command { 'R', 2 } && recorded[1] == Command { 'T', 2 },
+              "reset then start timestamp of the advanced pair");
+    }
+    else if (name == "ring")
+    {
         {
-            // Unavailable queries may leave some or all destination words untouched.
-            replies.push_back({ VK_NOT_READY, { 200, 0 }, 1 });
-            replies.push_back({ VK_NOT_READY, { 0, 0 }, 0 });
-            UpscalerTimeVk::ReadUpscalingTime(device);
-            UpscalerTimeVk::ReadUpscalingTime(device);
-            Unchanged();
+            ScopedGpuTime_Vk scoped(&timer, commandBuffer); // the form the shaders use
         }
+        Record(timer);
+        Record(timer);
+        Check(recorded == std::vector<Command> { { 'R', 2 }, { 'T', 2 }, { 'T', 3 }, { 'R', 4 }, { 'T', 4 },
+                                                 { 'T', 5 }, { 'R', 0 }, { 'T', 0 }, { 'T', 1 } },
+              "per pair: reset, start, end; pairs advance 1, 2, 0");
         replies.push_back({ VK_SUCCESS, { 100, 1500100 } });
-        UpscalerTimeVk::ReadUpscalingTime(device);
-        Check(polls == (name == "partial-not-ready" ? 4u : 2u), "retry the same pending read until ready");
-        Published(3.0);
-        UpscalerTimeVk::ReadUpscalingTime(device);
-        Published(3.0);
+        Near(timer.ReadGpuTime(), 3.0, "the oldest pair is read, scaled by timestampPeriod");
+        Check(polled == std::vector<uint32_t> { 2 }, "the first poll targets pair 1");
+    }
+    else if (name == "not-ready-retry")
+    {
+        PrimeOldestPair(timer);
+        // Plausible words on NOT_READY: deterministic even against a guard-less read.
+        replies.push_back({ VK_NOT_READY, { 100, 1000100 } });
+        Check(!timer.ReadGpuTime().has_value(), "NOT_READY publishes nothing");
+        // Unavailable queries may leave some or all destination words untouched.
+        replies.push_back({ VK_NOT_READY, { 200, 0 }, 1 });
+        replies.push_back({ VK_NOT_READY, { 0, 0 }, 0 });
+        Check(!timer.ReadGpuTime().has_value() && !timer.ReadGpuTime().has_value(),
+              "partial or no writes publish nothing");
+        replies.push_back({ VK_SUCCESS, { 100, 1500100 } });
+        Near(timer.ReadGpuTime(), 3.0, "the retained pair publishes once it is ready");
+        Check(polled == std::vector<uint32_t> { 2, 2, 2, 2 }, "the same pair is polled until ready");
+        Check(!timer.ReadGpuTime().has_value() && polled.size() == 4, "a published pair is consumed");
     }
     else if (name == "errors")
     {
+        PrimeOldestPair(timer);
         for (const auto error :
              { VK_ERROR_DEVICE_LOST, VK_ERROR_OUT_OF_HOST_MEMORY, VK_ERROR_OUT_OF_DEVICE_MEMORY, VK_ERROR_UNKNOWN })
         {
-            Record();
             replies.push_back({ error, { 100, 1000100 } });
-            UpscalerTimeVk::ReadUpscalingTime(device);
-            Unchanged();
-            UpscalerTimeVk::ReadUpscalingTime(device); // Error consumes; no endless retry.
+            Check(!timer.ReadGpuTime().has_value(), "a query error publishes nothing");
         }
-        Check(polls == 4, "each failed measurement is consumed once");
-        Record();
+        // Upstream keeps the pair armed on any non-success: it is read again until it succeeds or the ring
+        // records over it.
+        Check(polled.size() == 4, "an errored pair stays armed");
         replies.push_back({ VK_SUCCESS, { 100, 1500100 } });
-        UpscalerTimeVk::ReadUpscalingTime(device);
-        Published(3.0); // A new measurement can still arm after a failure.
+        Near(timer.ReadGpuTime(), 3.0, "a later success still publishes");
     }
-    else if (name == "success-once")
+    else if (name == "reversed")
     {
-        replies.push_back({ VK_SUCCESS, { 100, 1500100 } });
-        UpscalerTimeVk::ReadUpscalingTime(device);
-        UpscalerTimeVk::ReadUpscalingTime(device);
-        Check(polls == 1, "one poll after success");
-        Published(3.0);
+        PrimeOldestPair(timer);
+        replies.push_back({ VK_SUCCESS, { 200, 100 } });
+        Check(!timer.ReadGpuTime().has_value(), "an end before its start publishes nothing");
+        Check(!timer.ReadGpuTime().has_value() && polled.size() == 1, "and is consumed, not retried");
     }
-    else if (name == "invalid-duration")
+    else if (name == "lifetime")
     {
-        // Preserve the existing elapsed-duration filter; do not add timestamp wrap semantics.
-        for (const auto pair : { std::array<uint64_t, 2> { 100, 100 }, { 200, 100 }, { 0, 2500000000ULL } })
+        // Destroyed with the timer, once, except at process shutdown, where it is abandoned.
         {
-            Record();
-            replies.push_back({ VK_SUCCESS, pair });
-            UpscalerTimeVk::ReadUpscalingTime(device);
-            Unchanged();
-            UpscalerTimeVk::ReadUpscalingTime(device); // Invalid completed sample is consumed too.
+            GpuTime_Vk other(device, physicalDevice);
         }
-        Check(polls == 3, "completed invalid durations are not retried");
-    }
-    else if (name == "record-again")
-    {
-        replies.push_back({ VK_NOT_READY, { 100, 1000100 } });
-        UpscalerTimeVk::ReadUpscalingTime(device);
-        Unchanged();
-        Record();
-        replies.push_back({ VK_SUCCESS, { 100, 1500100 } });
-        UpscalerTimeVk::ReadUpscalingTime(device);
-        UpscalerTimeVk::ReadUpscalingTime(device);
-        Check(recorded == std::vector<unsigned> { 0, 1, 2, 0, 1, 2 } && polls == 2, "reused pair can be polled");
-        Published(3.0); // This says nothing about which GPU recording produced the result.
+        Check(destroys == 1, "destroyed with its timer");
+        State::Instance().isShuttingDown = true;
+        {
+            GpuTime_Vk other(device, physicalDevice);
+        }
+        Check(destroys == 1, "abandoned at shutdown");
+        State::Instance().isShuttingDown = false;
     }
     else
         Check(false, "unknown case");
+
     Check(replies.empty(), "all scripted replies consumed");
 }
