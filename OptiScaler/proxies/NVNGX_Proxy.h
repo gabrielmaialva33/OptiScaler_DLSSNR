@@ -448,6 +448,19 @@ class NVNGXProxy
             return;
 
         std::string_view sv(message);
+
+        if (sv.find("failed to load NGXCore: 0") != std::string_view::npos)
+        {
+            static bool reportedCore0 = false;
+            if (!reportedCore0)
+            {
+                reportedCore0 = true;
+                LOG_WARN("NGX could not load its core: the signature check passed but the signer chain did not end at "
+                         "NVIDIA. Something in this process (OptiScaler's loader or WinVerifyTrust hooks, or another "
+                         "mod) changed the file, loader or crypto calls");
+            }
+        }
+
         const bool isFailure =
             sv.find("FAIL_") != std::string_view::npos || sv.find("failed") != std::string_view::npos ||
             sv.find("nvapi status") != std::string_view::npos || sv.find("error:") != std::string_view::npos;
