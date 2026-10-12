@@ -1135,8 +1135,7 @@ void SynthInputs::Feed(IFGFeature_Dx12* fg, ID3D12Device* device)
     fg->SetReset((_resetOwed || frameSceneCut || action == SynthFgPolicy::Action::Reset) ? 1 : 0);
     fg->SetInterpolationRect(_width, _height);
 
-    if (state.isShuttingDown || !fg->IsActive() || !cfg.FGEnabled.value_or_default() ||
-        state.currentSwapchain == nullptr)
+    if (state.isShuttingDown || !fg->IsActive() || !cfg.IsFGEnabled() || state.currentSwapchain == nullptr)
     {
         return;
     }
