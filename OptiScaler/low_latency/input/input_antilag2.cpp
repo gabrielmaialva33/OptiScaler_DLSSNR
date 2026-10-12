@@ -2,6 +2,7 @@
 #include "input_antilag2.h"
 #include "input_common.h"
 #include <proxies/FfxApi_Proxy.h>
+#include <atomic>
 
 HRESULT STDMETHODCALLTYPE AmdExtAntiLagApi::UpdateAntiLagState(VOID* pData)
 {
@@ -136,8 +137,15 @@ HRESULT STDMETHODCALLTYPE AmdExtAntiLagApi::UpdateAntiLagState(VOID* pData)
 
             if (result == InputResult::Ok || result == InputResult::UsingDifferentInput)
                 return S_OK;
-            else
-                LOG_ERROR("set_async_marker result: {}", magic_enum::enum_name(result));
+
+            // This runs once per presented frame. When the output cannot start (AntiLag 2 never passes a
+            // device, and a D3D11 title whose frame generation OptiScaler hosts on its D3D11-to-D3D12 bridge has
+            // no current D3D12 device to borrow) it fails on every frame, and logging each one wrote ~150
+            // lines a second. The answer to the caller is unchanged; the log says it once per result.
+            static std::atomic<uint32_t> loggedResults { 0 };
+            const uint32_t bit = 1u << (static_cast<uint32_t>(result) & 31u);
+            if ((loggedResults.fetch_or(bit) & bit) == 0)
+                LOG_ERROR("set_async_marker result: {} (repeats are not logged)", magic_enum::enum_name(result));
 
             return E_FAIL;
         }
