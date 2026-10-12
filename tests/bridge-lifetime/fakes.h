@@ -645,6 +645,8 @@ class Dx11wDx12SC
     HWND _handle = reinterpret_cast<HWND>(456);
     FG* _fg = nullptr;
     void* _fgSwapchainContext = nullptr;
+    FG* _pendingReleaseFg = nullptr;
+    HWND _pendingReleaseHandle = nullptr;
     UINT _currentFakeIndex = 0;
     Dx11wDx12SC* _nextLive = nullptr;
     std::unique_ptr<DlssNr::PresentHost> _nrHost;

@@ -491,7 +491,11 @@ ULONG STDMETHODCALLTYPE Dx11wDx12SC::Release()
             return 0;
         }
         _FinishRelease(deviceLost);
+        auto* releaseFg = _pendingReleaseFg;
+        const auto releaseHandle = _pendingReleaseHandle;
         delete this;
+        if (releaseFg != nullptr)
+            releaseFg->ReleaseSwapchain(releaseHandle);
     }
 
     return ret;
@@ -627,11 +631,15 @@ void Dx11wDx12SC::_FinishRelease(bool deviceLost)
     _ReleaseInteropObjects();
 
     // FG ownership is presenter identity, not HWND identity or game-facing wrapper identity.
+    // Intel: XeFG's context is destroyed after every reference to its swapchain is gone (else
+    // xefgSwapChainDestroy fails with POINTER_STILL_IN_USE). Deactivate here, but defer
+    // ReleaseSwapchain until our destructor has released _fgSwapChain and _real (janblade 4f2b6a10).
     if (!deviceLost && ownsFg && fgContext != nullptr && fg->Mutex.getOwner() != 1 &&
         fg->SwapchainContext() == fgContext)
     {
         fg->Deactivate();
-        fg->ReleaseSwapchain(_handle);
+        _pendingReleaseFg = fg;
+        _pendingReleaseHandle = _handle;
     }
     if (_wasCurrentOnRelease && !deviceLost && (fg == nullptr || fg->Mutex.getOwner() != 1))
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
@@ -668,7 +676,11 @@ void Dx11wDx12SC::_CollectRetired()
             return;
         // Backend cleanup can re-enter Release. Never call it while holding the retirement lock.
         ready->_FinishRelease(deviceLost);
+        auto* releaseFg = ready->_pendingReleaseFg;
+        const auto releaseHandle = ready->_pendingReleaseHandle;
         delete ready;
+        if (releaseFg != nullptr)
+            releaseFg->ReleaseSwapchain(releaseHandle);
     }
 }
 

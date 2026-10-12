@@ -184,6 +184,8 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
 
     IFGFeature_Dx12* _fg = nullptr;
     void* _fgSwapchainContext = nullptr;
+    IFGFeature_Dx12* _pendingReleaseFg = nullptr;
+    HWND _pendingReleaseHandle = nullptr;
 
     ID3D11Device* _dx11Device = nullptr;
     ID3D11Device5* _dx11Device5 = nullptr;
