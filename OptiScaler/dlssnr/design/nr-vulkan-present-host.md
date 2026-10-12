@@ -66,7 +66,7 @@ The five requested commits were read with `git show`:
 | `255ca14` | `dllmain.cpp` checks the adjacent marker on Wine and skips `VulkanHooks::Hook`. Its comment identifies present races with Streamline DLSS-G under vkd3d-proton. It is a coarse hook-bundle bypass, not a demonstrated ImGui-only diagnosis. |
 | `a4f1bbb` | The bypass also sets `State::vulkanHooksSkipped`. |
 | `33f2961` | Declares that new state field, independently of `vulkanSkipHooks`. |
-| `7fe23f4` | The wrapped DXGI swapchain bypasses the DXVK direct-present shortcut when `vulkanHooksSkipped` is set, allowing the D3D overlay path. Current code additionally limits the shortcut to D3D11. |
+| `7fe23f4` | The wrapped DXGI swapchain bypasses the DXVK direct-present shortcut when `vulkanHooksSkipped` is set, allowing the D3D overlay path. Current code additionally limits the shortcut to D3D11. **Retired 2026-10-12:** upstream `1cc9d5a1` deleted the shortcut, so every DXGI present reaches the D3D overlay. |
 | `10c6760` | Replaces an infinite overlay fence wait with a one-second wait and skips drawing on failure. This bounds a symptom; it neither repairs synchronization nor proves the original cause. |
 
 There is an important correction to the premise: **the marker does not set `vulkanSkipHooks`.**

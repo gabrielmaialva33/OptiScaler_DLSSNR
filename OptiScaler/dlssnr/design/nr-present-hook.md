@@ -138,6 +138,12 @@ Wine**, before calling `VulkanHooks::Hook`. When found it logs the skip and sets
 `State::vulkanHooksSkipped = true`. Preserve the lookup location, Wine condition, flag and skip.
 None of these five commits changes that file or `State.h`.
 
+> **Update 2026-10-12 (merge of `optiscaler/master` at `2a382e1f`).** The shortcut quoted below is
+> gone: upstream `1cc9d5a1` deleted the whole DXVK direct-present branch from `LocalPresent`, so every
+> DXGI present now reaches `RunPresentPass` and `MenuOverlayDx::Present`, and the Vulkan hooks skip
+> presents and swapchains that come from dxgi/d3d11/d3d12 (`IsDxgiBackedCaller`). `usesDxvk` became
+> `dxgiIsDxvk` in `ac7a0111`. The text below records the baseline it was written against.
+
 The current shortcut in `LocalPresent` is more specific than the older patch description:
 
 ```cpp

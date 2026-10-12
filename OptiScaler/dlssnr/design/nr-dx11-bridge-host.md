@@ -245,7 +245,8 @@ The first real harness must start with **no game NGX metadata or calls** and pro
 
 Preserve `dllmain.cpp`'s adjacent `optiscaler_skip_vulkan_hooks` marker and `State::vulkanHooksSkipped`,
 and the `wrapped_swapchain.cpp:455` bypass of the DXVK direct-present shortcut when hooks were
-skipped. Neither file is permission to change the marker, re-enable Vulkan hooks, or alter the
+skipped (the shortcut itself is gone since the 2026-10-12 merge: upstream `1cc9d5a1` deleted it, so
+the bypass has nothing left to bypass). Neither file is permission to change the marker, re-enable Vulkan hooks, or alter the
 ordinary off path. This bridge presents through D3D12 under vkd3d-proton even though the game renders
 through D3D11/DXVK; it must select the D3D12 menu backend for that topology.
 
