@@ -4066,6 +4066,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const bool carried = !cadence.runModel;
     PublishCadence(cadence);
 
+    // A model frame not handed the chain while its history is older than one frame: the game's vectors would
+    // misalign that history by every frame since, so it starts over (optimizer-fps-dlss5 fe67a80).
     if (cadence.staleHistory)
     {
         g_nr.reset = true;
@@ -4791,6 +4793,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
         else
         {
+            // No chain to hand, and the game's vectors would misalign that history the same way.
             g_nr.reset = true;
             for (auto& reset : g_nr.passReset)
                 reset = true;
@@ -5556,7 +5559,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     else if (!carried && cadenceRecorded)
         g_cadence.Recorded();
     else
-        g_cadence.Drop(carried);
+        g_cadence.Drop(carried, !carried && result == 1);
 
     // Arm, but do not record the final timestamp yet. All remaining resource/state destructors
     // precede timing's destructor. Partial chains and failed composition never publish success.

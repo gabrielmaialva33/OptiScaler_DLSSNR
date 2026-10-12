@@ -237,7 +237,7 @@ struct Decision
     bool handChain = false;    // a scheduled model frame after carried ones: hand the model the summed chain
     bool chainStart = false;   // the first carried frame since a model frame: the chain starts from this frame
     bool record = false;       // a model frame whose edit is to be stored for the frames that carry it
-    bool staleHistory = false; // model frame without chain motion while model history is > 0 frames old
+    bool staleHistory = false; // a model frame not handed the chain while its history is older than one frame
     Reason reason = Reason::None;
     uint32_t cadence = 1; // what is in effect: 1 whenever the model runs every frame because of a refusal
     uint32_t age = 0;     // presents the pass ran at since the last model frame, this one included
@@ -280,6 +280,8 @@ class Scheduler
             Drop();
             d.reason = refusal;
             d.cadence = 1;
+            // The first refused frame after carried ones runs the model on the game's vectors too.
+            d.staleHistory = _framesSinceModel > 0;
             return d;
         }
 
@@ -333,11 +335,14 @@ class Scheduler
     }
 
     // Nothing usable is stored: a failed or partial model frame, a failed carry, any forced frame.
-    // _framesSinceModel survives Drop() and is zeroed only by Recorded().
-    void Drop(bool carriedFrame = false)
+    // How old the model's history is survives it: a failed carry still went by without the model, and a
+    // model frame that ran without storing its edit (a refusal, a second view) still renewed that history.
+    void Drop(bool carriedFrame = false, bool modelRan = false)
     {
         if (carriedFrame)
             ++_framesSinceModel;
+        else if (modelRan)
+            _framesSinceModel = 0;
         _edit = false;
         _carried = 0;
     }

@@ -59,7 +59,7 @@ struct Driver
             if (modelOk && d.record)
                 scheduler.Recorded();
             else
-                scheduler.Drop();
+                scheduler.Drop(false, modelOk);
         }
         else
         {
@@ -484,22 +484,56 @@ void StaleHistory_ResetsWhenHistoryIsOlderThanMotion()
         assert(next.runModel && next.reason == Reason::NoEdit && !next.handChain && next.staleHistory);
     }
 
-    // Path 4: Chain build failure on a scheduled frame. Scheduler expects to hand chain,
-    // so staleHistory is false, but caller detects ModelMotion == nullptr and pulses reset.
+    // A refused frame after carried ones runs the model on the game's vectors, so it resets; the refused frames
+    // after it renewed the history, so lifting the refusal does not reset again.
+    {
+        Driver d;
+        const auto in = Running(3);
+        d.Frame(in, Shape()); // M
+        d.Frame(in, Shape()); // c
+        auto off = in;
+        off.requested = 1;
+        const auto refused = d.Frame(off, Shape());
+        assert(refused.runModel && refused.reason == Reason::Off && refused.staleHistory);
+        assert(!d.Frame(off, Shape()).staleHistory);
+        const auto back = d.Frame(in, Shape());
+        assert(back.runModel && back.reason == Reason::NoEdit && !back.staleHistory);
+    }
+
+    // A second view in one present runs the model without storing its edit, as every call does without cadence:
+    // the forced frame that follows does not reset.
+    {
+        Driver d;
+        const auto in = Running(3);
+        d.Frame(in, Shape()); // M
+        d.Frame(in, Shape()); // c
+        const auto second = d.Frame(in, Shape(), true, 0);
+        assert(second.runModel && second.reason == Reason::SamePresent && second.staleHistory);
+        const auto next = d.Frame(in, Shape());
+        assert(next.runModel && next.reason == Reason::NoEdit && !next.staleHistory);
+    }
+
+    // A model frame that failed renews nothing: the forced frame after it still resets.
+    {
+        Driver d;
+        const auto in = Running(3);
+        d.Frame(in, Shape()); // M
+        d.Frame(in, Shape()); // c
+        const auto failed = d.Frame(in, Shape(), false, 1, kGapMs + 1);
+        assert(failed.runModel && failed.staleHistory);
+        assert(d.Frame(in, Shape()).staleHistory);
+    }
+
+    // A scheduled frame handed the chain never resets; the caller resets only if the chain cannot be built.
     {
         Driver d;
         const auto in = Running(3);
         d.Frame(in, Shape()); // M
         d.Frame(in, Shape()); // c
         d.Frame(in, Shape()); // c
-        const auto scheduled = d.scheduler.Decide(in, Shape(), ++d.present, d.ms += 16, d.resetPending);
+        const auto scheduled = d.Frame(in, Shape());
         assert(scheduled.runModel && scheduled.reason == Reason::Scheduled && scheduled.handChain);
         assert(!scheduled.staleHistory);
-        // Caller checks: if (cadence.handChain && ModelMotion(...) == nullptr) -> g_nr.reset = true;
-        bool modelMotionFailed = true;
-        if (scheduled.handChain && modelMotionFailed)
-            d.resetPending = true;
-        assert(d.resetPending);
     }
 
     ++g_cases;
