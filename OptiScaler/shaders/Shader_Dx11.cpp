@@ -63,6 +63,8 @@ DXGI_FORMAT Shader_Dx11::TranslateTypelessFormats(DXGI_FORMAT format)
         return DXGI_FORMAT_R32_FLOAT;
     case DXGI_FORMAT_D32_FLOAT:
         return DXGI_FORMAT_R32_FLOAT;
+    case DXGI_FORMAT_D16_UNORM:
+        return DXGI_FORMAT_R16_UNORM;
     default:
         return format;
     }
