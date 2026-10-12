@@ -706,20 +706,11 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
                 const float implied = DlssNr::Exposure::PreExposure(g_vk.gamePreExposure) / measured;
                 if (g_vk.exposureLatch.Observe(implied))
                 {
-                    if (g_vk.exposureLatch.Reason() == DlssNr::Exposure::LatchReason::Swinging)
-                    {
-                        LOG_WARN(
-                            "DLSS-NR Vulkan: the game's exposure is not usable (implied white point {:.4f}..{:.4f}, "
-                            "{:.1f} stops in {} readings); using paper white for the rest of the session",
-                            g_vk.exposureLatch.MinSpan(), g_vk.exposureLatch.MaxSpan(), g_vk.exposureLatch.StopsSpan(),
-                            g_vk.exposureLatch.ReadingsSpan());
-                    }
-                    else
-                    {
-                        LOG_WARN("DLSS-NR Vulkan: the game's exposure is not usable (implied white point {:.4f} out of "
-                                 "range [0.02, 512] on {} readings); using paper white for the rest of the session",
-                                 g_vk.exposureLatch.LastReading(), g_vk.exposureLatch.OutOfRangeCount());
-                    }
+                    LOG_WARN("DLSS-NR Vulkan: the game's exposure is not usable (implied white point as low as {:.4f} "
+                             "and as high as {:.1f}; {} readings below 0.02, {} above 512); using paper white for "
+                             "the rest of the session",
+                             g_vk.exposureLatch.Lowest(), g_vk.exposureLatch.Highest(), g_vk.exposureLatch.LowCount(),
+                             g_vk.exposureLatch.HighCount());
                 }
             }
         }

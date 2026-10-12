@@ -8,9 +8,13 @@ The runner compiles `OptiScaler/dlssnr/DlssNr_Exposure.h` with g++ C++20, ASan/U
 
 ## What this covers
 
-- **Normal stable/slow game**: an exposure that remains stable or moves gently never latches over 1,000 readings.
-- **One wild reading**: a single out-of-range reading does not latch.
-- **Three out-of-range readings**: three readings outside [0.02, 512] (non-consecutive) latch the session.
-- **Swinging window**: an 8.1-stop swing within 120 readings latches, while the same 8.1-stop swing spread smoothly over 200 readings does not.
-- **Reset**: `Reset()` restores the unlatched state and clears all history and diagnostics.
-- **Fallback behaviour**: when latched, `Exposure::WhitePoint` for source 1 falls back to the manual slider, and `Exposure::LiveWanted` is false.
+- **Normal game**: an exposure that stays stable or moves gently never latches over 1,000 readings.
+- **Crimson Desert's eye adaptation**: the implied white points logged on 2026-10-12 (0.10..307, with a jump from
+  0.28 to 303 inside 120 readings) and ten-stop sweeps inside [0.02, 512] never latch. The 8-stop swing test that
+  came first latched on exactly this, which is why it was removed.
+- **One end alone**: hundreds of readings above 512, or below 0.02, never latch (a loading screen, a black frame).
+- **Both ends**: one reading at each end does not latch; two at each end do, once, with the extremes recorded.
+- **Control**: an exposure jumping between 0.00025 and 116 latches within a few readings.
+- **Ignored readings**: NaN, infinity, zero and negative values change nothing.
+- **Reset**, and **fallback behaviour**: when latched, `Exposure::WhitePoint` for source 1 returns the slider and
+  `Exposure::LiveWanted` is false; sources 0 and 2 are unaffected.

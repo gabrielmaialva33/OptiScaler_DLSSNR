@@ -137,18 +137,18 @@ documented in the shipped `OptiScaler.ini`. The config-round-trip check should p
 ## Game exposure plausibility latch (WhitePointSource == 1)
 
 When `WhitePointSource == 1`, the white point tracks the game's own exposure (`preExposure / exposure * trim`).
-Some games publish an exposure value that is not usable: in Control, the exposure moved from 0.00025 to 116
-within seconds, throwing the white point alternately against the 0.01 floor and 4096 ceiling and flashing the screen.
-To prevent this, `PlausibilityLatch` (adapted from Skynizz commit `53e7d232`) monitors accepted readings and latches
-unreliable for the rest of the session. It is fed `preExposure / exposure` without the trim: the trim is the user's
-choice, and sweeping it across its 0.01..4 range would itself read as a nine-stop swing.
+Some games publish an exposure value that is not usable: in Control it moved from 0.00025 to 116 within seconds,
+throwing the white point between the 0.01 floor and the 4096 ceiling and flashing the screen (Skynizz, `53e7d232`).
+`PlausibilityLatch` watches the implied white point `preExposure / exposure` (without the trim, which is the user's
+choice and spans almost nine stops) and, once the game's exposure has been **implausible at both ends** -- at least
+two readings below 0.02 and two above 512 -- uses paper white for the rest of the session.
 
-- **Out of range:** the implied white point falls outside [0.02, 512] on 3 readings (non-consecutive). A single wild
-  reading does not latch it, protecting against transient camera cuts or loading frames.
-- **Swinging:** within the last 120 readings (~2 s at 60 fps), the implied white spans more than 8 stops
-  (`log2(max) - log2(min) > 8`). This catches games whose values stay within [0.02, 512] but oscillate wildly.
-
-When latched, the white point falls back to the manual paper white slider, and the live in-shader path stands down.
-The real risk is a false latch: a title whose exposure legitimately swings more than 8 stops within ~2 s (e.g. an
-instant bomb flash or extreme cave exit) falls back to paper white until the source is toggled. The latch is
-session-scoped and clears on NR reset or when `WhitePointSource` changes.
+- **Why not a swing test.** The first version also latched when the white point spanned more than 8 stops within 120
+  readings, as Skynizz's fork does. It latched in Crimson Desert on its first session (2026-10-12): eye adaptation
+  took the white point from 0.28 to 303 within 120 readings during a scene change, and over the session it ranged
+  0.10..307. A real exposure moves a long way; it does not leave the plausible range on both sides.
+- **Why not one end.** A loading screen or a black frame can push the exposure to an extreme for a while without the
+  value being meaningless. Only a value that is implausible in both directions is noise.
+- **Scope.** Session-long; cleared when `WhitePointSource` changes or NR resets. When latched, the white point falls
+  back to the paper-white slider and the live in-shader path stands down; the menu says so, and the log gives the
+  extremes and counts once.

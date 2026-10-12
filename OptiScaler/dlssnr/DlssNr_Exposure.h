@@ -43,123 +43,66 @@ inline float WhitePoint(uint32_t source, bool hdr, float slider, float trim, flo
 enum class LatchReason : uint8_t
 {
     None = 0,
-    OutOfRange,
-    Swinging,
+    BothEnds,
 };
 
 // Plausibility latch for WhitePointSource=1.
-// Monitors the implied white point (PreExposure / exposure, without the user's trim and before the 0.01..4096
-// clamp) of accepted readings. If a game publishes unusable exposure values (e.g. Control swinging from 0.00025 to 116
-// within seconds, flashing between black and blown out), this latches unreliable for the session so DLSS-NR
-// falls back to paper white rather than corrupting the image.
+// Watches the implied white point (PreExposure / exposure, without the user's trim and before the 0.01..4096 clamp)
+// of accepted readings. Control published an exposure that jumped between 0.00025 and 116 within seconds, which
+// put the white point on the 0.01 floor one moment and the 4096 ceiling the next. Once a game's exposure has been
+// implausible at both ends, the latch holds for the session and DLSS-NR uses paper white instead.
+//
+// A test of how far the white point moves was tried first (more than 8 stops within 120 readings, as Skynizz's
+// fork does) and latched in Crimson Desert, whose eye adaptation took the white point from 0.28 to 303 within 120
+// readings during a scene change. A real exposure moves a long way; it does not leave the plausible range on both
+// sides. One end alone is not enough either: a loading screen or a black frame can push the exposure to an extreme
+// for a moment without the value being meaningless.
 struct PlausibilityLatch
 {
-    // The plausible range of implied white point values (PreExposure / exposure).
-    // In Control, the game's exposure moved from 0.00025 to 116 within seconds, implying white points
-    // hitting the 0.01 floor and 4096 ceiling. A legitimate scene linear white point sits within [0.02, 512.0].
+    // Implied white points outside [0.02, 512] are not a scene a game exposes for. Crimson Desert, which
+    // adapts hard, stays within 0.10..307.
     static constexpr float kMinImpliedWhite = 0.02f;
     static constexpr float kMaxImpliedWhite = 512.0f;
 
-    // Number of out-of-range readings required before latching. A single wild reading must never
-    // latch it; 3 non-consecutive readings confirm that the game's exposure cannot be trusted.
-    static constexpr uint32_t kOutOfRangeThreshold = 3;
-
-    // Window size (~2 seconds at 60 fps) across which dynamic range swing is tracked.
-    static constexpr size_t kWindowSize = 120;
-
-    // Maximum plausible dynamic range swing in photographic stops (log2) over 120 readings.
-    // 8 stops corresponds to a 256x luminance swing within ~2 s, which exceeds legitimate scene
-    // transitions and indicates an oscillating or uncalibrated exposure buffer.
-    static constexpr float kMaxStopsSpan = 8.0f;
+    // Readings needed beyond EACH end. Two, so neither one wild frame nor one excursion at each end latches it.
+    static constexpr uint32_t kPerEnd = 2;
 
     bool latched = false;
     LatchReason reason = LatchReason::None;
-    uint32_t outOfRangeCount = 0;
+    uint32_t lowCount = 0;
+    uint32_t highCount = 0;
+    float lowest = 0.0f;
+    float highest = 0.0f;
 
-    float window[kWindowSize] = {};
-    size_t head = 0;
-    size_t count = 0;
-
-    // Diagnostics captured at the moment of latching for one-shot logging.
-    float minSpan = 0.0f;
-    float maxSpan = 0.0f;
-    float stopsSpan = 0.0f;
-    uint32_t readingsSpan = 0;
-    float lastImpliedWhite = 0.0f;
-
-    void Reset()
-    {
-        latched = false;
-        reason = LatchReason::None;
-        outOfRangeCount = 0;
-        head = 0;
-        count = 0;
-        minSpan = 0.0f;
-        maxSpan = 0.0f;
-        stopsSpan = 0.0f;
-        readingsSpan = 0;
-        lastImpliedWhite = 0.0f;
-        for (float& v : window)
-            v = 0.0f;
-    }
+    void Reset() { *this = PlausibilityLatch {}; }
 
     // Feed an implied white point reading (PreExposure / exposure, before the trim and the 0.01..4096 clamp).
-    // Returns true on the exact frame it latches so the caller can log once at WARN.
+    // Returns true on the reading that latches it, so the caller can log once.
     bool Observe(float impliedWhite)
     {
-        if (latched)
+        if (latched || !std::isfinite(impliedWhite) || impliedWhite <= 0.0f)
             return false;
 
-        if (!std::isfinite(impliedWhite) || impliedWhite <= 0.0f)
-            return false;
-
-        lastImpliedWhite = impliedWhite;
-
-        // Test 1: Out-of-range readings. Counted across the session; do not need to be consecutive.
-        // A single wild reading must never latch it.
-        if (impliedWhite < kMinImpliedWhite || impliedWhite > kMaxImpliedWhite)
+        if (impliedWhite < kMinImpliedWhite)
         {
-            ++outOfRangeCount;
-            if (outOfRangeCount >= kOutOfRangeThreshold)
-            {
-                latched = true;
-                reason = LatchReason::OutOfRange;
-                return true;
-            }
+            ++lowCount;
+            lowest = lowest == 0.0f ? impliedWhite : std::min(lowest, impliedWhite);
+        }
+        else if (impliedWhite > kMaxImpliedWhite)
+        {
+            ++highCount;
+            highest = std::max(highest, impliedWhite);
         }
         else
         {
-            // Test 2: Swinging within the last 120 readings.
-            window[head] = impliedWhite;
-            head = (head + 1) % kWindowSize;
-            if (count < kWindowSize)
-                ++count;
+            return false;
+        }
 
-            if (count > 1)
-            {
-                float minVal = window[0];
-                float maxVal = window[0];
-                for (size_t i = 1; i < count; ++i)
-                {
-                    minVal = std::min(minVal, window[i]);
-                    maxVal = std::max(maxVal, window[i]);
-                }
-
-                if (minVal > 0.0f)
-                {
-                    const float stops = std::log2(maxVal) - std::log2(minVal);
-                    if (stops > kMaxStopsSpan)
-                    {
-                        latched = true;
-                        reason = LatchReason::Swinging;
-                        minSpan = minVal;
-                        maxSpan = maxVal;
-                        stopsSpan = stops;
-                        readingsSpan = static_cast<uint32_t>(count);
-                        return true;
-                    }
-                }
-            }
+        if (lowCount >= kPerEnd && highCount >= kPerEnd)
+        {
+            latched = true;
+            reason = LatchReason::BothEnds;
+            return true;
         }
 
         return false;
@@ -167,11 +110,9 @@ struct PlausibilityLatch
 
     bool Latched() const { return latched; }
     LatchReason Reason() const { return reason; }
-    uint32_t OutOfRangeCount() const { return outOfRangeCount; }
-    float MinSpan() const { return minSpan; }
-    float MaxSpan() const { return maxSpan; }
-    float StopsSpan() const { return stopsSpan; }
-    uint32_t ReadingsSpan() const { return readingsSpan; }
-    float LastReading() const { return lastImpliedWhite; }
+    uint32_t LowCount() const { return lowCount; }
+    uint32_t HighCount() const { return highCount; }
+    float Lowest() const { return lowest; }
+    float Highest() const { return highest; }
 };
 } // namespace DlssNr::Exposure

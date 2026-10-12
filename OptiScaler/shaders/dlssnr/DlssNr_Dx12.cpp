@@ -1808,20 +1808,10 @@ void ConsumeMeterReadback()
         const float implied = DlssNr::Exposure::PreExposure(g_nr.gamePreExposure) / src[0];
         if (g_nr.exposureLatch.Observe(implied))
         {
-            if (g_nr.exposureLatch.Reason() == DlssNr::Exposure::LatchReason::Swinging)
-            {
-                LOG_WARN("DLSS-NR: the game's exposure is not usable (implied white point {:.4f}..{:.4f}, {:.1f} "
-                         "stops in {} readings); using paper white for the rest of the session",
-                         g_nr.exposureLatch.MinSpan(), g_nr.exposureLatch.MaxSpan(), g_nr.exposureLatch.StopsSpan(),
-                         g_nr.exposureLatch.ReadingsSpan());
-            }
-            else
-            {
-                LOG_WARN(
-                    "DLSS-NR: the game's exposure is not usable (implied white point {:.4f} out of range [0.02, 512] "
-                    "on {} readings); using paper white for the rest of the session",
-                    g_nr.exposureLatch.LastReading(), g_nr.exposureLatch.OutOfRangeCount());
-            }
+            LOG_WARN("DLSS-NR: the game's exposure is not usable (implied white point as low as {:.4f} and as high "
+                     "as {:.1f}; {} readings below 0.02, {} above 512); using paper white for the rest of the session",
+                     g_nr.exposureLatch.Lowest(), g_nr.exposureLatch.Highest(), g_nr.exposureLatch.LowCount(),
+                     g_nr.exposureLatch.HighCount());
         }
     }
 
