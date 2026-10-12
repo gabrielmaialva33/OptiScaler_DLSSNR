@@ -77,7 +77,7 @@ bool WantedIdleForNeuralRendering()
 
 bool Wanted() { return WantedForFrameGeneration() || WantedForNeuralRendering(); }
 
-void ResolveZeroExtent(HWND gameWindow, UINT& width, UINT& height)
+void ResolveZeroExtent(HWND gameWindow, UINT& width, UINT& height, IDXGISwapChain* swapChain)
 {
     if ((width != 0 && height != 0) || gameWindow == nullptr)
         return;
@@ -86,17 +86,43 @@ void ResolveZeroExtent(HWND gameWindow, UINT& width, UINT& height)
     if (!GetClientRect(gameWindow, &client))
         return;
 
-    const UINT clientWidth = static_cast<UINT>(std::max<LONG>(client.right - client.left, 1));
-    const UINT clientHeight = static_cast<UINT>(std::max<LONG>(client.bottom - client.top, 1));
+    const LONG clientWidth = client.right - client.left;
+    const LONG clientHeight = client.bottom - client.top;
 
-    LOG_DEBUG("bridge extent {}x{} resolved against the game window to {}x{}", width, height,
-              width != 0 ? width : clientWidth, height != 0 ? height : clientHeight);
+    // Use the client rect only if both sides are >= 16; when a game leaves exclusive fullscreen before
+    // sizing its window, or the window is minimized, GetClientRect gives a sub-16 px size (or 0x0). Clamping
+    // to at least 1 collapsed the swapchain to 1x1 permanently. Keep the current buffer size until the window
+    // is sized properly (janblade 758eb136, 75ff5e1a).
+    if (clientWidth >= 16 && clientHeight >= 16)
+    {
+        LOG_DEBUG("bridge extent {}x{} resolved against the game window to {}x{}", width, height,
+                  width != 0 ? width : static_cast<UINT>(clientWidth),
+                  height != 0 ? height : static_cast<UINT>(clientHeight));
 
-    if (width == 0)
-        width = clientWidth;
+        if (width == 0)
+            width = static_cast<UINT>(clientWidth);
 
-    if (height == 0)
-        height = clientHeight;
+        if (height == 0)
+            height = static_cast<UINT>(clientHeight);
+
+        return;
+    }
+
+    if (swapChain != nullptr)
+    {
+        DXGI_SWAP_CHAIN_DESC current {};
+        if (SUCCEEDED(swapChain->GetDesc(&current)))
+        {
+            LOG_WARN("ResizeBuffers 0x0 with a {}x{} window: keeping {}x{}", clientWidth, clientHeight,
+                     current.BufferDesc.Width, current.BufferDesc.Height);
+
+            if (width == 0)
+                width = current.BufferDesc.Width;
+
+            if (height == 0)
+                height = current.BufferDesc.Height;
+        }
+    }
 }
 
 bool PresenterExtent(IDXGISwapChain1* presenter, UINT& width, UINT& height)
@@ -1184,8 +1210,20 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     // presenter took (see ResolveZeroExtent). The resolved extent is for comparing and for falling back.
     UINT hiddenWidth = Width;
     UINT hiddenHeight = Height;
-    Dx11wDx12::ResolveZeroExtent(_handle, hiddenWidth, hiddenHeight);
+    Dx11wDx12::ResolveZeroExtent(_handle, hiddenWidth, hiddenHeight, _fgSwapChain != nullptr ? _fgSwapChain : _real);
     const UINT presenterFlags = Dx11wDx12::PresenterResizeFlags(_fgSwapChain, SwapChainFlags);
+
+    // If Width and Height were 0x0 and the window is tiny (< 16), ResolveZeroExtent kept the current buffer
+    // size in hiddenWidth/hiddenHeight. Hand those to the presenter as well so DXGI does not collapse it to 1x1.
+    UINT presenterWidth = Width;
+    UINT presenterHeight = Height;
+    RECT clientRect {};
+    if (Width == 0 && Height == 0 && GetClientRect(_handle, &clientRect) &&
+        (clientRect.right - clientRect.left < 16 || clientRect.bottom - clientRect.top < 16))
+    {
+        presenterWidth = hiddenWidth;
+        presenterHeight = hiddenHeight;
+    }
 
     const bool skipFgResize = !_presenterResizeOwed &&
                               IsSame(_fgSwapChain, BufferCount, hiddenWidth, hiddenHeight, NewFormat, presenterFlags);
@@ -1237,7 +1275,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         }
         else
         {
-            fgResult = _ResizePresenter(BufferCount, Width, Height, NewFormat, presenterFlags);
+            fgResult = _ResizePresenter(BufferCount, presenterWidth, presenterHeight, NewFormat, presenterFlags);
         }
     }
 
@@ -1474,8 +1512,20 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     // The same order as ResizeBuffers: the presenter as given, then the hidden swapchain at its size.
     UINT hiddenWidth = Width;
     UINT hiddenHeight = Height;
-    Dx11wDx12::ResolveZeroExtent(_handle, hiddenWidth, hiddenHeight);
+    Dx11wDx12::ResolveZeroExtent(_handle, hiddenWidth, hiddenHeight, _fgSwapChain != nullptr ? _fgSwapChain : _real);
     const UINT presenterFlags = Dx11wDx12::PresenterResizeFlags(_fgSwapChain, SwapChainFlags);
+
+    // If Width and Height were 0x0 and the window is tiny (< 16), ResolveZeroExtent kept the current buffer
+    // size in hiddenWidth/hiddenHeight. Hand those to the presenter as well so DXGI does not collapse it to 1x1.
+    UINT presenterWidth = Width;
+    UINT presenterHeight = Height;
+    RECT clientRect {};
+    if (Width == 0 && Height == 0 && GetClientRect(_handle, &clientRect) &&
+        (clientRect.right - clientRect.left < 16 || clientRect.bottom - clientRect.top < 16))
+    {
+        presenterWidth = hiddenWidth;
+        presenterHeight = hiddenHeight;
+    }
 
     const bool skipFgResize =
         !_presenterResizeOwed && IsSame(_fgSwapChain, BufferCount, hiddenWidth, hiddenHeight, Format, presenterFlags);
@@ -1526,7 +1576,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         }
         else
         {
-            fgResult = _ResizePresenter(BufferCount, Width, Height, Format, presenterFlags);
+            fgResult = _ResizePresenter(BufferCount, presenterWidth, presenterHeight, Format, presenterFlags);
         }
     }
 

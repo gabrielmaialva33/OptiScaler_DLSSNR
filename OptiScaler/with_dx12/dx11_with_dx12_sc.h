@@ -60,7 +60,7 @@ bool Wanted();
 // presenter took (PresenterExtent, MatchHiddenToPresenter). Resolving once and handing both the same
 // number sampled the window on our clock instead, which a fullscreen emulation may still be moving from
 // a helper thread (ApplyWindowPlacement).
-void ResolveZeroExtent(HWND gameWindow, UINT& width, UINT& height);
+void ResolveZeroExtent(HWND gameWindow, UINT& width, UINT& height, IDXGISwapChain* swapChain = nullptr);
 
 // The presenter's current extent. The interop copy moves whole buffers from the hidden swapchain to the
 // presenter, so this is the size the hidden one must have. False, and nothing written, when unknown.
