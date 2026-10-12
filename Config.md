@@ -509,6 +509,15 @@ ScanTrim=auto
 ; true or false - Default (auto) is false
 ScanMeter=auto
 
+; NVIDIA's highlight recovery, from RTX Remix (dlssnr/design/hdr-highlight-recovery.md). The model is shown
+; everything above paper white squeezed into the top of its range, so its verdict there -- above all its
+; colour -- is made without knowing how bright the pixel really is. This blends pixels that were very
+; bright (the brightest channel 1x to 8x paper white) and that the encode compressed hard back toward the
+; game's own frame, keeping a fire's orange and a coloured light's brightness. Costs a little of the model's
+; detail in bright areas. Linear HDR buffers only; no effect on a frame the game already tone mapped.
+; true or false - Default (auto) is false
+HighlightRecovery=auto
+
 ; How a model running below full resolution is enlarged: 0 classic, 1 matched residual,
 ; 2 matched residual + DLSS, 3 matched residual with a sharp enlargement.
 ; Matched residual carries only the model's edit onto the full-size frame's proxy, avoiding

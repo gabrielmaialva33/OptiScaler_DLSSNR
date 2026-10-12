@@ -128,6 +128,13 @@ acceptance, the ring fill and its "no match, no fill" rule, the off-picture vect
 (https://github.com/BeliyG3/optimizer-fps-dlss5, MIT). `Licenses/OptimizerFps_LICENSE.txt` carries their
 licence and says which parts are theirs.
 
+Highlight recovery (`[DlssNr] HighlightRecovery`, off by default) -- the max-channel smoothstep on the
+exposed frame times the smoothstep on what the model was shown, blended back toward the frame, with its
+thresholds -- is **NVIDIA's, from RTX Remix's DLSS-NR integration**
+(https://github.com/NVIDIAGameWorks/dxvk-remix, commit `ecf646d3ea`; per-file MIT-style grant, repository
+zlib). `Licenses/RTXRemix_ATTRIBUTION.txt` carries both texts and says which part is theirs;
+`design/hdr-highlight-recovery.md` is the analysis.
+
 ## Why a forwarder DLL exists
 
 The model's snippet resolves the module that owns its caller's return address and refuses any whose

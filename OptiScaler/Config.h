@@ -383,6 +383,13 @@ class Config
     // light source, whatever the model returns.
     CustomOptional<float> DlssNrMaxRatio { 2.0f };
 
+    // NVIDIA's highlight recovery, from RTX Remix: after the composition, pixels that were very bright and
+    // that the encode compressed hard are blended back toward the frame -- so the model's verdict on a pixel
+    // whose brightness it was never shown (above all its colour) does not reach it. Linear HDR buffers only;
+    // nothing on a frame the game already tone mapped. Off by default, which is the composition as it was.
+    // dlssnr/design/hdr-highlight-recovery.md.
+    CustomOptional<bool> DlssNrHighlightRecovery { false };
+
     // How a model that worked below the frame's size is brought back. 0 classic, 1 matched
     // residual, 3 matched residual with a sharp (Catmull-Rom) enlargement of the edit, 2 matched residual
     // with the edit enlarged by a private DLSS Super Resolution -- the meaning upstream's multi-pass PR

@@ -46,6 +46,13 @@ int main() {
     assert(band70.contractHash!=offAgain.contractHash && band80.contractHash!=band70.contractHash); ++cases;
     cfg.DlssNrPeripheryCompression.value=false; auto off=make();
     assert(off.contractHash==offAgain.contractHash); ++cases;
+    // Highlight recovery: a contract of its own only where the resolve is sent it, so off -- and on over a buffer
+    // the game already tone mapped -- keeps the default hash.
+    cfg.DlssNrHighlightRecovery.value=true; auto recovering=make();
+    auto recoverySdr=make("after",3440,1440,1,false,false,false,28);
+    assert(recovering.contractHash!=off.contractHash && recoverySdr.contractHash==plain.contractHash); ++cases;
+    cfg.DlssNrHighlightRecovery.value=false; auto recoveryOff=make();
+    assert(recoveryOff.contractHash==off.contractHash); ++cases;
     // Transfer 2: its warm-up (sent 1) and its running DLSS (sent 2) are different contracts, and the same
     // effective transfer with a different reason is too -- the private SR's cost sits in outside_model_ms.
     auto warming=make("after",3440,1440,0.5f,false,false,true,10,1,false,1,"warming-up");
@@ -82,6 +89,6 @@ int main() {
     assert(!ImGui::Contains("model cadence")); ++cases;
     ImGui::toggle=0; ImGui::Clear(); RenderGpuTiming(&cfg,false);
     assert(!cfg.settings.Enabled && ImGui::sliderCalls==0 && !ImGui::Contains("Last confirmed")); ++cases;
-    assert(cases==25);
+    assert(cases==27);
     std::printf("PASS %d timing boundary metadata/UI cases\n",cases);
 }

@@ -170,6 +170,10 @@ std::mutex g_vkMutex;
 // before. Same rule as g_resetOnReturn on the D3D12 side.
 std::atomic<bool> g_vkResetOnReturn { false };
 
+// Whether the last evaluate's buffer was linear HDR. For the menu, which offers highlight recovery only where it
+// can act; the same as g_lastLinearHdr on the D3D12 side.
+std::atomic<bool> g_vkLinearHdr { false };
+
 void Fail(const char* why)
 {
     if (g_vk.failed)
@@ -594,6 +598,8 @@ unsigned long long FramesVk() { return g_vk.frames; }
 bool ExposureOfferedVk() { return g_vk.exposureOffered; }
 
 bool ExposureLatchedVk() { return g_vk.exposureLatch.Latched(); }
+
+bool LinearHdrVk() { return g_vkLinearHdr.load(); }
 
 std::optional<double> LastGpuTimeVk() { return g_vk.lastGpuTime; }
 
@@ -1091,6 +1097,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     // Both have to agree. A game can set the HDR flag on a buffer that cannot hold open-ended light,
     // and encoding an already tone-mapped frame a second time looks washed out and banded.
     const bool linearHdr = gameSaysHdr && FormatCanHoldLinearHdr(colour->Resource.ImageViewInfo.Format);
+    g_vkLinearHdr.store(linearHdr);
 
     // The same rule as the D3D12 path, deliberately spelled the same way: the game divides its frame
     // by preExposure and multiplies by exposure, so undoing that is the divisor this pass wants, and
@@ -1136,6 +1143,19 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     encode.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
     encode.GuideWidth = guideWidth;
     encode.GuideHeight = guideHeight;
+    // Read by the resolve, which takes a copy of these constants. Linear HDR only, as on D3D12
+    // (design/hdr-highlight-recovery.md).
+    encode.HighlightRecovery = linearHdr && cfg.DlssNrHighlightRecovery.value_or_default() ? 1u : 0u;
+
+    // This path has no composition summary, so the one setting a screenshot cannot show is said when it changes.
+    // Starts at off, so a session that never turns it on logs nothing about it.
+    static uint32_t saidRecovery = 0u;
+
+    if (encode.HighlightRecovery != saidRecovery)
+    {
+        saidRecovery = encode.HighlightRecovery;
+        LOG_INFO("DLSS-NR Vulkan: highlight recovery {}", saidRecovery != 0 ? "on" : "off");
+    }
 
     const VkImageSubresourceRange colourRange = colour->Resource.ImageViewInfo.SubresourceRange;
 

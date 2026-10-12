@@ -1,0 +1,84 @@
+NVIDIA RTX Remix: DLSS-NR highlight recovery
+============================================
+
+Project:  RTX Remix runtime (dxvk-remix), NVIDIA
+Source:   https://github.com/NVIDIAGameWorks/dxvk-remix, commit ecf646d3ea97b1e81e450993f414a2ae31b71d3b
+          ("DLSS 3D-Guided Neural Generation Integration", 2026-09-18)
+
+What is derived from it
+-----------------------
+
+The optional highlight recovery step in the DLSS Neural Rendering resolve
+(OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl, [DlssNr] HighlightRecovery,
+off by default) reimplements, in HLSL, the highlight recovery of RTX Remix's
+inverse tone mapping pass:
+
+  * src/dxvk/shaders/rtx/pass/tonemap/tonemapping_inverse_tonemapping.comp.slang,
+    lines 84-106: a mask equal to a smoothstep on the exposed HDR frame's
+    largest channel times a smoothstep on the largest channel of what the
+    model was shown, used to blend the result back toward the original HDR
+    frame;
+  * src/dxvk/rtx_render/rtx_dlss_neural_rendering.h, lines 78-83: the default
+    smoothstep edges (1.0, 8.0, 0.75, 0.99), used here as fixed constants.
+
+What is not theirs: Remix applies the mask after an ACES tone map and a
+per-channel inverse of it. Neither is used here. The exposed frame is the
+pass's own normalised frame (the frame over its white point), and what the
+model was shown is the pass's own encode curve (soft knee, Neutwo or Hybrid)
+reproduced per pixel. The composition the mask is applied over is described in
+OptiScaler/dlssnr/README.md and is not derived from Remix. The analysis is in
+OptiScaler/dlssnr/design/hdr-highlight-recovery.md.
+
+No Remix source file is redistributed.
+
+Licences
+--------
+
+The files the step is derived from carry NVIDIA's own per-file grant, reproduced
+here as it appears in them:
+
+  Copyright (c) 2022-2026, NVIDIA CORPORATION. All rights reserved.
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the "Software"),
+  to deal in the Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+  and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+  THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  DEALINGS IN THE SOFTWARE.
+
+The RTX Remix repository as a whole is distributed under the zlib/libpng
+licence of dxvk, from which it is forked (its LICENSE file):
+
+  Copyright (c) 2017-2021 Philip Rebohle
+  Copyright (c) 2019-2021 Joshua Ashton
+
+  zlib/libpng license
+
+  This software is provided 'as-is', without any express or implied
+  warranty. In no event will the authors be held liable for any damages
+  arising from the use of this software.
+
+  Permission is granted to anyone to use this software for any purpose,
+  including commercial applications, and to alter it and redistribute it
+  freely, subject to the following restrictions:
+
+  - The origin of this software must not be misrepresented; you must not
+    claim that you wrote the original software. If you use this software
+    in a product, an acknowledgment in the product documentation would be
+    appreciated but is not required.
+
+  - Altered source versions must be plainly marked as such, and must not
+    be misrepresented as being the original software.
+
+  - This notice may not be removed or altered from any source distribution.

@@ -360,6 +360,10 @@ const char* CadenceStatus();
 // Whether this build carries model cadence's shader. Its bytecode header is optional; without it the control
 // is not offered.
 bool CadenceAvailable();
+
+// Whether the buffer the last D3D12 dispatch worked on was linear HDR, i.e. the colour transform was on. False
+// until something has run. For the menu: highlight recovery acts only there (design/hdr-highlight-recovery.md).
+bool BufferIsLinearHdr();
 // What peripheral compression did on the last D3D12 dispatch (design/peripheral-compression.md), for the
 // menu's status line. reason is a string literal: "active", or why not.
 struct PeripheryState
