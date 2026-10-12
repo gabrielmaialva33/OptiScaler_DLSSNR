@@ -5,7 +5,8 @@ using DlssNr::ScopedPreUpscale;
 struct Fixture
 {
     ID3D12Device device;
-    ID3D12Resource color{{}, &device}, depth{{}, &device}, motion{{}, &device}, output{{}, &device}, exposure{{}, &device};
+    ID3D12Resource color { {}, &device }, depth { {}, &device }, motion { {}, &device }, output { {}, &device },
+        exposure { {}, &device };
     ID3D12GraphicsCommandList cmd;
     NVSDK_NGX_Parameter params;
     Config& cfg = *Config::Instance();
@@ -19,7 +20,7 @@ struct Fixture
         State::Instance().frameCount = 100;
         cfg.DlssNrEnabled = true;
         cfg.DlssNrStage = 1;
-        params.typed = {{"Color", &color}, {"Depth", &depth}, {"Motion", &motion}, {"Output", &output}};
+        params.typed = { { "Color", &color }, { "Depth", &depth }, { "Motion", &motion }, { "Output", &output } };
         params.untyped["Exposure"] = &exposure;
         g_pre = {};
         g_preDevice = nullptr;
@@ -30,15 +31,14 @@ struct Fixture
         DlssNr_Dx12::writes = true;
         DlssNr_Dx12::modelCalled = true;
         DlssNr_Dx12::modelResult = 1;
-        for (auto& stage : g_coverage) stage = {};
-        for (auto& totals : g_coverageLogged) totals = {};
+        for (auto& stage : g_coverage)
+            stage = {};
+        for (auto& totals : g_coverageLogged)
+            totals = {};
         infoLogs.clear();
         Stable();
     }
-    void Stable()
-    {
-        g_preExtent.Observe(1280, 720, steady_clock::now() - milliseconds(501), color.desc.Format);
-    }
+    void Stable() { g_preExtent.Observe(1280, 720, steady_clock::now() - milliseconds(501), color.desc.Format); }
     void Restored()
     {
         assert(params.typed["Color"] == &color);
@@ -46,283 +46,564 @@ struct Fixture
         assert(depth.state == cfg.DepthResourceBarrier.value_or(1));
         assert(motion.state == cfg.MVResourceBarrier.value_or(1));
         assert(exposure.state == cfg.ExposureResourceBarrier.value_or(1));
-        if (g_pre.scratch) assert(g_pre.scratch->state == 2);
+        if (g_pre.scratch)
+            assert(g_pre.scratch->state == 2);
     }
 };
 
 int main()
 {
     unsigned checks = 0;
-    for (bool enabled : {false, true})
-        for (unsigned stage : {0u, 1u})
+    for (bool enabled : { false, true })
+        for (unsigned stage : { 0u, 1u })
         {
-            Fixture f; f.cfg.DlssNrEnabled = enabled; f.cfg.DlssNrStage = stage;
-            { ScopedPreUpscale p(&f.cmd, &f.params, true); assert(p.Swapped() == (enabled && stage == 1)); }
-            if (!enabled || stage == 0) assert(f.params.gets == 0 && f.params.sets == 0 && f.device.allocations == 0);
-            f.Restored(); ++checks;
+            Fixture f;
+            f.cfg.DlssNrEnabled = enabled;
+            f.cfg.DlssNrStage = stage;
+            {
+                ScopedPreUpscale p(&f.cmd, &f.params, true);
+                assert(p.Swapped() == (enabled && stage == 1));
+            }
+            if (!enabled || stage == 0)
+                assert(f.params.gets == 0 && f.params.sets == 0 && f.device.allocations == 0);
+            f.Restored();
+            ++checks;
         }
     for (unsigned mode = 0; mode < 4; ++mode)
     {
         Fixture f;
-        if (mode == 1) { f.params.typed.erase("Color"); f.params.untyped["Color"] = &f.color; }
-        if (mode == 2) f.params.untyped["Color"] = &f.color;
-        if (mode == 3) { f.params.typed["Color"] = nullptr; f.params.untyped["Color"] = &f.color; }
-        auto typed = f.params.typed; auto untyped = f.params.untyped;
+        if (mode == 1)
+        {
+            f.params.typed.erase("Color");
+            f.params.untyped["Color"] = &f.color;
+        }
+        if (mode == 2)
+            f.params.untyped["Color"] = &f.color;
+        if (mode == 3)
+        {
+            f.params.typed["Color"] = nullptr;
+            f.params.untyped["Color"] = &f.color;
+        }
+        auto typed = f.params.typed;
+        auto untyped = f.params.untyped;
         try
         {
             ScopedPreUpscale p(&f.cmd, &f.params, true);
             assert(p.Swapped());
-            if (typed.count("Color")) assert(f.params.typed["Color"] == g_pre.scratch);
-            if (untyped.count("Color")) assert(f.params.untyped["Color"] == g_pre.scratch);
+            if (typed.count("Color"))
+                assert(f.params.typed["Color"] == g_pre.scratch);
+            if (untyped.count("Color"))
+                assert(f.params.untyped["Color"] == g_pre.scratch);
             throw 1; // The caller failing must not leave its block referring to our scratch.
         }
-        catch (int) {}
+        catch (int)
+        {
+        }
         assert(f.params.typed == typed && f.params.untyped == untyped);
-        assert(g_pre.scratch->state == 2); ++checks;
+        assert(g_pre.scratch->state == 2);
+        ++checks;
     }
-    { Fixture f; f.params.untyped["Color"] = &f.output;
-      ScopedPreUpscale p(&f.cmd, &f.params, true); assert(!p.Swapped() && f.device.allocations == 0); ++checks; }
-    for (bool wrote : {false, true})
     {
-        Fixture f; DlssNr_Dx12::writes = wrote;
-        bool declined;
-        { ScopedPreUpscale p(&f.cmd, &f.params, true); assert(p.Swapped() == wrote); declined = p.Declined(); }
-        DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, declined);
-        assert(DlssNr_Dx12::calls == 1); f.Restored(); ++checks;
+        Fixture f;
+        f.params.untyped["Color"] = &f.output;
+        ScopedPreUpscale p(&f.cmd, &f.params, true);
+        assert(!p.Swapped() && f.device.allocations == 0);
+        ++checks;
     }
-    { Fixture f; bool declined;
-      { ScopedPreUpscale p(&f.cmd, &f.params, false); assert(!p.Swapped()); declined = p.Declined(); }
-      DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, declined);
-      assert(declined && DlssNr_Dx12::calls == 1 && f.device.allocations == 0); ++checks; }
-    { Fixture f; f.cfg.ColorResourceBarrier = 4; f.color.state = 4; f.color.desc.Flags = 2;
-      f.cfg.DepthResourceBarrier = 16; f.depth.state = 16;
-      f.cfg.MVResourceBarrier = 32; f.motion.state = 32;
-      f.cfg.ExposureResourceBarrier = 8; f.exposure.state = 8;
-      { ScopedPreUpscale p(&f.cmd, &f.params, true); assert(p.Swapped()); assert(g_pre.scratch->state == 4); }
-      f.Restored(); ++checks; }
-    { Fixture f; ScopedPreUpscale outer(&f.cmd, &f.params, true);
-      auto scratch = f.params.typed["Color"];
-      { ScopedPreUpscale nested(&f.cmd, &f.params, true); assert(!nested.Swapped() && !nested.Declined()); }
-      assert(f.params.typed["Color"] == scratch && DlssNr_Dx12::calls == 1); ++checks; }
+    for (bool wrote : { false, true })
+    {
+        Fixture f;
+        DlssNr_Dx12::writes = wrote;
+        bool declined;
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+            assert(p.Swapped() == wrote);
+            declined = p.Declined();
+        }
+        DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, declined);
+        assert(DlssNr_Dx12::calls == 1);
+        f.Restored();
+        ++checks;
+    }
+    {
+        Fixture f;
+        bool declined;
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, false);
+            assert(!p.Swapped());
+            declined = p.Declined();
+        }
+        DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, declined);
+        assert(declined && DlssNr_Dx12::calls == 1 && f.device.allocations == 0);
+        ++checks;
+    }
+    {
+        Fixture f;
+        f.cfg.ColorResourceBarrier = 4;
+        f.color.state = 4;
+        f.color.desc.Flags = 2;
+        f.cfg.DepthResourceBarrier = 16;
+        f.depth.state = 16;
+        f.cfg.MVResourceBarrier = 32;
+        f.motion.state = 32;
+        f.cfg.ExposureResourceBarrier = 8;
+        f.exposure.state = 8;
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+            assert(p.Swapped());
+            assert(g_pre.scratch->state == 4);
+        }
+        f.Restored();
+        ++checks;
+    }
+    {
+        Fixture f;
+        ScopedPreUpscale outer(&f.cmd, &f.params, true);
+        auto scratch = f.params.typed["Color"];
+        {
+            ScopedPreUpscale nested(&f.cmd, &f.params, true);
+            assert(!nested.Swapped() && !nested.Declined());
+        }
+        assert(f.params.typed["Color"] == scratch && DlssNr_Dx12::calls == 1);
+        ++checks;
+    }
     // wilsjo2's padded input (docs/PADDED-PRESR.md in their fork): an origin-zero picture drawn into a
     // larger allocation. The copy is the drawn size, and the upscaler reads it with the subrect it was
     // already given, so nothing is copied back into the game's texture.
-    { Fixture f; f.color.desc.Width = 2560; f.color.desc.Height = 1440;
-      f.params.numbers = {{"Width", 2558}, {"Height", 1439}};
-      g_preExtent.Reset();
-      g_preExtent.Observe(2558, 1439, steady_clock::now() - milliseconds(501), f.color.desc.Format);
-      { ScopedPreUpscale p(&f.cmd, &f.params, true); assert(p.Swapped());
-        assert(g_pre.width == 2558 && g_pre.height == 1439 && f.params.typed["Color"] == g_pre.scratch); }
-      assert(f.device.allocations == 1); f.Restored(); ++checks; }
+    {
+        Fixture f;
+        f.color.desc.Width = 2560;
+        f.color.desc.Height = 1440;
+        f.params.numbers = { { "Width", 2558 }, { "Height", 1439 } };
+        g_preExtent.Reset();
+        g_preExtent.Observe(2558, 1439, steady_clock::now() - milliseconds(501), f.color.desc.Format);
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+            assert(p.Swapped());
+            assert(g_pre.width == 2558 && g_pre.height == 1439 && f.params.typed["Color"] == g_pre.scratch);
+        }
+        assert(f.device.allocations == 1);
+        f.Restored();
+        ++checks;
+    }
     for (unsigned invalid = 0; invalid < 11; ++invalid)
     {
         Fixture f;
         switch (invalid)
         {
-        case 0: f.color.desc.Format = 10; break;
-        case 1: f.color.desc.SampleDesc.Count = 4; break;
-        case 2: f.color.desc.DepthOrArraySize = 2; break;
-        case 3: f.params.numbers["X"] = 1; break;
-        case 4: f.params.numbers = {{"Width", 2000}, {"Height", 720}}; break;
-        case 5: f.params.numbers["Width"] = 1280; break;
-        case 6: f.color.desc.Format = 99; break;
-        case 7: f.color.desc.Flags = 4; break;
-        case 8: f.cfg.DlssNrHoldFrame = true; break;
-        case 9: f.cfg.DlssNrUseProxy = true; break;
-        case 10: f.device.formatSupported = false; break;
+        case 0:
+            f.color.desc.Format = 10;
+            break;
+        case 1:
+            f.color.desc.SampleDesc.Count = 4;
+            break;
+        case 2:
+            f.color.desc.DepthOrArraySize = 2;
+            break;
+        case 3:
+            f.params.numbers["X"] = 1;
+            break;
+        case 4:
+            f.params.numbers = { { "Width", 2000 }, { "Height", 720 } };
+            break;
+        case 5:
+            f.params.numbers["Width"] = 1280;
+            break;
+        case 6:
+            f.color.desc.Format = 99;
+            break;
+        case 7:
+            f.color.desc.Flags = 4;
+            break;
+        case 8:
+            f.cfg.DlssNrHoldFrame = true;
+            break;
+        case 9:
+            f.cfg.DlssNrUseProxy = true;
+            break;
+        case 10:
+            f.device.formatSupported = false;
+            break;
         }
         ScopedPreUpscale p(&f.cmd, &f.params, true);
-        assert(!p.Swapped() && p.Declined() && f.device.allocations == 0 && f.cmd.barriers == 0); ++checks;
+        assert(!p.Swapped() && p.Declined() && f.device.allocations == 0 && f.cmd.barriers == 0);
+        ++checks;
     }
-    { Fixture f; f.device.allocationFails = true;
-      for (int i = 0; i < 1000; ++i) { ScopedPreUpscale p(&f.cmd, &f.params, true); assert(!p.Swapped()); }
-      assert(f.device.allocations == 1 && f.params.sets == 0); ++checks; }
-    { Fixture f; ID3D12Device other; g_preDevice = &other;
-      ScopedPreUpscale p(&f.cmd, &f.params, true); assert(!p.Swapped() && !p.Declined() && f.device.allocations == 0); ++checks; }
-    { Fixture f; g_preExtent.Reset();
-      for (unsigned i = 0; i < 1000; ++i)
-      { f.params.numbers = {{"Width", 1000 + i % 2}, {"Height", 600}};
-        ScopedPreUpscale p(&f.cmd, &f.params, true); assert(!p.Swapped() && !p.Declined()); }
-      assert(f.device.allocations == 0 && DlssNr_Dx12::calls == 0); ++checks; }
-    { DlssNr::Detail::StableExtent e; auto t = steady_clock::now();
-      assert(!e.Observe(1280, 720, t)); assert(!e.Observe(1280, 720, t + milliseconds(499)));
-      assert(e.Observe(1280, 720, t + milliseconds(500)));
-      assert(!e.Observe(1280, 720, t + milliseconds(501), 1));
-      assert(!e.Observe(1920, 1080, t + milliseconds(502), 1)); ++checks; }
-    { Fixture f; State::Instance().frameCount = 0;
-      ScopedPreUpscale p(&f.cmd, &f.params, true);
-      assert(!p.Swapped() && p.Declined() && f.device.allocations == 0); ++checks; }
-    { DlssNr::Detail::CreationFrameGate gate; gate.Created(100);
-      for (int i = 0; i < 1000; ++i) assert(!gate.Ready(100));
-      assert(!gate.Ready(0)); assert(!gate.Ready(99)); assert(gate.Ready(101));
-      gate.Created(101); assert(!gate.Ready(101)); assert(gate.Ready(102)); ++checks; }
+    {
+        Fixture f;
+        f.device.allocationFails = true;
+        for (int i = 0; i < 1000; ++i)
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+            assert(!p.Swapped());
+        }
+        assert(f.device.allocations == 1 && f.params.sets == 0);
+        ++checks;
+    }
+    {
+        Fixture f;
+        ID3D12Device other;
+        g_preDevice = &other;
+        ScopedPreUpscale p(&f.cmd, &f.params, true);
+        assert(!p.Swapped() && !p.Declined() && f.device.allocations == 0);
+        ++checks;
+    }
+    {
+        Fixture f;
+        g_preExtent.Reset();
+        for (unsigned i = 0; i < 1000; ++i)
+        {
+            f.params.numbers = { { "Width", 1000 + i % 2 }, { "Height", 600 } };
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+            assert(!p.Swapped() && !p.Declined());
+        }
+        assert(f.device.allocations == 0 && DlssNr_Dx12::calls == 0);
+        ++checks;
+    }
+    {
+        DlssNr::Detail::StableExtent e;
+        auto t = steady_clock::now();
+        assert(!e.Observe(1280, 720, t));
+        assert(!e.Observe(1280, 720, t + milliseconds(499)));
+        assert(e.Observe(1280, 720, t + milliseconds(500)));
+        assert(!e.Observe(1280, 720, t + milliseconds(501), 1));
+        assert(!e.Observe(1920, 1080, t + milliseconds(502), 1));
+        ++checks;
+    }
+    {
+        Fixture f;
+        State::Instance().frameCount = 0;
+        ScopedPreUpscale p(&f.cmd, &f.params, true);
+        assert(!p.Swapped() && p.Declined() && f.device.allocations == 0);
+        ++checks;
+    }
+    {
+        DlssNr::Detail::CreationFrameGate gate;
+        gate.Created(100);
+        for (int i = 0; i < 1000; ++i)
+            assert(!gate.Ready(100));
+        assert(!gate.Ready(0));
+        assert(!gate.Ready(99));
+        assert(gate.Ready(101));
+        gate.Created(101);
+        assert(!gate.Ready(101));
+        assert(gate.Ready(102));
+        ++checks;
+    }
     // Coverage must survive the exact failure that invalidated the earlier manual game test:
     // repeated entries without applying any composition are explicitly ZERO_APPLIED, not success.
-    { Fixture f; g_preExtent.Reset();
-      for (int i = 0; i < 1000; ++i) { ScopedPreUpscale p(&f.cmd, &f.params, true); }
-      const auto& t = g_coverage[1].totals;
-      assert(t.calls == 1000 && t.skipped == 1000 && t.applied == 0 && t.modelOk == 0);
-      assert(t.skippedPresents == 1 && t.appliedPresents == 0);
-      assert(infoLogs.back().find("coverage=ZERO_APPLIED_IN_WINDOW") != std::string::npos);
-      assert(infoLogs.back().find("stable render resolution") != std::string::npos); ++checks; }
-    { Fixture f; DlssNr_Dx12::writes = false;
-      { ScopedPreUpscale p(&f.cmd, &f.params, true); assert(!p.Swapped()); }
-      assert(g_coverage[1].totals.modelOk == 1 && g_coverage[1].totals.applied == 0);
-      assert(infoLogs.back().find("model_ok=1 model_failed=0 applied_recorded=0") != std::string::npos); ++checks; }
-    { Fixture f;
-      { ScopedPreUpscale p(&f.cmd, &f.params, true); assert(p.Swapped()); }
-      DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
-      assert(g_coverage[1].totals.applied == 1 && g_coverage[0].totals.calls == 0 && g_coverage[2].totals.calls == 0);
-      assert(infoLogs.back().find("coverage=APPLIED_IN_WINDOW") != std::string::npos);
-      std::puts(infoLogs.back().c_str()); ++checks; }
-    { Fixture f; f.cfg.DlssNrStage = 0;
-      DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
-      assert(g_coverage[0].totals.applied == 1 && g_coverage[0].totals.modelOk == 1);
-      assert(infoLogs.back().find("stage=after calls=1") != std::string::npos); ++checks; }
+    {
+        Fixture f;
+        g_preExtent.Reset();
+        for (int i = 0; i < 1000; ++i)
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+        }
+        const auto& t = g_coverage[1].totals;
+        assert(t.calls == 1000 && t.skipped == 1000 && t.applied == 0 && t.modelOk == 0);
+        assert(t.skippedPresents == 1 && t.appliedPresents == 0);
+        assert(infoLogs.back().find("coverage=ZERO_APPLIED_IN_WINDOW") != std::string::npos);
+        assert(infoLogs.back().find("stable render resolution") != std::string::npos);
+        ++checks;
+    }
+    {
+        Fixture f;
+        DlssNr_Dx12::writes = false;
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+            assert(!p.Swapped());
+        }
+        assert(g_coverage[1].totals.modelOk == 1 && g_coverage[1].totals.applied == 0);
+        assert(infoLogs.back().find("model_ok=1 model_failed=0 applied_recorded=0") != std::string::npos);
+        ++checks;
+    }
+    {
+        Fixture f;
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+            assert(p.Swapped());
+        }
+        DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
+        assert(g_coverage[1].totals.applied == 1 && g_coverage[0].totals.calls == 0 && g_coverage[2].totals.calls == 0);
+        assert(infoLogs.back().find("coverage=APPLIED_IN_WINDOW") != std::string::npos);
+        std::puts(infoLogs.back().c_str());
+        ++checks;
+    }
+    {
+        Fixture f;
+        f.cfg.DlssNrStage = 0;
+        DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
+        assert(g_coverage[0].totals.applied == 1 && g_coverage[0].totals.modelOk == 1);
+        assert(infoLogs.back().find("stage=after calls=1") != std::string::npos);
+        ++checks;
+    }
     // Auto with guides captured but no present hook running (the D3D11 bridge, Vulkan): the pass must
     // run here, not be deferred to a hook that never comes.
-    { Fixture f; f.cfg.DlssNrStage = 0; f.cfg.DlssNrHookMethod = 0u;
-      DlssNr::g_temporalValid = true; DlssNr::presentHookLive = false;
-      DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
-      assert(g_coverage[0].totals.applied == 1);
-      DlssNr::g_temporalValid = false; ++checks; }
+    {
+        Fixture f;
+        f.cfg.DlssNrStage = 0;
+        f.cfg.DlssNrHookMethod = 0u;
+        DlssNr::g_temporalValid = true;
+        DlssNr::presentHookLive = false;
+        DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
+        assert(g_coverage[0].totals.applied == 1);
+        DlssNr::g_temporalValid = false;
+        ++checks;
+    }
     // The same with the D3D12 present hook live: deferred, the present pass owns the frame.
-    { Fixture f; f.cfg.DlssNrStage = 0; f.cfg.DlssNrHookMethod = 0u;
-      DlssNr::g_temporalValid = true; DlssNr::presentHookLive = true;
-      DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
-      assert(g_coverage[0].totals.applied == 0);
-      DlssNr::g_temporalValid = false; DlssNr::presentHookLive = false; ++checks; }
-    { Fixture f; bool declined;
-      { ScopedPreUpscale p(&f.cmd, &f.params, false); declined = p.Declined(); }
-      DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, declined);
-      assert(g_coverage[1].totals.fallback == 1 && g_coverage[1].totals.applied == 0);
-      assert(g_coverage[2].totals.applied == 1 && g_coverage[0].totals.calls == 0);
-      assert(infoLogs.back().find("stage=after-fallback calls=1") != std::string::npos); ++checks; }
-    { Fixture f; DlssNr_Dx12::writes = false; DlssNr_Dx12::modelResult = -1;
-      const auto passesBefore = DlssNr::g_passesRecorded.load();
-      { ScopedPreUpscale p(&f.cmd, &f.params, true); }
-      assert(DlssNr::g_passesRecorded.load() == passesBefore); // a failed pass is not a recorded one
-      assert(g_coverage[1].totals.modelFailed == 1 && g_coverage[1].totals.applied == 0);
-      assert(infoLogs.back().find("model_ok=0 model_failed=1 applied_recorded=0") != std::string::npos); ++checks; }
-    { Fixture f; f.cfg.DlssNrStage = 1; f.cfg.DlssNrHookMethod = 2u;
-      { ScopedPreUpscale p(&f.cmd, &f.params, true);
-        assert(!p.Swapped() && p.Declined()); } // Present owns the frame: no second run before the upscaler
-      assert(f.params.gets == 0 && f.params.sets == 0 && f.device.allocations == 0);
-      f.Restored(); ++checks; }
-    { Fixture f; f.cfg.DlssNrEnabled = false;
-      DlssNr::g_resetOnReturn = false;
-      { ScopedPreUpscale p(&f.cmd, &f.params, true); }
-      assert(DlssNr::g_resetOnReturn.exchange(false)); // off, seen by the pre-upscale scope
-      DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
-      assert(DlssNr::g_resetOnReturn.exchange(false)); // off, seen by the after-upscale entry
-      assert(infoLogs.empty() && g_coverage[0].totals.calls == 0 && g_coverage[1].totals.calls == 0); ++checks; }
-    { Fixture f;
-      const auto passesBefore = DlssNr::g_passesRecorded.load();
-      { ScopedPreUpscale p(&f.cmd, &f.params, true); }
-      assert(g_coverage[1].totals.applied == 1);
-      assert(DlssNr::g_passesRecorded.load() == passesBefore + 1); // the status window sees this pass
-      assert(!DlssNr::g_resetOnReturn.load());                     // on, so nothing is owed
-      ++checks; }
-    { Fixture f;
-      { ScopedPreUpscale p(&f.cmd, &f.params, true); }
-      DlssNr_Dx12::writes = false; DlssNr_Dx12::modelResult = -1;
-      { ScopedPreUpscale p(&f.cmd, &f.params, true); }
-      assert(g_coverage[1].totals.applied == 1 && g_coverage[1].totals.skipped == 1);
-      assert(infoLogs.back().find("window_applied=0 window_skipped=1") != std::string::npos);
-      assert(infoLogs.back().find("coverage=ZERO_APPLIED_IN_WINDOW") != std::string::npos);
-      std::puts(infoLogs.back().c_str()); ++checks; }
-    { DlssNr::Detail::StageCoverage coverage; DlssNr::Detail::CoverageSample sample;
-      auto now = steady_clock::now(); sample.present = 100;
-      assert(coverage.Record(sample, now));
-      for (int i = 0; i < 1000; ++i) assert(!coverage.Record(sample, now + milliseconds(1)));
-      assert(coverage.Record(sample, now + seconds(5))); // All-skip heartbeat is mandatory.
-      assert(coverage.totals.skippedPresents == 1);
-      sample.applied = true; sample.ModelResult(1, 1280, 720);
-      assert(coverage.Record(sample, now + seconds(5))); // First application logs immediately.
-      assert(coverage.totals.appliedPresents == 1); // Same present can occur in both buckets.
-      sample.present = 101; coverage.Record(sample, now + seconds(5));
-      assert(coverage.totals.appliedPresents == 2); ++checks; }
-    for (bool typeless : {false, true})
-    { Fixture f; f.depth.desc.Format = typeless ? 99 : 1; f.depth.state = 32;
-      ID3D12Resource* clone = nullptr;
-      { ReadResourceScope input(&f.cmd, &f.depth, 32);
-        auto* readable = ReadableGuide(&f.device, &f.cmd, &f.depth, &clone);
-        RestoreResourceState cleanup { &f.cmd, readable != &f.depth ? readable : nullptr, 1, 32 };
-        assert(readable->state == 1);
-        // Simulate the next guide failing: scope exit still restores the first used clone.
-        f.device.allocationFails = true;
-        f.motion.desc.Format = 99;
-        ID3D12Resource* missing = nullptr;
-        assert(ReadableGuide(&f.device, &f.cmd, &f.motion, &missing) == nullptr);
-      }
-      assert(f.depth.state == 32 && (!clone || clone->state == 32)); ++checks; }
-    { Fixture f; f.output.state = 4; f.output.desc.Flags = 2;
-      { ReadResourceScope exposure(&f.cmd, &f.output, 4); assert(f.output.state == 1); }
-      assert(f.output.state == 4);
-      f.output.state = 1;
-      { RestoreResourceState cleanup { &f.cmd, &f.output, 1, 2 }; cleanup.Restore(); }
-      assert(f.output.state == 2); ++checks; }
+    {
+        Fixture f;
+        f.cfg.DlssNrStage = 0;
+        f.cfg.DlssNrHookMethod = 0u;
+        DlssNr::g_temporalValid = true;
+        DlssNr::presentHookLive = true;
+        DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
+        assert(g_coverage[0].totals.applied == 0);
+        DlssNr::g_temporalValid = false;
+        DlssNr::presentHookLive = false;
+        ++checks;
+    }
+    {
+        Fixture f;
+        bool declined;
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, false);
+            declined = p.Declined();
+        }
+        DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, declined);
+        assert(g_coverage[1].totals.fallback == 1 && g_coverage[1].totals.applied == 0);
+        assert(g_coverage[2].totals.applied == 1 && g_coverage[0].totals.calls == 0);
+        assert(infoLogs.back().find("stage=after-fallback calls=1") != std::string::npos);
+        ++checks;
+    }
+    {
+        Fixture f;
+        DlssNr_Dx12::writes = false;
+        DlssNr_Dx12::modelResult = -1;
+        const auto passesBefore = DlssNr::g_passesRecorded.load();
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+        }
+        assert(DlssNr::g_passesRecorded.load() == passesBefore); // a failed pass is not a recorded one
+        assert(g_coverage[1].totals.modelFailed == 1 && g_coverage[1].totals.applied == 0);
+        assert(infoLogs.back().find("model_ok=0 model_failed=1 applied_recorded=0") != std::string::npos);
+        ++checks;
+    }
+    {
+        Fixture f;
+        f.cfg.DlssNrStage = 1;
+        f.cfg.DlssNrHookMethod = 2u;
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+            assert(!p.Swapped() && p.Declined());
+        } // Present owns the frame: no second run before the upscaler
+        assert(f.params.gets == 0 && f.params.sets == 0 && f.device.allocations == 0);
+        f.Restored();
+        ++checks;
+    }
+    {
+        Fixture f;
+        f.cfg.DlssNrEnabled = false;
+        DlssNr::g_resetOnReturn = false;
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+        }
+        assert(DlssNr::g_resetOnReturn.exchange(false)); // off, seen by the pre-upscale scope
+        DlssNr::EvaluateAfterUpscale(&f.cmd, &f.params, nullptr, false);
+        assert(DlssNr::g_resetOnReturn.exchange(false)); // off, seen by the after-upscale entry
+        assert(infoLogs.empty() && g_coverage[0].totals.calls == 0 && g_coverage[1].totals.calls == 0);
+        ++checks;
+    }
+    {
+        Fixture f;
+        const auto passesBefore = DlssNr::g_passesRecorded.load();
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+        }
+        assert(g_coverage[1].totals.applied == 1);
+        assert(DlssNr::g_passesRecorded.load() == passesBefore + 1); // the status window sees this pass
+        assert(!DlssNr::g_resetOnReturn.load());                     // on, so nothing is owed
+        ++checks;
+    }
+    {
+        Fixture f;
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+        }
+        DlssNr_Dx12::writes = false;
+        DlssNr_Dx12::modelResult = -1;
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+        }
+        assert(g_coverage[1].totals.applied == 1 && g_coverage[1].totals.skipped == 1);
+        assert(infoLogs.back().find("window_applied=0 window_skipped=1") != std::string::npos);
+        assert(infoLogs.back().find("coverage=ZERO_APPLIED_IN_WINDOW") != std::string::npos);
+        std::puts(infoLogs.back().c_str());
+        ++checks;
+    }
+    {
+        DlssNr::Detail::StageCoverage coverage;
+        DlssNr::Detail::CoverageSample sample;
+        auto now = steady_clock::now();
+        sample.present = 100;
+        assert(coverage.Record(sample, now));
+        for (int i = 0; i < 1000; ++i)
+            assert(!coverage.Record(sample, now + milliseconds(1)));
+        assert(coverage.Record(sample, now + seconds(5))); // All-skip heartbeat is mandatory.
+        assert(coverage.totals.skippedPresents == 1);
+        sample.applied = true;
+        sample.ModelResult(1, 1280, 720);
+        assert(coverage.Record(sample, now + seconds(5))); // First application logs immediately.
+        assert(coverage.totals.appliedPresents == 1);      // Same present can occur in both buckets.
+        sample.present = 101;
+        coverage.Record(sample, now + seconds(5));
+        assert(coverage.totals.appliedPresents == 2);
+        ++checks;
+    }
+    for (bool typeless : { false, true })
+    {
+        Fixture f;
+        f.depth.desc.Format = typeless ? 99 : 1;
+        f.depth.state = 32;
+        ID3D12Resource* clone = nullptr;
+        {
+            ReadResourceScope input(&f.cmd, &f.depth, 32);
+            auto* readable = ReadableGuide(&f.device, &f.cmd, &f.depth, &clone);
+            RestoreResourceState cleanup { &f.cmd, readable != &f.depth ? readable : nullptr, 1, 32 };
+            assert(readable->state == 1);
+            // Simulate the next guide failing: scope exit still restores the first used clone.
+            f.device.allocationFails = true;
+            f.motion.desc.Format = 99;
+            ID3D12Resource* missing = nullptr;
+            assert(ReadableGuide(&f.device, &f.cmd, &f.motion, &missing) == nullptr);
+        }
+        assert(f.depth.state == 32 && (!clone || clone->state == 32));
+        ++checks;
+    }
+    {
+        Fixture f;
+        f.output.state = 4;
+        f.output.desc.Flags = 2;
+        {
+            ReadResourceScope exposure(&f.cmd, &f.output, 4);
+            assert(f.output.state == 1);
+        }
+        assert(f.output.state == 4);
+        f.output.state = 1;
+        {
+            RestoreResourceState cleanup { &f.cmd, &f.output, 1, 2 };
+            cleanup.Restore();
+        }
+        assert(f.output.state == 2);
+        ++checks;
+    }
     // Actual production SRV validation, including hardware load support.
     for (int contract = 0; contract < 10; ++contract)
-    { Fixture f; f.output.desc.Format = DXGI_FORMAT_R32_FLOAT;
-      switch (contract) {
-      case 1: f.output.desc.Dimension = 1; break;
-      case 2: f.output.desc.DepthOrArraySize = 2; break;
-      case 3: f.output.desc.SampleDesc.Count = 4; break;
-      case 4: f.output.desc.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE; break;
-      case 5: f.output.desc.Width = 0; break;
-      case 6: f.output.desc.MipLevels = 0; break;
-      case 7: f.output.desc.Format = 999; break;
-      case 8: f.device.formatSupported = false; break;
-      case 9: f.output.desc.Format = DXGI_FORMAT_R32_TYPELESS; break;
-      }
-      assert(ExposureTextureUsable(&f.device, &f.output) == (contract == 0 || contract == 9));
-      assert(!ExposureTextureUsable(&f.device, nullptr)); ++checks; }
-    { using namespace DlssNr::Exposure;
-      const float nan = std::numeric_limits<float>::quiet_NaN();
-      const float inf = std::numeric_limits<float>::infinity();
-      for (float invalid : {nan, inf, -inf, 0.0f, -1.0f, 1e-6f, 1e6f})
-      { assert(!ValidSample(invalid)); assert(WhitePoint(1, true, 8, 1, invalid, 2, 0) == 8); }
-      assert(ValidSample(0.5f)); assert(PreExposure(inf) == 1 && PreExposure(nan) == 1);
-      assert(Trim(nan) == 1); assert(WhitePoint(0, true, nan, 1, 0, 1, 0) == 1);
-      for (unsigned source : {0u, 1u, 2u, 3u})
-      { assert(WhitePoint(source, false, 8, 1.5f, 0.5f, 2, 20) == 8);
-        assert(!LiveWanted(source, false, true, false));
-        assert(!LiveWanted(source, true, true, true));
-        assert(!MeterWanted(source, true, true));
-        assert(!LiveWanted(source, true, false, false));
-        assert(LiveWanted(source, true, true, false) == (source == 1)); }
-      assert(WhitePoint(0, true, 8, 1.5f, 0.5f, 2, 20) == 8);
-      assert(WhitePoint(1, true, 8, 1.5f, 0.5f, 2, 20) == 6);
-      assert(WhitePoint(2, true, 8, 1.5f, 0.5f, 2, 20) == 20);
-      assert(WhitePoint(2, true, 8, 1.5f, 0.5f, 2, inf) == 8);
-      assert(WhitePoint(1, true, 8, 1.5f, 0.5f, inf, 20) == 3);
-      bool wasGame = false;
-      for (unsigned source : {0u, 1u, 1u, 2u, 1u, 0u})
-      { assert(InvalidateOnSourceChange(wasGame, source) == (source == 1 && !wasGame));
-        wasGame = source == 1; }
-      ++checks;
+    {
+        Fixture f;
+        f.output.desc.Format = DXGI_FORMAT_R32_FLOAT;
+        switch (contract)
+        {
+        case 1:
+            f.output.desc.Dimension = 1;
+            break;
+        case 2:
+            f.output.desc.DepthOrArraySize = 2;
+            break;
+        case 3:
+            f.output.desc.SampleDesc.Count = 4;
+            break;
+        case 4:
+            f.output.desc.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+            break;
+        case 5:
+            f.output.desc.Width = 0;
+            break;
+        case 6:
+            f.output.desc.MipLevels = 0;
+            break;
+        case 7:
+            f.output.desc.Format = 999;
+            break;
+        case 8:
+            f.device.formatSupported = false;
+            break;
+        case 9:
+            f.output.desc.Format = DXGI_FORMAT_R32_TYPELESS;
+            break;
+        }
+        assert(ExposureTextureUsable(&f.device, &f.output) == (contract == 0 || contract == 9));
+        assert(!ExposureTextureUsable(&f.device, nullptr));
+        ++checks;
     }
-    { Fixture f;
-      trackingAccepted = false;
-      { ScopedPreUpscale p(&f.cmd, &f.params, true); assert(!p.Swapped()); }
-      assert(trackingCalls == 1 && f.params.sets == 0 && f.device.allocations == 0 && f.cmd.barriers == 0);
-      assert(DlssNr_Dx12::calls == 0); f.Restored(); ++checks; }
-    { Fixture f;
-      f.output.desc.Width = 2560; f.output.desc.Height = 1440;
-      infoLogs.clear();
-      DlssNr::ReportSpatialContract(&f.params, &f.color, &f.output, true, 1280, 720);
-      assert(infoLogs.size() == 1 && infoLogs[0].find("absent/failed") != std::string::npos);
-      DlssNr::ReportSpatialContract(&f.params, &f.color, &f.output, true, 1280, 720);
-      assert(infoLogs.size() == 1);
-      f.params.numbers[NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width] = 1280;
-      f.params.numbers[NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height] = 720;
-      DlssNr::ReportSpatialContract(&f.params, &f.color, &f.output, true, 1280, 720);
-      assert(infoLogs.size() == 2 && infoLogs.back().find("width-query=success") != std::string::npos);
-      f.cfg.DlssNrWorkingScale = 2.0f;
-      DlssNr::ReportSpatialContract(&f.params, &f.color, &f.output, true, 1280, 720);
-      assert(infoLogs.size() == 4 && infoLogs.back().find("no spatial reduction") != std::string::npos);
-      assert(f.params.sets == 0 && f.cmd.barriers == 0 && f.device.allocations == 0); ++checks; }
+    {
+        using namespace DlssNr::Exposure;
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const float inf = std::numeric_limits<float>::infinity();
+        for (float invalid : { nan, inf, -inf, 0.0f, -1.0f, 1e-6f, 1e6f })
+        {
+            assert(!ValidSample(invalid));
+            assert(WhitePoint(1, true, 8, 1, invalid, 2, 0) == 8);
+        }
+        assert(ValidSample(0.5f));
+        assert(PreExposure(inf) == 1 && PreExposure(nan) == 1);
+        assert(Trim(nan) == 1);
+        assert(WhitePoint(0, true, nan, 1, 0, 1, 0) == 1);
+        for (unsigned source : { 0u, 1u, 2u, 3u })
+        {
+            assert(WhitePoint(source, false, 8, 1.5f, 0.5f, 2, 20) == 8);
+            assert(!LiveWanted(source, false, true, false));
+            assert(!LiveWanted(source, true, true, true));
+            assert(!MeterWanted(source, true, true));
+            assert(!LiveWanted(source, true, false, false));
+            assert(LiveWanted(source, true, true, false) == (source == 1));
+        }
+        assert(WhitePoint(0, true, 8, 1.5f, 0.5f, 2, 20) == 8);
+        assert(WhitePoint(1, true, 8, 1.5f, 0.5f, 2, 20) == 6);
+        assert(WhitePoint(2, true, 8, 1.5f, 0.5f, 2, 20) == 20);
+        assert(WhitePoint(2, true, 8, 1.5f, 0.5f, 2, inf) == 8);
+        assert(WhitePoint(1, true, 8, 1.5f, 0.5f, inf, 20) == 3);
+        assert(WhitePoint(1, true, 8, 1.5f, 0.5f, 2, 20, true) == 8);
+        assert(!LiveWanted(1, true, true, false, true));
+        bool wasGame = false;
+        for (unsigned source : { 0u, 1u, 1u, 2u, 1u, 0u })
+        {
+            assert(InvalidateOnSourceChange(wasGame, source) == (source == 1 && !wasGame));
+            wasGame = source == 1;
+        }
+        ++checks;
+    }
+    {
+        Fixture f;
+        trackingAccepted = false;
+        {
+            ScopedPreUpscale p(&f.cmd, &f.params, true);
+            assert(!p.Swapped());
+        }
+        assert(trackingCalls == 1 && f.params.sets == 0 && f.device.allocations == 0 && f.cmd.barriers == 0);
+        assert(DlssNr_Dx12::calls == 0);
+        f.Restored();
+        ++checks;
+    }
+    {
+        Fixture f;
+        f.output.desc.Width = 2560;
+        f.output.desc.Height = 1440;
+        infoLogs.clear();
+        DlssNr::ReportSpatialContract(&f.params, &f.color, &f.output, true, 1280, 720);
+        assert(infoLogs.size() == 1 && infoLogs[0].find("absent/failed") != std::string::npos);
+        DlssNr::ReportSpatialContract(&f.params, &f.color, &f.output, true, 1280, 720);
+        assert(infoLogs.size() == 1);
+        f.params.numbers[NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width] = 1280;
+        f.params.numbers[NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height] = 720;
+        DlssNr::ReportSpatialContract(&f.params, &f.color, &f.output, true, 1280, 720);
+        assert(infoLogs.size() == 2 && infoLogs.back().find("width-query=success") != std::string::npos);
+        f.cfg.DlssNrWorkingScale = 2.0f;
+        DlssNr::ReportSpatialContract(&f.params, &f.color, &f.output, true, 1280, 720);
+        assert(infoLogs.size() == 4 && infoLogs.back().find("no spatial reduction") != std::string::npos);
+        assert(f.params.sets == 0 && f.cmd.barriers == 0 && f.device.allocations == 0);
+        ++checks;
+    }
     assert(checks >= 56 && "ZERO COVERAGE");
     std::printf("PASS: %u boundary cases; allocation-failure and DRS loops: 1000 each\n", checks);
 }

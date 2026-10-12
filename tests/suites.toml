@@ -23,6 +23,11 @@ tier = "host"
 timeout = 60
 summary = "Render size resolution: subrect handling and Width/Height fallback when subrect is absent."
 
+[nr-exposure-latch]
+tier = "host"
+timeout = 60
+summary = "Exposure plausibility latch (WhitePointSource=1): out-of-range readings, swinging window, reset, and white-point fallback."
+
 [nr-invariants]
 tier = "host"
 timeout = 120

@@ -447,6 +447,7 @@ struct NrState
     // would be a flicker source.
     float gameExposure = 0.0f;
     float gamePreExposure = 1.0f;
+    DlssNr::Exposure::PlausibilityLatch exposureLatch;
 
     // What the game OFFERS, as opposed to what has been read. Recorded from the parameter block every
     // frame whether or not the setting is on, and deliberately so: the menu has to be able to answer
@@ -1799,7 +1800,30 @@ void ConsumeMeterReadback()
     // When it is not believed gameExposure keeps its last good value, or stays 0 and lets
     // ResolveWhitePoint fall back to the slider, which is what a game supplying none should get.
     if (g_nr.meterExposureValid[slot] && DlssNr::Exposure::ValidSample(src[0]))
+    {
         g_nr.gameExposure = src[0];
+
+        const float trim = Config::Instance()->DlssNrWhitePointTrim.value_or_default();
+        const float implied =
+            DlssNr::Exposure::PreExposure(g_nr.gamePreExposure) / src[0] * DlssNr::Exposure::Trim(trim);
+        if (g_nr.exposureLatch.Observe(implied))
+        {
+            if (g_nr.exposureLatch.Reason() == DlssNr::Exposure::LatchReason::Swinging)
+            {
+                LOG_WARN("DLSS-NR: the game's exposure is not usable (implied white point {:.4f}..{:.4f}, {:.1f} "
+                         "stops in {} readings); using paper white for the rest of the session",
+                         g_nr.exposureLatch.MinSpan(), g_nr.exposureLatch.MaxSpan(), g_nr.exposureLatch.StopsSpan(),
+                         g_nr.exposureLatch.ReadingsSpan());
+            }
+            else
+            {
+                LOG_WARN(
+                    "DLSS-NR: the game's exposure is not usable (implied white point {:.4f} out of range [0.02, 512] "
+                    "on {} readings); using paper white for the rest of the session",
+                    g_nr.exposureLatch.LastReading(), g_nr.exposureLatch.OutOfRangeCount());
+            }
+        }
+    }
 
     D3D12_RANGE nothingWritten { 0, 0 };
     buffer->Unmap(0, &nothingWritten);
@@ -1832,6 +1856,7 @@ void InvalidateExposureMeter()
     // Re-arms the `< 4` guard in ConsumeMeterReadback, so nothing is read back until four frames
     // have genuinely been queued since this point.
     g_nr.meterFrames = 0;
+    g_nr.exposureLatch.Reset();
 }
 
 // Keep source selection testable without changing the established exposure law.
@@ -1843,7 +1868,8 @@ float ResolveWhitePoint(int whitePointSource, float whitePointScale, float white
             ? DlssNr::ExposureScan::AnchoredWhitePoint(DlssNr::ExposureScan::BestValue(), scanInverted, scanTrim)
             : 0.0f;
     return DlssNr::Exposure::WhitePoint(whitePointSource, isHdrBuffer, whitePointScale, whitePointTrim,
-                                        g_nr.gameExposure, g_nr.gamePreExposure, anchored);
+                                        g_nr.gameExposure, g_nr.gamePreExposure, anchored,
+                                        g_nr.exposureLatch.Latched());
 }
 
 // Advanced by every NR scratch allocation, and read into every cached descriptor key.
@@ -4104,6 +4130,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         InvalidateExposureMeter();
         LOG_INFO("DLSS-NR exposure: option switched on, held reading discarded");
     }
+    else if (g_nr.exposureSettingWasOn && !exposureSettingOn)
+    {
+        InvalidateExposureMeter();
+    }
 
     g_nr.exposureSettingWasOn = exposureSettingOn;
 
@@ -4121,6 +4151,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
     if (usableExposure)
         reportedInvalidExposure = false;
+
+    g_nr.gamePreExposure = DlssNr::Exposure::PreExposure(frame.PreExposure);
 
     if (g_nr.meter != nullptr && wantExposure)
     {
@@ -4151,8 +4183,6 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ConsumeMeterReadback();
     }
 
-    g_nr.gamePreExposure = DlssNr::Exposure::PreExposure(frame.PreExposure);
-
     float whitePoint =
         ResolveWhitePoint(whitePointSource, whitePointScale, whitePointTrim, isHdrBuffer, scanInverted, scanTrim);
 
@@ -4164,7 +4194,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     uint32_t useGameExposure = 0;
     float exposurePreMul = 0.0f;
 
-    if (DlssNr::Exposure::LiveWanted(whitePointSource, isHdrBuffer, usableExposure, holdingColor))
+    if (DlssNr::Exposure::LiveWanted(whitePointSource, isHdrBuffer, usableExposure, holdingColor,
+                                     g_nr.exposureLatch.Latched()))
     {
         exposureTex = (ID3D12Resource*) frame.ExposureTexture;
         useGameExposure = 1;
@@ -8142,6 +8173,7 @@ ExposureStatus GameExposureStatus()
     s.everOffered = g_nr.exposureEverOffered;
     s.exposure = g_nr.gameExposure;
     s.preExposure = g_nr.gamePreExposure;
+    s.latched = g_nr.exposureLatch.Latched();
     return s;
 }
 
@@ -8487,6 +8519,7 @@ void Shutdown()
         valid = false;
 
     g_nr.meterFrames = 0;
+    g_nr.exposureLatch.Reset();
 
     if (g_nr.depthClone != nullptr)
     {

@@ -61,6 +61,7 @@ std::optional<double> LastGpuTimeVk();
 // binding the game's image means naming a layout this side cannot know. For the menu, and to settle
 // whether reading it is worth the risk on any real Vulkan game.
 bool ExposureOfferedVk();
+bool ExposureLatchedVk();
 
 void ShutdownVk(bool deviceAlive = true);
 

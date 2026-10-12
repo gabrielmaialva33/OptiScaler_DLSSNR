@@ -1277,8 +1277,13 @@ void RenderMenu(Config* config, float menuResScale)
                     // Availability, in colour, for the option currently chosen.
                     if (source == 1)
                     {
+                        const bool latched = vk ? DlssNr::ExposureLatchedVk() : ex.latched;
                         if (!vk && ex.seenFrames == 0)
                             ImGui::TextDisabled(Localization::Tr("Waiting for a frame..."));
+                        else if (latched)
+                            ImGui::TextColored(
+                                ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
+                                Localization::Tr("This game's exposure is not usable here; paper white is in use."));
                         else if (!haveExposure)
                             ImGui::TextColored(
                                 ImVec4(0.9f, 0.6f, 0.25f, 1.0f),

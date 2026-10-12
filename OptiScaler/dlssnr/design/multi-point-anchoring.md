@@ -133,3 +133,21 @@ documented in the shipped `OptiScaler.ini`. The config-round-trip check should p
 4. Near-duplicate anchor rejected; delete a row; delete all rows -> falls back to "nothing anchored".
 5. Restart: the table persists; a pre-existing single anchor migrated to one row.
 6. Source != 2: the table UI is hidden and nothing in this feature runs.
+
+## Game exposure plausibility latch (WhitePointSource == 1)
+
+When `WhitePointSource == 1`, the white point tracks the game's own exposure (`preExposure / exposure * trim`).
+Some games publish an exposure value that is not usable: in Control, the exposure moved from 0.00025 to 116
+within seconds, throwing the white point alternately against the 0.01 floor and 4096 ceiling and flashing the screen.
+To prevent this, `PlausibilityLatch` (adapted from Skynizz commit `53e7d232`) monitors accepted readings and latches
+unreliable for the rest of the session:
+
+- **Out of range:** the implied white point falls outside [0.02, 512] on 3 readings (non-consecutive). A single wild
+  reading does not latch it, protecting against transient camera cuts or loading frames.
+- **Swinging:** within the last 120 readings (~2 s at 60 fps), the implied white spans more than 8 stops
+  (`log2(max) - log2(min) > 8`). This catches games whose values stay within [0.02, 512] but oscillate wildly.
+
+When latched, the white point falls back to the manual paper white slider, and the live in-shader path stands down.
+The real risk is a false latch: a title whose exposure legitimately swings more than 8 stops within ~2 s (e.g. an
+instant bomb flash or extreme cave exit) falls back to paper white until the source is toggled. The latch is
+session-scoped and clears on NR reset or when `WhitePointSource` changes.
