@@ -48,13 +48,13 @@ enum class LatchReason : uint8_t
 };
 
 // Plausibility latch for WhitePointSource=1.
-// Monitors the implied white point (PreExposure / exposure * trim, computed before the 0.01..4096 clamp)
-// of accepted readings. If a game publishes unusable exposure values (e.g. Control swinging from 0.00025 to 116
+// Monitors the implied white point (PreExposure / exposure, without the user's trim and before the 0.01..4096
+// clamp) of accepted readings. If a game publishes unusable exposure values (e.g. Control swinging from 0.00025 to 116
 // within seconds, flashing between black and blown out), this latches unreliable for the session so DLSS-NR
 // falls back to paper white rather than corrupting the image.
 struct PlausibilityLatch
 {
-    // The plausible range of implied white point values (PreExposure / exposure * trim).
+    // The plausible range of implied white point values (PreExposure / exposure).
     // In Control, the game's exposure moved from 0.00025 to 116 within seconds, implying white points
     // hitting the 0.01 floor and 4096 ceiling. A legitimate scene linear white point sits within [0.02, 512.0].
     static constexpr float kMinImpliedWhite = 0.02f;
@@ -103,7 +103,7 @@ struct PlausibilityLatch
             v = 0.0f;
     }
 
-    // Feed an implied white point reading (PreExposure / exposure * trim, computed before the 0.01..4096 clamp).
+    // Feed an implied white point reading (PreExposure / exposure, before the trim and the 0.01..4096 clamp).
     // Returns true on the exact frame it latches so the caller can log once at WARN.
     bool Observe(float impliedWhite)
     {

@@ -702,9 +702,8 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
             {
                 g_vk.gameExposure = measured;
 
-                const float trim = std::clamp(cfg.DlssNrWhitePointTrim.value_or_default(), 0.01f, 4.0f);
-                const float implied =
-                    DlssNr::Exposure::PreExposure(g_vk.gamePreExposure) / measured * DlssNr::Exposure::Trim(trim);
+                // The game's own implied white, without the user's trim (see ConsumeMeterReadback).
+                const float implied = DlssNr::Exposure::PreExposure(g_vk.gamePreExposure) / measured;
                 if (g_vk.exposureLatch.Observe(implied))
                 {
                     if (g_vk.exposureLatch.Reason() == DlssNr::Exposure::LatchReason::Swinging)

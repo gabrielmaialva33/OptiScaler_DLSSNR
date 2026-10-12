@@ -1803,9 +1803,9 @@ void ConsumeMeterReadback()
     {
         g_nr.gameExposure = src[0];
 
-        const float trim = Config::Instance()->DlssNrWhitePointTrim.value_or_default();
-        const float implied =
-            DlssNr::Exposure::PreExposure(g_nr.gamePreExposure) / src[0] * DlssNr::Exposure::Trim(trim);
+        // The game's own implied white, without the user's trim: sweeping the trim across its 0.01..4 range
+        // would itself read as a nine-stop swing.
+        const float implied = DlssNr::Exposure::PreExposure(g_nr.gamePreExposure) / src[0];
         if (g_nr.exposureLatch.Observe(implied))
         {
             if (g_nr.exposureLatch.Reason() == DlssNr::Exposure::LatchReason::Swinging)

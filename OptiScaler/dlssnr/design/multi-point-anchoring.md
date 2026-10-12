@@ -140,7 +140,8 @@ When `WhitePointSource == 1`, the white point tracks the game's own exposure (`p
 Some games publish an exposure value that is not usable: in Control, the exposure moved from 0.00025 to 116
 within seconds, throwing the white point alternately against the 0.01 floor and 4096 ceiling and flashing the screen.
 To prevent this, `PlausibilityLatch` (adapted from Skynizz commit `53e7d232`) monitors accepted readings and latches
-unreliable for the rest of the session:
+unreliable for the rest of the session. It is fed `preExposure / exposure` without the trim: the trim is the user's
+choice, and sweeping it across its 0.01..4 range would itself read as a nine-stop swing.
 
 - **Out of range:** the implied white point falls outside [0.02, 512] on 3 readings (non-consecutive). A single wild
   reading does not latch it, protecting against transient camera cuts or loading frames.
