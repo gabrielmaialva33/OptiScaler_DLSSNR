@@ -71,6 +71,31 @@ exactly 1 anchor (direction is in the data at ≥2). Paper white shows only to s
 to edit a selected row; in the steady state (≥1 anchor, none selected) it is hidden and Anchor captures
 the trimmed effective white instead.
 
+### 2.2 Compare → "Capture original and processed" (`DlssNr_Menu.cpp`, `PairCapture::ButtonFor`)
+
+The comparison capture's one control ([comparison-capture.md](comparison-capture.md)). `ButtonFor` in
+`DlssNr_PairCapture.h` decides it and `tests/nr-capture` holds every row; the menu only draws what it returns. Rows
+are checked top to bottom and the first that applies wins.
+
+| State | Button | Line under it |
+|-------|--------|---------------|
+| `[DlssNr] Enabled` off | **absent** | — |
+| native Vulkan | shown, **disabled** | "Not on this route yet: the capture is D3D12 only." |
+| no D3D12 route has run the model this session | **absent** | — |
+| `UseProxy` on | shown, disabled | "Not with the driver proxy: it returns before the pass writes the frame." |
+| `Compare` 1 or 2 | shown, disabled | "Turn off Compare to capture the result." |
+| `DebugView` not 0 | shown, disabled | "Turn off the debug view to capture the result." |
+| requested, or being recorded | shown, disabled | "Waiting for the next frame the pass writes..." |
+| copies recorded, the GPU not yet proven past them | shown, disabled | "Waiting for the GPU to finish the copies..." |
+| handed to the writer | shown, disabled | "Writing the files..." |
+| the capture folder could not be created this session | shown, disabled | "The capture folder could not be created (see the log)." |
+| otherwise | shown, **enabled** | "Saved <stem> (the pair and its .json)" after a capture; the last refusal or failure in amber; nothing before the first |
+
+Invariant checks against this table: absent wherever there is no frame of the pass to capture (rule 2); one control
+(rule 3); every disabled row says why. A frame format the files cannot hold is refused when the press reaches a
+frame and the reason shown on the line, not predicted before the press: predicting it would cost a store on every
+frame, and the capture's idle cost is one load (comparison-capture.md, section 4.7).
+
 ---
 
 ## 3. Per-change-type review (run BEFORE deploy)

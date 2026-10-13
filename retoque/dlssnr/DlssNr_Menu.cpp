@@ -8,6 +8,7 @@
 #include "DlssNr_ExposureScan.h"
 #include "DlssNr_GpuTiming.h"
 #include "DlssNr_ModelLog.h"
+#include "DlssNr_PairCapture.h"
 #include "DlssNr_PresentSync.h"
 #include "DlssNr_Session.h"
 #include "DlssNr_WorkingScale.h"
@@ -157,6 +158,48 @@ static void RenderPeriphery(Config* config)
     {
         ImGui::TextDisabled("%s", Localization::Tr("Waiting for the pass to run."));
     }
+}
+
+// The comparison capture (docs/dlssnr/design/comparison-capture.md): one press saves the frame the pass read and the
+// frame it wrote, as two image files of the same frame with a provenance record. What the button is in each state is
+// DEVELOPMENT.md section 2.2, and PairCapture::ButtonFor decides it: absent while there is no frame of the pass to
+// capture, disabled with the reason wherever a press could not give the pair.
+static void RenderPairCapture(Config* config, bool nativeVulkan)
+{
+    const auto status = DlssNr::GetPairCaptureStatus();
+    PairCapture::ButtonInputs in;
+    in.enabled = config->DlssNrEnabled.value_or_default();
+    in.nativeVulkan = nativeVulkan;
+    in.d3d12Ran = DlssNr::IsRunning();
+    in.proxy = config->DlssNrUseProxy.value_or_default();
+    in.compare = config->DlssNrCompare.value_or_default();
+    in.debugView = config->DlssNrDebugView.value_or_default();
+    in.phase = status.phase;
+    in.directoryFailed = status.directoryFailed;
+    const auto button = PairCapture::ButtonFor(in);
+    if (!button.shown)
+        return;
+
+    ImGui::BeginDisabled(!button.enabled);
+    if (ImGui::Button(Localization::Label("Capture original and processed")))
+        DlssNr::RequestPairCapture();
+    ImGui::EndDisabled();
+
+    HelpMarker("Saves the next frame twice, as the pass read it and as the pass wrote it, into the"
+               "\nretoque-captures folder beside OptiScaler. Each file carries a record of the build, the route,"
+               "\nthe model and every setting that shapes the picture, and a .json beside them says the same."
+               "\n\nA display-referred frame is saved as PNG, a linear HDR frame as PFM (32-bit float). On the"
+               "\npresent routes it is the finished frame before the menu is drawn; after the upscaler it is the"
+               "\nupscaler's output, before the game's own tonemapper, post-processing and interface."
+               "\n\nThe newest 64 pairs are kept. Dropping a file named dlssnr-capture.trigger beside OptiScaler"
+               "\nasks for the same capture from outside the game.");
+
+    if (button.reason != nullptr)
+        ImGui::TextDisabled("%s", Localization::Tr(button.reason));
+    else if (status.ok && !status.lastStem.empty())
+        ImGui::TextDisabled(Localization::Tr("Saved %s (the pair and its .json)"), status.lastStem.c_str());
+    else if (status.reason != nullptr)
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", Localization::Tr(status.reason));
 }
 
 // Historical confirmed samples have their own immutable contract. Never present them as the
@@ -1900,6 +1943,9 @@ void RenderMenu(Config* config, float menuResScale)
                    "\npoint stops being measured and holds its value while frozen, so it cannot"
                    "\ndrift and confound the comparison."
                    "\n\nHide the menu and it stays held. Untoggle to resume.");
+
+        // The comparison capture, beside Hold frame: the A/B tools frame-hold.md gathered here.
+        RenderPairCapture(config, nativeVulkan);
 
         // "Measure detail" (D3D12 only, under Compare)
         if (!nativeVulkan)

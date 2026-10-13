@@ -439,3 +439,23 @@ Without it, each new answer of the model replaces the carried one on the frame t
 # 2026-10-13: the residual limit (docs/dlssnr/design/residual-limit.md): the control and its help.
 Residual limit	Limite do resíduo
 The most the model may move any pixel's light, either way, in stops: 0.5 allows\nat most 1.41x brighter or darker, 1 at most 2x. Off at 0, the composition as\nit always was.\n\nAimed at blotches and flicker: a patch of wall the model brightens by a stop\none frame and not the next. It bounds the model's real corrections the same\nway, so start high and lower it until the blotches go. It sits inside the\nhighlight guard and can only narrow it.	O máximo que o modelo pode mover a luz de qualquer pixel, para cima ou para baixo, em stops: 0,5 permite\nno máximo 1,41x mais claro ou mais escuro, 1 no máximo 2x. Desligado em 0, a composição como\nsempre foi.\n\nPensado contra manchas e cintilação: um pedaço de parede que o modelo clareia um stop\nem um quadro e no seguinte não. Limita do mesmo jeito as correções reais do modelo,\nentão comece alto e vá baixando até as manchas sumirem. Fica dentro da\nproteção de altas luzes e só pode estreitá-la.
+# 2026-10-13: the comparison capture (docs/dlssnr/design/comparison-capture.md): the button, its help and its states.
+Capture original and processed	Capturar original e processado
+Saves the next frame twice, as the pass read it and as the pass wrote it, into the\nretoque-captures folder beside OptiScaler. Each file carries a record of the build, the route,\nthe model and every setting that shapes the picture, and a .json beside them says the same.\n\nA display-referred frame is saved as PNG, a linear HDR frame as PFM (32-bit float). On the\npresent routes it is the finished frame before the menu is drawn; after the upscaler it is the\nupscaler's output, before the game's own tonemapper, post-processing and interface.\n\nThe newest 64 pairs are kept. Dropping a file named dlssnr-capture.trigger beside OptiScaler\nasks for the same capture from outside the game.	Salva o próximo quadro duas vezes, como o passe o leu e como o passe o escreveu, na\npasta retoque-captures ao lado do OptiScaler. Cada arquivo leva um registro da build, da rota,\ndo modelo e de cada configuração que molda a imagem, e um .json ao lado diz o mesmo.\n\nUm quadro já pronto para a tela é salvo como PNG; um quadro HDR linear, como PFM (float de 32 bits). Nas\nrotas de present é o quadro final, antes de o menu ser desenhado; depois do upscaler é a saída\ndo upscaler, antes do tone mapping, do pós-processamento e da interface do próprio jogo.\n\nOs 64 pares mais recentes são mantidos. Um arquivo chamado dlssnr-capture.trigger ao lado do OptiScaler\npede a mesma captura de fora do jogo.
+Saved %s (the pair and its .json)	Salvo %s (o par e seu .json)
+Turn off Compare to capture the result.	Desligue Comparar para capturar o resultado.
+Turn off the debug view to capture the result.	Desligue a visualização de depuração para capturar o resultado.
+Not with the driver proxy: it returns before the pass writes the frame.	Não com o proxy do driver: ele retorna antes de o passe escrever o quadro.
+Not on this route yet: the capture is D3D12 only.	Ainda não nesta rota: a captura é só para D3D12.
+The capture folder could not be created (see the log).	Não foi possível criar a pasta de capturas (veja o log).
+No frame reached the pass in time; nothing was captured.	Nenhum quadro chegou ao passe a tempo; nada foi capturado.
+Earlier captures are still held for the GPU; try again shortly.	Capturas anteriores ainda estão retidas para a GPU; tente de novo em instantes.
+The readback buffers could not be created.	Não foi possível criar os buffers de leitura.
+The GPU never confirmed the copies; nothing was written.	A GPU nunca confirmou as cópias; nada foi gravado.
+The writer could not be started.	Não foi possível iniciar a gravação.
+The files could not be written (see the log).	Não foi possível gravar os arquivos (veja o log).
+This frame's format is not one the capture can write yet.	A captura ainda não sabe gravar o formato deste quadro.
+The two surfaces differ in shape; nothing was captured.	As duas superfícies têm formatos diferentes; nada foi capturado.
+Waiting for the next frame the pass writes...	Aguardando o próximo quadro que o passe escrever...
+Waiting for the GPU to finish the copies...	Aguardando a GPU terminar as cópias...
+Writing the files...	Gravando os arquivos...
