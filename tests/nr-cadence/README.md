@@ -1,7 +1,7 @@
 # Model cadence
 
 Run `python3 tests/nr-cadence/run.py` from the repository root. Needs Python and `g++` with C++20,
-ASan and UBSan. Builds into a temporary directory. `OptiScaler/dlssnr/design/model-cadence.md` is
+ASan and UBSan. Builds into a temporary directory. `docs/dlssnr/design/model-cadence.md` is
 what is being tested.
 
 ## What it runs

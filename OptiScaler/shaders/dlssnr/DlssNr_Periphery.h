@@ -1,7 +1,7 @@
 #pragma once
 
 // Peripheral compression's layout: from two settings, the frame and the working scale, to the packed extent
-// the model works at and the constants the pack and unpack read. dlssnr/design/peripheral-compression.md.
+// the model works at and the constants the pack and unpack read. docs/dlssnr/design/peripheral-compression.md.
 //
 // Two origins, both stated where they apply:
 //   - Axis and BuildAxis are ported verbatim from PeripheralWarp ABI v2 at 64902dd6 (Copyright (c) 2026

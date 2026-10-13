@@ -1,7 +1,7 @@
 #pragma once
 
 // The output stabilizer for Neural Rendering: keeps the shown picture where the game's frame did not
-// change and follows the model where it did. dlssnr/design/output-stabilizer.md is the reasoning.
+// change and follows the model where it did. docs/dlssnr/design/output-stabilizer.md is the reasoning.
 //
 // One object serves one output size and format on one device. Its history textures are sized at
 // construction; a different output gets a new object, and the old one is parked with the pass's other

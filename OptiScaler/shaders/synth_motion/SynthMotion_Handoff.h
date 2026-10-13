@@ -3,7 +3,7 @@
 // One synthesized motion field per base frame, whoever computes it. DLSS-NR's present hosts and
 // synthesized frame generation both want the estimator's field for the same frame; this slot lets the
 // first of them publish it and the second take it instead of running the estimator again. Design:
-// dlssnr/design/synthesized-frame-generation.md, "Computing the field once when NR and FG both want it".
+// docs/dlssnr/design/synthesized-frame-generation.md, "Computing the field once when NR and FG both want it".
 //
 // Header only and free of any module: frame generation must not depend on DLSS-NR, and DLSS-NR must
 // stay removable as one block. It stores pointers and compares them; it never touches the GPU.

@@ -9,7 +9,7 @@ execution; `--no-lock` skips the clock lock. Output goes to the ignored `artifac
 ## What it runs
 
 The production `SynthMotion::Estimator_Dx12` (`OptiScaler/shaders/synth_motion/`, the FidelityFX
-optical flow port, see `OptiScaler/dlssnr/design/synthesized-frame-generation.md`) compiled with a
+optical flow port, see `docs/dlssnr/design/synthesized-frame-generation.md`) compiled with a
 `pch.h`/`Logger.h` shim, on vkd3d-proton in an isolated Wine prefix. The compiler prefix is a
 private copy of the local MSVC prefix. No NGX, no OptiScaler.dll, no game.
 
@@ -45,7 +45,7 @@ frames after a reset. Thresholds and their reasons are in the comment block at t
 
 They reproduce Generation Zero's smeared crosshair and HUD under synthesized FG (2026-09-28), which
 the expand pass's per-pixel choice fixes ("Static overlays" in
-`OptiScaler/dlssnr/design/synthesized-motion.md`). Every colour pixel falls in one class:
+`docs/dlssnr/design/synthesized-motion.md`). Every colour pixel falls in one class:
 
 - **Overlay, clear.** An overlay pixel the frame pair can show is static. Judged: a mean `|v|` under
   0.5 px.

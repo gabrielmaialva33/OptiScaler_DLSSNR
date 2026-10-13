@@ -107,6 +107,6 @@ and refuses a swizzle-named macro parameter in either rule's includers (`UM_` an
 - Whether the thresholds suit a real game. They are the design's estimates, to be tuned from the
   10 s summary in the log.
 
-Design: `OptiScaler/dlssnr/design/synthesized-frame-generation.md`, "Motion into FG, and emulator
+Design: `docs/dlssnr/design/synthesized-frame-generation.md`, "Motion into FG, and emulator
 behaviour", "Coherence, not speed", "The HUD: near depth and a UI layer" and "The HUD layer's own mask:
 recall and a margin".

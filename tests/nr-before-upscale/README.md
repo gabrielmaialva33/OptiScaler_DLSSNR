@@ -121,7 +121,7 @@ The 61st is wilsjo2's padded input (their `docs/PADDED-PRESR.md`): 2558x1439 dra
 of a 2560x1440 allocation. The scratch comes out at the drawn size, the upscaler is handed it, and
 everything is restored afterwards. A second unit, `guide_match_cases.cpp`, compiles
 `DlssNr_GuideMatch.h` directly. It pins the reduced-scale guide rules
-(`OptiScaler/dlssnr/design/reduced-scale-guides.md`) with the numbers of the cases they were written
+(`docs/dlssnr/design/reduced-scale-guides.md`) with the numbers of the cases they were written
 for, which cover both stages:
 - when depth and motion are resampled to the working size;
 - the model's motion scale against the legacy working / frame conversion;

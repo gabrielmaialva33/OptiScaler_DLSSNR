@@ -10,7 +10,7 @@ namespace DlssNr::LogRate
 // rate limiter reading one goes silent for as long as the correction.
 using Clock = std::chrono::steady_clock;
 
-// One line per second per site for a quantity that only drifts. design/nr-log-rate.md has the
+// One line per second per site for a quantity that only drifts. docs/dlssnr/design/nr-log-rate.md has the
 // session that set it: 486 composition lines in 54.7 s, with white-point drift and one model-size
 // transition that must still be reported immediately.
 constexpr Clock::duration DriftInterval = std::chrono::seconds(1);

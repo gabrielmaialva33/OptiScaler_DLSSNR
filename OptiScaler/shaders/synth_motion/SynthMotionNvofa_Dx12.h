@@ -2,7 +2,7 @@
 
 // Synthesized motion from NVIDIA's Optical Flow Accelerator (NVOFA): the second motion source behind the
 // same output contract as Estimator_Dx12 (SynthMotion_Dx12.h), selected by [DlssNr] SynthMotionSource.
-// Design: dlssnr/design/synthesized-motion.md, "Motion sources: FidelityFX and NVOFA".
+// Design: docs/dlssnr/design/synthesized-motion.md, "Motion sources: FidelityFX and NVOFA".
 //
 // Why a second source: the OFA is a fixed-function engine present on Turing and later, so the search
 // runs off the shader cores that the NR model is already saturating on a mid-range card. The price is

@@ -1,5 +1,5 @@
 // Peripheral compression's mapping between the frame and the model's packed input, one axis at a time.
-// dlssnr/design/peripheral-compression.md.
+// docs/dlssnr/design/peripheral-compression.md.
 //
 // The radius curve, its inverse and the side selection are ported from PeripheralWarp ABI v2 at
 // 64902dd6a02460e5f6b778504ec2a4005faf4d9c, through wilsjo2's external/peripheral_warp/SpatialWarp.h.

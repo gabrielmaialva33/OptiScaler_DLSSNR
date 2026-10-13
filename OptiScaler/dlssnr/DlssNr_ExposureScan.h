@@ -110,7 +110,7 @@ const char* Status();
 bool Scanning();
 
 // ---------------------------------------------------------------------------------------------
-// Multi-point anchoring. See dlssnr/design/multi-point-anchoring.md.
+// Multi-point anchoring. See docs/dlssnr/design/multi-point-anchoring.md.
 //
 // The white point driven by the scan is calibrated from one or more points the user placed --
 // (scanValue, whitePoint) pairs -- and interpolated between them in log space. One point is the

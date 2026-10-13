@@ -1,6 +1,6 @@
 // Peripheral compression's layout and mapping (OptiScaler/shaders/dlssnr/DlssNr_Periphery.h and the shared
 // precompile/dlssnr_periphery_warp.h the shader includes), pinned against the cases they were written for.
-// dlssnr/design/peripheral-compression.md.
+// docs/dlssnr/design/peripheral-compression.md.
 //
 // Everything below runs the production headers in float, as the shader does; only the image the colour pack
 // reads is a vector here instead of a texture, and mode 2 of dlssnr.hlsl (the downsample the colour pack must

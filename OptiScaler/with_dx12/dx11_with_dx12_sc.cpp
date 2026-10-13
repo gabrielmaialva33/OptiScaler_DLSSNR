@@ -63,7 +63,7 @@ bool WantedForNeuralRendering()
     // here would be a second writer on the frame. Synthesized FG has none: the bridge copy is the one
     // place a base frame exists before FG, and FG interpolates whatever lands in the presenter's
     // backbuffer, so the pass runs there once per base frame and the generated frames inherit it
-    // (dlssnr/design/synthesized-frame-generation.md, step 2).
+    // (docs/dlssnr/design/synthesized-frame-generation.md, step 2).
     return !WantedForFrameGeneration() || State::Instance().activeFgInput == FGInput::Synthesized;
 }
 

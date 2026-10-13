@@ -271,7 +271,7 @@ void RenderMenu(::Config* config, float menuResScale);
 void RetryAfterFailure();
 
 // Clears Transfer 2's failure alone and rebuilds its private DLSS, leaving the model, its history and the
-// settling gates as they are (design/dlss-enlargement.md). RetryAfterFailure does this as well.
+// settling gates as they are (docs/dlssnr/design/dlss-enlargement.md). RetryAfterFailure does this as well.
 void RetryEnlargement();
 
 // Asks the model whether it will work on Direct3D 11 at all, once, and logs the answer.
@@ -354,7 +354,7 @@ unsigned int ActivePassCount();
 const char* MultipassStatus();
 
 // What model cadence is doing, for the line under its control: running, or the reason the model runs every
-// frame. A string literal from DlssNr::Cadence::Describe. design/model-cadence.md.
+// frame. A string literal from DlssNr::Cadence::Describe. docs/dlssnr/design/model-cadence.md.
 const char* CadenceStatus();
 
 // Whether this build carries model cadence's shader. Its bytecode header is optional; without it the control
@@ -362,9 +362,10 @@ const char* CadenceStatus();
 bool CadenceAvailable();
 
 // Whether the buffer the last D3D12 dispatch worked on was linear HDR, i.e. the colour transform was on. False
-// until something has run. For the menu: highlight recovery acts only there (design/hdr-highlight-recovery.md).
+// until something has run. For the menu: highlight recovery acts only there
+// (docs/dlssnr/design/hdr-highlight-recovery.md).
 bool BufferIsLinearHdr();
-// What peripheral compression did on the last D3D12 dispatch (design/peripheral-compression.md), for the
+// What peripheral compression did on the last D3D12 dispatch (docs/dlssnr/design/peripheral-compression.md), for the
 // menu's status line. reason is a string literal: "active", or why not.
 struct PeripheryState
 {
@@ -383,7 +384,7 @@ struct PeripheryState
 
 PeripheryState PeripheryStatus();
 
-// Transfer 2: what the D3D12 resolve was last sent, and why (design/dlss-enlargement.md). For the menu's
+// Transfer 2: what the D3D12 resolve was last sent, and why (docs/dlssnr/design/dlss-enlargement.md). For the menu's
 // status line while "Matched residual + DLSS" is selected. Why::NotYet until the first dispatch.
 Enlarge::Status EnlargeStatus();
 

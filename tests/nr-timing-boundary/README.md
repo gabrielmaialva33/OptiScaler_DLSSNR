@@ -20,7 +20,7 @@ source guards are not execution of the full Windows renderer.
 The metadata cases include returning to a prior contract and repeated evaluation without a
 generation/hash change.
 
-Model cadence (`dlssnr/design/model-cadence.md`): the cadence in effect is named in the contract only
+Model cadence (`docs/dlssnr/design/model-cadence.md`): the cadence in effect is named in the contract only
 when it runs, so a contract with it off reads as before; a carried frame has the same contract and
 generation as a model frame of the same cadence and differs only by its `carried` flag; the menu names
 a carried sample (no model call, so no model time) and a model frame of a cadence, and says nothing

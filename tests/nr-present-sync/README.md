@@ -17,4 +17,4 @@ The runner compiles `OptiScaler/dlssnr/DlssNr_PresentSync.h` with g++ C++20, ASa
 
 The inputs are gathered in `RunPresentPass` (`DlssNr_Dx12.cpp`) from `State` and the loader; that code and the wait
 itself are not exercised here. Whether the write-back can race a paced flip is the design note's question
-(`dlssnr/design/nr-present-hook.md`), not this suite's.
+(`docs/dlssnr/design/nr-present-hook.md`), not this suite's.

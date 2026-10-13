@@ -31,7 +31,7 @@ The concept originates from **janblade** (`OptiScaler` fork, `origin/main` branc
 - **Model Dispatch:**
   `OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp:4650-4750` evaluates the model feature (`g_nr.evaluate`) on the command list.
 - **Theoretical cost model:**
-  `OptiScaler/dlssnr/design/model-cost-across-architectures.md` discusses relative costs across GPU architectures based on external benchmarks, but currently lacks live kernel-level breakdown data on this machine (RTX 4090) and Rafael's PC (RTX 3060).
+  `docs/dlssnr/design/model-cost-across-architectures.md` discusses relative costs across GPU architectures based on external benchmarks, but currently lacks live kernel-level breakdown data on this machine (RTX 4090) and Rafael's PC (RTX 3060).
 
 ---
 

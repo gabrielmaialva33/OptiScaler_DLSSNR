@@ -23,7 +23,7 @@ class Overlay_Dx12;
 // has neither, so this stands in with a display-size R16G16_FLOAT motion field and an R32_FLOAT depth,
 // both cleared to zero once and never written again: no motion, and with inverted depth, every pixel
 // at the far plane. FSR-FG still runs its own optical flow on the frames themselves, which step 1 of
-// dlssnr/design/synthesized-frame-generation.md measured as enough on its own in Divinity.
+// docs/dlssnr/design/synthesized-frame-generation.md measured as enough on its own in Divinity.
 //
 // Two owners, one per transport, both calling Feed just before the presenter's Present dispatches FG:
 // - The D3D11 bridge (one per bridge swapchain) records the clear onto its copy list, which the present

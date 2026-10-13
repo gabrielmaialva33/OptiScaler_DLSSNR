@@ -179,7 +179,7 @@ constexpr int kCutFrame = 8;
 constexpr int kAbandonFrame = 8;
 
 // The static overlay for Kind::Overlay: what a first-person HUD draws over a moving world, and what
-// smeared in Generation Zero under synthesized FG (dlssnr/design/synthesized-motion.md, "Static
+// smeared in Generation Zero under synthesized FG (docs/dlssnr/design/synthesized-motion.md, "Static
 // overlays"). Three elements, identical in every frame:
 //  - a crosshair: four 2 px arms from 4 to 16 px off the centre and a 2x2 dot, each with a 1 px dark
 //    outline;

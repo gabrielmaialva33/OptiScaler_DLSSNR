@@ -1,5 +1,5 @@
 // Depth and motion vectors, point-resampled from the upscaler's region to the NR model's working size.
-// design/reduced-scale-guides.md.
+// docs/dlssnr/design/reduced-scale-guides.md.
 //
 // Point, not linear: a depth between two surfaces is a surface that does not exist, and a vector
 // averaged across an edge belongs to neither side. The vectors keep the game's units; the host

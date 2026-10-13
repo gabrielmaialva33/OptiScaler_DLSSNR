@@ -5,7 +5,8 @@
 
 #include <cstdint>
 
-// The private DLSS Super Resolution that Transfer 2 enlarges the model's edit with. design/dlss-enlargement.md.
+// The private DLSS Super Resolution that Transfer 2 enlarges the model's edit with.
+// docs/dlssnr/design/dlss-enlargement.md.
 //
 // One SR feature with its own parameter table and its own handle, so its history is its own and never the
 // game's. Reached through the raw driver core (NVNGXProxy), not through OptiScaler's exported NVSDK_NGX_*

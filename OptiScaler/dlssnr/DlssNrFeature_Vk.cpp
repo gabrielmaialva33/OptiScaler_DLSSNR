@@ -1138,13 +1138,13 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     encode.ColourStrength = cfg.DlssNrColourStrength.value_or_default();
     encode.MaxRatio = cfg.DlssNrMaxRatio.value_or_default();
     // Transfer 2's private DLSS is D3D12 only. Sent as is, the shader would decode this path's plain answer as
-    // the carrier that DLSS writes; it runs matched residual instead (design/dlss-enlargement.md).
+    // the carrier that DLSS writes; it runs matched residual instead (docs/dlssnr/design/dlss-enlargement.md).
     encode.Transfer = Enlarge::VulkanTransfer(cfg.DlssNrTransfer.value_or_default());
     encode.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
     encode.GuideWidth = guideWidth;
     encode.GuideHeight = guideHeight;
     // Read by the resolve, which takes a copy of these constants. Linear HDR only, as on D3D12
-    // (design/hdr-highlight-recovery.md).
+    // (docs/dlssnr/design/hdr-highlight-recovery.md).
     encode.HighlightRecovery = linearHdr && cfg.DlssNrHighlightRecovery.value_or_default() ? 1u : 0u;
 
     // This path has no composition summary, so the one setting a screenshot cannot show is said when it changes.

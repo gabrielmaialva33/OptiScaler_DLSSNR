@@ -3,8 +3,8 @@ NR model loader and NGX loader scan
 
 Two pieces of OptiScaler's Neural Rendering module rest on other projects'
 work. Neither copies their source; both are rewritten against OptiScaler's own
-structures. The design is recorded in OptiScaler/dlssnr/FORWARDER_INVESTIGATION.md
-and OptiScaler/dlssnr/design/ngx-driver-616.md.
+structures. The design is recorded in docs/history/FORWARDER_INVESTIGATION.md
+and docs/dlssnr/design/ngx-driver-616.md.
 
 
 1. The direct model loader ([DlssNr] ModelLoader=direct)

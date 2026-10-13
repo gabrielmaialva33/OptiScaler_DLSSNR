@@ -34,7 +34,7 @@ assert dispatch.count('g_nr.evaluate(') == 2  # no unmeasured forwarder calls ou
 assert second_begin > dispatch.index('for (unsigned i = 1; i < passSnapshot.Count; ++i)')
 assert dispatch.index('timing.FinishOnScopeExit(') > dispatch.index('colorRead.Restore();')
 assert 'wrote && result == 1 && chain.completed == passSnapshot.Count' in dispatch
-# Model cadence (design/model-cadence.md): a carried frame calls no model, so it records no model markers,
+# Model cadence (docs/dlssnr/design/model-cadence.md): a carried frame calls no model, so it records no model markers,
 # is never rejected as a partial chain, finishes with zero passes, and holds a pending reset.
 carry_call = dispatch.index('g_nr.cadence->Carry(')
 assert carry_call < first_begin, 'the carry must be the alternative to the model call, not after it'

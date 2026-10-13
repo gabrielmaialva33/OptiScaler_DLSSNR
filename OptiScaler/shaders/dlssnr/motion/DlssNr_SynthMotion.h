@@ -1,7 +1,7 @@
 #pragma once
 
 // ===========================================================================================
-// UNBUILT SKELETON. Design: OptiScaler/dlssnr/design/synthesized-motion.md.
+// UNBUILT SKELETON. Design: docs/dlssnr/design/synthesized-motion.md.
 //
 // This file is NOT in OptiScaler.vcxproj, is compiled by nothing, and is referenced by no
 // existing source. It exists so the integration worker has a concrete shape to wire in. Do

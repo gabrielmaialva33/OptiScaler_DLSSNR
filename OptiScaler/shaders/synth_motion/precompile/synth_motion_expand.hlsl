@@ -2,7 +2,7 @@
 //
 // Expands the level-0 optical flow -- one vector per 8x8 block of the colour, in colour pixels --
 // into one R16G16_FLOAT vector per colour pixel, the output contract in shaders/synth_motion/README.md
-// and dlssnr/design/synthesized-motion.md §4:
+// and docs/dlssnr/design/synthesized-motion.md §4:
 //   .rg = displacement from the current frame to the previous one, in colour pixels, +x right, +y down
 //         (prev = cur + mv, the DLSS/FSR convention).
 // FFX's flow already has exactly that meaning and those units: the search looks for the current

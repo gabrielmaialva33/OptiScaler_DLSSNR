@@ -26,7 +26,7 @@ ramp that spares still pixels by the border, the scaling of taps and rings with 
 working size, the point-resampled depth snapshot, the plain box-averaged coarse residual,
 and the resource lifetime. Their cross-pass blend, phase-in, Lucas-Kanade refinement,
 expected depth, older passes, cells, compose pass and background queue are not ported.
-See OptiScaler/dlssnr/design/model-cadence.md.
+See docs/dlssnr/design/model-cadence.md.
 
 Upstream licence
 ----------------

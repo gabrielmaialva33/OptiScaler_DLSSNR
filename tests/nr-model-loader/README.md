@@ -14,7 +14,7 @@ Both come from `OptiScaler/dlssnr/DlssNr_PeScan.h`, which is header-only and fre
   The technique is wilsjo2's (OptiScaler-DLSSNR-PreSR-Multipass v0.8.1–0.8.3, GPL-3).
 - **The 616.64 route** (`DlssNr_NgxInfo`, the `UseProxy` guard in `DlssNr_Proxy`) reads the
   NGX loader's feature-id → snippet-name table to see whether entry 18 names `dlssnr`. The table
-  layout is NIGos/dlss5-bridge's (MIT). See `OptiScaler/dlssnr/design/ngx-driver-616.md`.
+  layout is NIGos/dlss5-bridge's (MIT). See `docs/dlssnr/design/ngx-driver-616.md`.
 
 ## What it exercises
 

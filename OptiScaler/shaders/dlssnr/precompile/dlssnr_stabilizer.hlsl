@@ -1,5 +1,5 @@
 // The output stabilizer: keep the shown picture where the game's frame did not change, and follow
-// the model where it did. dlssnr/design/output-stabilizer.md is the reasoning; the gate is
+// the model where it did. docs/dlssnr/design/output-stabilizer.md is the reasoning; the gate is
 // DLSS5-Feeder's feed_hold12.h (MIT, Jean-Laurent Rouzies); the witness, the creep and the weights are not.
 //
 // Precompiled like dlssnr.hlsl: editing this alone changes nothing. From this directory:

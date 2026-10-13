@@ -2,7 +2,7 @@
 
 // Which of synthesized frame generation's two HUD fixes run for a base frame, and what FG is handed.
 // Pure logic with no D3D in it, so the host tests drive it directly (tests/fg-synth-policy). Design:
-// dlssnr/design/synthesized-frame-generation.md, "The HUD: near depth and a UI layer" and "DLSS-G output".
+// docs/dlssnr/design/synthesized-frame-generation.md, "The HUD: near depth and a UI layer" and "DLSS-G output".
 //
 // - Fix A, [FrameGen] SynthesizedHudDepth: the HUD mask's depth (1.0, near, where the mask holds) instead of
 //   the constant zero depth. Any output takes it: it is only the depth FG is given.

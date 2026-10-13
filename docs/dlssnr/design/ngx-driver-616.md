@@ -14,7 +14,7 @@ NIGos/dlss5-bridge (MIT) measured it on an RTX 5090 and wrote it down in `dlss5-
 - In **32.0.16.1656** (616.56) entry 18 points at `L""`. `NGXSecureLoadFeature` loads nothing for an
   empty name (dlss5-bridge reads `0xBAD00001` there), so the core's `CreateFeature(18)` fails. That
   is the `0xBAD0000B` this repository measured from `CreateFeature` on 2026-08-31 and 09-01, and that
-  `FORWARDER_INVESTIGATION.md` explains.
+  `docs/history/FORWARDER_INVESTIGATION.md` explains.
 - In **32.0.16.1664** (616.64) and 1686, entry 18 points at `L"dlssnr"`, and `DLSSNR.Available`
   appears in the file. **The loader now routes feature 18 into `nvngx_dlssnr.dll` itself.** Entries
   0–17 are byte-identical between the two versions.
@@ -90,7 +90,7 @@ ships NR through Streamline. If a future route of ours needs the core's `CreateF
 old model, dlss5-bridge's `PatchNgxFeatureTable` is the reference, and `FindFeature18Route` already
 returns the table's offset.
 
-A consequence worth measuring: **`UseProxy` may now work.** `FORWARDER_INVESTIGATION.md` concluded
+A consequence worth measuring: **`UseProxy` may now work.** `docs/history/FORWARDER_INVESTIGATION.md` concluded
 the core "has no feature 18". That was true of the loaders it was measured on and is not true of
 1664 and later, this machine's included. With 310.8.2.0 on such a loader, the core route is the one
 the NR add-on beside dlss5-bridge takes, and check 4 below will show whether it builds here.
@@ -115,7 +115,7 @@ mistaken:
 ## The direct loader
 
 `[DlssNr] ModelLoader=direct` is the other half of the forwarder question. It is recorded, with its
-provenance (wilsjo2, GPL-3), in `FORWARDER_INVESTIGATION.md` under 2026-09-28. It is independent of
+provenance (wilsjo2, GPL-3), in `docs/history/FORWARDER_INVESTIGATION.md` under 2026-09-28. It is independent of
 the driver: it calls the model exactly as the forwarder does.
 
 ## Checks for the lead, in a game

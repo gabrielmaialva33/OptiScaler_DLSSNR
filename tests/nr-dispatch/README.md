@@ -25,7 +25,7 @@ generation, and a saturated one. Two guards in `run.py` cover what no behavioura
 the view arguments are constants — that every argument a call site passes is also in the key, and
 that every member of `BindKey` appears in its own `operator==`.
 
-Design note: `OptiScaler/dlssnr/design/descriptor-reuse.md`.
+Design note: `docs/dlssnr/design/descriptor-reuse.md`.
 
 ## What it does not cover
 

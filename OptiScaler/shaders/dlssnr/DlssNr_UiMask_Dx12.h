@@ -2,7 +2,7 @@
 
 // The static-overlay mask for DLSS-NR's UI correction: pixels that stay the same while the pixels around
 // them change are taken for interface, and the model is handed them as DLSSNR.UIAlpha so it leaves them
-// as they were. dlssnr/design/hud-protection.md is the reasoning.
+// as they were. docs/dlssnr/design/hud-protection.md is the reasoning.
 //
 // One object serves one working size on one device. Its history is sized at construction; a different
 // size gets a new object, and the old one is parked with the pass's other retired objects rather than

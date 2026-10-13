@@ -61,29 +61,29 @@ experiment.
 | `DlssNrFeature_Dx12.h` | the namespace-level API the menu and the call sites use |
 | `DlssNr_Menu.cpp` | the settings panel |
 | `DlssNr_Capture.h` | matched before/after frame dumps |
-| `DlssNr_WorkingScale.h/.cpp` | what `WorkingScale=auto` resolves to on the GPU the pass runs on; `design/working-scale-auto.md` |
-| `DlssNr_Proxy.h/.cpp` | the experiment in reaching the model through the driver core instead of the forwarder; see `FORWARDER_INVESTIGATION.md` |
+| `DlssNr_WorkingScale.h/.cpp` | what `WorkingScale=auto` resolves to on the GPU the pass runs on; `../../docs/dlssnr/design/working-scale-auto.md` |
+| `DlssNr_Proxy.h/.cpp` | the experiment in reaching the model through the driver core instead of the forwarder; see `../../docs/history/FORWARDER_INVESTIGATION.md` |
 | `forwarder/` | the caller-gate shim, built by `dlssnr_forwarder.vcxproj` into the release layout |
-| `DlssNr_DirectRuntime.h/.cpp` | `ModelLoader=direct`: the forwarder's D3D12 calls made from OptiScaler.dll, passing the caller check through the model's own `GetModuleFileNameW/A` imports (wilsjo2's technique); `FORWARDER_INVESTIGATION.md` |
-| `DlssNr_NgxInfo.h/.cpp` | the `DLSS-NR NGX:` line at the first build (loader, its build, whether it routes feature 18 itself, the model) and the 616.64 pairing check; `design/ngx-driver-616.md` |
+| `DlssNr_DirectRuntime.h/.cpp` | `ModelLoader=direct`: the forwarder's D3D12 calls made from OptiScaler.dll, passing the caller check through the model's own `GetModuleFileNameW/A` imports (wilsjo2's technique); `../../docs/history/FORWARDER_INVESTIGATION.md` |
+| `DlssNr_NgxInfo.h/.cpp` | the `DLSS-NR NGX:` line at the first build (loader, its build, whether it routes feature 18 itself, the model) and the 616.64 pairing check; `../../docs/dlssnr/design/ngx-driver-616.md` |
 | `DlssNr_PeScan.h` | header-only byte scans both of those act on: the model's caller-path import slots, the loader's feature-18 table; tested by `tests/nr-model-loader` |
-| `DlssNr_PresentColour.h` | which presented frames the present hosts decline: HDR10/PQ, scRGB and other non-sRGB swapchains, until the hosts convert them; `design/nr-present-hook.md` |
-| `DlssNr_Enlarge.h` | Transfer 2's rules as pure functions: what the resolve is sent and why, the Vulkan 2 -> 1 mapping, the menu's index table, when the private SR's history resets; `design/dlss-enlargement.md`, tested by `tests/nr-enlarge` |
+| `DlssNr_PresentColour.h` | which presented frames the present hosts decline: HDR10/PQ, scRGB and other non-sRGB swapchains, until the hosts convert them; `../../docs/dlssnr/design/nr-present-hook.md` |
+| `DlssNr_Enlarge.h` | Transfer 2's rules as pure functions: what the resolve is sent and why, the Vulkan 2 -> 1 mapping, the menu's index table, when the private SR's history resets; `../../docs/dlssnr/design/dlss-enlargement.md`, tested by `tests/nr-enlarge` |
 | `DlssNr_PrivateSr.h/.cpp` | Transfer 2's private DLSS Super Resolution, the NGX half: its own parameter table and handle through `NVNGXProxy`, created and evaluated with wilsjo2's parameters |
 | `shaders/dlssnr/DlssNr_Dx12.h/.cpp` | the pass: forwarder loading, feature lifetime, the evaluate path, encode/resolve orchestration, capture |
 | `shaders/dlssnr/DlssNr_Common.h` | the constant buffer, shared by the host and the shader |
 | `shaders/dlssnr/precompile/dlssnr.hlsl` | **the live shader**: encode (scale and sRGB-encode with a soft knee), area downsample, resolve (RenoDX's two-branch composition, OkLab hue correction, AP1 clamp, the guard) |
 | `shaders/dlssnr/precompile/DlssNr_Shader.h`, `DlssNr_Shader_Vk.h` | that shader compiled, as bytes (D3D12 and Vulkan). The other passes' bytecode sits beside it, one `DlssNr_<Pass>_Shader.h` each: `Cadence`, `DetailStats`, `Guides`, `PeripheryColour`, `PeripheryGuides`, `PeripheryUnpack`, `Stabilizer`, `UiMask` |
-| `shaders/dlssnr/DlssNr_Stabilizer_Dx12.h/.cpp`, `precompile/dlssnr_stabilizer.hlsl` | the output stabilizer, off by default; `design/output-stabilizer.md` |
-| `DlssNr_Cadence.h`, `shaders/dlssnr/DlssNr_Cadence_Dx12.h/.cpp`, `precompile/dlssnr_cadence.hlsl`, `precompile/dlssnr_cadence_rule.h` | model cadence, off by default: the model every Nth frame, its edit carried along the motion in between; the bytecode header is optional (`__has_include`); `design/model-cadence.md` |
-| `DlssNr_DetailStats.h`, `shaders/dlssnr/DlssNr_DetailStats_Dx12.h/.cpp`, `precompile/dlssnr_detail_stats.hlsl` | in-game detail and temporal stability metrics ("Measure detail") across 60 evaluations on a still scene; the bytecode header is optional (`__has_include`); `design/detail-measure.md` |
-| `shaders/dlssnr/DlssNr_GuideMatch.h`, `DlssNr_GuideMatch_Dx12.h/.cpp`, `precompile/dlssnr_guides.hlsl` | below the frame's size: depth and motion point-resampled to the model's working size, and the motion-vector scale for the texture handed over; the bytecode header is optional (`__has_include`); `design/reduced-scale-guides.md` |
-| `shaders/dlssnr/DlssNr_Periphery.h`, `DlssNr_Periphery_Dx12.h/.cpp`, `precompile/dlssnr_periphery_warp.h`, `precompile/dlssnr_periphery.hlsl` | peripheral compression, off by default: the model's input packed denser in the centre than at the edges, the guides packed with it, the answer unpacked onto the uniform grid before the resolve; D3D12 only; the three bytecode headers are optional (`__has_include`); `design/peripheral-compression.md` |
+| `shaders/dlssnr/DlssNr_Stabilizer_Dx12.h/.cpp`, `precompile/dlssnr_stabilizer.hlsl` | the output stabilizer, off by default; `../../docs/dlssnr/design/output-stabilizer.md` |
+| `DlssNr_Cadence.h`, `shaders/dlssnr/DlssNr_Cadence_Dx12.h/.cpp`, `precompile/dlssnr_cadence.hlsl`, `precompile/dlssnr_cadence_rule.h` | model cadence, off by default: the model every Nth frame, its edit carried along the motion in between; the bytecode header is optional (`__has_include`); `../../docs/dlssnr/design/model-cadence.md` |
+| `DlssNr_DetailStats.h`, `shaders/dlssnr/DlssNr_DetailStats_Dx12.h/.cpp`, `precompile/dlssnr_detail_stats.hlsl` | in-game detail and temporal stability metrics ("Measure detail") across 60 evaluations on a still scene; the bytecode header is optional (`__has_include`); `../../docs/dlssnr/design/detail-measure.md` |
+| `shaders/dlssnr/DlssNr_GuideMatch.h`, `DlssNr_GuideMatch_Dx12.h/.cpp`, `precompile/dlssnr_guides.hlsl` | below the frame's size: depth and motion point-resampled to the model's working size, and the motion-vector scale for the texture handed over; the bytecode header is optional (`__has_include`); `../../docs/dlssnr/design/reduced-scale-guides.md` |
+| `shaders/dlssnr/DlssNr_Periphery.h`, `DlssNr_Periphery_Dx12.h/.cpp`, `precompile/dlssnr_periphery_warp.h`, `precompile/dlssnr_periphery.hlsl` | peripheral compression, off by default: the model's input packed denser in the centre than at the edges, the guides packed with it, the answer unpacked onto the uniform grid before the resolve; D3D12 only; the three bytecode headers are optional (`__has_include`); `../../docs/dlssnr/design/peripheral-compression.md` |
 
 ### Editing the shader
 
 `dlssnr.hlsl` is **precompiled**; editing it alone changes nothing. Rebuild **both** targets and
-both headers (`design/DEVELOPMENT.md` invariant 6 is the authority):
+both headers (`../../docs/dlssnr/design/DEVELOPMENT.md` invariant 6 is the authority):
 
 ```
 cd OptiScaler/shaders/dlssnr/precompile
@@ -133,7 +133,7 @@ exposed frame times the smoothstep on what the model was shown, blended back tow
 thresholds -- is **NVIDIA's, from RTX Remix's DLSS-NR integration**
 (https://github.com/NVIDIAGameWorks/dxvk-remix, commit `ecf646d3ea`; per-file MIT-style grant, repository
 zlib). `Licenses/RTXRemix_ATTRIBUTION.txt` carries both texts and says which part is theirs;
-`design/hdr-highlight-recovery.md` is the analysis.
+`../../docs/dlssnr/design/hdr-highlight-recovery.md` is the analysis.
 
 ## Why a forwarder DLL exists
 
@@ -182,10 +182,10 @@ part of the solution, and builds with everything else.
   a trained DLAA pass): the model re-decides detail with the framing, so old answers do not belong
   to new frames. There is no accumulator; the composition is re-anchored to the model every frame
   instead, which is what makes it steady.
-  The output stabilizer (`design/output-stabilizer.md`) is not that and does not reopen it: it is gated
+  The output stabilizer (`../../docs/dlssnr/design/output-stabilizer.md`) is not that and does not reopen it: it is gated
   by the model's *input* and reprojects nothing, so a pixel whose input changed shows the current answer
   that frame, and only pixels the game left alone keep what was shown.
-  Model cadence (`design/model-cadence.md`) is not that either, and does hit this dead end in motion: it
+  Model cadence (`../../docs/dlssnr/design/model-cadence.md`) is not that either, and does hit this dead end in motion: it
   is an FPS option that moves the last answer onto the frames between model calls, blends no two answers,
   and is off by default because it costs stability in motion.
 - **The model's own UI correction went with it.** It only ever acted on a UI layer the game tagged

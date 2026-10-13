@@ -1,5 +1,5 @@
 // The per-pixel rules of DLSS-NR's model cadence: how the edit the model made on its last frame is moved onto
-// the frames in between, and what stops it landing on the wrong surface. dlssnr/design/model-cadence.md has
+// the frames in between, and what stops it landing on the wrong surface. docs/dlssnr/design/model-cadence.md has
 // the reasoning. Two things run this file: the cadence pass (dlssnr_cadence.hlsl beside it) and the host test
 // tests/nr-cadence, so the test runs the shader's own decisions rather than a copy of them.
 //

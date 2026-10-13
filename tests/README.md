@@ -71,7 +71,7 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   header over fixtures: a glyph and a 1 px frame over a pan are taken whole, and a swaying silhouette, a moving
   patch, rain and a straight edge along a pan are not.
 - `nr-before-upscale` — pre-upscale boundary functions against strict host fakes.
-- `nr-cadence` — model cadence (`dlssnr/design/model-cadence.md`): the production scheduler (age
+- `nr-cadence` — model cadence (`docs/dlssnr/design/model-cadence.md`): the production scheduler (age
   in presents the pass ran at, the held reset, forced model frames, every refusal with its reason, off
   allocating nothing) and the production per-pixel rules -- the header the shader includes -- over
   synthetic sequences: a still scene carried exactly, integer and sub-pixel pans, an occluder
@@ -153,7 +153,7 @@ The host `nr-*` suites exercise decision logic against fakes. They do not execut
 a real D3D12 device, or a real shader. A green run says nothing about GPU
 behaviour, image quality, or performance. In-game validation is still required;
 `CLAUDE.md` has the test target. For Neural Rendering changes, work through the
-per-change-type review in `OptiScaler/dlssnr/design/DEVELOPMENT.md` §3 before
+per-change-type review in `docs/dlssnr/design/DEVELOPMENT.md` §3 before
 calling a change done.
 
 ## Adding a suite

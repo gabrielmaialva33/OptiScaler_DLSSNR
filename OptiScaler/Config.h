@@ -360,13 +360,13 @@ class Config
 
     // Frame hold: freeze the NR pass's input so a live setting change re-renders the SAME frame -- the
     // only clean way to A/B our settings. A live testing toggle, not really a saved preference; off by
-    // default. See dlssnr/design/frame-hold.md.
+    // default. See docs/dlssnr/design/frame-hold.md.
     CustomOptional<bool> DlssNrHoldFrame { false };
 
     // The output stabilizer: holds a pixel's shown picture while the model's input there did not change,
     // and shows the model's answer as it is where it did. Strength 0 is off -- nothing allocated, nothing
     // dispatched; 1 holds a still pixel outright. Tolerance is how far the input may drift, relative to
-    // its brightness, before a pixel counts as moved. D3D12 only. See dlssnr/design/output-stabilizer.md.
+    // its brightness, before a pixel counts as moved. D3D12 only. See docs/dlssnr/design/output-stabilizer.md.
     CustomOptional<float> DlssNrStabilizerStrength { 0.0f };
     CustomOptional<float> DlssNrStabilizerTolerance { 0.05f };
 
@@ -375,7 +375,7 @@ class Config
     // frame -- off, nothing allocated, nothing dispatched; 2..4 are allowed, anything else reads as 1.
     // It stands down while frame generation is active unless CadenceWithFrameGen is true, because frame
     // times then alternate long and short and DLSS-G cannot pace through that. D3D12 only. See
-    // dlssnr/design/model-cadence.md.
+    // docs/dlssnr/design/model-cadence.md.
     CustomOptional<uint32_t> DlssNrCadence { 1 };
     CustomOptional<bool> DlssNrCadenceWithFrameGen { false };
 
@@ -387,14 +387,14 @@ class Config
     // that the encode compressed hard are blended back toward the frame -- so the model's verdict on a pixel
     // whose brightness it was never shown (above all its colour) does not reach it. Linear HDR buffers only;
     // nothing on a frame the game already tone mapped. Off by default, which is the composition as it was.
-    // dlssnr/design/hdr-highlight-recovery.md.
+    // docs/dlssnr/design/hdr-highlight-recovery.md.
     CustomOptional<bool> DlssNrHighlightRecovery { false };
 
     // How a model that worked below the frame's size is brought back. 0 classic, 1 matched
     // residual, 3 matched residual with a sharp (Catmull-Rom) enlargement of the edit, 2 matched residual
     // with the edit enlarged by a private DLSS Super Resolution -- the meaning upstream's multi-pass PR
     // gives it. 2 is D3D12 and its bridges only; native Vulkan, and any frame its DLSS cannot run on, get 1
-    // (dlssnr/design/dlss-enlargement.md). Only has an effect when Model resolution is under 100%.
+    // (docs/dlssnr/design/dlss-enlargement.md). Only has an effect when Model resolution is under 100%.
     CustomOptional<uint32_t> DlssNrTransfer { 1 };
 
     // Measure the white point from the frame instead of taking it from the slider. On a frame the
@@ -454,7 +454,7 @@ class Config
     // where auto is 0.5 must survive a save, and the WithDefault rule would write it back as auto.
     CustomOptional<float, SoftDefault> DlssNrWorkingScale { 1.0f };
 
-    // Peripheral compression (dlssnr/design/peripheral-compression.md): the model's input packed denser in
+    // Peripheral compression (docs/dlssnr/design/peripheral-compression.md): the model's input packed denser in
     // the centre than at the edges, its answer unpacked before the composition. D3D12, after the upscaler or
     // at present, not above Model resolution 100 and not with UseProxy. Off by default. The centre band
     // (percent of each axis kept at full density) and the work extent (percent of each axis the packed input
@@ -566,7 +566,7 @@ class Config
     CustomOptional<float> DlssNrScanAnchorWhitePoint { 0.0f }; // legacy single anchor, migrated then unused
 
     // The multi-point anchor table, serialised as "scan:white;scan:white;..." ascending. See
-    // dlssnr/design/multi-point-anchoring.md. Replaces the single pair above; a pre-existing single
+    // docs/dlssnr/design/multi-point-anchoring.md. Replaces the single pair above; a pre-existing single
     // anchor is migrated into a one-row table on first load.
     CustomOptional<std::string> DlssNrScanAnchors { std::string() };
 
@@ -644,7 +644,7 @@ class Config
     // Higher means highlights sit lower on the curve and the model treats them as less extreme.
     CustomOptional<float> DlssNrWhitePointScale { 1.0f };
 
-    // Kernel-variant census and per-group GPU timing of the DLSS-NR model (design/vit-skip.md).
+    // Kernel-variant census and per-group GPU timing of the DLSS-NR model (docs/dlssnr/design/vit-skip.md).
     // Samples 3 consecutive evaluations out of every 240, logging execution breakdown.
     CustomOptional<bool> DlssNrKernelProfile { false };
 
@@ -929,7 +929,7 @@ class Config
     // FGInput::Synthesized only: the synthesized motion field as FG's motion vectors, the fast-motion
     // response's cap (median px per base frame, 0 = no cap) and incoherence rule (share of neighbouring
     // motion samples that disagree, 0..1, 0 = off), and the low-fps floor (base fps, 0 = off). See
-    // dlssnr/design/synthesized-frame-generation.md, "Motion into FG, and emulator behaviour".
+    // docs/dlssnr/design/synthesized-frame-generation.md, "Motion into FG, and emulator behaviour".
     CustomOptional<bool> FGSynthesizedMotion { false };
     CustomOptional<float> FGSynthesizedFastMotion { 0.0f };
     CustomOptional<float> FGSynthesizedIncoherence { 0.0f };

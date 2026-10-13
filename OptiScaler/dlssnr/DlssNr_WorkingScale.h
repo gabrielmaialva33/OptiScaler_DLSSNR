@@ -7,7 +7,7 @@ struct _LUID;
 namespace DlssNr
 {
 
-// What [DlssNr] WorkingScale=auto stands for on the GPU the pass runs on. design/working-scale-auto.md
+// What [DlssNr] WorkingScale=auto stands for on the GPU the pass runs on. docs/dlssnr/design/working-scale-auto.md
 // is the reasoning; model-cost-across-architectures.md is the measurement it rests on.
 
 // NV_GPU_ARCHITECTURE_TU100 and _GA100, spelled out so this header needs no NVAPI; the .cpp asserts they

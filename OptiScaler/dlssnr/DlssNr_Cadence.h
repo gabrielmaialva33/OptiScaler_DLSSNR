@@ -4,7 +4,7 @@
 #include <cstdint>
 
 // Model cadence's scheduling: which frames run the model, which carry its last edit, and why.
-// design/model-cadence.md is the reasoning.
+// docs/dlssnr/design/model-cadence.md is the reasoning.
 //
 // Pure: flags, sizes, ids and times in, a decision out, so tests/nr-cadence pins it without a device. The
 // renderer (DlssNr_Dx12::Dispatch) asks once per call and then tells the scheduler what actually happened --

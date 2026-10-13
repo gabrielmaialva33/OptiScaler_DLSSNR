@@ -108,7 +108,7 @@ struct Durations
 
 // Layout: total begin, N adjacent model begin/end pairs, total end. Sum explicit gaps.
 //
-// A carried evaluation (model cadence, design/model-cadence.md) calls no model by design, so it is exactly
+// A carried evaluation (model cadence, docs/dlssnr/design/model-cadence.md) calls no model by design, so it is exactly
 // total begin and total end, all of it outside the model. Only a sample that says it is carried may have no
 // model pair: an ordinary evaluation without one is still an incomplete evaluation, and a carried one with a
 // model pair is not what it claims to be.

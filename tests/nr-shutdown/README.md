@@ -9,4 +9,4 @@ missing entries are not exposed, and a null device selects the all-devices API i
 null inside the core. The public callable retains the SDK's one-argument type.
 
 These are host behavior checks; the driver ABI is established separately through binary inspection
-and the real Proton loopback. See `OptiScaler/dlssnr/design/ngx-shutdown-order.md` for that evidence.
+and the real Proton loopback. See `docs/dlssnr/design/ngx-shutdown-order.md` for that evidence.

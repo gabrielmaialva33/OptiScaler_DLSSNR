@@ -1,7 +1,7 @@
 // The UI layer's own mask, for synthesized frame generation: which pixels the layer FFX composes over generated
 // frames takes from the real frame. A superset of the strict static-overlay mask (static_overlay_rule.h beside this
 // file), which stays the depth FSR-FG is handed. Frame generation only: DLSS-NR's pass does not include this file,
-// so nothing here can move its bytecode. Design: dlssnr/design/synthesized-frame-generation.md, "The HUD layer's own
+// so nothing here can move its bytecode. Design: docs/dlssnr/design/synthesized-frame-generation.md, "The HUD layer's own
 // mask: recall and a margin". Run by synth_overlay_detect.hlsl (its SYNTH_OVERLAY_LAYER permutation), by
 // synth_overlay_layer.hlsl (the band's weight only), and on the CPU by tests/fg-synth-policy.
 //

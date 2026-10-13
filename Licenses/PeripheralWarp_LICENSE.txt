@@ -19,7 +19,7 @@ What is not theirs: the extent and validity rules ported from wilsjo2's
 DlssNr_Spatial.h (GPL-3.0), the compression floor, the exact area filter of the
 colour pack, the motion conversion in frame pixels, the unpack onto the uniform grid
 and everything about how the pass runs. See
-OptiScaler/dlssnr/design/peripheral-compression.md.
+docs/dlssnr/design/peripheral-compression.md.
 
 Upstream licence
 ----------------

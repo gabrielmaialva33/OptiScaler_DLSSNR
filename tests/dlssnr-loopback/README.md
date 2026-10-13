@@ -50,7 +50,7 @@ Results:
   - The edit's high-pass energy is +20% in passthrough and +2% in linear.
   - The resolve side costs +0.02 ms and +0.045 ms respectively.
 
-See `OptiScaler/dlssnr/design/sharp-residual.md`.
+See `docs/dlssnr/design/sharp-residual.md`.
 
 **2026-09-27 — UI protection A/B: written, not yet run.**
 `python3 tests/dlssnr-loopback/run.py --present-nr --ui-protect-ab` tests the UI correction contract
@@ -60,7 +60,7 @@ over the HUD fixture's own cover, with the model's input as `DLSSNR.Backbuffer`,
 source inside the cover, and how close it is to base outside it, and writes
 `artifacts/ui-protect-run/ui-protect-report.json`. The verdict fields `protects` and
 `gated_by_uicorrection` answer whether the mask works and whether `UICorrection` gates it. It is the
-contract half of [hud-protection.md](../../OptiScaler/dlssnr/design/hud-protection.md). The detector
+contract half of [hud-protection.md](../../docs/dlssnr/design/hud-protection.md). The detector
 half needs a moving scene, which this fixture does not have.
 
 **2026-09-27 — ControlMask A/B: no observed effect.**
@@ -362,7 +362,7 @@ The corrected core-shutdown ABI adapter now completes this same sweep and shutdo
 5 creates, 4371 upscale evaluations, NR composition at both output sizes, shutdown result
 `0x00000001`, process exit 0. The raw core export needs writable output storage in its
 second argument; using the public SDK's one-argument typedef left it unspecified.
-See `OptiScaler/dlssnr/design/ngx-shutdown-order.md` for the binary evidence and scope.
+See `docs/dlssnr/design/ngx-shutdown-order.md` for the binary evidence and scope.
 The runner also verifies the shutdown result and prefers the forwarder built beside the
 selected DLL. Logs and hashes are retained in `x64/dispatch-validation/core-abi/`.
 

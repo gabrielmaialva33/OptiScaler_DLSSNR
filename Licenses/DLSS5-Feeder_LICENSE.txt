@@ -15,7 +15,7 @@ with a soft edge from the tolerance to twice it -- and the hold/creep it drives.
 
 What is not theirs: the quantisation-aware minimum step in the creep, the linear
 luminance weights, the route and reset rules, and the resource lifetime. See
-OptiScaler/dlssnr/design/output-stabilizer.md.
+docs/dlssnr/design/output-stabilizer.md.
 
 Upstream licence
 ----------------

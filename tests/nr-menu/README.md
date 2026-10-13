@@ -11,7 +11,7 @@ field/pass clearing, active-pass selection, retained inactive settings and disab
 reenabling individual tuning. Four more cover the two controls the model itself makes inert: the
 per-pass preset is not drawn once the model reports one weight set (`DlssNr::ModelLog`,
 faked here), and skin structure is drawn disabled, taking no click, while the auto mask is off. Twelve
-more cover model cadence's control (`dlssnr/design/model-cadence.md`): nothing on native Vulkan; with
+more cover model cadence's control (`docs/dlssnr/design/model-cadence.md`): nothing on native Vulkan; with
 the driver proxy or a build without its shader, no control and one line only when a cadence is
 configured; the combo writes 1..4; the frame-generation opt-in and the status line only above a
 cadence of 1; a hand-edited out-of-range value reads as off. Source guards reject direct master writes and check both

@@ -56,8 +56,8 @@ static bool PeripheryRunning(Config* config, DlssNr::PeripheryState* out = nullp
            std::chrono::steady_clock::now() - status.at < std::chrono::seconds(1);
 }
 
-// Peripheral compression (design/peripheral-compression.md), under Model resolution. D3D12 only: a native Vulkan
-// game never reads these keys, so nothing is shown there (DEVELOPMENT.md rule 2). The two sliders commit on
+// Peripheral compression (docs/dlssnr/design/peripheral-compression.md), under Model resolution. D3D12 only: a native
+// Vulkan game never reads these keys, so nothing is shown there (DEVELOPMENT.md rule 2). The two sliders commit on
 // release, as Model resolution does: a new work extent is a new packed size, and that rebuilds the model.
 static void RenderPeriphery(Config* config)
 {
@@ -213,8 +213,8 @@ static void RenderGpuTiming(Config* config, bool nativeVulkan)
                        static_cast<unsigned long long>(sample.metadata.settingsGeneration),
                        static_cast<unsigned long long>(sample.metadata.evaluationId),
                        static_cast<unsigned long long>(sample.runId), sample.sampleInterval);
-    // Model cadence (design/model-cadence.md): which kind of frame the sample is. A carried frame's zero model
-    // time is by design, not a measurement of the model.
+    // Model cadence (docs/dlssnr/design/model-cadence.md): which kind of frame the sample is. A carried frame's zero
+    // model time is by design, not a measurement of the model.
     if (sample.metadata.carried)
         ImGui::TextWrapped(Localization::Tr("A carried frame of model cadence %u: no model call, so no model time."),
                            sample.metadata.cadence);
@@ -414,8 +414,8 @@ static void RenderPassControls(Config* config, bool vulkan)
     ImGui::PopID();
 }
 
-// Model cadence (design/model-cadence.md): the model on one frame in N, its edit carried in between. It runs
-// after the D3D12 model call; native Vulkan has none, the driver proxy returns before the resolve, and a build
+// Model cadence (docs/dlssnr/design/model-cadence.md): the model on one frame in N, its edit carried in between. It
+// runs after the D3D12 model call; native Vulkan has none, the driver proxy returns before the resolve, and a build
 // without its shader cannot run it, so none of them is offered the control -- a cadence saved in the ini that
 // does nothing here gets one line saying so instead. The frame-generation opt-in exists only for a cadence
 // above 1, and so does the status line.
@@ -881,7 +881,7 @@ void RenderMenu(Config* config, float menuResScale)
             const bool reduced = DlssNr::WorkingScale() < 0.999f || packed;
 
             // "+ DLSS" (Transfer 2) is D3D12 only: native Vulkan does not offer it, and an ini that asks for it
-            // there is shown as asked, with a line saying what runs instead (design/dlss-enlargement.md).
+            // there is shown as asked, with a line saying what runs instead (docs/dlssnr/design/dlss-enlargement.md).
             const auto& apiState = State::Instance();
             const bool nativeVk = vulkan || (apiState.api == API::Vulkan &&
                                              (!apiState.currentFeature || !apiState.currentFeature->IsWithDx12()));
@@ -1168,9 +1168,9 @@ void RenderMenu(Config* config, float menuResScale)
         RenderPassControls(config, nativeVulkan);
         RenderGpuTiming(config, nativeVulkan);
 
-        // The output stabilizer (design/output-stabilizer.md) runs after the D3D12 resolve. Native Vulkan has
-        // none, and the driver proxy returns before the resolve, so on either it has nothing to act on and
-        // is not offered -- as the pass controls and the GPU timing are not.
+        // The output stabilizer (docs/dlssnr/design/output-stabilizer.md) runs after the D3D12 resolve. Native Vulkan
+        // has none, and the driver proxy returns before the resolve, so on either it has nothing to act on and is not
+        // offered -- as the pass controls and the GPU timing are not.
         if (!nativeVulkan && !config->DlssNrUseProxy.value_or_default())
         {
             ImGui::SeparatorText(Localization::Tr("Output stabilizer"));
@@ -1572,11 +1572,11 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nlight turning into a string of coloured cells. Raise it only if bright areas"
                            "\nlook clipped.");
 
-                // Highlight recovery (design/hdr-highlight-recovery.md), beside the guard because both decide how
-                // highlights come back. Only where it can act: a linear HDR buffer, which the encode compresses,
-                // and a route that runs the resolve. On a frame the game already tone mapped, before anything has
-                // run, and under the driver proxy (D3D12 only; it returns before the resolve) there is nothing for
-                // it to do, so there is no control (DEVELOPMENT.md rule 2).
+                // Highlight recovery (docs/dlssnr/design/hdr-highlight-recovery.md), beside the guard because both
+                // decide how highlights come back. Only where it can act: a linear HDR buffer, which the encode
+                // compresses, and a route that runs the resolve. On a frame the game already tone mapped, before
+                // anything has run, and under the driver proxy (D3D12 only; it returns before the resolve) there is
+                // nothing for it to do, so there is no control (DEVELOPMENT.md rule 2).
                 if (nativeVulkan ? DlssNr::LinearHdrVk()
                                  : !config->DlssNrUseProxy.value_or_default() && DlssNr::BufferIsLinearHdr())
                 {
@@ -1829,7 +1829,7 @@ void RenderMenu(Config* config, float menuResScale)
 
         // Freeze the frame the model works on, so a setting change re-renders it in place -- the only
         // clean way to A/B our own settings (a moving scene confounds every other comparison). See
-        // design/frame-hold.md.
+        // docs/dlssnr/design/frame-hold.md.
         bool held = config->DlssNrHoldFrame.value_or_default();
         if (ImGui::Checkbox(Localization::Label("Hold frame"), &held))
             config->DlssNrHoldFrame = held;

@@ -185,7 +185,7 @@ struct DlssNrFrameInfo
     // Whether depth and motion are the game's own, as it handed them to an upscaler -- set by GatherFrame
     // and carried by a present-time capture of it. False for zero guides and for synthesized motion, whose
     // depth is zero. Model cadence carries the model's edit along these and refuses to run without them
-    // (design/model-cadence.md). False by default, so a route that does not say has no game guides.
+    // (docs/dlssnr/design/model-cadence.md). False by default, so a route that does not say has no game guides.
     bool GameGuides = false;
 };
 
@@ -237,9 +237,9 @@ struct alignas(256) DlssNrConstants
     uint32_t CompareSwap;
 
     // How a model that worked below the frame's size is brought back. 0 classic, 1 matched residual,
-    // 3 matched residual with a sharp enlargement (dlssnr/design/sharp-residual.md), 2 matched residual
+    // 3 matched residual with a sharp enlargement (docs/dlssnr/design/sharp-residual.md), 2 matched residual
     // with the edit enlarged by a private DLSS SR, in which case the model slot holds that SR's output, a
-    // carrier, not a picture (dlssnr/design/dlss-enlargement.md). The host sends 2 only on frames the SR ran.
+    // carrier, not a picture (docs/dlssnr/design/dlss-enlargement.md). The host sends 2 only on frames the SR ran.
     //
     // Classic composes the model's own low-resolution picture against the full-resolution frame, so
     // the two disagree by the blur the downsample introduced as well as by the edit -- and the
@@ -276,7 +276,7 @@ struct alignas(256) DlssNrConstants
     float ExposurePreMul;
 
     // Take the matched-residual path (Transfer 1 and 3) even when the proxy is the frame's size. Set only
-    // while peripheral compression is running (dlssnr/design/peripheral-compression.md): at Model resolution
+    // while peripheral compression is running (docs/dlssnr/design/peripheral-compression.md): at Model resolution
     // 100 the unpacked pair is frame-sized, so the size test alone sent the composition to Classic over a
     // proxy that had been packed and unpacked. Zero everywhere else, which is the path the shader took
     // before this existed. Trailing scalar, mirrored in the shader cbuffer.
@@ -285,7 +285,7 @@ struct alignas(256) DlssNrConstants
     // NVIDIA's highlight recovery from RTX Remix ([DlssNr] HighlightRecovery): after the composition, pixels
     // that were very bright and that the encode compressed hard are blended back toward the frame. 1 only on
     // a linear HDR buffer with the key on; zero everywhere else, which is the path the shader took before
-    // this existed. dlssnr/design/hdr-highlight-recovery.md. Trailing scalar, mirrored in the shader cbuffer.
+    // this existed. docs/dlssnr/design/hdr-highlight-recovery.md. Trailing scalar, mirrored in the shader cbuffer.
     uint32_t HighlightRecovery;
 };
 

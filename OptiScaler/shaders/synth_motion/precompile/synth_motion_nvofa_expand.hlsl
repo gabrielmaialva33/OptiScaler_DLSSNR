@@ -2,7 +2,7 @@
 //
 // Turns the engine's flow -- one NV_OF_FLOW_VECTOR per output grid cell (2x2 or 4x4 input pixels),
 // signed S10.5 fixed point, in INPUT pixels, read here as R16G16_SINT -- into the estimator's output
-// contract (shaders/synth_motion/README.md, dlssnr/design/synthesized-motion.md §4):
+// contract (shaders/synth_motion/README.md, docs/dlssnr/design/synthesized-motion.md §4):
 //   R16G16_FLOAT at the colour's extent, .rg = displacement from the current frame to the previous one,
 //   in colour pixels, +x right, +y down (prev = cur + mv).
 //
