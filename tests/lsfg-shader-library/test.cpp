@@ -101,8 +101,9 @@ void TestDiscovery_WindowsSteamLibraries()
 void TestDiscovery_WineZDrive()
 {
     MockLsfgEnvironment env;
-    env.envVars["HOME"] = "/home/testuser";
-    const std::string targetDll = "Z:/home/testuser/.local/share/Steam/steamapps/common/Lossless Scaling/lsfg-vk.dll";
+    env.envVars["HOME"] = "/home/testuser"; // privacy: allow
+    const std::string targetDll =
+        "Z:/home/testuser/.local/share/Steam/steamapps/common/Lossless Scaling/lsfg-vk.dll"; // privacy: allow
     env.existingFiles.insert(targetDll);
 
     auto found = LsfgShaderLibrary::FindDll(std::nullopt, &env);
