@@ -1897,6 +1897,33 @@ void RenderMenu(Config* config, float menuResScale)
                     ImGui::PopStyleColor();
                 }
             }
+
+            // The pulse metric (docs/dlssnr/design/pulse-metric.md), beside the other measurement. It runs after the
+            // D3D12 resolve, so it is not offered under the driver proxy, which returns before it, nor in a build
+            // without its shader (DEVELOPMENT.md rule 2). The reading is shown only while it is on.
+            if (DlssNr::PulseAvailable() && !config->DlssNrUseProxy.value_or_default())
+            {
+                bool pulse = config->DlssNrPulseMetric.value_or_default();
+                if (ImGui::Checkbox(Localization::Label("Measure the light step###nrPulseMetric"), &pulse))
+                    config->DlssNrPulseMetric = pulse;
+
+                HelpMarker("How far the picture's light moves from one frame to the next because of the edit: the"
+                           "\nchange of log2(output light / frame light), in stops, averaged over two seconds."
+                           "\nFrames where the model ran and frames where model cadence carried its edit are kept"
+                           "\napart, so the step on the model's frames against the carried ones is the cadence's"
+                           "\npulse as a number. A still scene reads cleanest; a pan adds its own changes."
+                           "\n\nOne small measuring pass a frame while on. Also logged every 10 seconds.");
+
+                if (pulse)
+                {
+                    const auto pStatus = DlssNr::GetPulseStatus();
+                    if (pStatus.failed)
+                        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s",
+                                           Localization::Tr("Light step: the measuring pass could not be built."));
+                    else if (pStatus.running)
+                        ImGui::TextWrapped("%s", pStatus.words.c_str());
+                }
+            }
         }
 
         static const char* compareNames[] = { Localization::Label("Off"), Localization::Label("Side by side"),

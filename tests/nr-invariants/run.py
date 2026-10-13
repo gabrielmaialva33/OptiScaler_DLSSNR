@@ -170,6 +170,11 @@ if (precompile / 'DlssNr_DetailStats_Shader.cso').exists():
     targets.append(('DlssNr_DetailStats_Shader.cso', 'DlssNr_DetailStats_Shader.h', 'DlssNr_DetailStats_cso', b'DXBC'))
 elif (precompile / 'DlssNr_DetailStats_Shader.h').exists():
     fail('DlssNr_DetailStats_Shader.h is committed without DlssNr_DetailStats_Shader.cso beside it')
+# The pulse metric (pulse-metric.md). Optional bytecode like the detail stats: without it the metric is unavailable.
+if (precompile / 'DlssNr_Pulse_Shader.cso').exists():
+    targets.append(('DlssNr_Pulse_Shader.cso', 'DlssNr_Pulse_Shader.h', 'DlssNr_Pulse_cso', b'DXBC'))
+elif (precompile / 'DlssNr_Pulse_Shader.h').exists():
+    fail('DlssNr_Pulse_Shader.h is committed without DlssNr_Pulse_Shader.cso beside it')
 # Peripheral compression's three passes (peripheral-compression.md). Optional bytecode like the guide resample's:
 # none of the six files is a supported state (the feature says "unavailable"); any one of them commits to all
 # six, because DlssNr_Periphery_Dx12.cpp loads the three headers together and a .cso without its header, or a

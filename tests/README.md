@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Thirty-three suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
+**Host tier.** Thirty-four suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit,
@@ -46,6 +46,11 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-detail-measure` — the "Measure detail" CPU tile reduction and statistical aggregation (detail added,
   Laplacian raw, flicker beyond native, OkLab chroma/warmth, and shadow darkening/crush), delta comparisons
   and textual metric generation.
+- `nr-pulse-metric` — the pulse metric (`docs/dlssnr/design/pulse-metric.md`): the edit's light from the GPU's
+  grid, consecutive frames paired into light steps by kind (model, carried, every frame) with holes, gaps,
+  late and non-finite readbacks breaking the pair, two-second windows, reset, the menu's words, the log line and
+  its rate, and a synthetic cadence's pulse. Source guards on the pass and the renderer: off builds and records
+  nothing, one sample per present. No GPU, no shader.
 - `nr-present-sync` — what `[DlssNr] PresentSync=auto` means: the D3D12 present pass waits for its write-back
   only when frame generation could be involved (`DlssNr_PresentSync.h`). The wait itself is not exercised.
 - `nr-present-guides` — selection and completion tracking for the present-time guide snapshot ring

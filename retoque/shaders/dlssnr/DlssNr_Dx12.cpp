@@ -57,6 +57,8 @@
 #include <dlssnr/DlssNr_KernelProfile.h>
 #include "DlssNr_DetailStats_Dx12.h"
 #include <dlssnr/DlssNr_DetailStats.h>
+#include "DlssNr_Pulse_Dx12.h"
+#include <dlssnr/DlssNr_Pulse.h>
 #include <dlssnr/DlssNr_PresentGuideRing.h>
 
 namespace
@@ -1255,6 +1257,7 @@ struct NrRetired
     DlssNr_Cadence_Dx12* cadence = nullptr;
     NrEnlarger* enlarger = nullptr;
     DlssNr_DetailStats_Dx12* detailStats = nullptr;
+    DlssNr_Pulse_Dx12* pulse = nullptr;
 };
 
 std::vector<NrRetired> g_nrRetired;
@@ -1391,6 +1394,7 @@ void TickNrRetired()
         delete retired.uiMask;
         delete retired.cadence;
         delete retired.detailStats;
+        delete retired.pulse;
 
         if (retired.enlarger != nullptr)
             enlargers.push_back(retired.enlarger);
@@ -1440,6 +1444,21 @@ void ParkNrDetailStats(DlssNr_DetailStats_Dx12*& detailStats)
         r.usage = g_usage;
     r.detailStats = detailStats;
     detailStats = nullptr;
+    g_nrRetired.push_back(r);
+}
+
+// The pulse metric's pass, parked like the rest: its last recordings still reference its buffers and heaps.
+void ParkNrPulse(DlssNr_Pulse_Dx12*& pulse)
+{
+    if (!pulse)
+        return;
+
+    NrRetired r;
+    r.tracked = g_tracked;
+    if (g_tracked)
+        r.usage = g_usage;
+    r.pulse = pulse;
+    pulse = nullptr;
     g_nrRetired.push_back(r);
 }
 
@@ -1535,6 +1554,199 @@ static void DetailMeasureCopy(ID3D12GraphicsCommandList* cmdList, ID3D12Device* 
     Barrier(cmdList, from, D3D12_RESOURCE_STATE_COPY_SOURCE, fromState);
     Barrier(cmdList, copy, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     readable = true;
+}
+
+// The pulse metric ([DlssNr] PulseMetric, docs/dlssnr/design/pulse-metric.md): one small reduction a frame while it
+// is on, read back a few frames later and paired into light steps by the tracker. Everything but the published status
+// is touched under g_nrMutex only; the menu reads the status under the session's own mutex.
+struct PulseSession
+{
+    // What changes the meaning of a step: the frame's size and format, the cadence as configured. A change starts the
+    // window over, so no step spans it.
+    struct Shape
+    {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t format = 0;
+        uint32_t cadence = 1;
+
+        bool operator==(const Shape&) const = default;
+    };
+
+    struct Slot
+    {
+        bool pending = false;
+        bool stale = false; // recorded before the shape changed: collected, never counted
+        uint64_t seq = 0;
+        int64_t ms = 0;
+        DlssNr::Pulse::Kind kind = DlssNr::Pulse::Kind::Every;
+        uint32_t cadence = 1;
+        DlssNr::Submission::Usage usage {};
+    };
+
+    DlssNr_Pulse_Dx12* pass = nullptr;
+    Slot slots[DLSSNR_PULSE_SLOTS] {};
+    uint32_t next = 0;
+    // Presents at which the pass was asked to run, whether it then ran, skipped or failed: a measurement's sequence
+    // number. Counted whether or not the metric is on (one comparison a call), so the first measurement after it goes
+    // on has a number to pair with.
+    uint64_t entered = 0;
+    uint64_t lastEntered = 0;
+    uint64_t lastPresent = 0; // the present last measured
+    bool active = false;
+    bool saidFailure = false;
+    std::optional<Shape> shape;
+    DlssNr::Pulse::Tracker tracker;
+    DlssNr::Pulse::LogGate logGate;
+
+    std::mutex statusMutex;
+    DlssNr::PulseStatus status;
+};
+
+static PulseSession g_pulse;
+
+// At the top of every Dispatch that got as far as reading the present counter. A second call in one present is the
+// same present; where presents are not counted (the counter stays 0) every call is a new one.
+static void NotePulsePresent(uint64_t present)
+{
+    if (present == 0 || present != g_pulse.lastEntered)
+        ++g_pulse.entered;
+    g_pulse.lastEntered = present;
+}
+
+static void PublishPulse(bool running, bool failed)
+{
+    std::lock_guard<std::mutex> lock(g_pulse.statusMutex);
+    g_pulse.status.running = running;
+    g_pulse.status.failed = failed;
+    g_pulse.status.words = g_pulse.tracker.Latest().Words();
+}
+
+// Off: the pass is parked, the readings forgotten. Its slots' readbacks may still be in flight; they belong to the
+// parked object and are freed with it.
+static void StopPulseLocked()
+{
+    if (!g_pulse.active && g_pulse.pass == nullptr)
+        return;
+
+    ParkNrPulse(g_pulse.pass);
+    for (auto& slot : g_pulse.slots)
+        slot = {};
+    g_pulse.next = 0;
+    g_pulse.active = false;
+    g_pulse.saidFailure = false;
+    g_pulse.shape.reset();
+    g_pulse.tracker.Reset();
+    g_pulse.logGate.Reset();
+    PublishPulse(false, false);
+}
+
+// Once per Dispatch, after everything that writes the target. Collects the readbacks that completed, oldest first;
+// starts over if what is measured changed; then measures this frame if the pass wrote it. A present it cannot measure
+// -- the pass returned early, did not write, the slot is still in flight, the list cannot be tracked -- still took a
+// sequence number in NotePulsePresent, so the pair across it is broken rather than bridged.
+static void UpdatePulse(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, bool enabled, ID3D12Resource* target,
+                        ID3D12Resource* input, bool wrote, uint32_t width, uint32_t height, uint32_t format,
+                        uint32_t cadenceRequested, uint32_t cadenceInEffect, bool carried, uint64_t present,
+                        int64_t nowMs)
+{
+    if (!enabled || !DlssNr_Pulse_Dx12::Available())
+    {
+        StopPulseLocked();
+        return;
+    }
+
+    if (g_pulse.pass != nullptr && !g_pulse.pass->BuiltFor(device))
+        StopPulseLocked();
+
+    if (g_pulse.pass == nullptr)
+    {
+        // A failed pass is kept, so it is not rebuilt, and logged again, every frame.
+        g_pulse.pass = new DlssNr_Pulse_Dx12("DLSS-NR pulse", device);
+        g_pulse.active = true;
+        if (!g_pulse.pass->IsInit())
+            LOG_ERROR("DLSS-NR pulse: the measuring pass could not be built; the metric is off for this device");
+        PublishPulse(g_pulse.pass->IsInit(), !g_pulse.pass->IsInit());
+    }
+
+    if (!g_pulse.pass->IsInit())
+        return;
+
+    // The readbacks whose recordings completed, in the order they were recorded.
+    uint32_t done[DLSSNR_PULSE_SLOTS];
+    uint32_t doneCount = 0;
+    for (uint32_t i = 0; i < DLSSNR_PULSE_SLOTS; ++i)
+    {
+        if (g_pulse.slots[i].pending && DlssNr::Submission::Completed(g_pulse.slots[i].usage))
+            done[doneCount++] = i;
+    }
+    std::sort(done, done + doneCount,
+              [](uint32_t a, uint32_t b) { return g_pulse.slots[a].seq < g_pulse.slots[b].seq; });
+
+    for (uint32_t k = 0; k < doneCount; ++k)
+    {
+        auto& slot = g_pulse.slots[done[k]];
+        slot.pending = false;
+        if (slot.stale)
+            continue;
+
+        if (g_pulse.tracker.Add(slot.seq, slot.ms, slot.kind, g_pulse.pass->Light(done[k]), slot.cadence))
+        {
+            PublishPulse(true, false);
+            if (g_pulse.logGate.Due(nowMs))
+                LOG_INFO("{}", g_pulse.tracker.Latest().LogLine());
+        }
+    }
+
+    const PulseSession::Shape shape { width, height, format, cadenceRequested };
+    if (!g_pulse.shape || !(*g_pulse.shape == shape))
+    {
+        g_pulse.shape = shape;
+        g_pulse.tracker.Reset();
+        g_pulse.logGate.Reset();
+        for (auto& slot : g_pulse.slots)
+            slot.stale = slot.pending;
+        PublishPulse(true, false);
+    }
+
+    // One measurement per present: a title that runs the pass twice in one shows two views, and a step between them
+    // is not a step in time. Where presents are not counted (the counter stays 0) every call is measured.
+    if (present != 0 && present == g_pulse.lastPresent)
+        return;
+    g_pulse.lastPresent = present;
+    const uint64_t seq = g_pulse.entered;
+
+    auto& slot = g_pulse.slots[g_pulse.next];
+    if (wrote && target != nullptr && input != nullptr && !slot.pending)
+    {
+        if (!DlssNr::Submission::Track(cmdList, slot.usage))
+        {
+            if (!g_pulse.saidFailure)
+                LOG_INFO("DLSS-NR pulse: this command list cannot be tracked ({}); frames on it are not measured",
+                         DlssNr::Submission::LastRefusal());
+            g_pulse.saidFailure = true;
+        }
+        else
+        {
+            // The target rests in UNORDERED_ACCESS between the pass's writes; the untouched copy is readable already.
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            const bool recorded = g_pulse.pass->Record(cmdList, target, input, width, height, g_pulse.next);
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+            if (recorded)
+            {
+                slot.pending = true;
+                slot.stale = false;
+                slot.seq = seq;
+                slot.ms = nowMs;
+                slot.kind = DlssNr::Pulse::KindOf(cadenceInEffect, carried);
+                slot.cadence = cadenceRequested;
+                g_pulse.next = (g_pulse.next + 1) % DLSSNR_PULSE_SLOTS;
+            }
+        }
+    }
 }
 
 void ParkAltSurfaces()
@@ -3184,6 +3396,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                                              : (dlssNrStage == 1 ? "after-fallback" : "after");
     const uint64_t observedFrame = State::Instance().frameCount;
     const auto now = std::chrono::steady_clock::now();
+    // The pulse metric's sequence: every present the pass is asked to run at, so one it skips below breaks a pair of
+    // light steps instead of being bridged (docs/dlssnr/design/pulse-metric.md).
+    NotePulsePresent(observedFrame);
     const bool chainStable = !chainEnabled || g_chainSchedule.Stable(passSnapshot, now);
     if (chainEnabled && (!chainStable || !g_chainSchedule.Evaluate(observedFrame)))
     {
@@ -5559,6 +5774,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             }
         }
     }
+
+    // The pulse metric ([DlssNr] PulseMetric, docs/dlssnr/design/pulse-metric.md): the edit's light on every frame the
+    // pass wrote, its change from the frame before filed under the kind of frame this one was. Off builds and records
+    // nothing; on, one small reduction of the target against the untouched copy, after the stabilizer, so it measures
+    // what is shown.
+    UpdatePulse(cmdList, device, cfg.DlssNrPulseMetric.value_or_default(), target, g_nr.hdrCopy, wrote, width, height,
+                static_cast<uint32_t>(desc.Format), cadenceInputs.requested, cadence.cadence, carried, observedFrame,
+                std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
 
     hdrRead.Restore();
 
@@ -8284,6 +8507,14 @@ DetailMeasureStatus GetDetailMeasureStatus()
     return g_detailMeasure.status;
 }
 
+bool PulseAvailable() { return DlssNr_Pulse_Dx12::Available(); }
+
+PulseStatus GetPulseStatus()
+{
+    std::lock_guard<std::mutex> lock(g_pulse.statusMutex);
+    return g_pulse.status;
+}
+
 void Shutdown()
 {
     std::lock_guard<std::mutex> preLock(g_preMutex);
@@ -8326,6 +8557,7 @@ void Shutdown()
         delete r.uiMask;
         delete r.cadence;
         delete r.detailStats;
+        delete r.pulse;
         if (r.feature != nullptr && g_nr.release != nullptr)
             g_nr.release(r.feature);
 
@@ -8464,6 +8696,21 @@ void Shutdown()
     }
     g_detailMeasure.outputReadable[0] = g_detailMeasure.outputReadable[1] = false;
     g_detailMeasure.inputReadable[0] = g_detailMeasure.inputReadable[1] = false;
+
+    // The pulse metric's pass; the readings go with it, and the next session starts measuring afresh.
+    if (g_pulse.pass != nullptr)
+    {
+        delete g_pulse.pass;
+        g_pulse.pass = nullptr;
+    }
+    for (auto& slot : g_pulse.slots)
+        slot = {};
+    g_pulse.next = 0;
+    g_pulse.active = false;
+    g_pulse.shape.reset();
+    g_pulse.tracker.Reset();
+    g_pulse.logGate.Reset();
+    PublishPulse(false, false);
 
     if (g_nr.superDown != nullptr)
     {

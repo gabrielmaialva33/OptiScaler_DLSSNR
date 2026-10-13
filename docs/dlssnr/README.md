@@ -31,6 +31,7 @@ These are records, not designs.
 
 - [gpu-timing.md](design/gpu-timing.md): the contract for fence-confirmed NR GPU timing.
 - [detail-measure.md](design/detail-measure.md): the in-game "Measure detail" metric, ported from janblade's fork.
+- [pulse-metric.md](design/pulse-metric.md): the light step per frame, model frames against carried ones: model cadence's pulse as a number.
 - [nr-log-rate.md](design/nr-log-rate.md): rate-limiting the NR drift logs, from a measured log.
 - [stage-before-upscale-measured.md](design/stage-before-upscale-measured.md): running the model before the upscaler, measured in one Cyberpunk 2077 session.
 - [model-cost-vs-working-scale.md](design/model-cost-vs-working-scale.md): four GPU measurements of what the pass costs and how it answers to working scale.

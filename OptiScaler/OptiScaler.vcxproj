@@ -469,6 +469,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="..\retoque\shaders\dlssnr\precompile\DlssNr_PeripheryUnpack_Shader.h" />
     <ClInclude Include="..\retoque\shaders\dlssnr\DlssNr_DetailStats_Dx12.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_DetailStats.h" />
+    <ClInclude Include="..\retoque\shaders\dlssnr\DlssNr_Pulse_Dx12.h" />
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_Pulse.h" />
     <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotion_Dx12.h" />
     <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotion_Handoff.h" />
     <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotionNvofa_Dx12.h" />
@@ -934,6 +936,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="..\retoque\shaders\dlssnr\DlssNr_Cadence_Dx12.cpp" />
     <ClCompile Include="..\retoque\shaders\dlssnr\DlssNr_Periphery_Dx12.cpp" />
     <ClCompile Include="..\retoque\shaders\dlssnr\DlssNr_DetailStats_Dx12.cpp" />
+    <ClCompile Include="..\retoque\shaders\dlssnr\DlssNr_Pulse_Dx12.cpp" />
     <ClCompile Include="..\retoque\shaders\synth_motion\SynthMotion_Dx12.cpp" />
     <ClCompile Include="..\retoque\shaders\synth_motion\SynthMotionNvofa_Dx12.cpp" />
     <ClCompile Include="..\retoque\shaders\synth_motion\SynthOverlay_Dx12.cpp" />

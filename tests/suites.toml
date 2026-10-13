@@ -188,6 +188,11 @@ tier = "host"
 timeout = 120
 summary = "The Measure detail CPU tile reduction and statistical aggregation (flicker, detail, saturation, shadows)."
 
+[nr-pulse-metric]
+tier = "host"
+timeout = 120
+summary = "The pulse metric's CPU half (edit light from the grid, consecutive frames paired into light steps by kind, windows, reset, words, log rate, a synthetic cadence's pulse) and source guards on its pass: off builds and records nothing, one sample per present."
+
 [nr-present-guides]
 tier = "host"
 timeout = 120

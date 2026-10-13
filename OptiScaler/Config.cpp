@@ -490,6 +490,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrStabilizerTolerance.set_from_config(readFloat("DlssNr", "StabilizerTolerance"));
             DlssNrCadence.set_from_config(readUInt("DlssNr", "Cadence"));
             DlssNrCadenceWithFrameGen.set_from_config(readBool("DlssNr", "CadenceWithFrameGen"));
+            DlssNrPulseMetric.set_from_config(readBool("DlssNr", "PulseMetric"));
             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
 
             RenderPresetOverride.set_from_config(readBool("DLSS", "RenderPresetOverride"));
@@ -1489,6 +1490,7 @@ bool Config::SaveIni()
         ini.SetValue("DlssNr", "Cadence", GetIntValue(Instance()->DlssNrCadence.value_for_config()).c_str());
         ini.SetValue("DlssNr", "CadenceWithFrameGen",
                      GetBoolValue(Instance()->DlssNrCadenceWithFrameGen.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "PulseMetric", GetBoolValue(Instance()->DlssNrPulseMetric.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",
                      GetBoolValue(Instance()->RenderPresetOverride.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetForAll",

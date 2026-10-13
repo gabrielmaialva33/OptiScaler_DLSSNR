@@ -379,6 +379,12 @@ class Config
     CustomOptional<uint32_t> DlssNrCadence { 1 };
     CustomOptional<bool> DlssNrCadenceWithFrameGen { false };
 
+    // The pulse metric: the light step per frame -- the change, in stops, of log2(output light / frame light) from one
+    // frame to the next -- split into model frames and carried frames, so model cadence's pulse is a number. One
+    // small reduction a frame while on, read back a few frames late; off builds and records nothing. Shown in the
+    // menu and logged at most every 10 s. D3D12 only. See docs/dlssnr/design/pulse-metric.md.
+    CustomOptional<bool> DlssNrPulseMetric { false };
+
     // The most the pass may multiply or divide a pixel by. A detail pass has no business restyling a
     // light source, whatever the model returns.
     CustomOptional<float> DlssNrMaxRatio { 2.0f };
