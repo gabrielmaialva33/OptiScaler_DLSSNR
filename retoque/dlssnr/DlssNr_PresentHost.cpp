@@ -2,13 +2,17 @@
 
 #include "DlssNr_PresentHost.h"
 #include "DlssNrFeature_Dx12.h"
+#include "DlssNr_GpuTiming.h"
 #include "DlssNr_Identity.h"
 #include "DlssNr_PresentColour.h"
 
+#include <shaders/dlssnr/DlssNr_PresentHdr_Dx12.h>
 #include <shaders/format_transfer/FT_Dx12.h>
 
 #include <Config.h>
 #include <Logger.h>
+
+#include <optional>
 
 namespace DlssNr
 {
@@ -37,6 +41,15 @@ void Transition(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource, D3
     from = to;
 }
 
+// The decode's writes to the working colour are done before the pass touches it, whatever it does first.
+void UavBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource)
+{
+    D3D12_RESOURCE_BARRIER barrier {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barrier.UAV.pResource = resource;
+    cmdList->ResourceBarrier(1, &barrier);
+}
+
 // Say why a frame went without the pass, once per distinct reason.
 //
 // Every frame that declines declines at sixty hertz, so logging each one buries the log and hides the
@@ -57,7 +70,11 @@ void ReportFrameSkip(const char* reason)
 } // namespace
 
 PresentHost::PresentHost() = default;
-PresentHost::~PresentHost() { Release(); }
+PresentHost::~PresentHost()
+{
+    Release();
+    _hdr.reset();
+}
 
 void PresentHost::Release()
 {
@@ -313,6 +330,17 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         return false;
 
     const auto sourceDesc = source->GetDesc();
+
+    // The colour space's record (NoteColourSpace): every frame handed over is looked at, the pass on or off, so a
+    // format change while it was off is not missed.
+    if (_colourSpaceSet)
+    {
+        if (_colourFormat == DXGI_FORMAT_UNKNOWN)
+            _colourFormat = sourceDesc.Format;
+        else if (_colourFormat != sourceDesc.Format)
+            _colourValid = false;
+    }
+
     const auto sourceWidth = static_cast<uint32_t>(sourceDesc.Width);
     const auto sourceHeight = sourceDesc.Height;
     const bool builtForSource = _toWorking != nullptr && _fromWorking != nullptr && _width == sourceWidth &&
@@ -343,10 +371,34 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     }
 
     // An HDR frame is declined before anything is built for it, and the history the model has is not the
-    // frame that follows when it runs again. What was built stays, as for a frame too small.
-    if (const char* refusal = PresentColourRefusal(sourceDesc.Format, _colourSpace))
+    // frame that follows when it runs again. What was built stays, as for a frame too small. With HdrPresent
+    // on, HDR10 and scRGB are converted instead (docs/dlssnr/design/hdr-present-conversion.md section 5.2);
+    // off, the answer is PresentColourRefusal's on the colour space this host was always told.
+    PresentColourRecord record;
+    record.known = true;
+    record.valid = !_colourSpaceSet || _colourValid;
+    record.colourSpaceSet = _colourSpaceSet;
+    record.format = _colourSpaceSet ? _colourFormat : sourceDesc.Format;
+    record.colourSpace = _colourSpace;
+
+    const bool hdrPresent = Config::Instance()->DlssNrHdrPresent.value_or_default();
+    const PresentColourDecision switchOn = ResolvePresentColour(sourceDesc.Format, record, true, _colourSpace);
+    if (ReportsHdrStatus(sourceDesc.Format, switchOn, hdrPresent))
+        NotePresentHdr(switchOn.profile, hdrPresent ? switchOn.reason : nullptr, false);
+
+    const PresentColourDecision decision =
+        hdrPresent ? switchOn : ResolvePresentColour(sourceDesc.Format, record, false, _colourSpace);
+    const bool hdr = IsHdrProfile(decision.profile);
+
+    const char* refusal = decision.profile == PresentColour::Declined ? decision.reason : nullptr;
+    if (refusal == nullptr && hdr && !DlssNr_PresentHdr_Dx12::Available())
+        refusal = PresentColourText::kNoShader;
+
+    if (refusal != nullptr)
     {
         _resetOwed = true;
+        if (hdr)
+            NotePresentHdr(decision.profile, refusal, false);
         ReportFrameSkip(refusal);
         return false;
     }
@@ -374,6 +426,29 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         return false;
     }
 
+    // The HDR conversion's pass, on the first HDR frame and then for the host's life: built after _Ensure, which
+    // releases what it rebuilds. A device that cannot store to this format from a shader declines the frame here,
+    // before the frame's list carries anything (section 5.4: asked of the device, not assumed).
+    if (hdr)
+    {
+        if (_hdr == nullptr)
+            _hdr = std::make_unique<DlssNr_PresentHdr_Dx12>("DLSS-NR present host HDR", device);
+
+        const char* hdrRefusal = !_hdr->BuiltFor(device)              ? PresentColourText::kOtherDevice
+                                 : !_hdr->IsInit()                    ? PresentColourText::kNotBuilt
+                                 : !_hdr->Supports(sourceDesc.Format) ? PresentColourText::kNoTypedStore
+                                                                      : nullptr;
+        if (hdrRefusal != nullptr)
+        {
+            _resetOwed = true;
+            NotePresentHdr(decision.profile, hdrRefusal, false);
+            ReportFrameSkip(hdrRefusal);
+            return false;
+        }
+
+        NotePresentHdr(decision.profile, nullptr, true);
+    }
+
     // The guides' zeros and the model's creation happen once, on this host's own lists, before the
     // frame's list carries anything. Their bookkeeping is settled there, so nothing below owes the
     // caller an answer about them.
@@ -388,7 +463,31 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     Transition(cmdList, source, sourceStateNow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     Transition(cmdList, _toWorking->Buffer(), _workingState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    if (!_toWorking->Dispatch(cmdList, source, _toWorking->Buffer()))
+    // HDR: the source decoded into the working colour as linear Rec.709 in scRGB units, in place of the plain
+    // conversion, and both dispatches timed as one conversion sample (finished before the caller closes the list).
+    std::optional<GpuTiming::Conversion> hdrTiming;
+    const uint32_t hdrShaderProfile =
+        decision.profile == PresentColour::Hdr10 ? PresentHdr::kProfileHdr10 : PresentHdr::kProfileScRgb;
+    bool convertedIn = false;
+    if (hdr)
+    {
+        // Enabled exactly when the Dispatch's own sample is: under the driver proxy the menu says timing is off.
+        const auto timingSettings = Config::Instance()->GetDlssNrGpuTimingSettings();
+        hdrTiming.emplace(device, cmdList,
+                          timingSettings.Enabled && !Config::Instance()->DlssNrUseProxy.value_or_default(),
+                          timingSettings.Interval);
+        hdrTiming->Begin();
+        convertedIn = _hdr->Decode(cmdList, source, _toWorking->Buffer(), hdrShaderProfile);
+        hdrTiming->End();
+        if (convertedIn)
+            UavBarrier(cmdList, _toWorking->Buffer());
+    }
+    else
+    {
+        convertedIn = _toWorking->Dispatch(cmdList, source, _toWorking->Buffer());
+    }
+
+    if (!convertedIn)
     {
         // Put the caller's resource back before leaving: it arrived in sourceState and the caller is
         // entitled to find it there whatever happened in between.
@@ -410,7 +509,7 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     // away the real thing while holding it.
     ID3D12Resource* depth = _guides.Depth();
     ID3D12Resource* motion = _guides.Motion();
-    DlssNrFrameInfo frame = PresentFrameDefaults(_resetOwed);
+    DlssNrFrameInfo frame = PresentFrameDefaults(_resetOwed, decision.profile);
 
     // No real motion means no supersampling: the model refuses zero guides above native, so the pass
     // clamps to 1.0 rather than refusing. The captured branch below restores it -- real guides can.
@@ -434,6 +533,8 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         frame.ExtentIsStable = defaults.ExtentIsStable;
         frame.OutputState = defaults.OutputState;
         frame.Reset = defaults.Reset;
+        frame.PresentWhite = defaults.PresentWhite;
+        frame.PresentQuantRel = defaults.PresentQuantRel;
 
         depth = capturedDepth;
         motion = capturedMotion;
@@ -492,7 +593,25 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     Transition(cmdList, _toWorking->Buffer(), _workingState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     Transition(cmdList, _fromWorking->Buffer(), _outputState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    if (!_fromWorking->Dispatch(cmdList, _toWorking->Buffer(), _fromWorking->Buffer()))
+    // HDR: back into the source's format with the source as the reference, so a pixel the pass left alone is the
+    // game's own code. The source is read again, and handed back in the state it came in.
+    bool convertedOut = false;
+    if (hdr)
+    {
+        auto sourceStateAgain = sourceState;
+        Transition(cmdList, source, sourceStateAgain, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        hdrTiming->Begin();
+        convertedOut = _hdr->Encode(cmdList, source, _toWorking->Buffer(), _fromWorking->Buffer(), hdrShaderProfile);
+        hdrTiming->End();
+        hdrTiming->Finish(convertedOut);
+        Transition(cmdList, source, sourceStateAgain, sourceState);
+    }
+    else
+    {
+        convertedOut = _fromWorking->Dispatch(cmdList, _toWorking->Buffer(), _fromWorking->Buffer());
+    }
+
+    if (!convertedOut)
         return false;
 
     // Handed over as a copy source, because the one thing the caller does with it is copy it.

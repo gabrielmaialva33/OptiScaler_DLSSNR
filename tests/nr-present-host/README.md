@@ -38,8 +38,33 @@ model's creation there, and the model ran on none of the frames that followed. T
   whatever colour space it was told, ten bits with none set runs (DXGI's default is sRGB), and eight
   bits run even with a PQ colour space noted. The rule is `DlssNr_PresentColour.h` itself, compiled
   in, not a fake; the D3D12 present pass calls the same function.
+- HDR10 and scRGB at present (`[DlssNr] HdrPresent`, `docs/dlssnr/design/hdr-present-conversion.md`):
+  - the decision, `ResolvePresentColour`: with the switch off, every format and colour space gets
+    `PresentColourRefusal`'s answer, the same literal; with it on, eight bits run as SDR whatever is
+    recorded, full-range PQ on ten bits is HDR10 and FP16 scRGB (set or by default) is scRGB, and studio
+    or YCbCr PQ, a linear ten-bit space, HLG, Rec.2020 gamma, FP16 told anything else, a typeless format,
+    no record, a resize to another format since the colour space was set and a record for another format
+    are each declined with their own text; which frames reach the menu's status;
+  - the D3D12 route's per-window colour record (`DlssNr_SwapchainColour.h`'s `Book`): a creation knows the
+    format and no colour space, the default follows a resize until one is set, a resize to another format
+    leaves it unknown -- even after changing back -- until the next `SetColorSpace1`, and a new swapchain
+    on a window forgets the old one's;
+  - the bridge's host: off, an HDR10 frame is declined as before and nothing HDR is built; on, it is decoded
+    into the working colour, the pass is told linear HDR with the SDR white and a PQ code as the
+    stabilizer's unit, and it is encoded back into the source's format with the source as the reference;
+    FP16 never told a colour space converts as scRGB; a refusing model gets a decode and no encode, and its
+    timing sample is closed on the open list; no shader in the build, or no typed UAV store, declines and
+    says so; a format change after the colour space was set declines until it is set again; back to eight
+    bits is exactly the SDR path; switched off mid-session declines with the old text.
+
+  The fakes track every resource's state: a transition must start from the state the resource is in, the
+  source must come back as the copy source it arrived as, and the conversion pass's fake holds each
+  dispatch to the states its header documents. The conversion pass and its timing sample are fakes
+  (`hdr_fakes.h`); the decision, the record and the numbers are production's.
 
 ## What this does not cover
 
 No real D3D12, NGX, shader or bridge. Whether the bridge hands the host the right frame is the
 bridge's business (`tests/bridge-lifetime`); whether the model accepts it is the loopback harness's.
+The D3D12 route's own HDR wiring (`RunPresentPass`) is not compiled here; `tests/nr-hdr-math` guards its
+shape by source and the shader's maths by execution.

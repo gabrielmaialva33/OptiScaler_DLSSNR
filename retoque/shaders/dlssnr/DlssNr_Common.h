@@ -202,6 +202,16 @@ struct DlssNrFrameInfo
     // depth is zero. Model cadence carries the model's edit along these and refuses to run without them
     // (docs/dlssnr/design/model-cadence.md). False by default, so a route that does not say has no game guides.
     bool GameGuides = false;
+
+    // A present frame an HDR swapchain gave, decoded to linear Rec.709 in scRGB units
+    // (docs/dlssnr/design/hdr-present-conversion.md): the display's SDR white in those units, which the Paper white
+    // slider then multiplies, from source 0 -- no exposure texture, no scan anchor. 0 everywhere else, which changes
+    // nothing.
+    float PresentWhite = 0.0f;
+
+    // The relative size of one code of the format the frame goes back out in, when that is not the colour texture's
+    // own (HDR10: a PQ code, not an FP16 ulp), for the output stabilizer's minimum step. 0: the colour's own format.
+    float PresentQuantRel = 0.0f;
 };
 
 struct alignas(256) DlssNrConstants

@@ -608,6 +608,7 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* p
     auto refCount = _real->Release();
 
     CheckForHdrOutput();
+    DlssNr::SwapchainColour::NoteCreated(_real);
 
     LOG_INFO("{} created, real: {:X}, refCount: {}", _id, (UINT64) real, refCount);
 }
@@ -1028,6 +1029,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
         _lastFlags = SwapChainFlags;
         result = _real->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
     }
+    DlssNr::SwapchainColour::NoteResized(_real, result);
 
     if (result == DXGI_ERROR_DEVICE_REMOVED && State::Instance().currentD3D12Device != nullptr)
         Util::GetDeviceRemovedReason(State::Instance().currentD3D12Device);
@@ -1080,6 +1082,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
                 if (DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT & css)
                 {
                     result = _real3->SetColorSpace1(hdrCS);
+                    DlssNr::SwapchainColour::NoteColourSpace(_real, hdrCS, result);
 
                     if (result != S_OK)
                     {
@@ -1278,6 +1281,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::CheckColorSpaceSupport(DXGI_CO
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetColorSpace1(DXGI_COLOR_SPACE_TYPE ColorSpace)
 {
     auto result = _real3->SetColorSpace1(ColorSpace);
+    DlssNr::SwapchainColour::NoteColourSpace(_real, ColorSpace, result);
 
     // What one unit of the buffer means, which is the question the white point is really asking.
     //
@@ -1487,6 +1491,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
         result = _real3->ResizeBuffers1(BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask,
                                         ppPresentQueue);
     }
+    DlssNr::SwapchainColour::NoteResized(_real, result);
 
     if (result == DXGI_ERROR_DEVICE_REMOVED && State::Instance().currentD3D12Device != nullptr)
         Util::GetDeviceRemovedReason(State::Instance().currentD3D12Device);
@@ -1536,6 +1541,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
                 if (DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT & css)
                 {
                     result = _real3->SetColorSpace1(hdrCS);
+                    DlssNr::SwapchainColour::NoteColourSpace(_real, hdrCS, result);
 
                     if (result != S_OK)
                     {

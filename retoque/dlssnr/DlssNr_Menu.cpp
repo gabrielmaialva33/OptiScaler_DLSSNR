@@ -8,6 +8,7 @@
 #include "DlssNr_ExposureScan.h"
 #include "DlssNr_GpuTiming.h"
 #include "DlssNr_ModelLog.h"
+#include "DlssNr_PresentHdr.h"
 #include "DlssNr_PresentSync.h"
 #include "DlssNr_Session.h"
 #include "DlssNr_WorkingScale.h"
@@ -159,6 +160,70 @@ static void RenderPeriphery(Config* config)
     }
 }
 
+// HDR10 and scRGB at present ([DlssNr] HdrPresent, docs/dlssnr/design/hdr-present-conversion.md section 5.5), at the
+// top of the Colour group. Nothing at all unless a present host is looking at a ten-bit or FP16 swapchain the switch
+// acts on, in a build that carries the conversion (DEVELOPMENT.md rule 2; section 2.1 has the row). Returns whether
+// the present frames are being converted: the white-point controls below are then replaced by the one that applies,
+// Paper white as a multiple of the display's SDR white -- the same stored value, and the label says what it means now.
+static bool RenderPresentHdr(Config* config)
+{
+    const auto hdr = DlssNr::GetPresentHdrStatus();
+    if (!hdr.available || !hdr.seen)
+        return false;
+
+    bool on = config->DlssNrHdrPresent.value_or_default();
+    if (ImGui::Checkbox(Localization::Label("HDR output (HDR10 and scRGB)"), &on))
+        config->DlssNrHdrPresent = on;
+
+    HelpMarker("The game presents in HDR: HDR10 (PQ, Rec.2020) or scRGB (linear light). Off, its"
+               "\nframes are shown as the game rendered them and the pass does not run on them."
+               "\n\nOn, each frame is decoded to linear light, the pass runs on it as on any HDR"
+               "\nframe, and it is encoded back with the game's own frame as the reference: every"
+               "\npixel the pass leaves alone -- the interface, at strength zero -- keeps its exact"
+               "\ncode. The model is shown 203 nits (the BT.2408 reference white) times Paper white"
+               "\nas its white."
+               "\n\nExperimental: not yet measured on a real HDR display. HLG, studio-range or YCbCr"
+               "\nPQ and other colour spaces stay declined.");
+
+    const char* profile = hdr.profile == DlssNr::PresentColour::Hdr10   ? Localization::Tr("HDR10")
+                          : hdr.profile == DlssNr::PresentColour::ScRgb ? Localization::Tr("scRGB")
+                                                                        : nullptr;
+    const float multiplier = config->DlssNrWhitePointScale.value_or_default();
+    const float shown = std::isfinite(multiplier) && multiplier > 0.0f ? multiplier : 1.0f;
+
+    if (hdr.converted && profile != nullptr)
+        ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f), Localization::Tr("%s, SDR white %.0f nits x %.2f"),
+                           profile, DlssNr::PresentHdr::kSdrWhiteNits, shown);
+    else if (!on && profile != nullptr)
+        ImGui::TextDisabled(Localization::Tr("Off: this %s swapchain is shown as the game rendered it."), profile);
+    else if (hdr.reason != nullptr)
+        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f), "%s", Localization::Tr(hdr.reason));
+    else
+        ImGui::TextDisabled("%s", Localization::Tr("Waiting for a frame..."));
+
+    if (!hdr.converted)
+        return false;
+
+    // The display's SDR white times this is the white the model is shown; the composition divides by it and
+    // multiplies back, so it moves what the model sees, never where an untouched pixel lands. A quarter to four is the
+    // span a game's own paper-white setting covers around 203 nits.
+    float wpScale = shown;
+    if (ImGui::SliderFloat(Localization::Label("Paper white (x the display's SDR white)"), &wpScale, 0.25f, 4.0f,
+                           "%.2fx", ImGuiSliderFlags_Logarithmic))
+        config->DlssNrWhitePointScale = wpScale;
+
+    ImGui::SameLine();
+    if (ImGui::SmallButton(Localization::Label("Reset##hdrPaperWhite")))
+        config->DlssNrWhitePointScale = 1.0f;
+
+    HelpMarker("The same Paper white as on any other frame, measured here against the display's"
+               "\nSDR white of 203 nits: 1.00 shows the model 203 nits as white. Raise it if the"
+               "\ngame's own HDR paper white is set brighter, lower it if darker. It changes what"
+               "\nthe model is shown, not the frame where the pass leaves it alone.");
+
+    return true;
+}
+
 // Historical confirmed samples have their own immutable contract. Never present them as the
 // current frame's cost, or as an average of the active configuration.
 static void RenderGpuTiming(Config* config, bool nativeVulkan)
@@ -198,6 +263,12 @@ static void RenderGpuTiming(Config* config, bool nativeVulkan)
                 static_cast<unsigned long long>(sample.accepted), static_cast<unsigned long long>(sample.discarded),
                 sample.pending);
     ImGui::TextWrapped("%s", Localization::Tr(sample.reason));
+    // The HDR present conversion's decode and encode sit outside the dispatch interval, so they are their own sample.
+    if (sample.conversionValid)
+        ImGui::TextWrapped(Localization::Tr("HDR conversion, outside the dispatch: %.3f ms = %.3f ms decode + %.3f ms "
+                                            "encode (sample %llu, %.1f s since recording)"),
+                           sample.conversionMs, sample.conversionDecodeMs, sample.conversionEncodeMs,
+                           static_cast<unsigned long long>(sample.conversionSampleId), sample.conversionAgeMs / 1000.0);
     if (!sample.valid)
     {
         ImGui::TextDisabled(Localization::Tr("No confirmed GPU sample yet."));
@@ -1261,7 +1332,11 @@ void RenderMenu(Config* config, float menuResScale)
 
         ImGui::SeparatorText(Localization::Tr("Colour"));
 
-        if (config->DlssNrHookMethod.value_or_default() == 2)
+        if (RenderPresentHdr(config))
+        {
+            // Converted present frames: the block just drawn carries the one white control that applies to them.
+        }
+        else if (config->DlssNrHookMethod.value_or_default() == 2)
         {
             ImGui::TextDisabled(
                 Localization::Tr("Hook method is set to Present: the swapchain backbuffer is already\n"

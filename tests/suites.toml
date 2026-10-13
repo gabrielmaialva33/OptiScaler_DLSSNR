@@ -41,7 +41,7 @@ summary = "Zero depth/motion for a caller with no engine buffers, and the two-he
 [nr-present-host]
 tier = "host"
 timeout = 300
-summary = "What the present host builds and when: tiny frames, resizes, the pass switched off, HDR swapchains declined."
+summary = "What the present host builds and when: tiny frames, resizes, the pass switched off; HDR swapchains declined, or with HdrPresent converted (the decision table, the D3D12 route's per-window colour record, the bridge's decode and encode with every resource state tracked)."
 
 [nr-session-guard]
 tier = "host"
@@ -66,7 +66,7 @@ summary = "Peripheral compression's layout and mapping, the header the shader ru
 [nr-gpu-timing]
 tier = "host"
 timeout = 300
-summary = "Portable timing validation plus the duplicate-execution guard at the submission boundary."
+summary = "Portable timing validation plus the duplicate-execution guard at the submission boundary; the HDR present conversion's own sample."
 
 [nr-dispatch]
 tier = "host"
@@ -202,6 +202,11 @@ summary = "The residual limit, the composition's own bound sliced out of dlssnr.
 tier = "host"
 timeout = 120
 summary = "The pulse metric's CPU half (edit light from the grid, consecutive frames paired into light steps by kind, windows, reset, words, log rate, a synthetic cadence's pulse) and source guards on its pass: off builds and records nothing, one sample per present."
+
+[nr-hdr-math]
+tier = "host"
+timeout = 120
+summary = "The HDR present conversion's maths, the shader's own block sliced out of dlssnr_present_hdr.hlsl and held to a float64 reference: every PQ code round-trips, untouched HDR10 and scRGB texels come back bit for bit through FP16 and the composition, an edit within one code, constants and matrices against the BT.709/BT.2020 primaries, plus source guards on the pass and both hosts."
 
 [nr-present-guides]
 tier = "host"

@@ -8,7 +8,7 @@ Four checks, each for an invariant a script can catch so review time goes to the
    Keys that are deliberately absent from the ini are listed below with the reason, and a listed key
    that no longer exists fails too, so the list cannot rot.
 2. Struct == cbuffer (rule 5). DlssNrConstants (C++) and the Params cbuffer (HLSL) are one ordered list
-   of 4-byte scalars, same types, same names.
+   of 4-byte scalars, same types, same names; so are the HDR present conversion's Constants and its cbuffer.
 3. Shader headers are the committed bytecode (rule 6, the half a host can check). Each precompiled
    header is exactly what create_header.py makes from the .cso / .spv beside it. Whether the bytecode
    matches the .hlsl needs dxc and stays with the person who edits the shader.
@@ -143,6 +143,23 @@ elif cpp_list != hlsl_list:
 if len(failures) == before:
     print(f'PASS: {len(cpp_list)} ordered 4-byte constants match between DlssNrConstants and the Params cbuffer')
 
+# The HDR present conversion's own pair (hdr-present-conversion.md section 5.5): DlssNr_PresentHdr_Dx12::Constants and
+# the Params cbuffer of dlssnr_present_hdr.hlsl, under the same rule. dlssnr.hlsl's pair above is not touched by it.
+before = len(failures)
+hdr_pass = (nr / 'shaders/dlssnr/DlssNr_PresentHdr_Dx12.h').read_text()
+hdr_hlsl = (nr / 'shaders/dlssnr/precompile/dlssnr_present_hdr.hlsl').read_text()
+hdr_cpp = [(t.replace('uint32_t', 'uint'), n.lower()) for t, n in
+           re.findall(r'\b(uint32_t|float)\s+(\w+)\s*(?:=[^;]*)?;',
+                      re.sub(r'//[^\n]*', '', body(hdr_pass, 'struct alignas(256) Constants')))]
+hdr_cb = [(t, n[1:].lower() if n.startswith('g') else n.lower()) for t, n in
+          re.findall(r'\b(uint|float)\s+(\w+)\s*;', re.sub(r'//[^\n]*', '', body(hdr_hlsl, 'cbuffer Params')))]
+if not hdr_cpp:
+    fail('no fields parsed from DlssNr_PresentHdr_Dx12::Constants')
+elif hdr_cpp != hdr_cb:
+    fail(f'DlssNr_PresentHdr_Dx12::Constants {hdr_cpp} and the Params cbuffer of dlssnr_present_hdr.hlsl {hdr_cb} differ')
+if len(failures) == before:
+    print(f'PASS: {len(hdr_cpp)} ordered 4-byte constants match between DlssNr_PresentHdr_Dx12::Constants and its cbuffer')
+
 # --- 3. Headers are the committed bytecode --------------------------------------------------------
 
 before = len(failures)
@@ -175,6 +192,12 @@ if (precompile / 'DlssNr_Pulse_Shader.cso').exists():
     targets.append(('DlssNr_Pulse_Shader.cso', 'DlssNr_Pulse_Shader.h', 'DlssNr_Pulse_cso', b'DXBC'))
 elif (precompile / 'DlssNr_Pulse_Shader.h').exists():
     fail('DlssNr_Pulse_Shader.h is committed without DlssNr_Pulse_Shader.cso beside it')
+# The HDR present conversion (hdr-present-conversion.md). Optional bytecode like the pulse metric's: without it the
+# conversion reports itself unavailable and HDR swapchains stay declined; the pair is checked once committed.
+if (precompile / 'DlssNr_PresentHdr_Shader.cso').exists():
+    targets.append(('DlssNr_PresentHdr_Shader.cso', 'DlssNr_PresentHdr_Shader.h', 'DlssNr_PresentHdr_cso', b'DXBC'))
+elif (precompile / 'DlssNr_PresentHdr_Shader.h').exists():
+    fail('DlssNr_PresentHdr_Shader.h is committed without DlssNr_PresentHdr_Shader.cso beside it')
 # Peripheral compression's three passes (peripheral-compression.md). Optional bytecode like the guide resample's:
 # none of the six files is a supported state (the feature says "unavailable"); any one of them commits to all
 # six, because DlssNr_Periphery_Dx12.cpp loads the three headers together and a .cso without its header, or a

@@ -336,6 +336,10 @@ class Config
     CustomOptional<std::string> DlssNrSynthMotionSource { std::string("auto") };
     // Present hook: wait for GPU completion before flip. Default true.
     CustomOptional<bool, NoDefault> DlssNrPresentSync; // unset: auto, see DlssNr_PresentSync.h
+    // Present hosts (D3D12 swapchain and the D3D11 bridge): convert an HDR10 (PQ, Rec.2020) or scRGB swapchain's frame
+    // into linear light for the pass and back again, instead of declining it. Off by default until a measured run on
+    // real HDR; off, the frame and the decline texts are what they were. docs/dlssnr/design/hdr-present-conversion.md.
+    CustomOptional<bool> DlssNrHdrPresent { false };
     CustomOptional<uint32_t> DlssNrPreset { 0 };
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.

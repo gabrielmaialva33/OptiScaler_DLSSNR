@@ -25,7 +25,9 @@ header = (root / 'retoque/dlssnr/DlssNr_PresentHost.h').read_text()
 expected = {'#include "pch.h"', '#include "DlssNr_PresentHost.h"', '#include "DlssNrFeature_Dx12.h"',
             '#include "DlssNr_Identity.h"', '#include <shaders/format_transfer/FT_Dx12.h>', '#include <Config.h>',
             '#include <Logger.h>', '#include "DlssNr_ZeroGuides.h"', '#include <d3d12.h>', '#include <chrono>',
-            '#include <cstdint>', '#include <memory>', '#include "DlssNr_PresentColour.h"'}
+            '#include <cstdint>', '#include <memory>', '#include "DlssNr_PresentColour.h"',
+            '#include "DlssNr_GpuTiming.h"', '#include <shaders/dlssnr/DlssNr_PresentHdr_Dx12.h>',
+            '#include <optional>'}
 found = {l.strip() for l in (source + '\n' + header).splitlines() if l.startswith('#include')}
 assert found == expected, f'production include boundary changed: {sorted(found ^ expected)}'
 
@@ -35,13 +37,25 @@ def strip_includes(text):
 
 
 # DlssNr_PresentColour.h is not faked: which frames the host declines is its rule, and the cases below
-# exercise it as production has it. Its one include (dxgi1_4.h) is what fakes.h supplies.
+# exercise it as production has it. Its one include (dxgi1_4.h) is what fakes.h supplies. Nor are the HDR
+# conversion's numbers (DlssNr_PresentHdr.h, standard library only) or the D3D12 route's colour record
+# (DlssNr_SwapchainColour.h, whose Book is standard library and DXGI types), which the cases exercise as well.
 colour = (root / 'retoque/dlssnr/DlssNr_PresentColour.h').read_text()
 colour_includes = {l.strip() for l in colour.splitlines() if l.startswith('#include')}
 assert colour_includes == {'#include <dxgi1_4.h>'}, f'DlssNr_PresentColour.h includes changed: {colour_includes}'
+hdr_numbers = (root / 'retoque/dlssnr/DlssNr_PresentHdr.h').read_text()
+hdr_includes = {l.strip() for l in hdr_numbers.splitlines() if l.startswith('#include')}
+assert hdr_includes == {'#include <algorithm>', '#include <cmath>', '#include <cstdint>'}, hdr_includes
+book = (root / 'retoque/dlssnr/DlssNr_SwapchainColour.h').read_text()
+book_includes = {l.strip() for l in book.splitlines() if l.startswith('#include')}
+assert book_includes == {'#include "DlssNr_PresentColour.h"', '#include <mutex>', '#include <unordered_map>'}, \
+    book_includes
 
 unit = (here / 'fakes.h').read_text().replace('#pragma once\n', '', 1)
 unit += '\n' + strip_includes(colour)
+unit += '\n' + strip_includes(hdr_numbers)
+unit += '\n' + strip_includes(book)
+unit += '\n' + (here / 'hdr_fakes.h').read_text().replace('#pragma once\n', '', 1)
 unit += '\n' + strip_includes(header)
 unit += '\n' + strip_includes(source)
 unit += '\n' + (here / 'cases.h').read_text()

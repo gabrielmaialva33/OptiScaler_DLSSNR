@@ -17,5 +17,7 @@
 //   inputs/NVNGX_DLSS_Dx12.cpp        the pass after an upscale
 //   upscalers/IFeature_Dx11wDx12.cpp  the pass inside the D3D11-on-D3D12 bridge
 //   menu/menu_common.cpp              the settings panel
+//   wrapped/wrapped_swapchain.cpp     the present pass, and each swapchain's colour space for it
 
 #include "DlssNrFeature_Dx12.h"
+#include "DlssNr_SwapchainColour.h"

@@ -410,6 +410,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrRenderMotionScale.set_from_config(readBool("DlssNr", "RenderMotionScale"));
             DlssNrSynthMotionSource.set_from_config(readString("DlssNr", "SynthMotionSource", true));
             DlssNrPresentSync.set_from_config(readBool("DlssNr", "PresentSync"));
+            DlssNrHdrPresent.set_from_config(readBool("DlssNr", "HdrPresent"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
             DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
@@ -1396,6 +1397,7 @@ bool Config::SaveIni()
         ini.SetValue("DlssNr", "SynthMotionSource",
                      Instance()->DlssNrSynthMotionSource.value_for_config_or("auto").c_str());
         ini.SetValue("DlssNr", "PresentSync", GetBoolValue(Instance()->DlssNrPresentSync.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HdrPresent", GetBoolValue(Instance()->DlssNrHdrPresent.value_for_config()).c_str());
         ini.SetValue("DlssNr", "TransferStrength",
                      GetFloatValue(Instance()->DlssNrTransferStrength.value_for_config()).c_str());
         ini.SetValue("DlssNr", "ColourStrength",
