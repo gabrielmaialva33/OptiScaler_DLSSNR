@@ -143,4 +143,27 @@ inline bool Decode(const uint64_t* values, size_t queryCount, size_t models, uin
     result.outsideModelMs = static_cast<double>(outsideTicks) * millisecondsPerTick;
     return true;
 }
+
+// The HDR present conversion's layout (GpuTiming::Conversion): brackets begin/end pairs in order, not adjacent -- the
+// NR Dispatch runs between the decode's end and the encode's begin -- each its own duration. All of them zero is no
+// evidence of GPU execution.
+inline bool DecodeBrackets(const uint64_t* values, size_t queryCount, uint64_t frequency, double* milliseconds,
+                           size_t brackets)
+{
+    if (!values || !frequency || !milliseconds || brackets == 0 || queryCount != 2 * brackets)
+        return false;
+    for (size_t i = 1; i < queryCount; ++i)
+        if (values[i] < values[i - 1])
+            return false; // Includes counter wrap; do not guess the counter width.
+    uint64_t ticks = 0;
+    for (size_t bracket = 0; bracket < brackets; ++bracket)
+        ticks += values[2 * bracket + 1] - values[2 * bracket];
+    if (!ticks)
+        return false;
+    const double millisecondsPerTick = 1000.0 / static_cast<double>(frequency);
+    for (size_t bracket = 0; bracket < brackets; ++bracket)
+        milliseconds[bracket] =
+            static_cast<double>(values[2 * bracket + 1] - values[2 * bracket]) * millisecondsPerTick;
+    return true;
+}
 } // namespace DlssNr::GpuTiming::Detail

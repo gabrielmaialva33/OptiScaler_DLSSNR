@@ -134,6 +134,21 @@ int main()
     assert(!GpuTiming::Detail::Decode(backwards, 2, 0, 1000, result, true));
     assert(!GpuTiming::Detail::Decode(carried, 2, 0, 0, result, true));
     ++cases;
+    // The HDR present conversion: two brackets, decode and encode, with the NR Dispatch's time between them belonging
+    // to neither; any order break, a missing pair, zero frequency or all-zero brackets is refused.
+    {
+        const uint64_t conversion[] { 100, 130, 900, 950 };
+        double brackets[2] {};
+        assert(GpuTiming::Detail::DecodeBrackets(conversion, 4, 1000, brackets, 2));
+        assert(brackets[0] == 30 && brackets[1] == 50);
+        const uint64_t reversed[] { 100, 130, 120, 150 };
+        const uint64_t empty[] { 100, 100, 200, 200 };
+        assert(!GpuTiming::Detail::DecodeBrackets(reversed, 4, 1000, brackets, 2));
+        assert(!GpuTiming::Detail::DecodeBrackets(empty, 4, 1000, brackets, 2));
+        assert(!GpuTiming::Detail::DecodeBrackets(conversion, 3, 1000, brackets, 2));
+        assert(!GpuTiming::Detail::DecodeBrackets(conversion, 4, 0, brackets, 2));
+    }
+    ++cases;
 
     for (uintptr_t iteration = 2; iteration < 3002; ++iteration)
     {
@@ -146,7 +161,7 @@ int main()
         assert(GpuTiming::Detail::Certify(*e, done, frequency).accepted);
     }
     ++cases;
-    if (cases != 30)
+    if (cases != 31)
         return 2; // A runner that exercises nothing must fail loudly.
     std::cout << "PASS " << cases << " timing model cases; 3000 confirmed epoch cycles\n";
 }

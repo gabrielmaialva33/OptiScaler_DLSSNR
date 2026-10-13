@@ -51,6 +51,12 @@ struct Snapshot
     double totalMs = 0.0, modelMs = 0.0, otherMs = 0.0;
     Metadata metadata {};
     const char* reason = "disabled";
+    // The HDR present conversion's two dispatches (Conversion below): the latest confirmed sample, its own, beside the
+    // evaluation's rather than inside it.
+    bool conversionValid = false;
+    uint64_t conversionSampleId = 0;
+    uint64_t conversionAgeMs = 0;
+    double conversionMs = 0.0, conversionDecodeMs = 0.0, conversionEncodeMs = 0.0;
 };
 
 // Collection never waits for GPU completion. Pending resources survive disable and teardown.
@@ -77,5 +83,27 @@ class Evaluation
     void ModelBegin();
     void ModelEnd();
     void Finish(uint32_t actualPasses, bool success);
+};
+
+// The HDR present conversion's decode and encode (docs/dlssnr/design/hdr-present-conversion.md section 5.5): two
+// dispatches on the present host's list, one before the NR Dispatch and one after it, so outside every Evaluation. One
+// sample brackets each with its own pair of timestamps, is read back under the same proof as an evaluation, and is
+// published as Snapshot::conversionMs. Sampled on its own count of eligible conversions, at the same interval.
+class Conversion
+{
+    void* slot = nullptr;
+    ID3D12GraphicsCommandList* list = nullptr;
+
+  public:
+    Conversion(ID3D12Device* device, ID3D12GraphicsCommandList* commandList, bool enabled, uint32_t interval);
+    ~Conversion();
+    Conversion(const Conversion&) = delete;
+    Conversion& operator=(const Conversion&) = delete;
+    void Begin();
+    void End();
+    // success: the decode and the encode each recorded between their brackets. A frame the pass did not run on has
+    // no encode; it is neither a sample nor a discard, and its slot is freed silently. The destructor finishes
+    // unsuccessfully if nothing else did.
+    void Finish(bool success);
 };
 } // namespace DlssNr::GpuTiming
