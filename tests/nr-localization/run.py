@@ -7,7 +7,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
-pack_text = (ROOT / "OptiScaler/translations/optional/pt-BR.lang").read_text(encoding="utf-8")
+pack_text = (ROOT / "retoque/translations/optional/pt-BR.lang").read_text(encoding="utf-8")
 for line in pack_text.splitlines():
     if line and not line.startswith("#"):
         assert all(ord(char) <= 255 for char in line.split("\t")[1]), "pack needs glyphs outside default Latin range"
@@ -63,18 +63,18 @@ with tempfile.TemporaryDirectory(prefix="nr-localization-") as temp:
     subprocess.run([
         "g++", "-std=c++20", "-O1", "-g", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
         "-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections",
-        "-I", temp, "-I", str(ROOT / "OptiScaler"), "-I", str(ROOT / "OptiScaler/include/imgui"),
+        "-I", temp, "-I", str(ROOT / "retoque"), "-I", str(ROOT / "OptiScaler"), "-I", str(ROOT / "OptiScaler/include/imgui"),
         str(HERE / "cases.cpp"), str(ROOT / "OptiScaler/include/imgui/imgui.cpp"), "-o", str(binary),
     ], check=True)
-    subprocess.run([str(binary), str(ROOT / "OptiScaler/translations/optional/pt-BR.lang")], check=True)
+    subprocess.run([str(binary), str(ROOT / "retoque/translations/optional/pt-BR.lang")], check=True)
 
 with tempfile.TemporaryDirectory(prefix="nr-localization-runtime-") as temp:
     directory = Path(temp)
     binary = directory / "runtime"
     subprocess.run([
         "g++", "-std=c++20", "-O1", "-g", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
-        "-I", str(HERE / "stubs"), "-I", str(ROOT / "OptiScaler"),
-        str(HERE / "runtime.cpp"), str(ROOT / "OptiScaler/misc/Localization.cpp"), "-o", str(binary),
+        "-I", str(HERE / "stubs"), "-I", str(ROOT / "retoque"), "-I", str(ROOT / "OptiScaler"),
+        str(HERE / "runtime.cpp"), str(ROOT / "retoque/misc/Localization.cpp"), "-o", str(binary),
     ], check=True)
     for scenario in ("absent", "inactive", "invalid", "active"):
         case = directory / scenario
@@ -82,9 +82,9 @@ with tempfile.TemporaryDirectory(prefix="nr-localization-runtime-") as temp:
         if scenario == "inactive":
             optional = case / "translations/optional"
             optional.mkdir(parents=True)
-            (optional / "pt-BR.lang").write_bytes((ROOT / "OptiScaler/translations/optional/pt-BR.lang").read_bytes())
+            (optional / "pt-BR.lang").write_bytes((ROOT / "retoque/translations/optional/pt-BR.lang").read_bytes())
         if scenario == "invalid":
             (case / "OptiScaler.lang").write_text("Save Settings\tSalvar configurações\nunsafe\t%n\n")
         if scenario == "active":
-            (case / "OptiScaler.lang").write_bytes((ROOT / "OptiScaler/translations/optional/pt-BR.lang").read_bytes())
+            (case / "OptiScaler.lang").write_bytes((ROOT / "retoque/translations/optional/pt-BR.lang").read_bytes())
         subprocess.run([str(binary), scenario], cwd=case, check=True)

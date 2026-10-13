@@ -31,7 +31,7 @@ DLL/ASI or standalone add-on must be loaded in the same process.
 
 ## Measurement and ABI
 
-The version-1 layout is in `OptiScaler/menu/frame_telemetry_api.h`. The export
+The version-1 layout is in `retoque/menu/frame_telemetry_api.h`. The export
 has signature `int __stdcall DLSSG_GetFrameTelemetry(DLSSGFrameTelemetry*)`.
 The caller initializes `size` and `version`; nonzero return means the record
 was read. The reader also checks layout/version, enabled and valid flags,

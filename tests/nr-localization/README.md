@@ -35,7 +35,7 @@ Passing means every assertion succeeds and both executables exit 0 with sanitize
 absent. It does not prove Windows DLL integration, menu rendering, text layout or font glyphs;
 Release compile/link and a later authorized UI check are separate validations.
 
-See [pack documentation](../../OptiScaler/translations/README.md) for activation, coverage and
+See [pack documentation](../../retoque/translations/README.md) for activation, coverage and
 the label identity rule.
 
 ## Adversarial review

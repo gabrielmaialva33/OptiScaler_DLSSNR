@@ -9,7 +9,7 @@
 #include <misc/IdentifyGpu.h>
 #include <hooks/Reflex_Hooks.h>
 #include <framegen/dlssg/MfgUnlock.h>
-#include "Streamline_LogRepeat.h"
+#include <hooks/Streamline_LogRepeat.h>
 #include <menu/menu_overlay_base.h>
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <framegen/xefg/XeFG_Dx12.h>

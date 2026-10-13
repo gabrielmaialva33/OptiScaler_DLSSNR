@@ -4,7 +4,7 @@
 python3 tests/sl-log-repeat/run.py
 ```
 
-Compiles the production header `OptiScaler/hooks/Streamline_LogRepeat.h` with g++ under ASan/UBSan
+Compiles the production header `retoque/hooks/Streamline_LogRepeat.h` with g++ under ASan/UBSan
 and drives it with a fake clock. The input is the line that prompted it, verbatim from a Witcher 3
 log of 2026-09-29 where `RSYNC: setDynamicMFGParams failed with status 1` was 4,893 of 5,955 lines,
 from two threads.

@@ -1,7 +1,7 @@
 #include "pch.h"
 #include <misc/Localization.h>
 #include "menu_common.h"
-#include "DlssgExternalTelemetry.h"
+#include <menu/DlssgExternalTelemetry.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
 
 #include <algorithm>

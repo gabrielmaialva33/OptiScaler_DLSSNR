@@ -72,10 +72,16 @@ URLs redirect), which adds Linux/Proton overlay patches on top.
   than upstream's `IncludePath`, so `<dlssnr/...>` and `<shaders/dlssnr/...>` resolve unchanged and no
   upstream `#include` line was edited. The synthesized-motion estimator followed the same way to
   `retoque/shaders/synth_motion/`, so `<shaders/synth_motion/...>` resolves through that root too.
-  `nr-invariants` fails if `OptiScaler/dlssnr`, `OptiScaler/shaders/dlssnr` or
-  `OptiScaler/shaders/synth_motion` reappears. A few smaller fork files remain under `OptiScaler/`
-  (`inputs/FG/Synth_*`, `misc/Localization.*`, `framegen/dlssg/MfgUnlock.*`, `menu/input/kcd_input_fix.*`,
-  `include/nvofa/`).
+  The rest of the files this fork added under `OptiScaler/` followed, keeping their relative paths:
+  `inputs/FG/Synth_*`, `misc/Localization.*`, `framegen/dlssg/MfgUnlock.*`, `hooks/Streamline_LogRepeat.h`,
+  `menu/DlssgExternalTelemetry.h`, `menu/frame_telemetry_api.h`, `menu/input/kcd_input_fix.*` and
+  `translations/`, plus the vendored NVIDIA Optical Flow headers in `retoque/include/nvofa/` (a second
+  include root, `..\retoque\include\`). So every file under `OptiScaler/` now exists upstream too (one
+  exception: `inputs/FG/Streamline_Inputs_Dx12.*` is upstream's, moved there by `b4712c08`, which we have
+  not merged yet). Four quoted includes we had added to upstream files had to become rooted ones for
+  that (`hooks/Streamline_Hooks.cpp`, `menu/menu_common.cpp`, `menu/input/input_system.cpp` and
+  `input_system_directinput.cpp`); no line of upstream's own changed. `nr-invariants` fails if any of
+  the old paths reappears.
 
 ## Build
 

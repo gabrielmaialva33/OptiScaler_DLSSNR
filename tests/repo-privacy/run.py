@@ -26,7 +26,7 @@ PATTERNS = [
     ('private key', re.compile(r'-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----')),
 ]
 
-SKIP_PREFIXES = ('external/', 'OptiScaler/include/', 'tests/repo-privacy/')
+SKIP_PREFIXES = ('external/', 'OptiScaler/include/', 'retoque/include/', 'tests/repo-privacy/')
 
 
 def tracked_files():

@@ -127,7 +127,7 @@ shipped ini and `Config.md`.
 ### The API, as checked
 
 - **Headers.** `nvOpticalFlowCommon.h` and `nvOpticalFlowD3D12.h`, API 5.0, MIT (SPDX, NVIDIA
-  2018-2024). Vendored unchanged under `OptiScaler/include/nvofa/` from dxvk-nvapi's `inc/nvofapi`
+  2018-2024). Vendored unchanged under `retoque/include/nvofa/` from dxvk-nvapi's `inc/nvofapi`
   (commit `5c7b8b28`, 2024-11-04). The notice ships as `Licenses/NVIDIA_OpticalFlow_ATTRIBUTION.txt`.
 - **The DLL is never linked or shipped.** `LoadLibraryW("nvofapi64.dll")`, then
   `NvOFAPICreateInstanceD3D12(NV_OF_API_VERSION, &list)`, once per process. The driver ships it on

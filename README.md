@@ -284,12 +284,13 @@ drives real D3D12 and Vulkan. See [`tests/README.md`](tests/README.md).
 ## Repository layout
 
 ```text
-retoque/          the Neural Rendering module: dlssnr/ (host code), shaders/dlssnr/ (the pass) and
-                  shaders/synth_motion/ (the motion estimator for synthesized frame generation)
+retoque/          everything this fork adds: the Neural Rendering module (dlssnr/, shaders/dlssnr/),
+                  synthesized frame generation (shaders/synth_motion/, inputs/FG/Synth_*), the menu's
+                  translations, and smaller pieces, at the same relative paths as in OptiScaler/
 docs/             design notes (indexed by topic), Linux/Proton notes, guides, history
 tools/            build, deploy, release and log-summary scripts
 tests/            the test suites and their runner
-OptiScaler/       OptiScaler's tree, at upstream's paths so upstream merges stay easy
+OptiScaler/       OptiScaler's own tree with our changes, at upstream's paths so merges stay easy
 Config.md         every INI key
 ```
 

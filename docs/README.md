@@ -33,7 +33,7 @@ here or beside the code it describes.
 - [retoque/dlssnr/README.md](../retoque/dlssnr/README.md): NR module overview, file index, shader rebuild.
 - [retoque/dlssnr/forwarder/README.md](../retoque/dlssnr/forwarder/README.md): why `nvngx.dll_dlssnr.dll` exists.
 - [retoque/shaders/synth_motion/README.md](../retoque/shaders/synth_motion/README.md): the synthesized-motion estimator and the provenance of its FidelityFX-derived files.
-- [OptiScaler/translations/README.md](../OptiScaler/translations/README.md): the optional pt-BR text pack (shipped in the release zip).
+- [retoque/translations/README.md](../retoque/translations/README.md): the optional pt-BR text pack (shipped in the release zip).
 
 ## Licences
 

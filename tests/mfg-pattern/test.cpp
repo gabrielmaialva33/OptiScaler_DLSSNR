@@ -4,7 +4,7 @@
 // PE image, both Windows-only. What is portable, and what actually decides whether a patch lands, is
 // the signature match: so this compiles the real scanner matcher (FindPattern from
 // OptiScaler/scanner/scanner.cpp) and the real MFG signature strings (the kXxxPattern constants from
-// OptiScaler/framegen/dlssg/MfgUnlock.cpp) straight out of production, then drives them over
+// retoque/framegen/dlssg/MfgUnlock.cpp) straight out of production, then drives them over
 // synthetic byte buffers. run.py slices both in at the marker below, so the strings under test are
 // byte-for-byte the ones the shipped DLL patches with, not a copy that can drift.
 //

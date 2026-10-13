@@ -15,7 +15,7 @@ begin = scanner.index('uintptr_t FindPattern(')
 find_pattern = scanner[begin:scanner.index('uintptr_t scanner::GetAddress', begin)].rstrip()
 
 # The real signature strings, byte-for-byte from the module under test.
-mfg = (repo / 'OptiScaler/framegen/dlssg/MfgUnlock.cpp').read_text()
+mfg = (repo / 'retoque/framegen/dlssg/MfgUnlock.cpp').read_text()
 patterns = re.findall(r'^constexpr std::string_view k\w+ = ".*?";', mfg, re.M)
 assert len(patterns) == 5, f'expected 5 MFG signature constants, sliced {len(patterns)}'
 

@@ -8,7 +8,7 @@ compiler errors, sanitizer findings or a failed assertion.
 
 ## What it exercises
 
-The MFG unlock (`OptiScaler/framegen/dlssg/MfgUnlock.cpp`) patches `nvngx_dlssg.dll` and
+The MFG unlock (`retoque/framegen/dlssg/MfgUnlock.cpp`) patches `nvngx_dlssg.dll` and
 `sl.dlss_g.dll` in memory by finding a byte signature and rewriting bytes at a fixed offset
 inside it. Whether a patch lands at all is decided by the signature match, so that is what
 this suite covers.

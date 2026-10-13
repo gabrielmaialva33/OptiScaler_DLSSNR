@@ -1,7 +1,7 @@
 Ada MFG unlock: finding the driver's DLSS-G snippet
 ===================================================
 
-OptiScaler/framegen/dlssg/MfgUnlock.cpp and OptiScaler/hooks/LibraryLoad_Hooks.cpp
+retoque/framegen/dlssg/MfgUnlock.cpp and OptiScaler/hooks/LibraryLoad_Hooks.cpp
 recognise the DLSS-G snippet NVIDIA's driver keeps in its over-the-air store,
 
     C:\ProgramData\NVIDIA\NGX\models\dlssg\versions\<n>\files\<hash>.bin

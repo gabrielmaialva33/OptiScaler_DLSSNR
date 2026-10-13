@@ -162,7 +162,7 @@ Where it differs from the table above:
   - `synth_motion_nvofa_prep.hlsl`: colour to `R8_UNORM` luma at up to 540 lines;
   - `synth_motion_nvofa_expand.hlsl`: the S10.5 `R16G16_SINT` grid to per-pixel `R16G16_FLOAT` in
     colour pixels.
-- **Headers.** The NVIDIA headers are MIT, vendored in `OptiScaler/include/nvofa/`, with the notice
+- **Headers.** The NVIDIA headers are MIT, vendored in `retoque/include/nvofa/`, with the notice
   in `Licenses/NVIDIA_OpticalFlow_ATTRIBUTION.txt`.
 - **Until `build.sh` generates `SynthMotion_NvofaPrep_Shader.h` and `SynthMotion_NvofaExpand_Shader.h`,**
   the source compiles to "unavailable" (`__has_include`).

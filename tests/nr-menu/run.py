@@ -20,7 +20,7 @@ assert 'RetryAfterFailure' not in actual
 for name in ('OptiScaler.vcxproj', 'OptiScaler.vcxproj.filters'):
     tree = ET.parse(root / 'OptiScaler' / name)
     includes = [item.attrib.get('Include') for item in tree.iter()]
-    for path in ('misc\\Localization.cpp', '..\\retoque\\dlssnr\\DlssNr_Submission.cpp'):
+    for path in ('..\\retoque\\misc\\Localization.cpp', '..\\retoque\\dlssnr\\DlssNr_Submission.cpp'):
         assert includes.count(path) == 1, (name, path)
 with tempfile.TemporaryDirectory(prefix='nr-menu-') as directory:
     generated = Path(directory) / 'menu.cpp'

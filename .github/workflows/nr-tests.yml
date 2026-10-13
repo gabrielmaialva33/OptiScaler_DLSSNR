@@ -84,4 +84,4 @@ jobs:
         with:
           clang-format-version: '22'
           check-path: 'retoque'
-          exclude-regex: '/precompile/'
+          exclude-regex: 'retoque/include/|/precompile/'

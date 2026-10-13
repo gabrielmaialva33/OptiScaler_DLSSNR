@@ -1,6 +1,6 @@
 #include "pch.h"
 #include "input_system_internal.h"
-#include "kcd_input_fix.h"
+#include <menu/input/kcd_input_fix.h>
 
 #include <include/imgui/imgui.h>
 

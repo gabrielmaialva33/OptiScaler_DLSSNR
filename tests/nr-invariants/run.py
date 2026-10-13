@@ -28,11 +28,20 @@ failures = []
 # The NR module lives in retoque/, not under OptiScaler/ (upstream's tree). Every path into it goes through `nr`.
 nr = root / 'retoque'
 
-# The module moved on 2026-10-13. A stale copy under OptiScaler/ would shadow retoque/ through $(ProjectDir) in the
-# build, so its mere existence is a failure.
-for stale in ('OptiScaler/dlssnr', 'OptiScaler/shaders/dlssnr', 'OptiScaler/shaders/synth_motion'):
-    if (root / stale).exists():
-        failures.append(f'{stale} exists: the NR module lives in retoque/ and a stale copy shadows it')
+# Our files moved out of OptiScaler/ on 2026-10-13. A stale copy there would shadow retoque/ through $(ProjectDir) in
+# the build, so a file at any old path is a failure (an empty directory left behind is not).
+for stale in ('OptiScaler/dlssnr', 'OptiScaler/shaders/dlssnr', 'OptiScaler/shaders/synth_motion',
+              'OptiScaler/inputs/FG/Synth_Inputs.cpp', 'OptiScaler/inputs/FG/Synth_Inputs.h',
+              'OptiScaler/inputs/FG/Synth_Hud.h', 'OptiScaler/inputs/FG/Synth_Policy.h',
+              'OptiScaler/inputs/FG/Synth_MotionStats.h', 'OptiScaler/misc/Localization.h',
+              'OptiScaler/misc/Localization.cpp', 'OptiScaler/framegen/dlssg/MfgUnlock.h',
+              'OptiScaler/framegen/dlssg/MfgUnlock.cpp', 'OptiScaler/hooks/Streamline_LogRepeat.h',
+              'OptiScaler/menu/DlssgExternalTelemetry.h', 'OptiScaler/menu/frame_telemetry_api.h',
+              'OptiScaler/menu/input/kcd_input_fix.h', 'OptiScaler/menu/input/kcd_input_fix.cpp',
+              'OptiScaler/include/nvofa', 'OptiScaler/translations'):
+    path = root / stale
+    if path.is_file() or (path.is_dir() and any(p.is_file() for p in path.rglob('*'))):
+        failures.append(f'{stale} exists: it lives in retoque/ now, and a stale copy shadows it')
 
 
 def fail(message):
@@ -241,7 +250,7 @@ RETIRED = [
     # The synthesized FG feed opening a UI command list: while FG was active but paused, fg->Present() did
     # not execute it, it was submitted later out of order, its fence went backwards, and WaitForUIAllocator
     # froze the present thread for 5 s on every launch (Rafael's RTX 3060, 2026-09-28).
-    (re.compile(r'GetUICommandList\('), [root / 'OptiScaler/inputs/FG/Synth_Inputs.cpp'],
+    (re.compile(r'GetUICommandList\('), [nr / 'inputs/FG/Synth_Inputs.cpp'],
      'the synthesized FG feed opening a UI command list'),
     # Folded into HookMethod=2 by e7ca0209; a saved ini that still has it must stay inert.
     (re.compile(r'"DlssNr",\s*"Dx11BridgeHost"'), [root / 'OptiScaler/Config.cpp'],

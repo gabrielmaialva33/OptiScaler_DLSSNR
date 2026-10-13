@@ -326,7 +326,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="exports\wininet.h" />
     <ClInclude Include="exports\winmm.h" />
     <ClInclude Include="framegen\dlssg\DLSSG_Dx12.h" />
-    <ClInclude Include="framegen\dlssg\MfgUnlock.h" />
+    <ClInclude Include="..\retoque\framegen\dlssg\MfgUnlock.h" />
     <ClInclude Include="framegen\ffx\FSRFG_Dx12.h" />
     <ClInclude Include="framegen\IFGFeature.h" />
     <ClInclude Include="framegen\IFGFeature_Dx12.h" />
@@ -346,10 +346,10 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="inputs\FG\Streamline_Inputs_Sl1_Dx12.h" />
     <ClInclude Include="include\device_info\device_info.hpp" />
     <ClInclude Include="inputs\FG\Upscaler_Inputs_Dx11wDx12.h" />
-    <ClInclude Include="inputs\FG\Synth_Hud.h" />
-    <ClInclude Include="inputs\FG\Synth_Inputs.h" />
-    <ClInclude Include="inputs\FG\Synth_MotionStats.h" />
-    <ClInclude Include="inputs\FG\Synth_Policy.h" />
+    <ClInclude Include="..\retoque\inputs\FG\Synth_Hud.h" />
+    <ClInclude Include="..\retoque\inputs\FG\Synth_Inputs.h" />
+    <ClInclude Include="..\retoque\inputs\FG\Synth_MotionStats.h" />
+    <ClInclude Include="..\retoque\inputs\FG\Synth_Policy.h" />
     <ClInclude Include="low_latency\input\input_common.h" />
     <ClInclude Include="low_latency\input\input_reflex.h" />
     <ClInclude Include="low_latency\input\input_reflex_vk.h" />
@@ -361,7 +361,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\hud_copy\precompile\HudCopy_Shader_Vk.h" />
     <ClInclude Include="shaders\magnifier\Magnifier_Dx11.h" />
     <ClInclude Include="menu\input\input_system.h" />
-    <ClInclude Include="menu\input\kcd_input_fix.h" />
+    <ClInclude Include="..\retoque\menu\input\kcd_input_fix.h" />
     <ClInclude Include="menu\input\input_system_internal.h" />
     <ClInclude Include="framegen\nvngx\Nvngx_FFX.h" />
     <ClInclude Include="framegen\nvngx\Nvngx_Nukems.h" />
@@ -473,8 +473,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotion_Handoff.h" />
     <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotionNvofa_Dx12.h" />
     <ClInclude Include="..\retoque\shaders\synth_motion\SynthOverlay_Dx12.h" />
-    <ClInclude Include="include\nvofa\nvOpticalFlowCommon.h" />
-    <ClInclude Include="include\nvofa\nvOpticalFlowD3D12.h" />
+    <ClInclude Include="..\retoque\include\nvofa\nvOpticalFlowCommon.h" />
+    <ClInclude Include="..\retoque\include\nvofa\nvOpticalFlowD3D12.h" />
     <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_ClearFloat_Shader.h" />
     <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_ClearUint_Shader.h" />
     <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_Expand_Shader.h" />
@@ -526,7 +526,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="hooks\Kernel_Hooks.h" />
     <ClInclude Include="hooks\Ntdll_Hooks.h" />
     <ClInclude Include="hooks\Streamline_Hooks.h" />
-    <ClInclude Include="hooks\Streamline_LogRepeat.h" />
+    <ClInclude Include="..\retoque\hooks\Streamline_LogRepeat.h" />
     <ClInclude Include="hooks\Wintrust_Hooks.h" />
     <ClInclude Include="hudfix\Hudfix_Dx11.h" />
     <ClInclude Include="hudfix\Hudfix_Dx12.h" />
@@ -631,8 +631,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dllmain.h" />
     <ClInclude Include="menu\menu_dx_base.h" />
     <ClInclude Include="menu\menu_common.h" />
-    <ClInclude Include="menu\DlssgExternalTelemetry.h" />
-    <ClInclude Include="menu\frame_telemetry_api.h" />
+    <ClInclude Include="..\retoque\menu\DlssgExternalTelemetry.h" />
+    <ClInclude Include="..\retoque\menu\frame_telemetry_api.h" />
     <ClInclude Include="menu\menu_dx11.h" />
     <ClInclude Include="menu\menu_dx12.h" />
     <ClInclude Include="menu\menu_overlay_base.h" />
@@ -691,7 +691,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="gpu_time\GpuTime_Vk.cpp" />
     <ClCompile Include="hooks\Amdxc64_Hooks.cpp" />
     <ClCompile Include="framegen\dlssg\DLSSG_Dx12.cpp" />
-    <ClCompile Include="framegen\dlssg\MfgUnlock.cpp" />
+    <ClCompile Include="..\retoque\framegen\dlssg\MfgUnlock.cpp" />
     <ClCompile Include="framegen\ffx\FSRFG_Dx12.cpp" />
     <ClCompile Include="framegen\IFGFeature.cpp" />
     <ClCompile Include="framegen\IFGFeature_Dx12.cpp" />
@@ -711,7 +711,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="inputs\FG\Streamline_Inputs_Sl1_Dx12.cpp" />
     <ClCompile Include="include\device_info\device_info.cpp" />
     <ClCompile Include="inputs\FG\Upscaler_Inputs_Dx11wDx12.cpp" />
-    <ClCompile Include="inputs\FG\Synth_Inputs.cpp" />
+    <ClCompile Include="..\retoque\inputs\FG\Synth_Inputs.cpp" />
     <ClCompile Include="low_latency\input\input_common.cpp" />
     <ClCompile Include="low_latency\input\input_reflex.cpp" />
     <ClCompile Include="low_latency\input\input_reflex_vk.cpp" />
@@ -725,7 +725,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="menu\input\input_system_cursor.cpp" />
     <ClCompile Include="menu\input\input_system_detours.cpp" />
     <ClCompile Include="menu\input\input_system_directinput.cpp" />
-    <ClCompile Include="menu\input\kcd_input_fix.cpp" />
+    <ClCompile Include="..\retoque\menu\input\kcd_input_fix.cpp" />
     <ClCompile Include="menu\input\input_system_gameinput.cpp" />
     <ClCompile Include="menu\input\input_system_hid.cpp" />
     <ClCompile Include="menu\input\input_system_messages.cpp" />
@@ -987,7 +987,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
   <ItemGroup>
-    <ClInclude Include="misc\Localization.h" />
+    <ClInclude Include="..\retoque\misc\Localization.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_GpuTiming.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_GpuTimingModel.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_Submission.h" />
@@ -1007,13 +1007,13 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="..\retoque\dlssnr\DlssNr_Cadence.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_Enlarge.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_PrivateSr.h" />
-    <ClCompile Include="misc\Localization.cpp" />
+    <ClCompile Include="..\retoque\misc\Localization.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_GpuTiming.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_Submission.cpp" />
   </ItemGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\retoque\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\retoque\;$(ProjectDir)..\retoque\include\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
   </ItemDefinitionGroup>
 </Project>

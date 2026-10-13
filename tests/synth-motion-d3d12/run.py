@@ -239,7 +239,7 @@ def build():
     command([MSVC / 'cl', '/nologo', '/std:c++latest', '/EHsc', '/MD', '/W4', '/O2',
              # The stubs come first so that "pch.h" and <Logger.h> resolve to the test shims.
              '/I' + str(HERE / 'stubs'), '/I' + str(ESTIMATOR), '/I' + str(ROOT / 'retoque'), '/I' + str(ROOT / 'OptiScaler'),
-             '/I' + str(ROOT / 'OptiScaler/include'),
+             '/I' + str(ROOT / 'retoque/include'), '/I' + str(ROOT / 'OptiScaler/include'),
              HERE / 'harness.cpp', *cpp,
              '/Fo' + str(objdir) + '/', '/Fe' + str(WORK / 'synth-motion-harness.exe'), '/link',
              'd3d12.lib', 'dxgi.lib', 'dxguid.lib'], env=env, logfile=OUT / 'build.log', timeout=900)
