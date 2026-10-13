@@ -30,7 +30,7 @@ nr = root / 'retoque'
 
 # The module moved on 2026-10-13. A stale copy under OptiScaler/ would shadow retoque/ through $(ProjectDir) in the
 # build, so its mere existence is a failure.
-for stale in ('retoque/dlssnr', 'retoque/shaders/dlssnr'):
+for stale in ('OptiScaler/dlssnr', 'OptiScaler/shaders/dlssnr'):
     if (root / stale).exists():
         failures.append(f'{stale} exists: the NR module lives in retoque/ and a stale copy shadows it')
 

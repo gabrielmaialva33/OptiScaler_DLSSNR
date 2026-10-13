@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A fork chain, three deep. Upstream **optiscaler/OptiScaler** (a Windows DLL that sits between a game and
 its upscaler / frame-gen SDKs and swaps the backend) → **Dagherbou/OptiScaler_DLSSNR** (adds the DLSS 5
-Neural Rendering module under `retoque/dlssnr/`) → **gabrielmaialva33/OptiScaler_DLSSNR** (this
-repo), which adds Linux/Proton overlay patches on top.
+Neural Rendering module under `OptiScaler/dlssnr/`, which this fork moved to `retoque/dlssnr/`) →
+**gabrielmaialva33/OptiScaler_DLSSNR** (this repo), which adds Linux/Proton overlay patches on top.
 
 - Working and default branch: `dlss-neural-rendering`. It began as Dagherbou's `v0.2.0-dlssnr`
   (commit `9737616`) plus our Linux patches.
@@ -59,19 +59,19 @@ repo), which adds Linux/Proton overlay patches on top.
   you left it, check `git reflog --date=iso`, and do not read an unexpected branch move as a fault.
 - **Never commit** `OptiScaler/resource_build_date.h`, `OptiScaler/resource_build_commit.h`, `x64/`,
   or `.winx/`. All are gitignored.
-- **The tree layout is upstream's, and stays that way.** The usual C++ advice (Pitchfork, the
-  Canonical Project Structure) says `src/`, `include/`, `tools/`, `docs/`. Do not apply it here.
-  Most tracked files live under `OptiScaler/` and belong to upstream; moving them turns every
-  `git merge optiscaler/master` into a whole-tree conflict, and this branch carries hundreds of
-  commits of our own (393 not in Dagherbou's fork as of 2026-09-27). Organise inside what this fork owns — `retoque/`, `tests/`, `tools/`, `docs/`,
-  `CLAUDE.md`, `.github/workflows/nr-tests.yml`, `.clang-format-ignore`, and the files listed under
-  "Linux / Proton patches" — and leave upstream's paths byte-identical.
-  The NR module lives in top-level `retoque/` (`retoque/dlssnr/`, `retoque/shaders/dlssnr/`), which is
-  ours alone: `OptiScaler.vcxproj` adds `..\retoque\` as an include root (in the fork-owned tail, not in
-  upstream's `IncludePath`), so `<dlssnr/...>` and `<shaders/dlssnr/...>` resolve unchanged, and
-  `nr-invariants` fails if `OptiScaler/dlssnr` or `OptiScaler/shaders/dlssnr` ever reappears. Upstream's
-  paths under `OptiScaler/` stay byte-identical. `OptiScaler/shaders/synth_motion/` and a few other fork
-  files remain under `OptiScaler/` for now.
+- **Upstream's tree stays at upstream's paths; ours lives beside it.** Most tracked files live under
+  `OptiScaler/` and belong to upstream. Moving them turns every `git merge optiscaler/master` into a
+  whole-tree conflict, and this branch carries hundreds of commits of our own (393 not in Dagherbou's
+  fork as of 2026-09-27). So upstream's paths stay byte-identical, and what this fork owns sits in
+  top-level directories of its own: `retoque/` (the NR module), `docs/`, `tools/` and `tests/`, plus
+  `CLAUDE.md`, `.github/workflows/nr-tests.yml`, `.clang-format-ignore` and the files listed under
+  "Linux / Proton patches".
+  The NR module is `retoque/dlssnr/` and `retoque/shaders/dlssnr/` (moved from `OptiScaler/` on
+  2026-10-13). `OptiScaler.vcxproj` adds `..\retoque\` as an include root, in the fork-owned tail rather
+  than upstream's `IncludePath`, so `<dlssnr/...>` and `<shaders/dlssnr/...>` resolve unchanged and no
+  upstream `#include` line was edited. `nr-invariants` fails if `OptiScaler/dlssnr` or
+  `OptiScaler/shaders/dlssnr` reappears. `OptiScaler/shaders/synth_motion/` and a few other fork files
+  remain under `OptiScaler/` for now.
 
 ## Build
 
