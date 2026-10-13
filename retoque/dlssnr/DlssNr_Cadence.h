@@ -310,6 +310,7 @@ class Scheduler
     bool _edit = false;    // an edit is stored, from the last model frame
     bool _faded = false;   // the last model frame faded in from the carried edit: its fade is stored
     bool _limited = false; // the last frame ran the light limiter
+    uint32_t _spread = 1;  // the spread the last scheduled model frame was decided with; its walk keeps it
 
   public:
     // One call per Dispatch. resetPending is anything that will reset the model's history this frame -- the
@@ -369,6 +370,7 @@ class Scheduler
             // here, is what the new answer is walked to from.
             d.fade = in.smoothing && d.handChain;
             d.fadeWeight = d.fade ? FadeWeight(0, spread) : 0.0f;
+            _spread = spread;
             d.limit = d.fade;
             d.limitReset = d.limit && !_limited;
             return d;
@@ -377,8 +379,9 @@ class Scheduler
         d.runModel = false;
         d.reason = Reason::Carried;
         d.chainStart = _carried == 0;
-        // The rest of the walk, if the model frame started one.
-        d.fadeWeight = in.smoothing && _faded ? FadeWeight(d.age, spread) : 0.0f;
+        // The rest of the walk, if the model frame started one, at the length it started with: a cadence changed in the
+        // middle neither drops the rest of it in one frame nor stretches it past the next model frame.
+        d.fadeWeight = in.smoothing && _faded ? FadeWeight(d.age, _spread) : 0.0f;
         d.limit = in.smoothing;
         d.limitReset = d.limit && !_limited;
         return d;

@@ -13,9 +13,9 @@
 // Smoothing (docs/dlssnr/design/cadence-smoothing.md), only with [DlssNr] CadenceSmoothing:
 //   5 fade          the model frame after carried ones: the carried answer minus the model's (kept), and the
 //                   model's answer with the walk's first share of the carried one (the shown answer)
-//   6 light         the shown answer's and the proxy's light, summed over a 16x16 grid of tiles
+//   6 light         the shown answer's and the proxy's light, summed over a 16x16 grid of tiles, the interface out
 //   7 limit         one group: the grid summed, the edit's light held to the last frame's, the gain kept
-//   8 apply         the shown answer times the gain, into the surface the resolve reads
+//   8 apply         the shown answer times the gain (not on the interface), into the surface the resolve reads
 //
 // Precompiled like dlssnr.hlsl: editing this or the rule alone changes nothing. From this directory (dxc under
 // the msvc-wine prefix on Linux, never while a build is using it):
@@ -211,10 +211,12 @@ void PixelModes(uint3 id)
         return;
     }
 
-    if (gMode == 8)
+        if (gMode == 8)
     {
+        // A pixel taken for interface keeps its answer as it is: the gain holds back the scenery's edit, not the HUD.
         const float4 shown = gAnswer.Load(int3(id.xy, 0));
-        gOut0[id.xy] = float4(CadenceApplyGain(shown.rgb, gOut2[uint2(3, 0)], int(gPassthrough)), shown.a);
+        const float keep = gHaveUi != 0u ? 1.0 - saturate(UiAt(px, py)) : 1.0;
+        gOut0[id.xy] = float4(CadenceApplyGain(shown.rgb, gOut2[uint2(3, 0)] * keep, int(gPassthrough)), shown.a);
         return;
     }
 }
@@ -235,9 +237,11 @@ void LightGrid(uint3 groupId, uint3 groupThreadId)
     {
         [loop] for (uint x = x0 + groupThreadId.x * 2u; x < x1; x += 16u)
         {
+                        // The interface is left out of the light, as the gain leaves it alone.
             const int3 p = int3(x, y, 0);
-            sum += float2(CadenceLight(gAnswer.Load(p).rgb, int(gPassthrough)),
-                          CadenceLight(gProxy.Load(p).rgb, int(gPassthrough)));
+            const float scenery = gHaveUi != 0u ? 1.0 - saturate(gUi.Load(p).x) : 1.0;
+            sum += scenery * float2(CadenceLight(gAnswer.Load(p).rgb, int(gPassthrough)),
+                                    CadenceLight(gProxy.Load(p).rgb, int(gPassthrough)));
         }
     }
 

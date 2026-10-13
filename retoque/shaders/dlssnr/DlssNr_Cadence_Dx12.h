@@ -115,6 +115,9 @@ class DlssNr_Cadence_Dx12 : public Shader_Dx12
     int _current = 0;                       // which chain holds the last carried frame's
 
     // Smoothing only. The light state rests in UNORDERED_ACCESS: four R32F texels, read and written as a UAV.
+    // _smoothingAsked is what the object was built for (Fits); _smoothing is whether its surfaces exist. A failed
+    // allocation leaves the carry running without smoothing rather than refusing the cadence.
+    bool _smoothingAsked = false;
     bool _smoothing = false;
     ID3D12Resource* _fade = nullptr;       // RGBA16F: the model frame's carried answer minus its own
     ID3D12Resource* _shown = nullptr;      // RGBA16F: what this frame shows, before the light limit
@@ -136,13 +139,18 @@ class DlssNr_Cadence_Dx12 : public Shader_Dx12
 
     Constants Base(uint32_t mode, const Frame& frame) const;
 
-    // The light limiter over _shown, then _shown times its gain into InOut (UNORDERED_ACCESS, left so).
-    bool Show(ID3D12GraphicsCommandList* InCmdList, const Frame& InFrame, const Smooth& InSmooth,
-              ID3D12Resource* InOut);
+    // The light limiter over _shown, then _shown times its gain into InOut (UNORDERED_ACCESS, left so). Interface
+    // pixels (InUiAlpha, may be null) are left out of the light and keep their answer as it is.
+    bool Show(ID3D12GraphicsCommandList* InCmdList, const Frame& InFrame, ID3D12Resource* InUiAlpha,
+              const Smooth& InSmooth, ID3D12Resource* InOut);
 
   public:
     // Whether this build carries the pass's bytecode at all.
     static bool Available();
+
+    // Whether that bytecode runs smoothing's modes: false for the binary committed before them, which writes nothing
+    // in modes 5 to 8 and would leave every smoothed carried frame unwritten.
+    static bool SmoothingAvailable();
 
     DlssNr_Cadence_Dx12(std::string InName, ID3D12Device* InDevice, UINT InWidth, UINT InHeight, bool InSmoothing);
     ~DlssNr_Cadence_Dx12();
@@ -151,7 +159,7 @@ class DlssNr_Cadence_Dx12 : public Shader_Dx12
     // still fits, so it is not rebuilt, and logged again, every frame.
     bool Fits(ID3D12Device* InDevice, UINT InWidth, UINT InHeight, bool InSmoothing) const
     {
-        return InDevice == _device && InWidth == _width && InHeight == _height && InSmoothing == _smoothing;
+        return InDevice == _device && InWidth == _width && InHeight == _height && InSmoothing == _smoothingAsked;
     }
 
     bool Smoothing() const { return _smoothing; }
@@ -174,8 +182,8 @@ class DlssNr_Cadence_Dx12 : public Shader_Dx12
 
     // After Fade and Record: the shown answer, held to the light limit, into InOut -- the surface the resolve reads,
     // at the working size, in UNORDERED_ACCESS, left so.
-    bool ShowFaded(ID3D12GraphicsCommandList* InCmdList, const Frame& InFrame, const Smooth& InSmooth,
-                   ID3D12Resource* InOut);
+    bool ShowFaded(ID3D12GraphicsCommandList* InCmdList, const Frame& InFrame, ID3D12Resource* InUiAlpha,
+                   const Smooth& InSmooth, ID3D12Resource* InOut);
 
     // The model frame after carried ones: the chain summed back to the last model frame, as the model's motion
     // vectors (working pixels, scale 1, off the picture where broken). Readable, valid until the next call;

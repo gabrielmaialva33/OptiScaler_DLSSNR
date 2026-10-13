@@ -28,8 +28,9 @@ way `DlssNr_Dx12::Dispatch` drives it: decide, then record, carry or drop. Twent
   reject it);
 - smoothing: the walk's weights rise by 1/S a frame and reach the new answer on frame S-1, the light
   limiter's step clamps a hitch and a frame of nothing; the fade only on a scheduled model frame, never a
-  forced one; its walk only after a model frame that faded; the limiter on every frame of a running cadence
-  and none other, starting over after anything that was not one; nothing at all with smoothing off.
+  forced one; its walk only after a model frame that faded, at the length that frame decided even if the
+  cadence changes mid-walk; the limiter on every frame of a running cadence and none other, starting over after
+  anything that was not one; nothing at all with smoothing off.
 
 **The per-pixel rules** (`rule.cpp`), the production
 `retoque/shaders/dlssnr/precompile/dlssnr_cadence_rule.h` -- the header the shader includes --
@@ -72,7 +73,9 @@ them a second time from the game's units (which carried every edit too far, and 
 review when the two features met); smoothing's surfaces are built only with its switch, which is part of
 what the surfaces are built for and of the settings the scheduler watches; the fade is dispatched before
 the record and the show after it; the limiter's grid is one size on both sides and its group-wide modes run
-on whole groups only; it is registered in the project; the licence ships and the rules carry their
+on whole groups only; the limiter leaves the interface out of its light and its gain; the digest by which the pass
+recognises the cadence bytecode from before smoothing is that binary's while it is committed; it is registered in the
+project; the licence ships and the rules carry their
 attribution.
 
 ## What it does not prove

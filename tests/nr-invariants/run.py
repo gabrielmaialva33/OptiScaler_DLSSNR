@@ -221,9 +221,9 @@ if len(failures) == before:
 # free), and the tree must stay testable in between. Drop an entry once its bytecode has been rebuilt.
 import hashlib
 PREDATES = [
-    # Cadence smoothing (cadence-smoothing.md): modes 5-8, t10 and the cbuffer's tail. This binary runs none of them,
-    # so a smoothed carried frame shows the last model frame's answer unmoved (the apply never writes), and smoothing
-    # is on by default whenever the cadence runs.
+        # Cadence smoothing (cadence-smoothing.md): modes 5-8, t10 and the cbuffer's tail. This binary runs none of them;
+    # the pass recognises it by its DXBC digest (SmoothingAvailable) and runs the cadence without smoothing, which is
+    # otherwise on by default whenever the cadence runs.
     ('DlssNr_Cadence_Shader.cso', 'e3e2076bef61705e7b8cf123ff43d02c9a6f079327d02f9d3659e3aa8fe20217',
      'dlssnr_cadence.hlsl', 'gMode == 5', 'cadence smoothing'),
     # The residual limit (residual-limit.md): gResidualLimit at the cbuffer's end. These binaries ignore it, so the

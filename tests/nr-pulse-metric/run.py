@@ -63,14 +63,13 @@ assert off < update.index('StopPulseLocked();', off) < update.index('new DlssNr_
 assert renderer.count('UpdatePulse(cmdList, device, cfg.DlssNrPulseMetric.value_or_default(),') == 1
 assert renderer.count('g_pulse.pass->Record(') == 1
 # One measurement per present, and a present it cannot measure -- an early return included -- still took its
-# sequence number: counted near the top of Dispatch, before the first skip that follows the present counter.
+# sequence number: counted at the top of Dispatch, before its first early return.
 assert 'if (present != 0 && present == g_pulse.lastPresent)' in update
 assert update.index('const uint64_t seq = g_pulse.entered;') < update.index('if (wrote && target != nullptr')
 dispatch = renderer[renderer.index('bool DlssNr_Dx12::Dispatch('):]
-noted = dispatch.index('NotePulsePresent(observedFrame);')
-assert dispatch.index('const uint64_t observedFrame = State::Instance().frameCount;') < noted
-assert noted < dispatch.index('reportSkip(!chainStable ?') < dispatch.index('UpdatePulse(cmdList, device,')
-assert renderer.count('NotePulsePresent(observedFrame);') == 1
+noted = dispatch.index('NotePulsePresent(State::Instance().frameCount);')
+assert noted < dispatch.index('return false;') < dispatch.index('UpdatePulse(cmdList, device,')
+assert renderer.count('NotePulsePresent(') == 2  # its definition and its one call
 # Readbacks recorded before what is measured changed are collected, never counted.
 assert 'slot.stale = slot.pending;' in update and 'if (slot.stale)' in update
 # The target is read in the state the pass leaves it in, and handed back so.

@@ -3,9 +3,11 @@
 Status: implemented on D3D12 behind `[DlssNr] CadenceSmoothing` (default **on**; it acts only when `Cadence` is
 above 1, and the cadence itself is off by default). **Not yet run in a game.** It needs `dlssnr_cadence.hlsl`
 recompiled: the C++ dispatches four new shader modes and binds an eleventh input, and the committed
-`DlssNr_Cadence_Shader.h` predates them. A build that keeps the old bytecode runs none of the new modes, so on every
-smoothed carried frame the final write never happens and the resolve composes the last model frame's answer where it
-was, unmoved; `nr-invariants` warns while that binary is committed. Native Vulkan has no cadence and no smoothing.
+`DlssNr_Cadence_Shader.h` predates them. That binary runs none of the new modes, so on its own every smoothed carried
+frame would go unwritten and show the last model frame's answer, unmoved. A build that still carries it recognises it by
+its DXBC container digest (`DlssNr_Cadence_Dx12::SmoothingAvailable`) and runs the cadence without smoothing, with a line
+in place of the control; `nr-invariants` warns while that binary is committed, and `nr-cadence` checks the digest the
+pass carries is that binary's. Native Vulkan has no cadence and no smoothing.
 
 ## The problem
 
@@ -37,7 +39,8 @@ with S = N, the whole interval:
 | 4 | 3/4 | 1/2 | 1/4 | 0 |
 
 So the new answer arrives in N equal steps, a straight line from one answer to the next, and is whole on the last
-carried frame -- never interrupted by the next model frame. On a still view with a drift of d between two answers the
+carried frame -- never interrupted by the next model frame. The walk keeps the length its model frame decided: a cadence
+changed in the middle neither drops the rest of the fade in one frame nor stretches it past the next model frame. On a still view with a drift of d between two answers the
 light steps d/N on every frame instead of d on one; `tests/nr-cadence` checks exactly that.
 
 **How, without a history.** On the model frame that follows carried frames, the answer a carried frame would have shown
@@ -86,7 +89,9 @@ freeze the light. No gain is the answer exactly, not a round trip through the cu
 It runs on the GPU in the same frame, after the shown answer exists: `light` sums Y over a 16x16 grid of tiles (every
 second pixel each way), `limit` is one thread group that adds the grid, applies the rule (`CadenceLimitLight`) and keeps
 four numbers in a 4x1 R32F texture, and `apply` writes the shown answer times the gain into the surface the resolve
-reads. A frame-late CPU readback was not an option: a re-grade would pass whole for the readback's latency and then be
+reads. Interface pixels (UI protection, present route) are left out of both: they do not count in the light, and they
+keep their answer as it is. Every other pixel takes the gain, including one the carry left as the game drew it ("no
+match, no fill"): the gain holds back the picture's light, not one pixel's edit, and is bounded and transient. A frame-late CPU readback was not an option: a re-grade would pass whole for the readback's latency and then be
 pulled back -- a flash, the thing it is there to stop.
 
 **Why global, and what that costs.** Skynizz's anti pop-in is regional: the 12 px tent of the edit's log light, against
@@ -123,12 +128,16 @@ The numbers are fixed, as the carry's are (BeliyG3 fixed everything but N):
 
 - **Cadence = 1 is bit-identical.** The decision is the `Off` refusal before anything about smoothing is read, the
   cadence object is never built (`ReleasesSurfaces(Off)`), nothing is dispatched, and the composition is untouched.
-- **Cadence > 1: on.** The cadence is an opt-in that already shows old answers on new frames and says so; the pulse is
-  its named artefact; both other forks that carry edits ship this on by default (Skynizz's crossfade and soft refresh
+- **Cadence > 1: on -- a deliberate, scoped exception to invariant 1.** That invariant asks a new switch to leave the
+  prior behaviour byte-identical at its default, and this one does not for anyone who has turned the cadence on. The
+  exception is taken because the cadence is itself an unmeasured opt-in, off in the shipped configuration (which stays
+  byte-identical), whose users are already trading stability for frame rate. The cadence already shows old answers on
+  new frames and says so; the pulse is its named artefact; both other forks that carry edits ship this on by default (Skynizz's crossfade and soft refresh
   are on, his anti pop-in is on at 0.75 stop/s; janblade's spread is automatic at every 3rd frame). A user who turns the
   cadence on gets the variant two independent implementations converged on, the pulse metric reads both, and the
   checkbox turns it off. What would flip the default: the pulse metric not showing the model/carried ratio falling in
-  this fork, or reports of the double detail described below.
+  this fork, or reports of the double detail described below. Flipping it is one line in `Config.h` and the ini's
+  "Default (auto) is" text.
 
 ## Where it lives
 
@@ -184,7 +193,8 @@ Off (and at Cadence = 1): nothing. On, with a cadence running:
 Smoothing runs only on a running cadence's frames: a scheduled model frame fades, a carried frame walks and is limited.
 A forced model frame (a reset, a change, a gap, nothing stored, a second view) and every refusal show the model's
 answer as it is, store no fade, and start the limiter over on the next cadence frame. A model frame whose fade or
-apply could not be recorded is stored without its fade, so its carried frames do not walk. The switch is part of what
+apply could not be recorded is stored without its fade, so its carried frames do not walk. If the smoothing surfaces
+cannot be allocated, the cadence carries without smoothing rather than being refused. The switch is part of what
 the cadence surfaces are built for and of the settings the scheduler watches, so a toggle builds the surfaces anew and
 forces a model frame. The pulse metric starts a new window on a toggle.
 
@@ -200,12 +210,14 @@ forces a model frame. The pulse metric starts a new window on a toggle.
   not read; a fade that is not finite is dropped at any weight; a still view's drift arrives in equal thirds; under an
   integer pan every frame of the walk is the straight line between the two stand-in models of the content under the
   pixel; a disocclusion and the interface take the answer at once; the limiter's rule (pass, hold, let go, clamp,
-  non-finite), its light and gain agree in both spaces, and a 0.85-stop re-grade is held to the rate and then follows a
-  jump of the frame's own light at once;
+    non-finite), its light and gain agree in both spaces, and a 0.85-stop re-grade is held to the rate and then follows a
+  jump of the frame's own light at once; a cadence changed mid-walk keeps the walk's length;
 - source guards: the surfaces are built only with the switch, the fade before the record and the show after it, the
-  limiter's grid one size on both sides, the group-wide modes on whole groups only.
+  limiter's grid one size on both sides, the group-wide modes on whole groups only, the interface out of the light and
+  the gain, and the digest that recognises the old bytecode equal to that binary's.
 
-`tests/nr-menu`: the checkbox only above a cadence of 1, never on native Vulkan, under the proxy or without the shader.
+`tests/nr-menu`: the checkbox only above a cadence of 1, never on native Vulkan, under the proxy or without the shader,
+and replaced by a line when the shader predates smoothing.
 
 ## In game
 

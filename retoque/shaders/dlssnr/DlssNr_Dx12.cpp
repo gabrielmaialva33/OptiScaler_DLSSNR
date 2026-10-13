@@ -3290,6 +3290,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // NR here: the forwarder already refuses to enter the model again, and this stops asking.
     NoteModelFault();
 
+    // The pulse metric's sequence: every present the pass is asked to run at, counted before the first early return,
+    // so one it skips breaks a pair of light steps instead of being bridged (docs/dlssnr/design/pulse-metric.md).
+    NotePulsePresent(State::Instance().frameCount);
+
     if (g_nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr || motion == nullptr ||
         output == nullptr)
     {
@@ -3400,9 +3404,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                                              : (dlssNrStage == 1 ? "after-fallback" : "after");
     const uint64_t observedFrame = State::Instance().frameCount;
     const auto now = std::chrono::steady_clock::now();
-    // The pulse metric's sequence: every present the pass is asked to run at, so one it skips below breaks a pair of
-    // light steps instead of being bridged (docs/dlssnr/design/pulse-metric.md).
-    NotePulsePresent(observedFrame);
+
     const bool chainStable = !chainEnabled || g_chainSchedule.Stable(passSnapshot, now);
     if (chainEnabled && (!chainStable || !g_chainSchedule.Evaluate(observedFrame)))
     {
@@ -4227,7 +4229,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                                       cfg.DlssNrReversibleMode.value_or_default() == 4);
     // The spread and the light limiter (docs/dlssnr/design/cadence-smoothing.md). Part of what the surfaces are built
     // for and of the settings the scheduler watches, so a toggle rebuilds them and drops the stored edit together.
-    cadenceInputs.smoothing = cfg.DlssNrCadenceSmoothing.value_or_default();
+    cadenceInputs.smoothing =
+        cfg.DlssNrCadenceSmoothing.value_or_default() && DlssNr_Cadence_Dx12::SmoothingAvailable();
 
     // The carry works at the model's working size, on the proxy the model is shown; without the reduced
     // proxy's surface there is no such picture to carry onto.
@@ -5409,7 +5412,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         {
             Barrier(cmdList, finalOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            cadenceFaded = g_nr.cadence->ShowFaded(cmdList, cadenceFrame, cadenceSmooth, finalOutput);
+            cadenceFaded = g_nr.cadence->ShowFaded(cmdList, cadenceFrame, uiAlpha, cadenceSmooth, finalOutput);
             Barrier(cmdList, finalOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
@@ -8508,6 +8511,7 @@ unsigned int ActivePassCount() { return g_activePasses.load(); }
 const char* MultipassStatus() { return g_chainStatus.load(); }
 const char* CadenceStatus() { return g_cadenceStatus.load(); }
 bool CadenceAvailable() { return DlssNr_Cadence_Dx12::Available(); }
+bool CadenceSmoothingAvailable() { return DlssNr_Cadence_Dx12::SmoothingAvailable(); }
 bool BufferIsLinearHdr() { return g_lastLinearHdr.load(); }
 
 PeripheryState PeripheryStatus()

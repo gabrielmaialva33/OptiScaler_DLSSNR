@@ -105,13 +105,24 @@ for axis in 'XY':
 # Smoothing (docs/dlssnr/design/cadence-smoothing.md). Its surfaces exist only on an object built with it, and the
 # switch is part of what an object was built for and of the settings the scheduler watches, so a toggle rebuilds the
 # surfaces and drops the stored edit together.
-assert 'cadenceInputs.smoothing = cfg.DlssNrCadenceSmoothing.value_or_default();' in renderer
+assert re.search(r'cadenceInputs\.smoothing\s*=\s*cfg\.DlssNrCadenceSmoothing\.value_or_default\(\)\s*&&\s*'
+                 r'DlssNr_Cadence_Dx12::SmoothingAvailable\(\);', renderer)
+# The bytecode from before smoothing runs none of its modes. The pass recognises it by its DXBC digest, and the digest
+# it carries must be that binary's: while the committed .cso is the old one, its bytes 4..19 are the constant.
+import hashlib
+digest = re.search(r'kPreSmoothing\[16\] = \{([^}]*)\}', pass_cpp)
+assert digest, 'SmoothingAvailable lost its digest'
+digest = bytes(int(v, 16) for v in re.findall(r'0x[0-9a-fA-F]{2}', digest.group(1)))
+cso = (retoque / 'shaders/dlssnr/precompile/DlssNr_Cadence_Shader.cso').read_bytes()
+if hashlib.sha256(cso).hexdigest() == 'e3e2076bef61705e7b8cf123ff43d02c9a6f079327d02f9d3659e3aa8fe20217':
+    assert cso[4:20] == digest, 'SmoothingAvailable no longer recognises the bytecode from before smoothing'
+assert 'DlssNr::CadenceSmoothingAvailable()' in read_nr('dlssnr/DlssNr_Menu.cpp')
 assert 'cadenceSettings = Cadence::Mix(cadenceSettings, cadenceInputs.smoothing ? 1u : 0u);' in renderer
 assert renderer.count('g_nr.cadence->Fits(device, workWidth, workHeight, cadenceInputs.smoothing)') == 2
 assert 'new DlssNr_Cadence_Dx12("DLSS-NR cadence", device, workWidth, workHeight, cadenceInputs.smoothing)' in renderer
 ctor = pass_cpp[pass_cpp.index('DlssNr_Cadence_Dx12::DlssNr_Cadence_Dx12('):]
 ctor = ctor[:ctor.index('\n}\n')]
-smoothing_block = ctor[ctor.index('if (_smoothing)'):]
+smoothing_block = ctor[ctor.index('if (_smoothingAsked)'):]
 for surface in ('_fade = CreateTexture(', '_shown = CreateTexture(', '_lightGrid = CreateTexture(',
                 '_lightState = CreateTexture('):
     assert surface in smoothing_block and ctor.count(surface) == 1, surface
@@ -136,6 +147,13 @@ assert csmain.index('if (gMode == 7)') < csmain.index('PixelModes(id);')
 # At a weight of zero the carried frame is the carry it always was: the fade is neither bound nor read.
 assert 'ID3D12Resource* const fade = fadeWeight > 0.0f ? _fade : nullptr;' in pass_cpp
 assert 'if (weight > 0.0f)' in rule
+# The light limiter leaves the interface alone: out of the light it measures, and out of the gain it applies.
+assert 'const float keep = gHaveUi != 0u ? 1.0 - saturate(UiAt(px, py)) : 1.0;' in shader
+assert "gOut2[uint2(3, 0)] * keep" in shader
+assert 'const float scenery = gHaveUi != 0u ? 1.0 - saturate(gUi.Load(p).x) : 1.0;' in shader
+assert 'g_nr.cadence->ShowFaded(cmdList, cadenceFrame, uiAlpha, cadenceSmooth, finalOutput)' in renderer
+# A failed allocation of the smoothing surfaces leaves the carry running: the object still initialises.
+assert 'carrying without smoothing' in pass_cpp
 
 # Registered in the project, once each.
 project = read('OptiScaler.vcxproj')

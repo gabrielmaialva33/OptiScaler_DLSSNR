@@ -664,6 +664,27 @@ void Smoothing_FadesScheduledFramesAndLimitsTheCadenceOnly()
     two.Recorded(true);
     d = two.Decide(in2, Shape(), ++present, ms += 16, false);
     assert(!d.runModel && d.fadeWeight == 0.0f && d.limit && !d.limitReset);
+
+    // A cadence changed in the middle of a walk: the walk keeps the length it started with, so going from 4 to 2
+    // neither drops the remaining three quarters of the fade in one frame nor stretches a walk past the model frame.
+    Scheduler four;
+    present = 0;
+    Inputs in4 = Running(4);
+    in4.smoothing = true;
+    four.Decide(in4, Shape(), ++present, ms += 16, false);
+    four.Recorded(false);
+    for (int i = 0; i < 3; ++i)
+    {
+        four.Decide(in4, Shape(), ++present, ms += 16, false);
+        four.Carried(true);
+    }
+    d = four.Decide(in4, Shape(), ++present, ms += 16, false);
+    assert(d.fade && d.fadeWeight == FadeWeight(0, 4));
+    four.Recorded(true);
+    Inputs nowTwo = Running(2);
+    nowTwo.smoothing = true;
+    d = four.Decide(nowTwo, Shape(), ++present, ms += 16, false);
+    assert(!d.runModel && d.fadeWeight == FadeWeight(1, 4) && d.fadeWeight == 0.5f);
     ++g_cases;
 }
 } // namespace

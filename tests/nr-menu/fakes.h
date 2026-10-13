@@ -78,5 +78,7 @@ unsigned ActivePassCount() { return 0; }
 const char* MultipassStatus() { return "Restart required"; }
 bool cadenceAvailable = true;
 bool CadenceAvailable() { return cadenceAvailable; }
+bool cadenceSmoothingAvailable = true;
+bool CadenceSmoothingAvailable() { return cadenceSmoothingAvailable; }
 const char* CadenceStatus() { return DlssNr::Cadence::Describe(DlssNr::Cadence::Reason::Carried, 2); }
 }

@@ -78,8 +78,8 @@ into steps, the windows, the words and the log line.
 
 ### Pairing
 
-The renderer counts every present at which the pass is asked to run (`NotePulsePresent`, right after Dispatch reads
-the present counter and before the first skip that follows it), whether it then runs, skips or fails, and tags each
+The renderer counts every present at which the pass is asked to run (`NotePulsePresent`, at the top of Dispatch,
+before its first early return), whether it then runs, skips or fails, and tags each
 measurement with that count. A step is taken only between two measurements whose counts are consecutive and whose
 times are under 250 ms apart (the cadence's own gap rule), so a present that could not be measured -- the pass
 returned early or did not write the target, the readback slot was still in flight, the command list could not be
@@ -91,7 +91,9 @@ after it goes on has a number to pair with.
 Only the first call in a present is measured. A title that runs the pass twice per present (the cadence's
 `SamePresent`) would otherwise pair two views. Where presents are not counted at all (the counter stays 0) every
 call is measured; those routes are refused by the cadence anyway (`NoPresentCount`), so all their frames are
-"every frame".
+"every frame". A title that ran the pass twice per present on such a route would pair its two views; none is known.
+Presents at which Dispatch is never reached at all (the toggle key, a game skipping its upscaler) are not counted, and
+are bridged only when they last under 250 ms.
 
 ## Cost
 
