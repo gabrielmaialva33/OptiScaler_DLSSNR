@@ -16,7 +16,7 @@
 //
 // The forwarder is a separate DLL the user copies into each game folder, so the two halves drift the
 // moment one is updated without the other. The export names have never changed across a signature
-// change, so a mismatch is invisible to package_release.ps1's export check and to GetProcAddress:
+// change, so a mismatch is invisible to tools/package_release.ps1's export check and to GetProcAddress:
 // past the fourth argument everything is on the stack, and an old forwarder reads each one from the
 // wrong slot. Version 2 moved `reset` under a motion-vector dimension, which is non-zero every frame,
 // so the model would be told to forget its history continuously and nothing would report a fault.

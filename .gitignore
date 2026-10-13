@@ -452,3 +452,6 @@ tmp
 # upstream rewrite of that template.
 /tests/*/artifacts/
 tests/dlssnr-loopback/artifacts/
+
+# Personal, untracked helper scripts
+tools/local/

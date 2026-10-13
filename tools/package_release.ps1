@@ -1,4 +1,4 @@
-# Assemble a release zip.
+# Assemble a release zip. Run: pwsh tools\package_release.ps1 [-Version <tag>] [-SkipBuild]
 #
 # The build output directory is not the release: it also holds import libraries, export files, debug
 # symbols, and whatever earlier experiments left behind. Shipping that folder wholesale is how a
@@ -18,7 +18,7 @@ $ErrorActionPreference = "Stop"
 # Derived rather than hardcoded, so this packages whichever checkout it is sitting in. There is more
 # than one now -- the experiment runs in a git worktree beside the main tree, and a hardcoded root
 # silently packages the other one's build output while reporting success.
-$root = Split-Path -Parent $PSCommandPath
+$root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)   # this script lives in tools/
 $msb = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
 $stage = "$root\release\$Version"
 $zip = "$root\release\OptiScaler-DLSSNR-$Version.zip"

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Local OptiScaler_DLSSNR build with msvc-wine (MSVC 14.44 + Windows SDK under Wine).
-# Usage: ./build-local.sh [Release|Debug]   -> outputs in x64/<Config>/ and copies OptiScaler.dll + nvngx.dll_dlssnr.dll to out/
+# Usage: tools/build-local.sh [Release|Debug] [extra msbuild args]   (also ./build-local.sh, a root stub; any cwd works)
+# Outputs go to x64/<Config>/ and OptiScaler.dll + nvngx.dll_dlssnr.dll are copied to x64/out/.
 set -euo pipefail
 CONFIG="${1:-Release}"
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root: this script lives in tools/
 MSVC_BIN="${MSVC_BIN:-$HOME/.local/opt/msvc/bin/x64}"
 export WINEPREFIX="${WINEPREFIX:-$HOME/.local/opt/msvc-wineprefix}"
 export WINEDEBUG="${WINEDEBUG:--all}"

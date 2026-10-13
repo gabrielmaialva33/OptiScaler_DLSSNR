@@ -6,10 +6,10 @@ set -euo pipefail
 # Targets: Linux/Proton/Wine gaming environments with Steam / Lutris / Heroic
 # ==============================================================================
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_SRC_OPTI="${SCRIPT_DIR}/x64/out/OptiScaler.dll"
-BIN_SRC_DLSSNR="${SCRIPT_DIR}/x64/out/nvngx.dll_dlssnr.dll"
-INI_SRC="${SCRIPT_DIR}/OptiScaler.ini"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # this script lives in tools/
+BIN_SRC_OPTI="${REPO_ROOT}/x64/out/OptiScaler.dll"
+BIN_SRC_DLSSNR="${REPO_ROOT}/x64/out/nvngx.dll_dlssnr.dll"
+INI_SRC="${REPO_ROOT}/OptiScaler.ini"
 
 usage() {
     echo "Usage: $0 <game-target-directory> [proxy-dll-name]"
@@ -42,7 +42,7 @@ fi
 
 if [[ ! -f "${BIN_SRC_OPTI}" ]]; then
     echo "[-] Error: ${BIN_SRC_OPTI} not found! Building first..."
-    "${SCRIPT_DIR}/build-local.sh" Release
+    "${REPO_ROOT}/tools/build-local.sh" Release
 fi
 
 if [[ ! -f "${BIN_SRC_DLSSNR}" ]]; then

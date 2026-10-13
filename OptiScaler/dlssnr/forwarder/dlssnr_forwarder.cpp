@@ -177,7 +177,7 @@ extern "C"
     // tells the model to forget its history on every frame -- and a subrect base in `intensity`.
     // Nothing crashes; the picture just quietly gets worse.
     //
-    // package_release.ps1 looks for export names, which cannot see a changed signature behind an
+    // tools/package_release.ps1 looks for export names, which cannot see a changed signature behind an
     // unchanged name, so this is the check that catches it. Bump on any change to the argument list
     // of dlssnr_call_evaluate or dlssnr_vk_evaluate, and change kForwarderAbi in the host to match --
     // a forwarder from before this export existed resolves to null and is refused the same way.

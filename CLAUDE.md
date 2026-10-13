@@ -63,7 +63,7 @@ repo), which adds Linux/Proton overlay patches on top.
   Canonical Project Structure) says `src/`, `include/`, `tools/`, `docs/`. Do not apply it here.
   Most tracked files live under `OptiScaler/` and belong to upstream; moving them turns every
   `git merge optiscaler/master` into a whole-tree conflict, and this branch carries hundreds of
-  commits of our own (393 not in Dagherbou's fork as of 2026-09-27). Organise inside what this fork owns — `tests/`, `build-local.sh`,
+  commits of our own (393 not in Dagherbou's fork as of 2026-09-27). Organise inside what this fork owns — `tests/`, `tools/`, `docs/`,
   `CLAUDE.md`, `.github/workflows/nr-tests.yml`, `.clang-format-ignore`, and the files listed under
   "Linux / Proton patches" — and leave upstream's paths byte-identical.
 
@@ -75,6 +75,10 @@ exist in the solution but CI and every script build only x64. Configurations: `D
 `ReleaseDebug`.
 
 ### Local, on this Linux workstation (msvc-wine)
+
+The script is `tools/build-local.sh`; `./build-local.sh` at the root is a stub that `exec`s it, so the
+commands below work as written, from any cwd. The other scripts we own (`tools/deploy-to-game.sh`,
+`tools/package_release.ps1`, `tools/nrlog_summary.py`) are described in `tools/README.md`.
 
 ```bash
 ./build-local.sh                # Release
@@ -182,7 +186,7 @@ The artifact downloaded through the API is named `.zip` but is a 7z; extract wit
 
 Open `OptiScaler.sln` in Visual Studio 2022, or
 `msbuild OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal`.
-`package_release.ps1` assembles the release zip from an explicit allow-list: it refuses a stale
+`tools/package_release.ps1` assembles the release zip from an explicit allow-list: it refuses a stale
 forwarder (checks exports), refuses any `Enabled=true` in the packaged ini, and never ships
 `nvngx_dlssnr.dll` (NVIDIA's model; users supply their own).
 

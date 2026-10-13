@@ -124,7 +124,7 @@ reached the presented image.
 
 All generated sources, DLLs, executables, logs, and prefixes are in ignored
 `tests/vulkan-overlay/artifacts/`. No test is added to `OptiScaler.sln` or its projects.
-`package_release.ps1` only copies its explicit file/folder allow-list from
+`tools/package_release.ps1` only copies its explicit file/folder allow-list from
 `x64/Release/a` (plus the production forwarder), so this directory is not packaged.
 The test DLL must never be installed into a game. The runner does not alter any
 `optiscaler_skip_vulkan_hooks` marker and refuses one in its test directories.
