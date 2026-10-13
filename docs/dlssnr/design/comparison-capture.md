@@ -1,7 +1,9 @@
 # Same-frame comparison capture: original and processed as image files, with provenance
 
-Status: design for review, not implementation, 2026-10-13. Line numbers on our side are against
-`93730d39` (branch `docs/design-hdr-capture`). Nothing here has been built or run.
+Status: v1 implemented on D3D12, 2026-10-13, on branch `feat/comparison-capture`; not yet built or run in a game.
+The open questions of section 8 were answered by the maintainer (section 9); section 10 records where the code
+differs from the design below. Line numbers in sections 2 to 7 are against `93730d39` (branch
+`docs/design-hdr-capture`) and have drifted.
 
 ## 1. The answer
 
@@ -444,3 +446,61 @@ native-D3D12 check):
 6. **Provenance disclosures:** GPU name and driver version are included; confirm that is acceptable for
    files users will attach to public issues.
 7. **Directory name** `retoque-captures/` and the 64-pair cap.
+
+## 9. Decisions (maintainer, 2026-10-13)
+
+1. **`AutoCapture`: removed**, in its own commit, through the four points, with the retired-identifier check in
+   `tests/nr-invariants` and the shipped ini clean.
+2. **PNG: uncompressed** (stored deflate) with the `tEXt` provenance chunk; our own writer, host-tested; 64 pairs.
+3. **No `CaptureKey` in v1**: the menu button and the trigger file. A trigger file whose content is `burst` keeps the
+   old eight-frame raw burst.
+4. **The burst's "before" is the frame itself** (`hdrCopy`), as the pair's original is; its own commit.
+5. **HDR: PFM only** (linear float) plus the JSON sidecar; no SDR preview in v1.
+6. **Provenance**: build, route, model identity, the picture-shaping settings, GPU name and driver version. Never a
+   file path, a user name, a machine name or anything personal; the menu shows the file name only.
+7. **`retoque-captures/` beside the DLL**, 64-pair cap, write under a temporary name and rename.
+
+## 10. What v1 does, where it differs from the design
+
+Code: `retoque/dlssnr/DlssNr_PairCapture.h` (the state machine over an abstract backend, names, the cap, the
+record, the menu button's table), `DlssNr_ImageFile.h` (PNG, PFM, the row conversions), `DlssNr_PairCapture.cpp`
+(the D3D12 backend and the writer thread), `DlssNr_Readback.h` (the readback helpers the burst and the pair share,
+section 4.9). Two calls in `DlssNr_Dx12::Dispatch`: `PairCapture::Poll()` right after `NotePulsePresent`, before
+anything can return, and the record site after the stabilizer, guarded by `wrote && PairCapture::Wanted()`.
+`tests/nr-capture` is the host suite; the menu's state table is DEVELOPMENT.md section 2.2.
+
+Where it differs from sections 4 and 6, and why:
+
+- **The ticket is `DlssNr::Submission` on every route**, the present route included (section 4.2, step 3 named the
+  present list's own fence there). The present fence lives in `RunPresentPass`, which other work is changing; the
+  submission tracker already sees our present list's `ExecuteCommandLists` through the queue hook, so one mechanism
+  serves all three routes from inside `Dispatch`. The 8-frame fallback is reached only when `Submission::Track`
+  refuses the list, and the record says `completion=assumed-8-frames` then.
+- **The readbacks are mapped on the writer thread, not the render thread** (section 4.2, step 4 mapped them on the
+  render thread and copied the rows out). Copying 20 to 130 MB is milliseconds, and the point of the ticket is that
+  the render thread does nothing heavy. `Map` and `Unmap` are thread-safe in D3D12. Two references keep a readback
+  alive: the writer's, released after `Unmap`, and the session's, released only when the list that carried the copies
+  is sealed (`Submission::Ready`: complete and reset, so it can never run again), or after 32 dispatches untracked --
+  never before the GPU is proven done with it.
+- **Give-up is 1200 dispatches**, after which a capture's readbacks are kept for the process (section 4.2, step 5),
+  and at most 4 pairs of readbacks are held waiting for their lists; past that a press is refused with a reason
+  rather than holding more memory for recordings that may never be released.
+- **A request no frame takes in 5 seconds is withdrawn** with a reason, so the button does not stay "waiting" when the
+  pass stops writing frames.
+- **A format the files cannot hold is refused at the press, not predicted** (section 4.5 listed it among the
+  disabled states). Predicting it means a store on every frame; the reason is shown on the line under the button.
+- **Before the upscaler is captured too**, labelled `surface=render-input`: the same record site serves it, and the
+  label says what the file is.
+- **The bridge is told apart by a flag**, `DlssNrFrameInfo::BridgeHost`, set by the bridge's present host and read
+  only for the route label.
+- **Names use UTC** (`<yyyymmdd-hhmmss>`), like the record's time, so a daylight-saving change cannot reorder the
+  folder. `.tmp` leftovers of a write the process did not finish count with their stem, so the cap clears them.
+- **A ten-bit PNG carries no sRGB chunk**: once the present hosts accept HDR10, a ten-bit present frame may be PQ, and
+  the chunk would then be false. PQ present frames themselves (section 4.3, last row) are not handled yet; the HDR
+  present work has to say what such a frame is before the capture can decode it.
+- **GPU name and driver** come from DXGI on the writer thread, by the device's LUID, with spoofing skipped: the real
+  adapter, and its user-mode driver version (`CheckInterfaceSupport`), asked once.
+- **Side effect on first use**: if nothing else has tracked a submission yet this session, the first capture installs
+  the submission tracker's hooks, as the pulse metric and "Measure detail" do; they stay for the session.
+- **Not done in v1**: the wine-tier test of section 6 (`tests/dlssnr-loopback` with a frame counter in pixels), the
+  burst's own ticket (section 4.9, second item), and Vulkan.
