@@ -1,4 +1,4 @@
-// The UI layer's own mask (OptiScaler/shaders/synth_motion/precompile/static_overlay_layer.h), the decisions the
+// The UI layer's own mask (retoque/shaders/synth_motion/precompile/static_overlay_layer.h), the decisions the
 // detect shader's SYNTH_OVERLAY_LAYER permutation runs, over synthetic luma sequences on the CPU. The shader's
 // structure is reproduced here and nothing else: one 8x8 tile per thread group, the group's tile tests on last
 // frame's tile map (four sides, perpendicular orientations around, the camera), then the per-pixel state, then this

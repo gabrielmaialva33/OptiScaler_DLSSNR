@@ -18,7 +18,7 @@ THRESHOLD = re.compile(r'constexpr\s+(?:float|uint32_t)\s+(k[A-Z]\w*)\s*=\s*([0-
 names = ('kStaticEps', 'kCoreEps', 'kMotionTau', 'kDetailMin', 'kDecay', 'kDropTau', 'kStreakMin', 'kSupportMin',
          'kSidesMin')
 nr = dict(THRESHOLD.findall((repo / 'retoque/shaders/dlssnr/DlssNr_UiMask_Dx12.cpp').read_text()))
-fg = dict(THRESHOLD.findall((repo / 'OptiScaler/shaders/synth_motion/SynthOverlay_Dx12.cpp').read_text()))
+fg = dict(THRESHOLD.findall((repo / 'retoque/shaders/synth_motion/SynthOverlay_Dx12.cpp').read_text()))
 missing = [n for n in names if n not in nr or n not in fg]
 differ = [f'{n}: DLSS-NR {nr[n]}, frame generation {fg[n]}' for n in names
           if n in nr and n in fg and float(nr[n]) != float(fg[n])]
@@ -66,7 +66,7 @@ print(f'PASS: no unexpected swizzle-parameter hazard in the rule\'s {len(include
 # Frame generation's mask runs the rule with a 3x3 still core (UM_CORE_RADIUS in its shader). The fixtures that
 # made DLSS-NR's 5x5 core necessary -- sand beside a swaying coat, a concave gap -- must still mark nothing
 # there, and a glyph over a pan must still be protected: tests/nr-uimask-rule's own cases, at that radius.
-detect = (repo / 'OptiScaler/shaders/synth_motion/precompile/synth_overlay_detect.hlsl').read_text()
+detect = (repo / 'retoque/shaders/synth_motion/precompile/synth_overlay_detect.hlsl').read_text()
 radius = re.search(r'^\s*#\s*define\s+UM_CORE_RADIUS\s+(\d+)', detect, re.M)
 if radius is None:
     print('FAIL: synth_overlay_detect.hlsl no longer defines UM_CORE_RADIUS')
@@ -75,8 +75,8 @@ if radius is None:
 # The UI layer's widest band: the layer shader sizes its group-shared memory for UL_MAX_MARGIN, and the C++ side
 # clamps the margin to MaxLayerMargin before it gets there; the key's range is the same number. Three copies of one
 # limit drift unless something holds them together.
-layer_header = (repo / 'OptiScaler/shaders/synth_motion/precompile/static_overlay_layer.h').read_text()
-overlay_header = (repo / 'OptiScaler/shaders/synth_motion/SynthOverlay_Dx12.h').read_text()
+layer_header = (repo / 'retoque/shaders/synth_motion/precompile/static_overlay_layer.h').read_text()
+overlay_header = (repo / 'retoque/shaders/synth_motion/SynthOverlay_Dx12.h').read_text()
 config_cpp = (repo / 'OptiScaler/Config.cpp').read_text()
 limits = {
     'UL_MAX_MARGIN (static_overlay_layer.h)': re.search(r'#define\s+UL_MAX_MARGIN\s+(\d+)', layer_header),
@@ -93,7 +93,7 @@ with tempfile.TemporaryDirectory(prefix='optiscaler-fg-synth-policy-') as direct
     rule = str(Path(directory) / 'rule')
     subprocess.run(['g++', '-std=c++20', '-O1', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
                     '-fno-omit-frame-pointer', '-g', f'-DUM_CORE_RADIUS={radius.group(1)}',
-                    '-I', str(repo / 'OptiScaler'), str(repo / 'tests/nr-uimask-rule/test.cpp'), '-o', rule],
+                    '-I', str(repo / 'retoque'), '-I', str(repo / 'OptiScaler'), str(repo / 'tests/nr-uimask-rule/test.cpp'), '-o', rule],
                    check=True)
     print(f'rule fixtures at frame generation\'s core radius {radius.group(1)}:', flush=True)
     subprocess.run([rule], check=True)
@@ -101,13 +101,13 @@ with tempfile.TemporaryDirectory(prefix='optiscaler-fg-synth-policy-') as direct
     # The UI layer's own mask (static_overlay_layer.h), its decisions on the CPU over fixtures (layer.cpp).
     layer = str(Path(directory) / 'layer')
     subprocess.run(['g++', '-std=c++20', '-O1', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
-                    '-fno-omit-frame-pointer', '-g', '-I', str(repo / 'OptiScaler'), str(root / 'layer.cpp'), '-o',
+                    '-fno-omit-frame-pointer', '-g', '-I', str(repo / 'retoque'), '-I', str(repo / 'OptiScaler'), str(root / 'layer.cpp'), '-o',
                     layer], check=True)
     print('the UI layer\'s own mask:', flush=True)
     subprocess.run([layer], check=True)
 
     binary = str(Path(directory) / 'test')
     subprocess.run(['g++', '-std=c++20', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
-                    '-fno-omit-frame-pointer', '-g', '-I', str(repo / 'OptiScaler'),
+                    '-fno-omit-frame-pointer', '-g', '-I', str(repo / 'retoque'), '-I', str(repo / 'OptiScaler'),
                     str(root / 'test.cpp'), '-o', binary], check=True)
     subprocess.run([binary], check=True)

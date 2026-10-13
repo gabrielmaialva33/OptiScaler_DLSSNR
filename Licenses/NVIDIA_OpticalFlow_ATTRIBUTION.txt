@@ -7,7 +7,7 @@ Source:   https://github.com/jp7677/dxvk-nvapi (inc/nvofapi), commit 5c7b8b28c16
 What is derived from it
 -----------------------
 
-The NVIDIA Optical Flow motion source in OptiScaler/shaders/synth_motion/
+The NVIDIA Optical Flow motion source in retoque/shaders/synth_motion/
 (SynthMotionNvofa_Dx12.cpp, [DlssNr] SynthMotionSource=nvofa) is compiled
 against two unmodified headers, vendored under OptiScaler/include/nvofa/:
 

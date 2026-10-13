@@ -29,16 +29,16 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="shaders\synth_motion\SynthMotion_Dx12.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotion_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\SynthMotion_Handoff.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotion_Handoff.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\SynthMotionNvofa_Dx12.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotionNvofa_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\SynthOverlay_Dx12.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\SynthOverlay_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\nvofa\nvOpticalFlowCommon.h">
@@ -47,46 +47,46 @@
     <ClInclude Include="include\nvofa\nvOpticalFlowD3D12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ClearFloat_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_ClearFloat_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ClearUint_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_ClearUint_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_Expand_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_Expand_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_Filter_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_Filter_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_LuminancePyramid_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_LuminancePyramid_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_PrepareLuma_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_PrepareLuma_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_Scale_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_Scale_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ScdDivergence_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_ScdDivergence_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_ScdHistogram_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_ScdHistogram_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_Search_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_Search_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_NvofaPrep_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_NvofaPrep_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthMotion_NvofaExpand_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthMotion_NvofaExpand_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthOverlay_Detect_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthOverlay_Detect_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\synth_motion\precompile\SynthOverlay_Layer_Shader.h">
+    <ClInclude Include="..\retoque\shaders\synth_motion\precompile\SynthOverlay_Layer_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Config.h">
@@ -1126,13 +1126,13 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="shaders\synth_motion\SynthMotion_Dx12.cpp">
+    <ClCompile Include="..\retoque\shaders\synth_motion\SynthMotion_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="shaders\synth_motion\SynthMotionNvofa_Dx12.cpp">
+    <ClCompile Include="..\retoque\shaders\synth_motion\SynthMotionNvofa_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="shaders\synth_motion\SynthOverlay_Dx12.cpp">
+    <ClCompile Include="..\retoque\shaders\synth_motion\SynthOverlay_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Config.cpp">

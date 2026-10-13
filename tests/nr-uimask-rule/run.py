@@ -11,6 +11,6 @@ repo = root.parents[1]
 with tempfile.TemporaryDirectory(prefix='optiscaler-nr-uimask-rule-') as directory:
     binary = str(Path(directory) / 'test')
     subprocess.run(['g++', '-std=c++20', '-O1', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
-                    '-fno-omit-frame-pointer', '-g', '-I', str(repo / 'OptiScaler'),
+                    '-fno-omit-frame-pointer', '-g', '-I', str(repo / 'retoque'), '-I', str(repo / 'OptiScaler'),
                     str(root / 'test.cpp'), '-o', binary], check=True)
     subprocess.run([binary], check=True)

@@ -7,7 +7,7 @@ Source:   https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK
 What is derived from it
 -----------------------
 
-The synthesized-motion estimator in OptiScaler/shaders/synth_motion/ runs the
+The synthesized-motion estimator in retoque/shaders/synth_motion/ runs the
 FidelityFX optical flow, compiled into OptiScaler.dll:
 
   * The shader code under shaders/synth_motion/precompile/ffx/ is copied

@@ -3,7 +3,7 @@
 Run `python3 tests/fg-synth-policy/run.py` from the repository root. It builds `test.cpp` with g++
 C++20, `-Werror`, ASan and UBSan in a temporary directory and includes the production headers as
 they are: `OptiScaler/inputs/FG/Synth_Policy.h`, `OptiScaler/inputs/FG/Synth_MotionStats.h`,
-`OptiScaler/inputs/FG/Synth_Hud.h` and `OptiScaler/shaders/synth_motion/SynthMotion_Handoff.h`. None of
+`OptiScaler/inputs/FG/Synth_Hud.h` and `retoque/shaders/synth_motion/SynthMotion_Handoff.h`. None of
 them touches the GPU, so nothing is faked beyond two empty `ID3D12Device` / `ID3D12Resource` structs.
 
 Before compiling, `run.py` also holds the HUD mask's thresholds (`shaders/synth_motion/SynthOverlay_Dx12.cpp`)

@@ -1,4 +1,4 @@
-// Real-GPU endpoint-error test for SynthMotion::Estimator_Dx12 (OptiScaler/shaders/synth_motion), and
+// Real-GPU endpoint-error test for SynthMotion::Estimator_Dx12 (retoque/shaders/synth_motion), and
 // with --source nvofa for SynthMotion::NvofaEstimator_Dx12, the NVIDIA Optical Flow source behind the
 // same contract.
 //

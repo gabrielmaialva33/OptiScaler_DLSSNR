@@ -70,9 +70,12 @@ URLs redirect), which adds Linux/Proton overlay patches on top.
   The NR module is `retoque/dlssnr/` and `retoque/shaders/dlssnr/` (moved from `OptiScaler/` on
   2026-10-13). `OptiScaler.vcxproj` adds `..\retoque\` as an include root, in the fork-owned tail rather
   than upstream's `IncludePath`, so `<dlssnr/...>` and `<shaders/dlssnr/...>` resolve unchanged and no
-  upstream `#include` line was edited. `nr-invariants` fails if `OptiScaler/dlssnr` or
-  `OptiScaler/shaders/dlssnr` reappears. `OptiScaler/shaders/synth_motion/` and a few other fork files
-  remain under `OptiScaler/` for now.
+  upstream `#include` line was edited. The synthesized-motion estimator followed the same way to
+  `retoque/shaders/synth_motion/`, so `<shaders/synth_motion/...>` resolves through that root too.
+  `nr-invariants` fails if `OptiScaler/dlssnr`, `OptiScaler/shaders/dlssnr` or
+  `OptiScaler/shaders/synth_motion` reappears. A few smaller fork files remain under `OptiScaler/`
+  (`inputs/FG/Synth_*`, `misc/Localization.*`, `framegen/dlssg/MfgUnlock.*`, `menu/input/kcd_input_fix.*`,
+  `include/nvofa/`).
 
 ## Build
 
@@ -356,8 +359,10 @@ On Linux, `dxc.exe`/`fxc.exe` run under the msvc-wine prefix
 (`WINEPREFIX=~/.local/opt/msvc-wineprefix wine ../../shader_tools/dxc.exe ...`), then
 `python3 ../../shader_tools/create_header.py <in.cso|in.spv> <out.h> <array_name>`.
 
-The NR passes are the exception: they live in `retoque/shaders/dlssnr/precompile/`, so from there use
-`../../../../OptiScaler/shaders/shader_tools/` in place of `../../shader_tools/` in the commands above.
+The NR passes and the synthesized-motion estimator are the exception: they live in
+`retoque/shaders/dlssnr/precompile/` and `retoque/shaders/synth_motion/precompile/`, so from there use
+`../../../../OptiScaler/shaders/shader_tools/` in place of `../../shader_tools/` in the commands above
+(`retoque/shaders/synth_motion/precompile/build.sh` already does).
 
 For the NR shader (`retoque/shaders/dlssnr/precompile/dlssnr.hlsl`) rebuild **both** targets: DX12 via dxc
 `cs_6_0` into `DlssNr_Shader.h` (array `DlssNr_cso`) and Vulkan via dxc `-spirv -D VK_MODE` into
@@ -512,5 +517,5 @@ choices).
 
 `docs/README.md` indexes everything this fork owns: NR design notes (`docs/dlssnr/design/`, topic index in
 `docs/dlssnr/README.md`), Linux/Proton notes, user guides and history. Upstream's own docs stay at the root.
-Code-adjacent READMEs (`retoque/dlssnr/`, `OptiScaler/shaders/synth_motion/`) and `tests/` READMEs stay
+Code-adjacent READMEs (`retoque/dlssnr/`, `retoque/shaders/synth_motion/`) and `tests/` READMEs stay
 beside what they describe.

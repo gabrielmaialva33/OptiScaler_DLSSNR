@@ -180,7 +180,7 @@ is admitted, and the input is recorded at `FG_Hooks.cpp:1215`, before `fg->Prese
 
 ## Where the code goes
 
-- **The shared estimator:** `OptiScaler/shaders/synth_motion/`, not `shaders/dlssnr/motion/`. FG
+- **The shared estimator:** `retoque/shaders/synth_motion/`, not `shaders/dlssnr/motion/`. FG
   must not depend on the NR module, which stays removable as one block. The unbuilt skeleton in
   `shaders/dlssnr/motion/` is superseded, and [synthesized-motion.md](synthesized-motion.md) points
   here.

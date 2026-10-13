@@ -16,7 +16,7 @@ uses FidelityFX. Nothing about it is measured. Design, Proton findings and risks
 
 Update 2026-09-27 (branch `synth-motion`): **integrated, behind `[DlssNr] SynthMotion`** (default off,
 menu checkbox "Synthesized motion" next to "No history without motion", under HookMethod Present).
-- **The estimator** is `SynthMotion::Estimator_Dx12` (`OptiScaler/shaders/synth_motion/`), the
+- **The estimator** is `SynthMotion::Estimator_Dx12` (`retoque/shaders/synth_motion/`), the
   FidelityFX optical-flow port described in the update below. Its output meets §4: `R16G16_FLOAT` at
   the colour's full extent, current-to-previous in pixels, +x right, +y down, resting in
   NON_PIXEL_SHADER_RESOURCE between frames.
@@ -50,7 +50,7 @@ estimator shared with frame generation. It changes two things here:
 - **The kernel** becomes a port of the FidelityFX optical flow: MIT, in the tree under
   `external/FidelityFX-SDK-v2`, 8x8 blocks over a 7-level luma pyramid, with scene-cut detection. It
   replaces the block matching §3 would have written by hand; the skeleton is the same.
-- **The producer** moves to `OptiScaler/shaders/synth_motion/`, so FG does not depend on the NR
+- **The producer** moves to `retoque/shaders/synth_motion/`, so FG does not depend on the NR
   module. The skeleton under `shaders/dlssnr/motion/` is superseded.
 
 The output contract in §4 and the plug point in §5 stand.
@@ -271,7 +271,7 @@ writes `R16G16_FLOAT` at the colour extent:
 falls back. To regenerate them (the same flags as the FidelityFX passes):
 
 ```
-cd OptiScaler/shaders/synth_motion/precompile
+cd retoque/shaders/synth_motion/precompile
 WINEPREFIX=~/.local/opt/msvc-wineprefix WINEDEBUG=-all wine ../../shader_tools/dxc.exe -T cs_6_2 -E CS -O3 \
   -Qstrip_debug -Qstrip_reflect -I ffx -DFFX_GPU=1 -DFFX_HLSL=1 -DFFX_HALF=0 -DFFX_HLSL_SM=62 \
   -DFFX_IMPLICIT_SHADER_REGISTER_BINDING_HLSL=0 -Wno-for-redefinition -Wno-ambig-lit-shift \

@@ -59,7 +59,7 @@ float2 AccPrevAt(int2 p) { return gAccPrev.Load(int3(Clamped(p), 0)); }
 #define UM_CHANGE(px_, py_) ChangeAt(int2(px_, py_))
 #define UM_PROT(px_, py_) AccPrevAt(int2(px_, py_)).x
 #define UM_STREAK(px_, py_) AccPrevAt(int2(px_, py_)).y
-#include "../../../../OptiScaler/shaders/synth_motion/precompile/static_overlay_rule.h"
+#include "../../synth_motion/precompile/static_overlay_rule.h"
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)

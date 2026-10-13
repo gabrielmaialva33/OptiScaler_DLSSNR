@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build and run the synthesized-motion estimator on a real D3D12 device, and score it.
 
-Compiles the production OptiScaler/shaders/synth_motion estimator with a pch/Logger shim, runs it in
+Compiles the production retoque/shaders/synth_motion estimator with a pch/Logger shim, runs it in
 an isolated Wine prefix on vkd3d-proton, and judges synth-motion-report.json against the thresholds
 below. Never loads NGX, OptiScaler.dll or a game.
 
@@ -24,7 +24,7 @@ OUT = HERE / 'artifacts'
 WORK = OUT / 'run'
 MSVC = Path(os.environ.get('MSVC_BIN', str(Path.home() / '.local/opt/msvc/bin/x64')))
 TOOLCHAIN_PREFIX = Path(os.environ.get('WINEPREFIX', str(Path.home() / '.local/opt/msvc-wineprefix')))
-ESTIMATOR = ROOT / 'OptiScaler/shaders/synth_motion'
+ESTIMATOR = ROOT / 'retoque/shaders/synth_motion'
 VKD3D = [
     Path.home() / '.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/vkd3d-proton/x86_64-windows',
     Path.home() / '.local/share/Steam/steamapps/common/Proton Hotfix/files/lib/wine/vkd3d-proton/x86_64-windows',
@@ -170,7 +170,7 @@ def nvofa_unavailable():
     missing = [h for h in NVOFA_SHADERS if not (ESTIMATOR / 'precompile' / h).exists()]
     if missing:
         return ('the NVOFA shaders are not generated (' + ', '.join(missing)
-                + '); run OptiScaler/shaders/synth_motion/precompile/build.sh outside a build window')
+                + '); run retoque/shaders/synth_motion/precompile/build.sh outside a build window')
     if nvofapi() is None:
         return 'no nvofapi64.dll (dxvk-nvapi) in any Proton install'
     return None
@@ -238,7 +238,7 @@ def build():
     objdir.mkdir(exist_ok=True)
     command([MSVC / 'cl', '/nologo', '/std:c++latest', '/EHsc', '/MD', '/W4', '/O2',
              # The stubs come first so that "pch.h" and <Logger.h> resolve to the test shims.
-             '/I' + str(HERE / 'stubs'), '/I' + str(ESTIMATOR), '/I' + str(ROOT / 'OptiScaler'),
+             '/I' + str(HERE / 'stubs'), '/I' + str(ESTIMATOR), '/I' + str(ROOT / 'retoque'), '/I' + str(ROOT / 'OptiScaler'),
              '/I' + str(ROOT / 'OptiScaler/include'),
              HERE / 'harness.cpp', *cpp,
              '/Fo' + str(objdir) + '/', '/Fe' + str(WORK / 'synth-motion-harness.exe'), '/link',

@@ -284,7 +284,8 @@ drives real D3D12 and Vulkan. See [`tests/README.md`](tests/README.md).
 ## Repository layout
 
 ```text
-retoque/          the Neural Rendering module: dlssnr/ (host code) and shaders/dlssnr/ (the pass)
+retoque/          the Neural Rendering module: dlssnr/ (host code), shaders/dlssnr/ (the pass) and
+                  shaders/synth_motion/ (the motion estimator for synthesized frame generation)
 docs/             design notes (indexed by topic), Linux/Proton notes, guides, history
 tools/            build, deploy, release and log-summary scripts
 tests/            the test suites and their runner

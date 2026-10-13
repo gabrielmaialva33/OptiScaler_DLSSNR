@@ -8,7 +8,7 @@ execution; `--no-lock` skips the clock lock. Output goes to the ignored `artifac
 
 ## What it runs
 
-The production `SynthMotion::Estimator_Dx12` (`OptiScaler/shaders/synth_motion/`, the FidelityFX
+The production `SynthMotion::Estimator_Dx12` (`retoque/shaders/synth_motion/`, the FidelityFX
 optical flow port, see `docs/dlssnr/design/synthesized-frame-generation.md`) compiled with a
 `pch.h`/`Logger.h` shim, on vkd3d-proton in an isolated Wine prefix. The compiler prefix is a
 private copy of the local MSVC prefix. No NGX, no OptiScaler.dll, no game.

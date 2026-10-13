@@ -30,7 +30,7 @@ nr = root / 'retoque'
 
 # The module moved on 2026-10-13. A stale copy under OptiScaler/ would shadow retoque/ through $(ProjectDir) in the
 # build, so its mere existence is a failure.
-for stale in ('OptiScaler/dlssnr', 'OptiScaler/shaders/dlssnr'):
+for stale in ('OptiScaler/dlssnr', 'OptiScaler/shaders/dlssnr', 'OptiScaler/shaders/synth_motion'):
     if (root / stale).exists():
         failures.append(f'{stale} exists: the NR module lives in retoque/ and a stale copy shadows it')
 
@@ -204,7 +204,7 @@ if len(failures) == before:
 # The synthesized-motion estimator (shaders/synth_motion): every committed .cso there, FidelityFX-derived
 # and NVOFA alike, named <stem>.cso -> <stem>_Shader.h, array <stem>_cso, as its build.sh writes them.
 before = len(failures)
-synth_precompile = root / 'OptiScaler/shaders/synth_motion/precompile'
+synth_precompile = nr / 'shaders/synth_motion/precompile'
 synth_checked = []
 with tempfile.TemporaryDirectory() as scratch:
     for binary in sorted(synth_precompile.glob('*.cso')):

@@ -1,4 +1,4 @@
-// The static-overlay mask's per-pixel rule (OptiScaler/shaders/synth_motion/precompile/static_overlay_rule.h),
+// The static-overlay mask's per-pixel rule (retoque/shaders/synth_motion/precompile/static_overlay_rule.h),
 // the exact code the shader runs, over synthetic frame sequences. The shader's own loads become array
 // lookups with the same clamping; everything else is the production header.
 #include <algorithm>
