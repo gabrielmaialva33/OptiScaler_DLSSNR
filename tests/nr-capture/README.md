@@ -12,7 +12,8 @@ What it holds: the pure half of the same-frame comparison capture
 - **The state machine** over a fake backend that counts every call: request, record, nothing handed to the writer
   before the ticket completes, exactly one hand-off when it does, a second request ignored while one is under way,
   the session's references released only when the list can never run again (`Ready`, not merely `Completed`), a
-  ticket that never completes kept and never released, the untracked path read after 8 dispatches and labelled
+  ticket that never completes kept and never released and the capture then off for the session, an ignored press that
+  does not move a waiting request's expiry, the untracked path read after 8 dispatches and labelled
   `assumed-8-frames`, released after 32, refusals and expiry, an allocation failure, the retained-pair bound, a
   hand-off the writer refuses, and shutdown freeing only what is proven done.
 - **The menu button**, every row of DEVELOPMENT.md section 2.2.
@@ -39,7 +40,9 @@ readback helpers exist once (`DlssNr_Readback.h`); no record value is set from a
 only as its sanitised stem; `PairCapture::Poll()` sits before the first return in `Dispatch`; the record site is
 guarded by `wrote && Wanted()`, comes after the stabilizer and copies `hdrCopy` (NON_PIXEL_SHADER_RESOURCE) and the
 target (UNORDERED_ACCESS); the burst's "before" is `hdrCopy`; `TimingMetadata` and the capture share
-`TimingContract`; the trigger file asks for the pair and for the burst on `burst`; `Shutdown` calls the capture's;
+`TimingContract`, and a frame that may carry a capture is labelled `capture_active` in the timing metadata; the
+record site does no file search or file read (the model's facts are found by the writer); the trigger file asks for
+the pair and for the burst on `burst`; `Shutdown` calls the capture's;
 the bridge host labels its frames; and `DlssNr_PairCapture.cpp` is in both project files once.
 
 Every reason the capture can show on the menu's line must have a pt-BR entry (those reach the menu through a variable,

@@ -208,6 +208,8 @@ static void StateMachine()
         for (int i = 0; i < 100; ++i)
             s.Poll(b, 0);
         CHECK(b.released.empty()); // never released later either
+        // And the capture is off for the session: a route that never completes cannot leak a pair per press.
+        CHECK(s.GaveUp() && !s.Request(0) && s.Current() == Phase::Idle);
         ++g_cases;
     }
 
@@ -239,9 +241,13 @@ static void StateMachine()
         FakeBackend b;
         FakeBackend::Recording rec;
         CHECK(s.Request(0));
-        CHECK(!s.Record(b, rec, FakePayload {}, kReasonCompare));
+        const char* why = nullptr;
+        CHECK(!s.Record(b, rec, FakePayload {}, kReasonCompare, &why));
+        CHECK(why == kReasonCompare);
         CHECK(s.Current() == Phase::Idle && b.allocs == 0 && s.LastOutcome().reason == kReasonCompare);
+        CHECK(!s.Record(b, rec, FakePayload {}, nullptr, &why) && why == nullptr); // not requested: not this call's
         CHECK(s.Request(100));
+        CHECK(!s.Request(100 + kRequestExpiryMs - 10)); // an ignored press does not move the expiry
         s.ExpireIfStale(100 + kRequestExpiryMs - 1);
         CHECK(s.Current() == Phase::Requested);
         s.Poll(b, 100 + kRequestExpiryMs);
@@ -364,6 +370,7 @@ static void Button()
         { [](ButtonInputs& i) { i.phase = Phase::Pending; }, kReadingWords },
         { [](ButtonInputs& i) { i.phase = Phase::Writing; }, kWritingWords },
         { [](ButtonInputs& i) { i.directoryFailed = true; }, kReasonDirectory },
+        { [](ButtonInputs& i) { i.gaveUp = true; }, kReasonNoCompletion },
     };
     for (const auto& row : rows)
     {

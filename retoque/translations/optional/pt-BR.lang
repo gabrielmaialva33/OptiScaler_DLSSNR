@@ -451,7 +451,7 @@ The capture folder could not be created (see the log).	Não foi possível criar 
 No frame reached the pass in time; nothing was captured.	Nenhum quadro chegou ao passe a tempo; nada foi capturado.
 Earlier captures are still held for the GPU; try again shortly.	Capturas anteriores ainda estão retidas para a GPU; tente de novo em instantes.
 The readback buffers could not be created.	Não foi possível criar os buffers de leitura.
-The GPU never confirmed the copies; nothing was written.	A GPU nunca confirmou as cópias; nada foi gravado.
+The GPU never confirmed the copies; nothing was written, and the capture is off for this session.	A GPU nunca confirmou as cópias; nada foi gravado, e a captura fica desligada nesta sessão.
 The writer could not be started.	Não foi possível iniciar a gravação.
 The files could not be written (see the log).	Não foi possível gravar os arquivos (veja o log).
 This frame's format is not one the capture can write yet.	A captura ainda não sabe gravar o formato deste quadro.

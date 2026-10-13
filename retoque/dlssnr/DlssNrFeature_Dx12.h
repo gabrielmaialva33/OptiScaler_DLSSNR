@@ -446,6 +446,7 @@ struct PairCaptureStatus
 {
     PairCapture::Phase phase {};
     bool directoryFailed = false; // the folder could not be created; the capture is off for the session
+    bool gaveUp = false;          // a recording never completed; the capture is off for the session
     bool ok = false;              // the last capture wrote its files
     const char* reason = nullptr; // why the last one did not, a literal; null before the first
     std::string lastStem;         // the last capture's file stem; never a path

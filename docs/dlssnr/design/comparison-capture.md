@@ -480,11 +480,21 @@ Where it differs from sections 4 and 6, and why:
   render thread and copied the rows out). Copying 20 to 130 MB is milliseconds, and the point of the ticket is that
   the render thread does nothing heavy. `Map` and `Unmap` are thread-safe in D3D12. Two references keep a readback
   alive: the writer's, released after `Unmap`, and the session's, released only when the list that carried the copies
-  is sealed (`Submission::Ready`: complete and reset, so it can never run again), or after 32 dispatches untracked --
-  never before the GPU is proven done with it.
-- **Give-up is 1200 dispatches**, after which a capture's readbacks are kept for the process (section 4.2, step 5),
-  and at most 4 pairs of readbacks are held waiting for their lists; past that a press is refused with a reason
-  rather than holding more memory for recordings that may never be released.
+  is sealed (`Submission::Ready`: complete and reset, so it can never run again).
+- **Untracked, release is an assumption, not a proof**, and the record says so. Where `Submission::Track` refuses the
+  list (a COMPUTE list, a second device, a recording the tracker already marked unknown) the copies are read after
+  8 dispatches and the session's reference is let go after 32: the rule every untracked NR resource follows
+  (`NrRetired`, "never free under the GPU" in `retoque/dlssnr/README.md`), not a fence. Refusing those routes, or
+  keeping their readbacks for the process, are the alternatives if a run ever shows a GPU 32 dispatches behind.
+- **Mapping reads what has completed so far.** D3D12 lets a closed list run again before it is reset;
+  `Submission::Completed` covers the executions seen. A game that re-executed the list carrying the copies before the
+  writer read them would give torn pixels, not a fault; the session's own reference waits for the reset either way.
+- **Give-up is 1200 dispatches**, after which a capture's readbacks are kept for the process (section 4.2, step 5)
+  and the capture is off for the session, so a route whose lists never complete cannot leak a pair per press. At
+  most 4 pairs of readbacks are held waiting for their lists; past that a press is refused with a reason rather than
+  holding more memory for recordings that may never be released.
+- **Pending is watched from `Dispatch` only.** While the pass is not called (NR switched off, a loading screen with
+  no upscaler), a recorded capture waits, and the button says so; it is handed on as soon as the pass runs again.
 - **A request no frame takes in 5 seconds is withdrawn** with a reason, so the button does not stay "waiting" when the
   pass stops writing frames.
 - **A format the files cannot hold is refused at the press, not predicted** (section 4.5 listed it among the
@@ -500,6 +510,14 @@ Where it differs from sections 4 and 6, and why:
   present work has to say what such a frame is before the capture can decode it.
 - **GPU name and driver** come from DXGI on the writer thread, by the device's LUID, with spoofing skipped: the real
   adapter, and its user-mode driver version (`CheckInterfaceSupport`), asked once.
+- **The model's identity is NgxInfo's, not `TimingModelIdentity()`** (section 4.4): the model's version and size and
+  the NGX loader's version and feature-18 route, found once on the writer thread. The timing label reads the model
+  file and logs its path on first use, and `NgxInfo::FindModel` may search folders; neither belongs on the render
+  thread, and neither path reaches the record.
+- **A capture frame is labelled in the GPU timing metadata** (`capture_active`), like a burst frame: its two copies
+  land inside the timed region.
+- **The writer logs from a detached thread.** If the process ended while it held the logger's lock, logging during
+  DLL detach could block. It logs three lines a capture; accepted, not engineered around.
 - **Side effect on first use**: if nothing else has tracked a submission yet this session, the first capture installs
   the submission tracker's hooks, as the pulse metric and "Measure detail" do; they stay for the session.
 - **Not done in v1**: the wine-tier test of section 6 (`tests/dlssnr-loopback` with a frame counter in pixels), the

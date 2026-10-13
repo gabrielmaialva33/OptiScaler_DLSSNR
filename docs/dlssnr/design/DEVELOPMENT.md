@@ -89,6 +89,7 @@ are checked top to bottom and the first that applies wins.
 | copies recorded, the GPU not yet proven past them | shown, disabled | "Waiting for the GPU to finish the copies..." |
 | handed to the writer | shown, disabled | "Writing the files..." |
 | the capture folder could not be created this session | shown, disabled | "The capture folder could not be created (see the log)." |
+| a recording never completed this session (given up) | shown, disabled | "The GPU never confirmed the copies; nothing was written, and the capture is off for this session." |
 | otherwise | shown, **enabled** | "Saved <stem> (the pair and its .json)" after a capture; the last refusal or failure in amber; nothing before the first |
 
 Invariant checks against this table: absent wherever there is no frame of the pass to capture (rule 2); one control

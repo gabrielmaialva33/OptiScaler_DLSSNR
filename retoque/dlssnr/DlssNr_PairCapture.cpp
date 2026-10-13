@@ -278,6 +278,62 @@ const Adapter& AdapterFor(LUID luid)
     return cached;
 }
 
+const char* RouteToken(DlssNr::PeScan::Feature18Route route)
+{
+    switch (route)
+    {
+    case DlssNr::PeScan::Feature18Route::Present:
+        return "loader-routes-feature-18";
+    case DlssNr::PeScan::Feature18Route::Absent:
+        return "loader-does-not-route-feature-18";
+    default:
+        return "unknown";
+    }
+}
+
+std::string Version(const uint16_t v[4])
+{
+    if (v[0] == 0 && v[1] == 0 && v[2] == 0 && v[3] == 0)
+        return "unknown";
+    return std::format("{}.{}.{}.{}", v[0], v[1], v[2], v[3]);
+}
+
+// The model and the NGX loader the first feature build already logged: their versions, the model's size and the
+// loader's feature-18 route, never their paths. Found here, once, on the writer thread, so the render thread does no
+// file search for a capture; a search that throws leaves "unknown" rather than an exception in a game thread.
+struct ModelFacts
+{
+    std::string version = "unknown";
+    std::string bytes = "unknown";
+    std::string loader = "unknown";
+    std::string route = "unknown";
+};
+
+const ModelFacts& ModelFactsOnce()
+{
+    static ModelFacts facts;
+    static bool asked = false; // writer thread only
+    if (!asked)
+    {
+        asked = true;
+        try
+        {
+            if (const auto path = NgxInfo::FindModel(); path.has_value())
+            {
+                const auto& ngx = NgxInfo::Describe(*path);
+                facts.version = Version(ngx.modelVersion);
+                facts.bytes = std::to_string(ngx.modelBytes);
+                facts.loader = Version(ngx.loaderVersion);
+                facts.route = RouteToken(ngx.route);
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+    return facts;
+}
+
 // The readback as rows, from its placed footprint.
 ImageFile::Rows RowsOf(const capture::Shot& shot, const void* mapped)
 {
@@ -312,7 +368,12 @@ const char* WritePair(Job& job, void* const (&mapped)[2], std::string& stemOut)
     // The record is complete before the first byte, so both images carry the same one.
     const ImageFile::Mean means[2] = { ImageFile::MeanOf(rows[0], p.plan), ImageFile::MeanOf(rows[1], p.plan) };
     const Adapter& adapter = AdapterFor(p.luid);
+    const ModelFacts& model = ModelFactsOnce();
     p.record.Set("completion", CompletionName(job.completion));
+    p.record.Set("model_version", model.version);
+    p.record.Set("model_bytes", model.bytes);
+    p.record.Set("ngx_loader", model.loader);
+    p.record.Set("ngx_route", model.route);
     p.record.Set("gpu", adapter.name);
     p.record.Set("gpu_driver", adapter.driver);
     p.record.Set("mean_original", Number(means[0].Value()));
@@ -459,26 +520,6 @@ void Writer::Run()
         TheSession().Finished(failure == nullptr, failure, std::move(stem));
     }
 }
-
-const char* RouteToken(DlssNr::PeScan::Feature18Route route)
-{
-    switch (route)
-    {
-    case DlssNr::PeScan::Feature18Route::Present:
-        return "loader-routes-feature-18";
-    case DlssNr::PeScan::Feature18Route::Absent:
-        return "loader-does-not-route-feature-18";
-    default:
-        return "unknown";
-    }
-}
-
-std::string Version(const uint16_t v[4])
-{
-    if (v[0] == 0 && v[1] == 0 && v[2] == 0 && v[3] == 0)
-        return "unknown";
-    return std::format("{}.{}.{}.{}", v[0], v[1], v[2], v[3]);
-}
 } // namespace
 
 void Poll()
@@ -555,16 +596,6 @@ void AtRecordSite(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D
         r.Set("white_point", Number(facts.whitePoint));
         r.Set("frame", std::to_string(facts.frame));
         r.Set("present", std::to_string(facts.present));
-        r.Set("model", facts.modelIdentity);
-
-        // The NGX loader and model the first build already logs; their versions only, never their paths.
-        if (const auto model = NgxInfo::FindModel(); model.has_value())
-        {
-            const auto& ngx = NgxInfo::Describe(*model);
-            r.Set("model_version", Version(ngx.modelVersion));
-            r.Set("ngx_loader", Version(ngx.loaderVersion));
-            r.Set("ngx_route", RouteToken(ngx.route));
-        }
         r.Set("settings", facts.settings);
     }
 
@@ -577,12 +608,13 @@ void AtRecordSite(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D
     recording.state[0] = originalState;
     recording.state[1] = processedState;
 
-    if (session.Record(backend, recording, std::move(payload), refusal))
+    const char* why = nullptr;
+    if (session.Record(backend, recording, std::move(payload), refusal, &why))
     {
         LOG_INFO("DLSS-NR capture: copies of {}x{} {} recorded on the pass's list ({}, {})", p.Width, p.Height,
                  ImageFile::FormatName(static_cast<uint32_t>(format)), facts.route, ImageFile::FileKindName(plan.kind));
     }
-    else if (const char* why = session.LastOutcome().reason; why != nullptr)
+    else if (why != nullptr)
     {
         LOG_INFO("DLSS-NR capture: not taken: {}", why);
     }
@@ -613,6 +645,7 @@ PairCaptureStatus GetPairCaptureStatus()
     PairCaptureStatus status;
     status.phase = session.Current();
     status.directoryFailed = PairCapture::g_directoryFailed.load();
+    status.gaveUp = session.GaveUp();
     const auto outcome = session.LastOutcome();
     status.ok = outcome.ok;
     status.reason = outcome.reason;

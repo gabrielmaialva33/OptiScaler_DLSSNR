@@ -39,7 +39,8 @@ constexpr uint64_t kAssumedPolls = 8;
 constexpr uint64_t kUntrackedReleasePolls = 32;
 
 // A tracked recording that has not completed after this many dispatches never will (device removed, a list that
-// was dropped): its readbacks are kept for the rest of the session, never released, and the capture says why.
+// was dropped, a queue the tracker cannot fence): its readbacks are kept for the rest of the session, never
+// released, and the capture is off for the session, so a route that never completes cannot leak a pair per press.
 constexpr uint64_t kGiveUpPolls = 1200;
 
 // A request no frame took within this long is withdrawn, so the button does not stay "waiting" forever.
@@ -59,7 +60,8 @@ inline constexpr const char* kReasonDirectory = "The capture folder could not be
 inline constexpr const char* kReasonExpired = "No frame reached the pass in time; nothing was captured.";
 inline constexpr const char* kReasonRetained = "Earlier captures are still held for the GPU; try again shortly.";
 inline constexpr const char* kReasonAllocation = "The readback buffers could not be created.";
-inline constexpr const char* kReasonNoCompletion = "The GPU never confirmed the copies; nothing was written.";
+inline constexpr const char* kReasonNoCompletion =
+    "The GPU never confirmed the copies; nothing was written, and the capture is off for this session.";
 inline constexpr const char* kReasonHandOff = "The writer could not be started.";
 inline constexpr const char* kReasonWrite = "The files could not be written (see the log).";
 
@@ -115,13 +117,21 @@ template <class Backend> class Session
     using Payload = typename Backend::Payload;
     using Recording = typename Backend::Recording;
 
-    // Asks for a capture. False when one is already under way: a second press is ignored.
+    // Asks for a capture. False when one is already under way -- a second press is ignored -- or the capture gave up
+    // on a recording this session.
     bool Request(int64_t nowMs)
     {
+        // The time is stored only once idle is seen, so a press that is ignored does not move a waiting request's
+        // expiry; the release below publishes it to ExpireIfStale's acquire.
+        if (gaveUp_.load(std::memory_order_relaxed) || phase_.load(std::memory_order_acquire) != Phase::Idle)
+            return false;
         requestedAt_.store(nowMs, std::memory_order_relaxed);
         Phase idle = Phase::Idle;
         return phase_.compare_exchange_strong(idle, Phase::Requested, std::memory_order_acq_rel);
     }
+
+    // Whether a recording was given up on this session, which turns the capture off.
+    bool GaveUp() const { return gaveUp_.load(std::memory_order_relaxed); }
 
     // A request nothing took in time goes back to idle, with a reason.
     void ExpireIfStale(int64_t nowMs)
@@ -177,6 +187,7 @@ template <class Backend> class Session
             {
                 backend.Leak(pending_.readbacks);
                 pending_ = {};
+                gaveUp_.store(true, std::memory_order_relaxed);
                 Settle(false, kReasonNoCompletion, {});
                 phase_.store(Phase::Idle, std::memory_order_release);
             }
@@ -199,9 +210,13 @@ template <class Backend> class Session
     }
 
     // At the record site, after the pass wrote the frame. refusal is the caller's reason not to capture this frame
-    // (compare on, a format the files cannot hold), or null. Returns whether the copies were recorded.
-    bool Record(Backend& backend, Recording& recording, Payload&& payload, const char* refusal)
+    // (compare on, a format the files cannot hold), or null. Returns whether the copies were recorded; when this call
+    // took the request and did not record, why is set to the reason it settled (null otherwise).
+    bool Record(Backend& backend, Recording& recording, Payload&& payload, const char* refusal,
+                const char** why = nullptr)
     {
+        if (why != nullptr)
+            *why = nullptr;
         if (phase_.load(std::memory_order_relaxed) != Phase::Requested)
             return false;
         Phase requested = Phase::Requested;
@@ -213,6 +228,8 @@ template <class Backend> class Session
 
         if (refusal != nullptr)
         {
+            if (why != nullptr)
+                *why = refusal;
             Settle(false, refusal, {});
             phase_.store(Phase::Idle, std::memory_order_release);
             return false;
@@ -224,6 +241,8 @@ template <class Backend> class Session
             // Never recorded into: nothing on the GPU can be using them.
             backend.Release(next.readbacks[0]);
             backend.Release(next.readbacks[1]);
+            if (why != nullptr)
+                *why = kReasonAllocation;
             Settle(false, kReasonAllocation, {});
             phase_.store(Phase::Idle, std::memory_order_release);
             return false;
@@ -321,6 +340,7 @@ template <class Backend> class Session
 
     std::atomic<Phase> phase_ { Phase::Idle };
     std::atomic<int64_t> requestedAt_ { 0 };
+    std::atomic<bool> gaveUp_ { false };
     mutable std::mutex outcomeMutex_;
     Outcome outcome_;
     // Render thread only.
@@ -341,6 +361,7 @@ struct ButtonInputs
     uint32_t debugView = 0;    // [DlssNr] DebugView
     Phase phase = Phase::Idle;
     bool directoryFailed = false;
+    bool gaveUp = false; // a recording never completed this session
 };
 
 struct ButtonState
@@ -385,6 +406,8 @@ inline ButtonState ButtonFor(const ButtonInputs& in)
         state.reason = kWritingWords;
     else if (in.directoryFailed)
         state.reason = kReasonDirectory;
+    else if (in.gaveUp)
+        state.reason = kReasonNoCompletion;
     else
         state.enabled = true;
     return state;

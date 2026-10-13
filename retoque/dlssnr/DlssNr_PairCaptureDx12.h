@@ -33,10 +33,9 @@ struct FrameFacts
     uint32_t compare = 0;
     uint32_t debugView = 0;
     float whitePoint = 0.0f;
-    uint64_t frame = 0;        // the pass's own dispatch counter
-    uint64_t present = 0;      // the present counter (State::frameCount)
-    std::string modelIdentity; // file attributes of the loaded model, as the timing metadata labels it
-    std::string settings;      // TimingContract: every setting that shapes the picture
+    uint64_t frame = 0;   // the pass's own dispatch counter
+    uint64_t present = 0; // the present counter (State::frameCount)
+    std::string settings; // TimingContract: every setting that shapes the picture
 };
 
 void Poll();

@@ -4391,8 +4391,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             timing.SetMetadata(TimingMetadata(
                 cfg, passSnapshot, initialTiming.evaluationId, observedFrame, beforeUpscale ? "before" : stageForTiming,
                 guideWidth, guideHeight, width, height, workWidth, workHeight, workScale, modelReset,
-                g_capture.isActive(), isHdrBuffer, static_cast<unsigned>(desc.Format), cadence.cadence, carried,
-                enlargePlan.transfer, DlssNr::Enlarge::Token(enlargePlan.why)));
+                g_capture.isActive() || DlssNr::PairCapture::Wanted(), isHdrBuffer, static_cast<unsigned>(desc.Format),
+                cadence.cadence, carried, enlargePlan.transfer, DlssNr::Enlarge::Token(enlargePlan.why)));
             timingMetadataReady = true;
         }
         catch (...)
@@ -5693,7 +5693,6 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             facts.whitePoint = resolveParams.WhitePoint;
             facts.frame = g_frames;
             facts.present = observedFrame;
-            facts.modelIdentity = TimingModelIdentity();
             facts.settings = TimingContract(cfg, passSnapshot, beforeUpscale ? "before" : stageForTiming, guideWidth,
                                             guideHeight, width, height, workWidth, workHeight, workScale, isHdrBuffer,
                                             static_cast<unsigned>(desc.Format), cadence.cadence, enlargePlan.transfer,

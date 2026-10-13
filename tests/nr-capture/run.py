@@ -406,7 +406,9 @@ if poll < 0 or not dispatch.index('NotePulsePresent(State::Instance().frameCount
         'return false;'):
     fail('PairCapture::Poll() must come right after NotePulsePresent, before the first return in Dispatch')
 site = dispatch.find('if (wrote && DlssNr::PairCapture::Wanted())')
-if site < 0 or dispatch.count('DlssNr::PairCapture::Wanted()') != 1:
+if 'g_capture.isActive() || DlssNr::PairCapture::Wanted()' not in re.sub(r'\s+', ' ', dispatch):
+    fail('a frame that may carry the capture must be labelled capture_active in the GPU timing metadata')
+if site < 0 or dispatch.count('if (wrote && DlssNr::PairCapture::Wanted())') != 1:
     fail('the record site must be guarded by `wrote && DlssNr::PairCapture::Wanted()`, once')
 elif site < dispatch.index('g_nr.stabilizer->Dispatch('):
     fail('the copies must be recorded after the stabilizer, the last write to the target')
@@ -445,6 +447,16 @@ if len(reasons) < 15:
 for reason in reasons:
     if reason not in pack:
         fail(f'the capture reason {reason!r} has no pt-BR entry')
+
+# No file search or file read for a capture on the render thread: the model's facts are found by the writer.
+record_site = body_of(code_cpp, 'void AtRecordSite(')
+for token in ('FindModel', 'Describe(', 'TimingModelIdentity', 'file_size', 'exists('):
+    if token in record_site:
+        fail(f'AtRecordSite calls {token}: file work belongs on the writer thread')
+if 'NgxInfo::FindModel()' not in body_of(code_cpp, 'const ModelFacts& ModelFactsOnce()'):
+    fail("the model's facts must be found on the writer thread (ModelFactsOnce)")
+if 'TimingModelIdentity' in dispatch[site:site + 3000]:
+    fail('the record site must not read the model file (TimingModelIdentity) on the render thread')
 
 # Built: the translation unit is in both project files, once.
 for project in ('OptiScaler.vcxproj', 'OptiScaler.vcxproj.filters'):

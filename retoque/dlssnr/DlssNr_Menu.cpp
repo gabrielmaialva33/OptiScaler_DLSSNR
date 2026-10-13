@@ -176,6 +176,7 @@ static void RenderPairCapture(Config* config, bool nativeVulkan)
     in.debugView = config->DlssNrDebugView.value_or_default();
     in.phase = status.phase;
     in.directoryFailed = status.directoryFailed;
+    in.gaveUp = status.gaveUp;
     const auto button = PairCapture::ButtonFor(in);
     if (!button.shown)
         return;
