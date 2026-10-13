@@ -1,6 +1,6 @@
 # Documentation index
 
-This fork (OptiScaler_DLSSNR, being renamed Retoque) keeps upstream OptiScaler's own documents at the
+This fork (Retoque, `OptiScaler_DLSSNR` until 2026-10-13) keeps upstream OptiScaler's own documents at the
 repository root, where upstream has them: `README.md`, `Features.md`, `Spoofing.md`, `Issues.md`,
 `Changelog.md`, `CONTRIBUTING.md` and the INI reference `Config.md`. Everything this fork added lives
 here or beside the code it describes.

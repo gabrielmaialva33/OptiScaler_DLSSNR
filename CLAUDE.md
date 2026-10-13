@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A fork chain, three deep. Upstream **optiscaler/OptiScaler** (a Windows DLL that sits between a game and
 its upscaler / frame-gen SDKs and swaps the backend) → **Dagherbou/OptiScaler_DLSSNR** (adds the DLSS 5
 Neural Rendering module under `OptiScaler/dlssnr/`, which this fork moved to `retoque/dlssnr/`) →
-**gabrielmaialva33/OptiScaler_DLSSNR** (this repo), which adds Linux/Proton overlay patches on top.
+**gabrielmaialva33/retoque** (this repo, Retoque; named `OptiScaler_DLSSNR` until 2026-10-13, and the old
+URLs redirect), which adds Linux/Proton overlay patches on top.
 
 - Working and default branch: `dlss-neural-rendering`. It began as Dagherbou's `v0.2.0-dlssnr`
   (commit `9737616`) plus our Linux patches.

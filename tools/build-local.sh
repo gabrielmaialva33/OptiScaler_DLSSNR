@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local OptiScaler_DLSSNR build with msvc-wine (MSVC 14.44 + Windows SDK under Wine).
+# Local Retoque build with msvc-wine (MSVC 14.44 + Windows SDK under Wine).
 # Usage: tools/build-local.sh [Release|Debug] [extra msbuild args]   (also ./build-local.sh, a root stub; any cwd works)
 # Outputs go to x64/<Config>/ and OptiScaler.dll + nvngx.dll_dlssnr.dll are copied to x64/out/.
 set -euo pipefail
