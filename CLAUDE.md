@@ -142,7 +142,7 @@ exist in the solution but CI and every script build only x64. Configurations: `D
 WINEPREFIX=~/.local/opt/msvc-wineprefix WINEDEBUG=-all ~/.local/opt/msvc/bin/x64/msbuild \
   OptiScaler/dlssnr/forwarder/dlssnr_forwarder.vcxproj /nologo /v:normal \
   /p:Configuration=Release /p:Platform=x64 \
-  '/p:SolutionDir=Z:\home\gabrielmaia\Projects\personal\OptiScaler_DLSSNR\' \
+  "/p:SolutionDir=Z:$(pwd | tr / '\\')\\" \
   /p:CL_MPCount=4 /p:WholeProgramOptimization=true \
   /p:PreBuildEventUseInBuild=false /p:PostBuildEventUseInBuild=false > /tmp/fwd.log 2>&1
 ./build-local.sh Release /p:CL_MPCount=4 > /tmp/release.log 2>&1
@@ -297,7 +297,7 @@ no `EvaluateAfterUpscale` to hook. Both measured working on 2026-09-18.
   already has `nvapi64.dll`, so no `NvapiPath` is needed. Pick **DirectX 11** in Steam's launch
   selector; the DX12 entry runs a different executable in a different directory.
 
-- **DOOM Eternal** (782330), `/mnt/games/SteamLibrary/.../DOOMEternal`, installed as `winmm.dll` (the
+- **DOOM Eternal** (782330), a second Steam library (`<library>/steamapps/common/DOOMEternal`), installed as `winmm.dll` (the
   exe imports no dxgi; id Tech 7 is pure Vulkan). NR runs on the Vulkan route (`EvaluateAfterUpscaleVk`,
   3440x1440 with DLSS Quality guides at 2293x960). The game presents from its **compute** queue family,
   so the Vulkan overlay draws on the graphics queue with a queue-family transfer around it (see

@@ -48,7 +48,7 @@ check that all four sites call it and that GPU timing remains outside it.
 (2026-09-17, build `a9371aab` / `20260917_124410`): 486 lines over 54693 ms, with the call site's quantisation already
 applied. It carries the milliseconds, the paper white, and an id for the rest of the line.
 
-Verified against `/home/gabrielmaia/.local/share/Steam/steamapps/common/Crimson Desert/bin64/OptiScaler.log`
+Verified against `~/.local/share/Steam/steamapps/common/Crimson Desert/bin64/OptiScaler.log`
 (1,774,012 bytes), SHA-256
 `708361a76dd3f5f2162c1f1870fccc122fcdb07543efa3fa6f39bf4b357ea52b`.
 Line 1 identifies the build; the 486 composition entries span lines 3649–7128,
