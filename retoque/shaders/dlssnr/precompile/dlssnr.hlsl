@@ -31,6 +31,7 @@ cbuffer Params : register(b0)
     float gExposurePreMul; // preExposure * trim, so the live white point is gExposurePreMul / exposure
     uint  gForceResidual;  // 1 = matched residual even at the frame's size (peripheral compression), else 0
     uint  gHighlightRecovery; // 1 = NVIDIA's highlight recovery after the composition (linear HDR only), else 0
+    float gResidualLimit;     // stops the model may move a pixel's light, either way, inside the guard; 0 = off
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -1146,6 +1147,16 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // can still lose a few percent, not a third.
     const float drop = lerp(1.0 / guard, 1.0, smoothstep(0.6, 1.1, originalLuma));
     float boundedRatio = clamp(amplified, drop, lift);
+
+    // The residual limit ([DlssNr] ResidualLimit, docs/dlssnr/design/residual-limit.md), off at 0: how far, in stops,
+    // the model may move any pixel's light, either way, after the guard has had its say. The guard is shaped -- no
+    // lift near black, no drop near white -- and sized for a light source; this is flat and sized for the model's
+    // re-decisions, the blotch that brightens a patch of wall by a stop one frame and not the next. Symmetric in
+    // stops, so it favours neither direction, and still a ratio, so the correction below carries it to the composed
+    // pixel and the colour blend keeps its luminance. Narrower only: inside the guard it can never widen it. Off is
+    // the branch not taken, so the composition is what it was; strength zero returned the frame long before here.
+    if (gResidualLimit > 0.0)
+        boundedRatio = clamp(boundedRatio, exp2(-gResidualLimit), exp2(gResidualLimit));
 
     // Exactly one while the ratio is already inside the guard, so a frame that never needed bounding
     // is untouched rather than rounded, and strength zero stays bit-identical.

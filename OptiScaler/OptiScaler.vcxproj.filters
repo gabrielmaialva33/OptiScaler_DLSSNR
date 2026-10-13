@@ -1876,6 +1876,12 @@
     <ClInclude Include="..\retoque\shaders\dlssnr\DlssNr_DetailStats_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\retoque\shaders\dlssnr\DlssNr_Pulse_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_Pulse.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClCompile Include="..\retoque\misc\Localization.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1913,6 +1919,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\retoque\shaders\dlssnr\DlssNr_DetailStats_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\retoque\shaders\dlssnr\DlssNr_Pulse_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

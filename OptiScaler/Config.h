@@ -382,6 +382,19 @@ class Config
     CustomOptional<uint32_t> DlssNrCadence { 1 };
     CustomOptional<bool> DlssNrCadenceWithFrameGen { false };
 
+    // Smoothing for model cadence, on its own frames only: a new model answer is walked in from the carried edit over
+    // the whole interval instead of replacing it at once, and the mean light of what the cadence shows may move by at
+    // most 1.5 stops a second while the frame's own light holds still. Display only; the stored edit and the model's
+    // history stay the model's own. On by default -- it only acts once Cadence is above 1, which is off by default.
+    // See docs/dlssnr/design/cadence-smoothing.md.
+    CustomOptional<bool> DlssNrCadenceSmoothing { false };
+
+    // The pulse metric: the light step per frame -- the change, in stops, of log2(output light / frame light) from one
+    // frame to the next -- split into model frames and carried frames, so model cadence's pulse is a number. One
+    // small reduction a frame while on, read back a few frames late; off builds and records nothing. Shown in the
+    // menu and logged at most every 10 s. D3D12 only. See docs/dlssnr/design/pulse-metric.md.
+    CustomOptional<bool> DlssNrPulseMetric { false };
+
     // The most the pass may multiply or divide a pixel by. A detail pass has no business restyling a
     // light source, whatever the model returns.
     CustomOptional<float> DlssNrMaxRatio { 2.0f };
@@ -392,6 +405,12 @@ class Config
     // nothing on a frame the game already tone mapped. Off by default, which is the composition as it was.
     // docs/dlssnr/design/hdr-highlight-recovery.md.
     CustomOptional<bool> DlssNrHighlightRecovery { false };
+
+    // The residual limit: how far, in stops, the model may move any pixel's light, either way, on the luminance ratio
+    // the composition applies -- a flat bound inside the guard, against blotches and flicker where the model re-decides
+    // a patch by a lot. 0 is off, which is the composition as it was; up to 2. Not applied by the replace curves
+    // (ReversibleMode 2 and 4), which skip the composition. docs/dlssnr/design/residual-limit.md.
+    CustomOptional<float> DlssNrResidualLimit { 0.0f };
 
     // How a model that worked below the frame's size is brought back. 0 classic, 1 matched
     // residual, 3 matched residual with a sharp (Catmull-Rom) enlargement of the edit, 2 matched residual

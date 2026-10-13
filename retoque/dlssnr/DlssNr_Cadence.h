@@ -34,6 +34,50 @@ constexpr float TapScale(uint32_t workWidth, uint32_t frameWidth)
 // The coarse edit's extent for a working extent.
 constexpr uint32_t LowExtent(uint32_t workExtent) { return (workExtent + kLowBlock - 1) / kLowBlock; }
 
+// Smoothing ([DlssNr] CadenceSmoothing, docs/dlssnr/design/cadence-smoothing.md). Two things, one switch, both on the
+// cadence's own frames only, both display-only -- the stored edit and the model's history stay the model's own:
+//
+// - The spread. A new model answer arrives over S frames instead of replacing the carried edit at once: on the k-th
+//   frame since the model frame (k = 0 is the model frame) FadeWeight(k, S) of what is shown is still the previous
+//   answer, moved along the same chain as the new one. S is the whole interval, so the new answer is whole on the
+//   last carried frame and never interrupted by the next model frame (janblade's spread, Skynizz's crossfade).
+// - The light limiter. The mean light of what the cadence shows, relative to the proxy, may move by at most
+//   kLightRate stops per second while the frame's own light holds still (Skynizz's anti light pop-in, made global).
+//
+// The limiter's numbers are fixed, as the carry's are. 1.5 stops/s fades a 0.5 stop re-grade in over a third of a
+// second; a step of the frame's own light of 0.15 stop or more in one frame is a cut, a flash or another room, and
+// the limit lets go for that frame; no frame's light is moved by more than a stop, either way.
+constexpr float kLightRate = 1.5f;
+constexpr float kLightInputStops = 0.15f;
+constexpr float kLightMaxGainStops = 1.0f;
+constexpr uint32_t kLightGrid = 16; // tiles per axis the limiter's light is summed over (dlssnr_cadence.hlsl)
+
+// The spread's length for a cadence: the whole interval. Shorter concentrates each answer's change on fewer frames,
+// which is the pulse again at a smaller size (Skynizz measured 6.5x the other frames' step with a 3-frame walk at an
+// 8-frame interval); longer would be interrupted by the next model frame and drop what it had blended in at once.
+constexpr uint32_t SpreadFor(uint32_t cadence) { return cadence; }
+
+// The share of the shown edit that is still the previous answer on the k-th frame since the model frame: 1 - (k+1)/S.
+// The new answer arrives in S equal steps, 1/S of it on the model frame, all of it on frame S-1. Zero from there on,
+// and for any S under 2.
+constexpr float FadeWeight(uint32_t k, uint32_t spread)
+{
+    return spread <= 1 || k + 1 >= spread ? 0.0f : 1.0f - (float) (k + 1) / (float) spread;
+}
+
+// The limiter's step, in stops, for a frame that took `seconds`. The time is clamped: a hitch must not let a whole
+// re-grade through in one frame, and a frame time of nothing must not freeze the light.
+constexpr float kLightMinSeconds = 1.0f / 500.0f;
+constexpr float kLightMaxSeconds = 1.0f / 15.0f;
+
+constexpr float LimitStep(float seconds)
+{
+    const float t = !(seconds >= kLightMinSeconds) ? kLightMinSeconds
+                    : seconds > kLightMaxSeconds   ? kLightMaxSeconds
+                                                   : seconds;
+    return kLightRate * t;
+}
+
 // The configured cadence as the pass uses it. 1 is the model every frame, which is off; 2..4 are allowed.
 // Anything else -- 0, a hand-edited 9 -- reads as off rather than as the nearest legal value, so a typo
 // never turns on an option that costs stability.
@@ -91,6 +135,7 @@ struct Inputs
     bool capture = false;           // a matched before/after capture is running
     bool surfaces = true;           // the cadence's surfaces exist
     bool reversibleReplace = false; // ReversibleMode 2 or 4 (replace curves flash under carried edits)
+    bool smoothing = false;         // [DlssNr] CadenceSmoothing: the spread and the light limiter
 };
 
 // Why the cadence cannot run, or None. When several hold, the first one a user can do least about is named.
@@ -241,6 +286,13 @@ struct Decision
     Reason reason = Reason::None;
     uint32_t cadence = 1; // what is in effect: 1 whenever the model runs every frame because of a refusal
     uint32_t age = 0;     // presents the pass ran at since the last model frame, this one included
+
+    // Smoothing (cadence-smoothing.md). Only ever set on a running cadence's own frames: a forced model frame or a
+    // refusal shows the model's answer as it is, and the limiter starts over after it.
+    bool fade = false;       // a scheduled model frame: the new answer is blended in from the carried edit
+    float fadeWeight = 0.0f; // the share of the previous answer shown on this frame (FadeWeight)
+    bool limit = false;      // the light limiter runs on this frame
+    bool limitReset = false; // ... with no limited frame before it to hold this one to
 };
 
 // Age is counted in presents the pass ran at, never by parity. A raw present delta would be wrong: the
@@ -255,7 +307,10 @@ class Scheduler
     uint32_t _carried = 0;          // carried frames since the last model frame
     uint32_t _framesSinceModel = 0; // frames since the last successful model frame; survives Drop()
     bool _seen = false;
-    bool _edit = false; // an edit is stored, from the last model frame
+    bool _edit = false;    // an edit is stored, from the last model frame
+    bool _faded = false;   // the last model frame faded in from the carried edit: its fade is stored
+    bool _limited = false; // the last frame ran the light limiter
+    uint32_t _spread = 1;  // the spread the last scheduled model frame was decided with; its walk keeps it
 
   public:
     // One call per Dispatch. resetPending is anything that will reset the model's history this frame -- the
@@ -304,34 +359,52 @@ class Scheduler
         }
 
         d.age = _carried + 1;
+        const uint32_t spread = SpreadFor(in.requested);
         if (d.age >= in.requested)
         {
             d.reason = Reason::Scheduled;
             d.handChain = _carried > 0;
             d.record = true;
             d.staleHistory = !d.handChain && _framesSinceModel > 0;
+            // The model frame after carried ones fades in from the carried edit: what was on screen a frame ago, moved
+            // here, is what the new answer is walked to from.
+            d.fade = in.smoothing && d.handChain;
+            d.fadeWeight = d.fade ? FadeWeight(0, spread) : 0.0f;
+            _spread = spread;
+            d.limit = d.fade;
+            d.limitReset = d.limit && !_limited;
             return d;
         }
 
         d.runModel = false;
         d.reason = Reason::Carried;
         d.chainStart = _carried == 0;
+        // The rest of the walk, if the model frame started one, at the length it started with: a cadence changed in the
+        // middle neither drops the rest of it in one frame nor stretches it past the next model frame.
+        d.fadeWeight = in.smoothing && _faded ? FadeWeight(d.age, _spread) : 0.0f;
+        d.limit = in.smoothing;
+        d.limitReset = d.limit && !_limited;
         return d;
     }
 
-    // The model ran -- every requested pass -- and its edit is stored: the cadence starts counting from here.
-    void Recorded()
+    // The model ran -- every requested pass -- and its edit is stored: the cadence starts counting from here. faded:
+    // it was also shown faded in from the carried edit, under the light limiter, and its fade is stored for the
+    // carried frames after it.
+    void Recorded(bool faded = false)
     {
         _edit = true;
         _carried = 0;
         _framesSinceModel = 0;
+        _faded = faded;
+        _limited = faded;
     }
 
-    // A carried frame was recorded.
-    void Carried()
+    // A carried frame was recorded. limited: under the light limiter.
+    void Carried(bool limited = false)
     {
         ++_carried;
         ++_framesSinceModel;
+        _limited = limited;
     }
 
     // Nothing usable is stored: a failed or partial model frame, a failed carry, any forced frame.
@@ -345,9 +418,13 @@ class Scheduler
             _framesSinceModel = 0;
         _edit = false;
         _carried = 0;
+        _faded = false;
+        _limited = false;
     }
 
     bool HasEdit() const { return _edit; }
+    bool Faded() const { return _faded; }
+    bool Limited() const { return _limited; }
     uint32_t CarriedSinceModel() const { return _carried; }
     uint32_t FramesSinceModel() const { return _framesSinceModel; }
 };

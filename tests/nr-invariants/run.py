@@ -170,6 +170,11 @@ if (precompile / 'DlssNr_DetailStats_Shader.cso').exists():
     targets.append(('DlssNr_DetailStats_Shader.cso', 'DlssNr_DetailStats_Shader.h', 'DlssNr_DetailStats_cso', b'DXBC'))
 elif (precompile / 'DlssNr_DetailStats_Shader.h').exists():
     fail('DlssNr_DetailStats_Shader.h is committed without DlssNr_DetailStats_Shader.cso beside it')
+# The pulse metric (pulse-metric.md). Optional bytecode like the detail stats: without it the metric is unavailable.
+if (precompile / 'DlssNr_Pulse_Shader.cso').exists():
+    targets.append(('DlssNr_Pulse_Shader.cso', 'DlssNr_Pulse_Shader.h', 'DlssNr_Pulse_cso', b'DXBC'))
+elif (precompile / 'DlssNr_Pulse_Shader.h').exists():
+    fail('DlssNr_Pulse_Shader.h is committed without DlssNr_Pulse_Shader.cso beside it')
 # Peripheral compression's three passes (peripheral-compression.md). Optional bytecode like the guide resample's:
 # none of the six files is a supported state (the feature says "unavailable"); any one of them commits to all
 # six, because DlssNr_Periphery_Dx12.cpp loads the three headers together and a .cso without its header, or a
@@ -209,6 +214,19 @@ with tempfile.TemporaryDirectory() as scratch:
 if len(failures) == before:
     print(f'PASS: {", ".join(header for _, header, _, _ in targets)} are byte-identical to '
           'create_header.py over the committed .cso and .spv')
+
+# Bytecode known to predate a source change. Whether a binary is the compile of its .hlsl needs dxc; what a host can
+# do is recognise binaries committed before a change that the C++ already relies on. A warning, not a failure: the
+# source and its bytecode are committed by different hands (the shader rebuild runs where the compiler prefix is
+# free), and the tree must stay testable in between. Drop an entry once its bytecode has been rebuilt.
+import hashlib
+PREDATES = [
+]
+for binary, digest, source, marker, what in PREDATES:
+    path = precompile / binary
+    if path.exists() and marker in (precompile / source).read_text() and \
+            hashlib.sha256(path.read_bytes()).hexdigest() == digest:
+        print(f'WARN: {binary} predates {what} in {source}: rebuild it before shipping a build (DEVELOPMENT.md rule 6)')
 
 # The synthesized-motion estimator (shaders/synth_motion): every committed .cso there, FidelityFX-derived
 # and NVOFA alike, named <stem>.cso -> <stem>_Shader.h, array <stem>_cso, as its build.sh writes them.

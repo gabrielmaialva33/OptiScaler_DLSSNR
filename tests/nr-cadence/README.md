@@ -1,13 +1,13 @@
 # Model cadence
 
 Run `python3 tests/nr-cadence/run.py` from the repository root. Needs Python and `g++` with C++20,
-ASan and UBSan. Builds into a temporary directory. `docs/dlssnr/design/model-cadence.md` is
-what is being tested.
+ASan and UBSan. Builds into a temporary directory. `docs/dlssnr/design/model-cadence.md` and
+`docs/dlssnr/design/cadence-smoothing.md` are what is being tested.
 
 ## What it runs
 
 **The scheduler** (`scheduler.cpp`), the production `retoque/dlssnr/DlssNr_Cadence.h` driven the
-way `DlssNr_Dx12::Dispatch` drives it: decide, then record, carry or drop. Eighteen cases:
+way `DlssNr_Dx12::Dispatch` drives it: decide, then record, carry or drop. Twenty-one cases:
 
 - off (`Cadence=1`, or anything outside 2..4) runs the model every frame and keeps no surfaces, so
   nothing is allocated or dispatched;
@@ -25,13 +25,18 @@ way `DlssNr_Dx12::Dispatch` drives it: decide, then record, carry or drop. Eight
   generation (and the opt-in), Hold frame, capture, no surfaces -- runs the model every frame with
   its own status text, and keeps or releases the surfaces as it should;
 - the status texts are distinct, name the cadence, and carry no bare `%` (the pt-BR pack would
-  reject it).
+  reject it);
+- smoothing: the walk's weights rise by 1/S a frame and reach the new answer on frame S-1, the light
+  limiter's step clamps a hitch and a frame of nothing; the fade only on a scheduled model frame, never a
+  forced one; its walk only after a model frame that faded, at the length that frame decided even if the
+  cadence changes mid-walk; the limiter on every frame of a running cadence and none other, starting over after
+  anything that was not one; nothing at all with smoothing off.
 
 **The per-pixel rules** (`rule.cpp`), the production
 `retoque/shaders/dlssnr/precompile/dlssnr_cadence_rule.h` -- the header the shader includes --
 with its texture loads turned into clamped array reads and the pass's five dispatches into loops in
 the order `DlssNr_Cadence_Dx12` records them. A smooth texture on an infinite plane and a stand-in
-model (a light sharpening and a lift; a strong lift on a red occluder) make eleven cases:
+model (a light sharpening and a lift; a strong lift on a red occluder) make twenty cases:
 
 - the depth mismatch tells a wall at 2 m from 6 m in a conventional 0..1 buffer, which plain
   relative depth cannot; the colour gate passes a lighting change on hue and partly on brightness and
@@ -46,7 +51,16 @@ model (a light sharpening and a lift; a strong lift on a red occluder) make elev
 - background an occluder uncovers restarts its chain from its own vector, never receives the
   occluder's edit, and is handed an off-picture vector for the model;
 - a surface the model frame never saw gets no fill at all: the pixel is the game's frame, exactly;
-- UI protection keeps the frame under the interface, in proportion to the alpha.
+- UI protection keeps the frame under the interface, in proportion to the alpha;
+- a replace curve's highlight reaches the clamp (why the cadence refuses replace modes under HDR);
+- smoothing: a carried frame at weight 0 is `CadenceSynthesize` to the bit even with the fade full of NaN,
+  and a fade that is not finite is dropped at any weight; a still view's drift between two answers arrives
+  in equal thirds at cadence 3; under an integer pan every frame of the walk is the straight line between
+  the two answers for the content under the pixel; a disocclusion and the interface take the new answer at
+  once; the light limiter passes, holds, lets go on a jump of the frame's own light, clamps its gain and
+  ignores what is not finite; its light and gain agree in both spaces; and a 0.85-stop re-grade on a still
+  view is held to 1.5 stops a second (32 frames at 60 fps) and then follows a jump of the frame's light at
+  once.
 
 **Source guards** (`run.py`) on the pass that runs them: its constant struct equals its cbuffer and
 fits a 256-byte view; every register is a root-signature slot and every unused one gets a null
@@ -56,8 +70,13 @@ decisions a running cadence makes; the refusals are wired to the inputs the desi
 `GatherFrame` marks guides as the game's; the pass is parked and freed with the rest; under peripheral
 compression the carry reads the packed vectors at scale 1, as the model does, rather than converting
 them a second time from the game's units (which carried every edit too far, and was caught only in
-review when the two features met); it is registered
-in the project; the licence ships and the rules carry their attribution.
+review when the two features met); smoothing's surfaces are built only with its switch, which is part of
+what the surfaces are built for and of the settings the scheduler watches; the fade is dispatched before
+the record and the show after it; the limiter's grid is one size on both sides and its group-wide modes run
+on whole groups only; the limiter leaves the interface out of its light and its gain; the digest by which the pass
+recognises the cadence bytecode from before smoothing is that binary's while it is committed; it is registered in the
+project; the licence ships and the rules carry their
+attribution.
 
 ## What it does not prove
 

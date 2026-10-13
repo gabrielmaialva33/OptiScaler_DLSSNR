@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Thirty-four suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
+**Host tier.** Thirty-six suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit,
@@ -50,6 +50,15 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   means (early end disables and stays blocked until acknowledged, middle ends warn then disable on the second,
   long ends are not blamed), who owns a marker (live second instance, reused pid), unreadable and read-only
   cases, and the call-site and session-only-disable source guards. The Windows layer is not exercised.
+- `nr-residual-limit` — the residual limit (`docs/dlssnr/design/residual-limit.md`): the composition's guard
+  and limit sliced out of `dlssnr.hlsl` and compiled against HLSL's intrinsics, held against the guard alone (off
+  is the guard to the bit; on bounds both ways in stops, only narrows, stays inside the guard, symmetric); the
+  host's clamp; source guards on where the constant is read, set, logged and shown. No GPU, no shader compile.
+- `nr-pulse-metric` — the pulse metric (`docs/dlssnr/design/pulse-metric.md`): the edit's light from the GPU's
+  grid, consecutive frames paired into light steps by kind (model, carried, every frame) with holes, gaps,
+  late and non-finite readbacks breaking the pair, two-second windows, reset, the menu's words, the log line and
+  its rate, and a synthetic cadence's pulse. Source guards on the pass and the renderer: off builds and records
+  nothing, one sample per present. No GPU, no shader.
 - `nr-present-sync` — what `[DlssNr] PresentSync=auto` means: the D3D12 present pass waits for its write-back
   only when frame generation could be involved (`DlssNr_PresentSync.h`). The wait itself is not exercised.
 - `nr-present-guides` — selection and completion tracking for the present-time guide snapshot ring
@@ -82,7 +91,10 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   in presents the pass ran at, the held reset, forced model frames, every refusal with its reason, off
   allocating nothing) and the production per-pixel rules -- the header the shader includes -- over
   synthetic sequences: a still scene carried exactly, integer and sub-pixel pans, an occluder
-  restarting the chain, no match no fill, UI protection. Source guards on the pass. No GPU, no shader.
+  restarting the chain, no match no fill, UI protection. Smoothing (`docs/dlssnr/design/cadence-smoothing.md`):
+  the walk's weights and per-frame decisions, weight 0 equal to the carry to the bit, a drift arriving in equal
+  steps and moved with the surface, disocclusions and the interface taking the answer at once, the light
+  limiter's rule, space and rate. Source guards on the pass. No GPU, no shader.
 - `nr-dispatch` — composition constants, descriptor slots and partial initialization cleanup.
 - `nr-enlarge` — Transfer 2, the model's edit enlarged by a private DLSS Super Resolution: the
   decision table (what the resolve is sent and why, supersampling and Vulkan included), the carrier

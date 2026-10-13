@@ -58,6 +58,8 @@
 #include <dlssnr/DlssNr_KernelProfile.h>
 #include "DlssNr_DetailStats_Dx12.h"
 #include <dlssnr/DlssNr_DetailStats.h>
+#include "DlssNr_Pulse_Dx12.h"
+#include <dlssnr/DlssNr_Pulse.h>
 #include <dlssnr/DlssNr_PresentGuideRing.h>
 
 namespace
@@ -1257,6 +1259,7 @@ struct NrRetired
     DlssNr_Cadence_Dx12* cadence = nullptr;
     NrEnlarger* enlarger = nullptr;
     DlssNr_DetailStats_Dx12* detailStats = nullptr;
+    DlssNr_Pulse_Dx12* pulse = nullptr;
 };
 
 std::vector<NrRetired> g_nrRetired;
@@ -1393,6 +1396,7 @@ void TickNrRetired()
         delete retired.uiMask;
         delete retired.cadence;
         delete retired.detailStats;
+        delete retired.pulse;
 
         if (retired.enlarger != nullptr)
             enlargers.push_back(retired.enlarger);
@@ -1442,6 +1446,21 @@ void ParkNrDetailStats(DlssNr_DetailStats_Dx12*& detailStats)
         r.usage = g_usage;
     r.detailStats = detailStats;
     detailStats = nullptr;
+    g_nrRetired.push_back(r);
+}
+
+// The pulse metric's pass, parked like the rest: its last recordings still reference its buffers and heaps.
+void ParkNrPulse(DlssNr_Pulse_Dx12*& pulse)
+{
+    if (!pulse)
+        return;
+
+    NrRetired r;
+    r.tracked = g_tracked;
+    if (g_tracked)
+        r.usage = g_usage;
+    r.pulse = pulse;
+    pulse = nullptr;
     g_nrRetired.push_back(r);
 }
 
@@ -1537,6 +1556,203 @@ static void DetailMeasureCopy(ID3D12GraphicsCommandList* cmdList, ID3D12Device* 
     Barrier(cmdList, from, D3D12_RESOURCE_STATE_COPY_SOURCE, fromState);
     Barrier(cmdList, copy, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     readable = true;
+}
+
+// The pulse metric ([DlssNr] PulseMetric, docs/dlssnr/design/pulse-metric.md): one small reduction a frame while it
+// is on, read back a few frames later and paired into light steps by the tracker. Everything but the published status
+// is touched under g_nrMutex only; the menu reads the status under the session's own mutex.
+struct PulseSession
+{
+    // What changes the meaning of a step: the frame's size and format, the cadence as configured and its smoothing,
+    // the residual limit. A change starts the window over, so no step spans it.
+    struct Shape
+    {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t format = 0;
+        uint32_t cadence = 1;
+        bool smoothing = false;
+        float residualLimit = 0.0f;
+
+        bool operator==(const Shape&) const = default;
+    };
+
+    struct Slot
+    {
+        bool pending = false;
+        bool stale = false; // recorded before the shape changed: collected, never counted
+        uint64_t seq = 0;
+        int64_t ms = 0;
+        DlssNr::Pulse::Kind kind = DlssNr::Pulse::Kind::Every;
+        uint32_t cadence = 1;
+        DlssNr::Submission::Usage usage {};
+    };
+
+    DlssNr_Pulse_Dx12* pass = nullptr;
+    Slot slots[DLSSNR_PULSE_SLOTS] {};
+    uint32_t next = 0;
+    // Presents at which the pass was asked to run, whether it then ran, skipped or failed: a measurement's sequence
+    // number. Counted whether or not the metric is on (one comparison a call), so the first measurement after it goes
+    // on has a number to pair with.
+    uint64_t entered = 0;
+    uint64_t lastEntered = 0;
+    uint64_t lastPresent = 0; // the present last measured
+    bool active = false;
+    bool saidFailure = false;
+    std::optional<Shape> shape;
+    DlssNr::Pulse::Tracker tracker;
+    DlssNr::Pulse::LogGate logGate;
+
+    std::mutex statusMutex;
+    DlssNr::PulseStatus status;
+};
+
+static PulseSession g_pulse;
+
+// At the top of every Dispatch that got as far as reading the present counter. A second call in one present is the
+// same present; where presents are not counted (the counter stays 0) every call is a new one.
+static void NotePulsePresent(uint64_t present)
+{
+    if (present == 0 || present != g_pulse.lastEntered)
+        ++g_pulse.entered;
+    g_pulse.lastEntered = present;
+}
+
+static void PublishPulse(bool running, bool failed)
+{
+    std::lock_guard<std::mutex> lock(g_pulse.statusMutex);
+    g_pulse.status.running = running;
+    g_pulse.status.failed = failed;
+    g_pulse.status.words = g_pulse.tracker.Latest().Words();
+}
+
+// Off: the pass is parked, the readings forgotten. Its slots' readbacks may still be in flight; they belong to the
+// parked object and are freed with it.
+static void StopPulseLocked()
+{
+    if (!g_pulse.active && g_pulse.pass == nullptr)
+        return;
+
+    ParkNrPulse(g_pulse.pass);
+    for (auto& slot : g_pulse.slots)
+        slot = {};
+    g_pulse.next = 0;
+    g_pulse.active = false;
+    g_pulse.saidFailure = false;
+    g_pulse.shape.reset();
+    g_pulse.tracker.Reset();
+    g_pulse.logGate.Reset();
+    PublishPulse(false, false);
+}
+
+// Once per Dispatch, after everything that writes the target. Collects the readbacks that completed, oldest first;
+// starts over if what is measured changed; then measures this frame if the pass wrote it. A present it cannot measure
+// -- the pass returned early, did not write, the slot is still in flight, the list cannot be tracked -- still took a
+// sequence number in NotePulsePresent, so the pair across it is broken rather than bridged.
+static void UpdatePulse(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, bool enabled, ID3D12Resource* target,
+                        ID3D12Resource* input, bool wrote, uint32_t width, uint32_t height, uint32_t format,
+                        uint32_t cadenceRequested, bool cadenceSmoothing, float residualLimit, uint32_t cadenceInEffect,
+                        bool carried, uint64_t present, int64_t nowMs)
+{
+    if (!enabled || !DlssNr_Pulse_Dx12::Available())
+    {
+        StopPulseLocked();
+        return;
+    }
+
+    if (g_pulse.pass != nullptr && !g_pulse.pass->BuiltFor(device))
+        StopPulseLocked();
+
+    if (g_pulse.pass == nullptr)
+    {
+        // A failed pass is kept, so it is not rebuilt, and logged again, every frame.
+        g_pulse.pass = new DlssNr_Pulse_Dx12("DLSS-NR pulse", device);
+        g_pulse.active = true;
+        if (!g_pulse.pass->IsInit())
+            LOG_ERROR("DLSS-NR pulse: the measuring pass could not be built; the metric is off for this device");
+        PublishPulse(g_pulse.pass->IsInit(), !g_pulse.pass->IsInit());
+    }
+
+    if (!g_pulse.pass->IsInit())
+        return;
+
+    // The readbacks whose recordings completed, in the order they were recorded.
+    uint32_t done[DLSSNR_PULSE_SLOTS];
+    uint32_t doneCount = 0;
+    for (uint32_t i = 0; i < DLSSNR_PULSE_SLOTS; ++i)
+    {
+        if (g_pulse.slots[i].pending && DlssNr::Submission::Completed(g_pulse.slots[i].usage))
+            done[doneCount++] = i;
+    }
+    std::sort(done, done + doneCount,
+              [](uint32_t a, uint32_t b) { return g_pulse.slots[a].seq < g_pulse.slots[b].seq; });
+
+    for (uint32_t k = 0; k < doneCount; ++k)
+    {
+        auto& slot = g_pulse.slots[done[k]];
+        slot.pending = false;
+        if (slot.stale)
+            continue;
+
+        if (g_pulse.tracker.Add(slot.seq, slot.ms, slot.kind, g_pulse.pass->Light(done[k]), slot.cadence))
+        {
+            PublishPulse(true, false);
+            if (g_pulse.logGate.Due(nowMs))
+                LOG_INFO("{}", g_pulse.tracker.Latest().LogLine());
+        }
+    }
+
+    const PulseSession::Shape shape {
+        width, height, format, cadenceRequested, cadenceRequested > 1 && cadenceSmoothing, residualLimit
+    };
+    if (!g_pulse.shape || !(*g_pulse.shape == shape))
+    {
+        g_pulse.shape = shape;
+        g_pulse.tracker.Reset();
+        g_pulse.logGate.Reset();
+        for (auto& slot : g_pulse.slots)
+            slot.stale = slot.pending;
+        PublishPulse(true, false);
+    }
+
+    // One measurement per present: a title that runs the pass twice in one shows two views, and a step between them
+    // is not a step in time. Where presents are not counted (the counter stays 0) every call is measured.
+    if (present != 0 && present == g_pulse.lastPresent)
+        return;
+    g_pulse.lastPresent = present;
+    const uint64_t seq = g_pulse.entered;
+
+    auto& slot = g_pulse.slots[g_pulse.next];
+    if (wrote && target != nullptr && input != nullptr && !slot.pending)
+    {
+        if (!DlssNr::Submission::Track(cmdList, slot.usage))
+        {
+            if (!g_pulse.saidFailure)
+                LOG_INFO("DLSS-NR pulse: this command list cannot be tracked ({}); frames on it are not measured",
+                         DlssNr::Submission::LastRefusal());
+            g_pulse.saidFailure = true;
+        }
+        else
+        {
+            // The target rests in UNORDERED_ACCESS between the pass's writes; the untouched copy is readable already.
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            const bool recorded = g_pulse.pass->Record(cmdList, target, input, width, height, g_pulse.next);
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+            if (recorded)
+            {
+                slot.pending = true;
+                slot.stale = false;
+                slot.seq = seq;
+                slot.ms = nowMs;
+                slot.kind = DlssNr::Pulse::KindOf(cadenceInEffect, carried);
+                slot.cadence = cadenceRequested;
+                g_pulse.next = (g_pulse.next + 1) % DLSSNR_PULSE_SLOTS;
+            }
+        }
+    }
 }
 
 void ParkAltSurfaces()
@@ -3076,6 +3292,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // NR here: the forwarder already refuses to enter the model again, and this stops asking.
     NoteModelFault();
 
+    // The pulse metric's sequence: every present the pass is asked to run at, counted before the first early return,
+    // so one it skips breaks a pair of light steps instead of being bridged (docs/dlssnr/design/pulse-metric.md).
+    NotePulsePresent(State::Instance().frameCount);
+
     if (g_nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr || motion == nullptr ||
         output == nullptr)
     {
@@ -3186,6 +3406,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                                              : (dlssNrStage == 1 ? "after-fallback" : "after");
     const uint64_t observedFrame = State::Instance().frameCount;
     const auto now = std::chrono::steady_clock::now();
+
     const bool chainStable = !chainEnabled || g_chainSchedule.Stable(passSnapshot, now);
     if (chainEnabled && (!chainStable || !g_chainSchedule.Evaluate(observedFrame)))
     {
@@ -4008,6 +4229,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     cadenceInputs.capture = g_capture.isActive();
     cadenceInputs.reversibleReplace = isHdrBuffer && (cfg.DlssNrReversibleMode.value_or_default() == 2 ||
                                                       cfg.DlssNrReversibleMode.value_or_default() == 4);
+    // The spread and the light limiter (docs/dlssnr/design/cadence-smoothing.md). Part of what the surfaces are built
+    // for and of the settings the scheduler watches, so a toggle rebuilds them and drops the stored edit together.
+    cadenceInputs.smoothing = cfg.DlssNrCadenceSmoothing.value_or_default();
 
     // The carry works at the model's working size, on the proxy the model is shown; without the reduced
     // proxy's surface there is no such picture to carry onto.
@@ -4022,13 +4246,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
     else if (Cadence::BuildsSurfaces(cadenceRefusal))
     {
-        if (g_nr.cadence != nullptr && !g_nr.cadence->Fits(device, workWidth, workHeight))
+        if (g_nr.cadence != nullptr && !g_nr.cadence->Fits(device, workWidth, workHeight, cadenceInputs.smoothing))
             ParkNrCadence(g_nr.cadence);
         if (g_nr.cadence == nullptr)
-            g_nr.cadence = new DlssNr_Cadence_Dx12("DLSS-NR cadence", device, workWidth, workHeight);
+            g_nr.cadence =
+                new DlssNr_Cadence_Dx12("DLSS-NR cadence", device, workWidth, workHeight, cadenceInputs.smoothing);
     }
     cadenceInputs.surfaces = proxyAtWorkSize && g_nr.cadence != nullptr && g_nr.cadence->IsInit() &&
-                             g_nr.cadence->Fits(device, workWidth, workHeight);
+                             g_nr.cadence->Fits(device, workWidth, workHeight, cadenceInputs.smoothing);
 
     // Everything whose change makes the stored edit describe another picture: what the model reads, and the
     // proxy it reads it from. Composition sliders stay out -- the edit is taken before composition.
@@ -4056,6 +4281,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     cadenceSettings = Cadence::Mix(cadenceSettings, frame.MotionVectorsLowResolution ? 1u : 0u);
     cadenceSettings = Cadence::Mix(cadenceSettings, frame.MvScaleX);
     cadenceSettings = Cadence::Mix(cadenceSettings, frame.MvScaleY);
+    // Not something the model reads: a toggle builds the surfaces anew (Fits), and their stored edit goes with them.
+    cadenceSettings = Cadence::Mix(cadenceSettings, cadenceInputs.smoothing ? 1u : 0u);
 
     const Cadence::Signature cadenceSignature {
         width,
@@ -4078,6 +4305,18 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count(), cadenceResetPending);
     const bool carried = !cadence.runModel;
     PublishCadence(cadence);
+
+    // What smoothing does on this frame, for the carry, the fade and the light limiter: the walk's share, and the
+    // limiter's step for the time since the pass last ran (cadence-smoothing.md). A gap is clamped by LimitStep, and
+    // a long one forced a model frame anyway, after which the limiter starts over.
+    static auto cadenceLastRun = now;
+    DlssNr_Cadence_Dx12::Smooth cadenceSmooth {};
+    cadenceSmooth.fadeWeight = cadence.fadeWeight;
+    cadenceSmooth.limit = cadence.limit;
+    cadenceSmooth.limitReset = cadence.limitReset;
+    cadenceSmooth.limitStep = Cadence::LimitStep(std::chrono::duration<float>(now - cadenceLastRun).count());
+    cadenceSmooth.passthrough = !isHdrBuffer;
+    cadenceLastRun = now;
 
     // A model frame not handed the chain while its history is older than one frame: the game's vectors would
     // misalign that history by every frame since, so it starts over (optimizer-fps-dlss5 fe67a80).
@@ -4794,10 +5033,12 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // texture has the shape the guide match already hands over. A forced model frame keeps the game's vectors.
     float modelMvScaleX = guideMvScaleXToWork;
     float modelMvScaleY = guideMvScaleYToWork;
+    bool cadenceChainHanded = false; // the chain was handed: a smoothed model frame can fade in along it
     if (cadence.handChain && g_nr.cadence != nullptr)
     {
         if (ID3D12Resource* chainMotion = g_nr.cadence->ModelMotion(cmdList, cadenceFrame))
         {
+            cadenceChainHanded = true;
             motionForModel = chainMotion;
             modelMotionWidth = workWidth;
             modelMotionHeight = workHeight;
@@ -4821,9 +5062,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // A carried frame: no model call and no extra pass. The proxy plus the last edit, moved along the chain,
         // is written where the model writes its answer, and the resolve below composes it as one. The pending
         // reset, if any, is held -- there is none here, since one forces a model frame -- and the menu keeps
-        // showing what the last model frame completed.
-        const bool carriedOk = g_nr.cadence != nullptr &&
-                               g_nr.cadence->Carry(cmdList, cadenceFrame, cadence.chainStart, uiAlpha, g_nr.output);
+        // showing what the last model frame completed. With smoothing, the walk's share of the last fade comes with
+        // it, and the light limiter holds what is shown.
+        const bool carriedOk = g_nr.cadence != nullptr && g_nr.cadence->Carry(cmdList, cadenceFrame, cadence.chainStart,
+                                                                              uiAlpha, cadenceSmooth, g_nr.output);
         result = carriedOk ? 1 : 0; // 1 is NVSDK_NGX_Result_Success: the resolve composes it like an answer
         g_activePasses = g_nr.cadencePasses;
     }
@@ -4945,8 +5187,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (!carried)
         g_nr.reset = false;
 
-    // Whether this model frame's edit was stored for the frames that carry it.
+    // Whether this model frame's edit was stored for the frames that carry it, and whether it was shown faded in from
+    // the carried edit, under the light limiter (cadence-smoothing.md).
     bool cadenceRecorded = false;
+    bool cadenceFaded = false;
 
     // Supersampling probe: report the model working ABOVE native so a test log tells us whether NGX even
     // accepts a super-native evaluate and what it returns. Once per working-size change, or on any error.
@@ -5030,6 +5274,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // Only where the encode compressed anything: on a frame the game already tone mapped the model saw the
         // frame as it is (docs/dlssnr/design/hdr-highlight-recovery.md). The shader gates on passthrough as well.
         resolveParams.HighlightRecovery = isHdrBuffer && cfg.DlssNrHighlightRecovery.value_or_default() ? 1u : 0u;
+        // The residual limit, in stops (docs/dlssnr/design/residual-limit.md), clamped to what its control offers so a
+        // hand-edited ini cannot hand the shader a negative or a NaN. 0 is off.
+        resolveParams.ResidualLimit = DlssNr::ResidualLimitStops(cfg.DlssNrResidualLimit.value_or_default());
 
         // The output stabilizer's two numbers, clamped to what its controls offer, so a hand-edited ini
         // cannot hand the shader a negative strength or a NaN. Read here because the composition report
@@ -5055,6 +5302,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             float transfer;
             float colour;
             float maxRatio;
+            float residualLimit;
             unsigned int highlightRecovery;
             unsigned int passthrough;
             unsigned int debugView;
@@ -5080,13 +5328,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             bool SameShape(const ComposeReport& other) const
             {
                 return transfer == other.transfer && colour == other.colour && maxRatio == other.maxRatio &&
-                       highlightRecovery == other.highlightRecovery && passthrough == other.passthrough &&
-                       debugView == other.debugView && compareMode == other.compareMode && residual == other.residual &&
-                       workW == other.workW && workH == other.workH && whiteSource == other.whiteSource &&
-                       whiteScale == other.whiteScale && whiteTrim == other.whiteTrim &&
-                       scanInverted == other.scanInverted && scanTrim == other.scanTrim &&
-                       scanEnabled == other.scanEnabled && hold == other.hold && stabilizer == other.stabilizer &&
-                       stabilizerTolerance == other.stabilizerTolerance &&
+                       residualLimit == other.residualLimit && highlightRecovery == other.highlightRecovery &&
+                       passthrough == other.passthrough && debugView == other.debugView &&
+                       compareMode == other.compareMode && residual == other.residual && workW == other.workW &&
+                       workH == other.workH && whiteSource == other.whiteSource && whiteScale == other.whiteScale &&
+                       whiteTrim == other.whiteTrim && scanInverted == other.scanInverted &&
+                       scanTrim == other.scanTrim && scanEnabled == other.scanEnabled && hold == other.hold &&
+                       stabilizer == other.stabilizer && stabilizerTolerance == other.stabilizerTolerance &&
                        std::equal(anchors.begin(), anchors.end(), other.anchors.begin(), other.anchors.end(),
                                   [](const auto& a, const auto& b) { return a.scan == b.scan && a.white == b.white; });
             }
@@ -5108,6 +5356,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             resolveParams.TransferStrength,
             resolveParams.ColourStrength,
             resolveParams.MaxRatio,
+            resolveParams.ResidualLimit,
             resolveParams.HighlightRecovery,
             resolveParams.Passthrough,
             resolveParams.DebugView,
@@ -5129,18 +5378,21 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         if (composeReporter.Observe(composeNow, DlssNr::LogRate::Clock::now()))
         {
-            LOG_INFO("DLSS-NR composition: paper white {:.2f}x, detail {:.2f}, colour {:.2f}, guard "
-                     "{:.1f}x, highlight recovery {}, colour transform {}, transfer {}, model {}x{}, debug view {}, "
-                     "compare {}, stabilizer {:.2f} (tolerance {:.2f})",
-                     composeNow.whitePoint, composeNow.transfer, composeNow.colour, composeNow.maxRatio,
-                     composeNow.highlightRecovery != 0 ? "on" : "off",
-                     composeNow.passthrough != 0 ? "off (frame already tone mapped)" : "on (linear HDR)",
-                     composeNow.residual == 1   ? "matched residual"
-                     : composeNow.residual == 2 ? "matched residual + DLSS"
-                     : composeNow.residual == 3 ? "matched residual, sharp"
-                                                : "classic",
-                     composeNow.workW, composeNow.workH, composeNow.debugView, composeNow.compareMode,
-                     composeNow.stabilizer, composeNow.stabilizerTolerance);
+            LOG_INFO(
+                "DLSS-NR composition: paper white {:.2f}x, detail {:.2f}, colour {:.2f}, guard "
+                "{:.1f}x, residual limit {}, highlight recovery {}, colour transform {}, transfer {}, model {}x{}, "
+                "debug view {}, compare {}, stabilizer {:.2f} (tolerance {:.2f})",
+                composeNow.whitePoint, composeNow.transfer, composeNow.colour, composeNow.maxRatio,
+                composeNow.residualLimit > 0.0f ? std::format("{:.2f} stops", composeNow.residualLimit)
+                                                : std::string("off"),
+                composeNow.highlightRecovery != 0 ? "on" : "off",
+                composeNow.passthrough != 0 ? "off (frame already tone mapped)" : "on (linear HDR)",
+                composeNow.residual == 1   ? "matched residual"
+                : composeNow.residual == 2 ? "matched residual + DLSS"
+                : composeNow.residual == 3 ? "matched residual, sharp"
+                                           : "classic",
+                composeNow.workW, composeNow.workH, composeNow.debugView, composeNow.compareMode, composeNow.stabilizer,
+                composeNow.stabilizerTolerance);
         }
 
         Barrier(cmdList, finalOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -5150,8 +5402,24 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // frames that carry it -- only when every requested pass completed, so a carried frame never shows a
         // partial chain's answer, and only when the scheduler asks, so a refused or switched-off cadence, or a
         // second call in one present, records nothing.
+        //
+        // With smoothing, a scheduled model frame first stores the carried answer minus its own -- reading the stored
+        // edit the record is about to replace -- and keeps its answer with the walk's first share of the carried one;
+        // after the record, that shown answer goes, under the light limiter, where the resolve reads. The record and
+        // the model's own history keep the model's answer as it is: smoothing is what is shown, never what is kept.
+        const bool cadenceFading = cadence.fade && cadenceChainHanded && cadence.record && !carried &&
+                                   chain.completed == passSnapshot.Count && g_nr.cadence != nullptr &&
+                                   g_nr.cadence->Fade(cmdList, cadenceFrame, uiAlpha, finalOutput, cadenceSmooth);
         if (cadence.record && !carried && chain.completed == passSnapshot.Count && g_nr.cadence != nullptr)
             cadenceRecorded = g_nr.cadence->Record(cmdList, cadenceFrame, finalOutput);
+        if (cadenceFading && cadenceRecorded)
+        {
+            Barrier(cmdList, finalOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cadenceFaded = g_nr.cadence->ShowFaded(cmdList, cadenceFrame, uiAlpha, cadenceSmooth, finalOutput);
+            Barrier(cmdList, finalOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
 
         // Supersampling down-leg. Average the Nx model answer back to native with the chosen filter, so
         // the resolve composites a native answer against the native proxy 1:1 -- a real area resample,
@@ -5565,6 +5833,15 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
 
+    // The pulse metric ([DlssNr] PulseMetric, docs/dlssnr/design/pulse-metric.md): the edit's light on every frame the
+    // pass wrote, its change from the frame before filed under the kind of frame this one was. Off builds and records
+    // nothing; on, one small reduction of the target against the untouched copy, after the stabilizer, so it measures
+    // what is shown.
+    UpdatePulse(cmdList, device, cfg.DlssNrPulseMetric.value_or_default(), target, g_nr.hdrCopy, wrote, width, height,
+                static_cast<uint32_t>(desc.Format), cadenceInputs.requested, cadenceInputs.smoothing,
+                DlssNr::ResidualLimitStops(cfg.DlssNrResidualLimit.value_or_default()), cadence.cadence, carried,
+                observedFrame, std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
+
     hdrRead.Restore();
 
     depthCloneRead.Restore();
@@ -5578,9 +5855,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // What the cadence learns from this frame: a stored edit restarts its count, a carried frame advances it,
     // and anything else -- a failed or partial model frame, a failed carry -- leaves nothing usable to carry.
     if (carried && result == 1)
-        g_cadence.Carried();
+        g_cadence.Carried(cadence.limit && g_nr.cadence != nullptr && g_nr.cadence->Smoothing());
     else if (!carried && cadenceRecorded)
-        g_cadence.Recorded();
+        g_cadence.Recorded(cadenceFaded);
     else
         g_cadence.Drop(carried, !carried && result == 1);
 
@@ -8294,6 +8571,14 @@ DetailMeasureStatus GetDetailMeasureStatus()
     return g_detailMeasure.status;
 }
 
+bool PulseAvailable() { return DlssNr_Pulse_Dx12::Available(); }
+
+PulseStatus GetPulseStatus()
+{
+    std::lock_guard<std::mutex> lock(g_pulse.statusMutex);
+    return g_pulse.status;
+}
+
 void Shutdown()
 {
     std::lock_guard<std::mutex> preLock(g_preMutex);
@@ -8336,6 +8621,7 @@ void Shutdown()
         delete r.uiMask;
         delete r.cadence;
         delete r.detailStats;
+        delete r.pulse;
         if (r.feature != nullptr && g_nr.release != nullptr)
             g_nr.release(r.feature);
 
@@ -8474,6 +8760,21 @@ void Shutdown()
     }
     g_detailMeasure.outputReadable[0] = g_detailMeasure.outputReadable[1] = false;
     g_detailMeasure.inputReadable[0] = g_detailMeasure.inputReadable[1] = false;
+
+    // The pulse metric's pass; the readings go with it, and the next session starts measuring afresh.
+    if (g_pulse.pass != nullptr)
+    {
+        delete g_pulse.pass;
+        g_pulse.pass = nullptr;
+    }
+    for (auto& slot : g_pulse.slots)
+        slot = {};
+    g_pulse.next = 0;
+    g_pulse.active = false;
+    g_pulse.shape.reset();
+    g_pulse.tracker.Reset();
+    g_pulse.logGate.Reset();
+    PublishPulse(false, false);
 
     if (g_nr.superDown != nullptr)
     {

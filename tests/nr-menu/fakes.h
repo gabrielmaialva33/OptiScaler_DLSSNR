@@ -56,6 +56,7 @@ struct Config {
  OptionalBool DlssNrUseProxy;
  OptionalU32 DlssNrCadence;
  OptionalBool DlssNrCadenceWithFrameGen;
+ OptionalBool DlssNrCadenceSmoothing;
  DlssNrResolvedPassSettings master;
  DlssNr::PassConfig::Overrides overrides;
  DlssNrPassSnapshot snapshot;

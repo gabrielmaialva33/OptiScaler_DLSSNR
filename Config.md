@@ -523,6 +523,14 @@ ScanMeter=auto
 ; true or false - Default (auto) is false
 HighlightRecovery=auto
 
+; Residual limit (docs/dlssnr/design/residual-limit.md). How far the model may move any pixel's light, either way, in
+; stops: 0.5 allows at most 1.41x brighter or darker, 1 at most 2x. A flat bound inside the highlight guard, against
+; blotches and flicker where the model re-decides a patch of the picture by a lot from one frame to the next. It
+; also caps the model's real corrections at the same size, so start high and lower it until the blotches go. Not
+; applied by the replace curves (ReversibleMode 2 and 4), which skip the composition.
+; 0 to 2 - Default (auto) is 0 (off)
+ResidualLimit=auto
+
 ; How a model running below full resolution is enlarged: 0 classic, 1 matched residual,
 ; 2 matched residual + DLSS, 3 matched residual with a sharp enlargement.
 ; Matched residual carries only the model's edit onto the full-size frame's proxy, avoiding
@@ -567,6 +575,24 @@ Cadence=auto
 ; flashes that grow with the multiplier and the cadence).
 ; true or false - Default (auto) is false
 CadenceWithFrameGen=auto
+
+; Smoothing for model cadence (docs/dlssnr/design/cadence-smoothing.md). Without it each new model answer replaces
+; the carried one on the frame the model runs, and the picture's light steps there every N frames (the pulse). With
+; it the new answer is walked in from the carried one over the whole interval, in N equal steps, and the mean light
+; of what the cadence shows may move by at most 1.5 stops a second while the frame's own light holds still. What is
+; shown only: the stored edit and the model's own history stay as the model made them. The previous answer stays on
+; screen, fading, for up to N-1 frames longer, which can trail a little where things move fast. Only acts with
+; Cadence above 1; costs two working-size textures and three small passes a frame while it does.
+; true or false - Default (auto) is false
+CadenceSmoothing=auto
+
+; The pulse metric (docs/dlssnr/design/pulse-metric.md). Measures the light step per frame: how far the picture's
+; light moves from one frame to the next because of the edit (the change of log2 output light / frame light, in
+; stops), split into frames where the model ran and frames where model cadence carried its edit. The step on the
+; model frames over the step on the carried ones is the cadence's pulse. Shown under Compare in the menu and logged
+; at most every 10 seconds. One small measuring pass a frame while on; off costs nothing. D3D12 only.
+; true or false - Default (auto) is false
+PulseMetric=auto
 
 ; Compare the clean upscaler frame with the NR edit: 0 off, 1 side by side, 2 wipe.
 ; Both comparison modes keep working with the menu closed.

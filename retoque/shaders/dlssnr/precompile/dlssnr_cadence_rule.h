@@ -10,6 +10,12 @@
 // (BeliyG3); Licenses/OptimizerFps_LICENSE.txt). The edge ramp that spares still pixels, the scaling with the
 // working size and the box-averaged coarse residual are not theirs.
 //
+// Smoothing (docs/dlssnr/design/cadence-smoothing.md) is at the end: the fade that walks a new model answer in from
+// the carried edit over the interval -- the idea is janblade's spread (DetailReuseSpread, OptiScaler-F5-DLSSNR-
+// Multipass a40bfac9/330db46c, GPL-3.0) and Skynizz's keyframe crossfade and soft refresh (optiscaler-dlss5 v1.2.1,
+// GPL-3.0); the code is ours, a non-recursive form of it -- and the light limiter, Skynizz's anti light pop-in rate
+// made a single global number. No code of either is ported.
+//
 // Plain C/HLSL subset: no templates, no references, no texture types, no swizzles beyond .x .y .z. Every
 // position is in working pixels with pixel centres at +0.5; a vector points from this frame back to an earlier
 // one (q = p + v), as the game's DLSS vectors do.
@@ -26,8 +32,10 @@
 //   CR_RESIDUAL(tx, ty)   the stored edit: the model's answer - its proxy                    -> float3
 //   CR_RESIDUAL_LOW(tx, ty) the coarse edit, at a coarse texel                               -> float3
 //   CR_UI(tx, ty)         this frame's UI alpha, 0..1 (read only when haveUi is set)         -> float
+//   CR_FADE(tx, ty)       the stored fade: the last model frame's carried answer minus its own  -> float3
+//                         (read only by CadenceSynthesizeFaded with a weight above zero)
 // In C++ also float2, float3 (members x, y, z; arithmetic with each other and with float) and dot, abs, min,
-// max, clamp, floor, frac, saturate, smoothstep, cos, sin and isfinite for floats. Name macro parameters
+// max, clamp, floor, frac, saturate, smoothstep, cos, sin, pow, exp2 and isfinite for floats. Name macro parameters
 // anything but x and y (see static_overlay_rule.h for why).
 
 #ifndef DLSSNR_CADENCE_RULE_H
@@ -289,12 +297,19 @@ CR_FN float3 CadenceCoarse(int lx, int ly, CadenceParams P)
     return n > 0.0f ? sum / n : float3(0.0f, 0.0f, 0.0f);
 }
 
-// A carried frame's answer at one pixel: the proxy now plus the last edit moved here, where the last model
-// frame showed this surface, and a fill where it did not (BeliyG3, PwTReproject, without the older passes,
-// the expected depth and the silhouette rules). acc is this frame's chain at the pixel.
-//
-// out = proxy + (1 - ui) * (accept * edit(q) + (1 - accept) * fill), clamped to [0, max(1, proxy)].
-CR_FN float3 CadenceSynthesize(int px, int py, float2 acc, CadenceParams P)
+// The carried edit at one pixel, before it is added to the proxy: the last edit moved here, where the last model
+// frame showed this surface, and a fill where it did not (BeliyG3, PwTReproject, without the older passes, the
+// expected depth and the silhouette rules). acc is this frame's chain at the pixel. accept is how much of add is
+// the moved edit rather than the fill, before UI protection; qx, qy are where it was read, held inside the image.
+struct CadenceCarry
+{
+    float3 add;
+    float accept;
+    float qx;
+    float qy;
+};
+
+CR_FN CadenceCarry CadenceCarryEdit(int px, int py, float2 acc, CadenceParams P)
 {
     const float W = (float) P.width;
     const float H = (float) P.height;
@@ -418,8 +433,162 @@ CR_FN float3 CadenceSynthesize(int px, int py, float2 acc, CadenceParams P)
     if (P.haveUi != 0)
         add = add * (1.0f - saturate(CR_UI(px, py)));
 
-    const float3 o = c + add;
+    CadenceCarry carry;
+    carry.add = add;
+    carry.accept = w;
+    carry.qx = qcx;
+    carry.qy = qcy;
+    return carry;
+}
+
+// An answer in the proxy's range: [0, max(1, proxy)] -- saturate, except that a proxy already above 1 is not clipped
+// below itself.
+CR_FN float3 CadenceClampAnswer(float3 c, float3 o)
+{
     return float3(clamp(o.x, 0.0f, max(1.0f, c.x)), clamp(o.y, 0.0f, max(1.0f, c.y)), clamp(o.z, 0.0f, max(1.0f, c.z)));
+}
+
+// A carried frame's answer at one pixel.
+//
+// out = proxy + (1 - ui) * (accept * edit(q) + (1 - accept) * fill), clamped to [0, max(1, proxy)].
+CR_FN float3 CadenceSynthesize(int px, int py, float2 acc, CadenceParams P)
+{
+    const float3 c = CR_PROXY_NOW(px, py);
+    const CadenceCarry carry = CadenceCarryEdit(px, py, acc, P);
+    return CadenceClampAnswer(c, c + carry.add);
+}
+
+// --- Smoothing (docs/dlssnr/design/cadence-smoothing.md) -----------------------------------------------------------
+//
+// The fade, without a history. On a model frame that follows carried ones, the answer a carried frame would have
+// shown here -- the previous answer, moved along this frame's chain -- is still at hand, and so is the new one. Their
+// difference is stored once, on the model frame's grid. Every frame of the walk then shows
+//
+//     new answer (moved) + w_k * fade (moved along the same chain),   w_k = FadeWeight(k, S)
+//
+// which is a straight line from the previous answer to the new one in S equal steps. Both answers are moved, neither
+// is a blend of earlier blends: the walk is finite (it ends on frame S-1, before the next model frame) and nothing on
+// screen feeds back into what is stored.
+
+// The fade at one pixel of a model frame: the carried answer minus the model's, where the carried edit was the moved
+// one (weighed by its acceptance) and the pixel is not interface. Where the last model frame did not show this
+// surface -- a disocclusion -- the carried answer was a fill, a guess, and the new answer is taken at once rather than
+// walked to from it (Skynizz's soft refresh makes the same call where the background reappears). A NaN from the
+// model stores nothing.
+CR_FN float3 CadenceFade(int px, int py, float2 acc, float3 answer, CadenceParams P)
+{
+    const float3 c = CR_PROXY_NOW(px, py);
+    const CadenceCarry carry = CadenceCarryEdit(px, py, acc, P);
+    const float3 carried = CadenceClampAnswer(c, c + carry.add);
+    float keep = carry.accept;
+    if (P.haveUi != 0)
+        keep = keep * (1.0f - saturate(CR_UI(px, py)));
+    const float3 fade = (carried - answer) * keep;
+    return CadenceFinite3(fade) ? fade : float3(0.0f, 0.0f, 0.0f);
+}
+
+// What the model frame shows: its answer, with w of the way back to the carried one. Between two answers, so in range.
+CR_FN float3 CadenceFadeShown(float3 answer, float3 fade, float weight) { return answer + fade * weight; }
+
+// The stored fade at a position, bilinear. It is a difference that is being faded out, so the clamped Catmull-Rom the
+// edit gets buys nothing here.
+CR_FN float3 CadenceFadeBilinear(float px_, float py_, CadenceParams P)
+{
+    const float tx = clamp(px_, 0.5f, (float) P.width - 0.5f) - 0.5f;
+    const float ty = clamp(py_, 0.5f, (float) P.height - 0.5f) - 0.5f;
+    const int bx = (int) floor(tx);
+    const int by = (int) floor(ty);
+    const float fx = tx - (float) bx;
+    const float fy = ty - (float) by;
+    const int x1 = min(bx + 1, P.width - 1);
+    const int y1 = min(by + 1, P.height - 1);
+    const float3 top = CR_FADE(bx, by) * (1.0f - fx) + CR_FADE(x1, by) * fx;
+    const float3 bottom = CR_FADE(bx, y1) * (1.0f - fx) + CR_FADE(x1, y1) * fx;
+    return top * (1.0f - fy) + bottom * fy;
+}
+
+// A carried frame of the walk: CadenceSynthesize plus w of the stored fade, read at the same q, kept where the carry
+// accepts the moved edit and the pixel is not interface. At w = 0 it is CadenceSynthesize exactly: the fade is not
+// read at all.
+CR_FN float3 CadenceSynthesizeFaded(int px, int py, float2 acc, float weight, CadenceParams P)
+{
+    const float3 c = CR_PROXY_NOW(px, py);
+    const CadenceCarry carry = CadenceCarryEdit(px, py, acc, P);
+    float3 add = carry.add;
+    if (weight > 0.0f)
+    {
+        float keep = weight * carry.accept;
+        if (P.haveUi != 0)
+            keep = keep * (1.0f - saturate(CR_UI(px, py)));
+        const float3 fade = CadenceFadeBilinear(carry.qx, carry.qy, P);
+        if (CadenceFinite3(fade))
+            add = add + fade * keep;
+    }
+    return CadenceClampAnswer(c, c + add);
+}
+
+// The light limiter's space: the one the composition compares the model's answer and its proxy in -- sRGB decoded,
+// saturated, as dlssnr.hlsl's SrgbToLinear, or the values as they are on a frame the game already tone mapped.
+CR_FN float CadenceSrgbToLinear(float v)
+{
+    const float s = saturate(v);
+    return s < 0.04045f ? s / 12.92f : pow((s + 0.055f) / 1.055f, 2.4f);
+}
+
+CR_FN float CadenceLinearToSrgb(float v)
+{
+    const float s = saturate(v);
+    return s < 0.0031308f ? s * 12.92f : 1.055f * pow(max(s, 1e-8f), 1.0f / 2.4f) - 0.055f;
+}
+
+// A pixel's light in that space: Rec.709 luminance. Not finite counts as none.
+CR_FN float CadenceLight(float3 v, int passthrough)
+{
+    const float3 l =
+        passthrough != 0 ? v : float3(CadenceSrgbToLinear(v.x), CadenceSrgbToLinear(v.y), CadenceSrgbToLinear(v.z));
+    const float y = CadenceLuma(float3(max(l.x, 0.0f), max(l.y, 0.0f), max(l.z, 0.0f)));
+    return isfinite(y) ? y : 0.0f;
+}
+
+// The limiter's gain applied to a shown answer: its light times 2^gain in that space. No gain is the answer exactly,
+// not a round trip through the curve.
+CR_FN float3 CadenceApplyGain(float3 v, float gainStops, int passthrough)
+{
+    if (gainStops == 0.0f)
+        return v;
+    const float g = exp2(gainStops);
+    if (passthrough != 0)
+        return v * g;
+    return float3(CadenceLinearToSrgb(CadenceSrgbToLinear(v.x) * g), CadenceLinearToSrgb(CadenceSrgbToLinear(v.y) * g),
+                  CadenceLinearToSrgb(CadenceSrgbToLinear(v.z) * g));
+}
+
+// One frame of the limiter, from the frame's summed light. raw: log2(light of what the cadence would show / light of
+// the proxy), the edit's light in stops before the limit; input: log2(light of the proxy), the frame's own. prevShown
+// and prevInput are the last limited frame's; valid says there was one. step: how far the edit's light may move this
+// frame (LimitStep). While the frame's own light holds still, the shown light is held within step of the last frame's;
+// where it moved by inputTol or more, or there is nothing to hold to, the frame passes as it is. The gain is clamped
+// to maxGain either way, and the shown light is what the gain really gives.
+struct CadenceLimit
+{
+    float shown;     // the edit's light shown this frame, in stops
+    float gainStops; // what the shown answer's light is multiplied by, in stops: 0 is nothing held back
+};
+
+CR_FN CadenceLimit CadenceLimitLight(float raw, float input, float prevShown, float prevInput, int valid, float step,
+                                     float inputTol, float maxGain)
+{
+    CadenceLimit r;
+    r.shown = raw;
+    r.gainStops = 0.0f;
+    if (valid == 0 || !isfinite(raw) || !isfinite(input) || !isfinite(prevShown) || !isfinite(prevInput))
+        return r;
+    if (abs(input - prevInput) >= inputTol)
+        return r;
+    const float held = clamp(raw, prevShown - step, prevShown + step);
+    r.gainStops = clamp(held - raw, -maxGain, maxGain);
+    r.shown = raw + r.gainStops;
+    return r;
 }
 
 #endif

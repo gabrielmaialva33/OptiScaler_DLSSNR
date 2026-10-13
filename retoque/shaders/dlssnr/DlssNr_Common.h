@@ -56,6 +56,21 @@ enum DlssNrMode : uint32_t
 // than approximating one on the GPU.
 constexpr uint32_t kDlssNrMeterGrid = 64;
 
+// The residual limit's range ([DlssNr] ResidualLimit, docs/dlssnr/design/residual-limit.md), in stops. 0 is off. Two
+// stops is four times either way, already wider than the guard's default of two; past the guard's own reach a limit
+// does nothing the guard does not.
+constexpr float kDlssNrResidualLimitMax = 2.0f;
+
+namespace DlssNr
+{
+// The configured residual limit as the shader is sent it: inside its range, and 0 -- off -- for anything that is not a
+// number.
+constexpr float ResidualLimitStops(float configured)
+{
+    return !(configured > 0.0f) ? 0.0f : (configured > kDlssNrResidualLimitMax ? kDlssNrResidualLimitMax : configured);
+}
+} // namespace DlssNr
+
 // What the composition shader reads.
 //
 // The model does not replace the frame. It is shown a tone-mapped proxy of the picture, and its
@@ -287,6 +302,12 @@ struct alignas(256) DlssNrConstants
     // a linear HDR buffer with the key on; zero everywhere else, which is the path the shader took before
     // this existed. docs/dlssnr/design/hdr-highlight-recovery.md. Trailing scalar, mirrored in the shader cbuffer.
     uint32_t HighlightRecovery;
+
+    // The residual limit ([DlssNr] ResidualLimit): how far, in stops, the model may move any pixel's light, either
+    // way, on the luminance ratio the composition applies -- inside the guard, never past it. 0 is off, and the shader
+    // then takes the path it took before this existed. docs/dlssnr/design/residual-limit.md. Trailing scalar,
+    // mirrored in the shader cbuffer.
+    float ResidualLimit;
 };
 
 class DlssNr_Common

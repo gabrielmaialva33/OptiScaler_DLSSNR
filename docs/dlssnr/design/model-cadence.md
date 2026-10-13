@@ -5,6 +5,11 @@ no implementation and the menu does not offer it there. The carry is a subset po
 `optimizer-fps-dlss5` (MIT, `Licenses/OptimizerFps_LICENSE.txt`); what was taken and what was left is
 listed below.
 
+Since 2026-10-13 a running cadence can be smoothed (`[DlssNr] CadenceSmoothing`, off until measured): each new answer
+is walked in from the carried one over the interval, and the light of what the cadence shows is rate-limited. That is the one place
+two answers are mixed in a pixel; `cadence-smoothing.md` is the design and its candid account against the README's
+dead end. Everything below describes the cadence with smoothing off, which is still what the carry does underneath.
+
 ## What it is
 
 An FPS option. With `[DlssNr] Cadence=N` (2..4) the model runs on one frame in N. On the frames in
@@ -31,7 +36,8 @@ What is genuinely different:
   steadiness. Cadence runs it less often, for speed, and claims nothing about steadiness.
 - **No blending of answers.** Every model frame is exactly the model's answer. Two model answers are
   never mixed in one pixel: the carried edit is always the *last* answer, moved, never a blend of
-  the last two.
+  the last two. (With smoothing on, what is *shown* walks from one answer to the next over the interval;
+  what is stored and carried is still the last answer alone. `cadence-smoothing.md`.)
 - **Still camera.** With nothing moving, a carried frame is the model frame's answer exactly (to
   half-float rounding of the stored residual). That shows the model's own frame-to-frame churn at
   1/N the rate, which is nearer to the output stabilizer than to the dead end.
@@ -173,7 +179,9 @@ Each refusal is logged once on change (`DLSS-NR cadence: ...`) and shown under t
 
 - BeliyG3's **cross-pass blend** (`PSResidual`'s blend) and **phase-in** (`PSResidualOld`/`PSApply`):
   they blend model answers, the README's dead-end class. Only behind a separate experiment measured
-  against the README's claim, if ever.
+  against the README's claim, if ever. That experiment is now `cadence-smoothing.md` -- not BeliyG3's code, a
+  finite, display-only walk between two answers after janblade's spread and Skynizz's crossfade -- with
+  `pulse-metric.md` to measure it.
 - The **Lucas–Kanade refinement** (`PSRefine`), until the basic carry has been measured.
 - The **background-queue mode**: both authors say a synchronisation bug there hangs the GPU, and it
   needs a host queue OptiScaler does not register.

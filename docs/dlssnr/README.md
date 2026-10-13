@@ -15,6 +15,7 @@ log of the attempt to drop it is [../history/FORWARDER_INVESTIGATION.md](../hist
 ## Performance and cost
 
 - [model-cadence.md](design/model-cadence.md): run the model every Nth frame and carry its edit along the motion vectors in between.
+- [cadence-smoothing.md](design/cadence-smoothing.md): walk each new answer in over the interval and rate-limit the shown light, against the cadence's pulse.
 - [vit-skip.md](design/vit-skip.md): kernel-variant profiling of the model and a proposal to skip its ViT bottleneck on alternating frames.
 - [dispatch-cpu-overhead.md](design/dispatch-cpu-overhead.md): persistent mapping of the upload buffers and CBV setup for the composition pass.
 - [descriptor-reuse.md](design/descriptor-reuse.md): keeping each ring slot's SRV/UAV descriptors until their key changes.
@@ -31,6 +32,7 @@ These are records, not designs.
 
 - [gpu-timing.md](design/gpu-timing.md): the contract for fence-confirmed NR GPU timing.
 - [detail-measure.md](design/detail-measure.md): the in-game "Measure detail" metric, ported from janblade's fork.
+- [pulse-metric.md](design/pulse-metric.md): the light step per frame, model frames against carried ones: model cadence's pulse as a number.
 - [nr-log-rate.md](design/nr-log-rate.md): rate-limiting the NR drift logs, from a measured log.
 - [stage-before-upscale-measured.md](design/stage-before-upscale-measured.md): running the model before the upscaler, measured in one Cyberpunk 2077 session.
 - [model-cost-vs-working-scale.md](design/model-cost-vs-working-scale.md): four GPU measurements of what the pass costs and how it answers to working scale.
@@ -44,6 +46,7 @@ These are records, not designs.
 - [multi-point-anchoring.md](design/multi-point-anchoring.md): more than one anchor for the scanned-exposure white point.
 - [hud-protection.md](design/hud-protection.md): protecting the HUD through the model's UI correction.
 - [output-stabilizer.md](design/output-stabilizer.md): hold still pixels still and follow the model where the game moved.
+- [residual-limit.md](design/residual-limit.md): an optional flat bound, in stops, on how far the model may move a pixel's light, inside the guard.
 - [dlss-enlargement.md](design/dlss-enlargement.md): Transfer 2, the model's edit enlarged by a private DLSS Super Resolution.
 - [sharp-residual.md](design/sharp-residual.md): Transfer 3, matched residual with a sharp enlargement.
 - [frame-hold.md](design/frame-hold.md): freezing the NR input so settings can be A/B'd on one frame.

@@ -102,6 +102,48 @@ for axis in 'XY':
     assert model and re.match(r'guidesPacked\s*\?\s*1\.0f\s*:', model.group(1)), f'model guideMvScale{axis}ToWork'
     assert packed_set < model.start() < renderer.index('DlssNr_Cadence_Dx12::Frame cadenceFrame {};')
 
+# Smoothing (docs/dlssnr/design/cadence-smoothing.md). Its surfaces exist only on an object built with it, and the
+# switch is part of what an object was built for and of the settings the scheduler watches, so a toggle rebuilds the
+# surfaces and drops the stored edit together.
+assert re.search(r'cadenceInputs\.smoothing\s*=\s*cfg\.DlssNrCadenceSmoothing\.value_or_default\(\);', renderer)
+assert 'cadenceSettings = Cadence::Mix(cadenceSettings, cadenceInputs.smoothing ? 1u : 0u);' in renderer
+assert renderer.count('g_nr.cadence->Fits(device, workWidth, workHeight, cadenceInputs.smoothing)') == 2
+assert 'new DlssNr_Cadence_Dx12("DLSS-NR cadence", device, workWidth, workHeight, cadenceInputs.smoothing)' in renderer
+ctor = pass_cpp[pass_cpp.index('DlssNr_Cadence_Dx12::DlssNr_Cadence_Dx12('):]
+ctor = ctor[:ctor.index('\n}\n')]
+smoothing_block = ctor[ctor.index('if (_smoothingAsked)'):]
+for surface in ('_fade = CreateTexture(', '_shown = CreateTexture(', '_lightGrid = CreateTexture(',
+                '_lightState = CreateTexture('):
+    assert surface in smoothing_block and ctor.count(surface) == 1, surface
+assert 'L"DLSS-NR cadence light state", kWrite)' in re.sub(r'\s+', ' ', smoothing_block).replace('( ', '(')
+# The model frame fades before the record overwrites the edit the fade reads, and shows after it; the carried
+# frames and the model frame are the only places smoothing is dispatched; the scheduler hears what really ran.
+assert renderer.count('g_nr.cadence->Fade(') == 1 and renderer.count('g_nr.cadence->ShowFaded(') == 1
+fade_at = renderer.index('g_nr.cadence->Fade(')
+assert fade_at < renderer.index('cadenceRecorded = g_nr.cadence->Record(') < renderer.index('g_nr.cadence->ShowFaded(')
+assert 'cadence.fade && cadenceChainHanded && cadence.record && !carried' in renderer
+assert 'g_cadence.Recorded(cadenceFaded);' in renderer
+assert 'g_cadence.Carried(cadence.limit && g_nr.cadence != nullptr && g_nr.cadence->Smoothing());' in renderer
+assert 'cadenceSmooth.limitStep = Cadence::LimitStep(' in renderer
+# The limiter's grid is one size on both sides, and its two group-wide modes run on whole groups only.
+assert int(re.search(r'constexpr uint32_t kLightGrid = (\d+);', read_nr('dlssnr/DlssNr_Cadence.h')).group(1)) == \
+    int(re.search(r'static const uint kLightGrid = (\d+);', shader).group(1))
+assert 'Run(InCmdList, c, srvs, uavs, DlssNr::Cadence::kLightGrid, DlssNr::Cadence::kLightGrid);' in pass_cpp
+assert 'Run(InCmdList, c, srvs, uavs, 1, 1);' in pass_cpp
+csmain = shader[shader.index('void CSMain('):]
+assert csmain.index('if (gMode == 6)') < csmain.index('PixelModes(id);')
+assert csmain.index('if (gMode == 7)') < csmain.index('PixelModes(id);')
+# At a weight of zero the carried frame is the carry it always was: the fade is neither bound nor read.
+assert 'ID3D12Resource* const fade = fadeWeight > 0.0f ? _fade : nullptr;' in pass_cpp
+assert 'if (weight > 0.0f)' in rule
+# The light limiter leaves the interface alone: out of the light it measures, and out of the gain it applies.
+assert 'const float keep = gHaveUi != 0u ? 1.0 - saturate(UiAt(px, py)) : 1.0;' in shader
+assert "gOut2[uint2(3, 0)] * keep" in shader
+assert 'const float scenery = gHaveUi != 0u ? 1.0 - saturate(gUi.Load(p).x) : 1.0;' in shader
+assert 'g_nr.cadence->ShowFaded(cmdList, cadenceFrame, uiAlpha, cadenceSmooth, finalOutput)' in renderer
+# A failed allocation of the smoothing surfaces leaves the carry running: the object still initialises.
+assert 'carrying without smoothing' in pass_cpp
+
 # Registered in the project, once each.
 project = read('OptiScaler.vcxproj')
 filters = read('OptiScaler.vcxproj.filters')
@@ -117,7 +159,8 @@ assert 'Copyright (c) 2026 Yuri Grib (BeliyG3)' in licence and 'MIT License' in 
 assert 'BeliyG3' in rule and 'Licenses/OptimizerFps_LICENSE.txt' in rule
 
 print('PASS: cadence constants == cbuffer, registers == root signature, every rule hook defined, optional bytecode, '
-      'off allocates and dispatches nothing, refusals wired, packed vectors at scale 1, registered, attributed',
+      'off allocates and dispatches nothing, refusals wired, packed vectors at scale 1, smoothing built and dispatched '
+      'only with its switch and in order, registered, attributed',
       flush=True)
 
 # --- The production headers, compiled ---------------------------------------------------------------------------

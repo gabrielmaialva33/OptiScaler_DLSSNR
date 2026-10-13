@@ -414,6 +414,19 @@ void CancelMeasureDetail();
 bool DetailMeasureAvailable();
 DetailMeasureStatus GetDetailMeasureStatus();
 
+// The pulse metric ([DlssNr] PulseMetric, docs/dlssnr/design/pulse-metric.md): the light step per frame, split into
+// model frames, carried frames and frames of a model that runs every frame, from the latest two-second window.
+struct PulseStatus
+{
+    bool running = false; // on, and its pass built
+    bool failed = false;  // on, and its pass could not be built
+    std::string words;    // the latest reading, or that it is measuring
+};
+
+// Whether this build carries the metric's shader. D3D12 only.
+bool PulseAvailable();
+PulseStatus GetPulseStatus();
+
 // Writes a run of consecutive frames, each as the upscaler produced it and again after the model's edit.
 // The pair is a control: same frames, same run, one variable.
 void RequestCapture(unsigned int frames);

@@ -28,6 +28,15 @@ void Transition(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource, D3
     cmdList->ResourceBarrier(1, &barrier);
 }
 
+// Orders the writes to a resource that stays in UNORDERED_ACCESS against what reads or writes it next.
+void UavBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource)
+{
+    D3D12_RESOURCE_BARRIER barrier {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barrier.UAV.pResource = resource;
+    cmdList->ResourceBarrier(1, &barrier);
+}
+
 constexpr auto kRest = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 constexpr auto kWrite = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 constexpr uint32_t kThreads = 8;
@@ -45,6 +54,7 @@ constexpr DXGI_FORMAT kNullSrv[] = {
     DXGI_FORMAT_R16G16B16A16_FLOAT, // t7 edit
     DXGI_FORMAT_R16G16B16A16_FLOAT, // t8 coarse edit
     DXGI_FORMAT_R8G8B8A8_UNORM,     // t9 UI alpha
+    DXGI_FORMAT_R16G16B16A16_FLOAT, // t10 fade
 };
 constexpr DXGI_FORMAT kNullUav[] = {
     DXGI_FORMAT_R16G16B16A16_FLOAT, // u0
@@ -53,20 +63,20 @@ constexpr DXGI_FORMAT kNullUav[] = {
 };
 } // namespace
 
-static_assert(sizeof(kNullSrv) / sizeof(kNullSrv[0]) == 10 && sizeof(kNullUav) / sizeof(kNullUav[0]) == 3,
+static_assert(sizeof(kNullSrv) / sizeof(kNullSrv[0]) == 11 && sizeof(kNullUav) / sizeof(kNullUav[0]) == 3,
               "one null format per slot");
 
 bool DlssNr_Cadence_Dx12::Available() { return DLSSNR_CADENCE_BYTECODE != 0; }
 
 ID3D12Resource* DlssNr_Cadence_Dx12::CreateTexture(ID3D12Device* device, DXGI_FORMAT format, UINT width, UINT height,
-                                                   const wchar_t* name)
+                                                   const wchar_t* name, D3D12_RESOURCE_STATES state)
 {
     const auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
     const auto desc =
         CD3DX12_RESOURCE_DESC::Tex2D(format, width, height, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 
     ID3D12Resource* resource = nullptr;
-    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, kRest, nullptr,
+    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr,
                                                IID_PPV_ARGS(&resource))) ||
         resource == nullptr)
     {
@@ -77,14 +87,15 @@ ID3D12Resource* DlssNr_Cadence_Dx12::CreateTexture(ID3D12Device* device, DXGI_FO
     return resource;
 }
 
-DlssNr_Cadence_Dx12::DlssNr_Cadence_Dx12(std::string InName, ID3D12Device* InDevice, UINT InWidth, UINT InHeight)
-    : Shader_Dx12(InName, InDevice), _width(InWidth), _height(InHeight), _lowWidth(DlssNr::Cadence::LowExtent(InWidth)),
-      _lowHeight(DlssNr::Cadence::LowExtent(InHeight))
+DlssNr_Cadence_Dx12::DlssNr_Cadence_Dx12(std::string InName, ID3D12Device* InDevice, UINT InWidth, UINT InHeight,
+                                         bool InSmoothing)
+    : Shader_Dx12(InName, InDevice), _smoothingAsked(InSmoothing), _width(InWidth), _height(InHeight),
+      _lowWidth(DlssNr::Cadence::LowExtent(InWidth)), _lowHeight(DlssNr::Cadence::LowExtent(InHeight))
 {
     if (InDevice == nullptr || !Available() || InWidth == 0 || InHeight == 0)
         return;
 
-    // Ten inputs, three outputs, one constant buffer, no sampler: every read is a Load.
+    // Eleven inputs, three outputs, one constant buffer, no sampler: every read is a Load.
     if (!SetupRootSignature(InDevice, kSrvCount, kUavCount, 1))
     {
         LOG_ERROR("[{0}] Failed to setup root signature", _name);
@@ -150,8 +161,33 @@ DlssNr_Cadence_Dx12::DlssNr_Cadence_Dx12(std::string InName, ID3D12Device* InDev
         return;
     }
 
-    const double megabytes = (double) _width * _height * (8 + 8 + 4 + 8 + 8) / (1024.0 * 1024.0);
-    LOG_INFO("DLSS-NR cadence: surfaces built for {}x{} (about {:.0f} MB)", _width, _height, megabytes);
+    // Smoothing (docs/dlssnr/design/cadence-smoothing.md): the fade, the shown answer, and the light limiter's grid and
+    // state. The state is read and written in place by one thread, so it lives in UNORDERED_ACCESS. If they cannot be
+    // had, the carry still runs, unsmoothed: refusing the whole cadence over them would cost more than it saves.
+    if (_smoothingAsked)
+    {
+        _fade = CreateTexture(InDevice, DXGI_FORMAT_R16G16B16A16_FLOAT, _width, _height, L"DLSS-NR cadence fade");
+        _shown = CreateTexture(InDevice, DXGI_FORMAT_R16G16B16A16_FLOAT, _width, _height, L"DLSS-NR cadence shown");
+        _lightGrid = CreateTexture(InDevice, DXGI_FORMAT_R32G32_FLOAT, DlssNr::Cadence::kLightGrid,
+                                   DlssNr::Cadence::kLightGrid, L"DLSS-NR cadence light grid");
+        _lightState = CreateTexture(InDevice, DXGI_FORMAT_R32_FLOAT, 4, 1, L"DLSS-NR cadence light state", kWrite);
+
+        _smoothing = _fade != nullptr && _shown != nullptr && _lightGrid != nullptr && _lightState != nullptr;
+        if (!_smoothing)
+        {
+            LOG_WARN("[{}] Could not allocate the cadence smoothing surfaces for {}x{}; carrying without smoothing",
+                     _name, _width, _height);
+            SAFE_RELEASE(_fade);
+            SAFE_RELEASE(_shown);
+            SAFE_RELEASE(_lightGrid);
+            SAFE_RELEASE(_lightState);
+        }
+    }
+
+    const double megabytes =
+        (double) _width * _height * (8 + 8 + 4 + 8 + 8 + (_smoothing ? 16 : 0)) / (1024.0 * 1024.0);
+    LOG_INFO("DLSS-NR cadence: surfaces built for {}x{}{} (about {:.0f} MB)", _width, _height,
+             _smoothing ? ", with smoothing" : "", megabytes);
     _init = true;
 }
 
@@ -175,6 +211,10 @@ DlssNr_Cadence_Dx12::~DlssNr_Cadence_Dx12()
     SAFE_RELEASE(_residualLow);
     for (auto& chain : _chain)
         SAFE_RELEASE(chain);
+    SAFE_RELEASE(_fade);
+    SAFE_RELEASE(_shown);
+    SAFE_RELEASE(_lightGrid);
+    SAFE_RELEASE(_lightState);
 
     for (uint32_t i = 0; i < DLSSNR_CADENCE_NUM_OF_HEAPS; ++i)
     {
@@ -301,7 +341,7 @@ bool DlssNr_Cadence_Dx12::Record(ID3D12GraphicsCommandList* InCmdList, const Fra
 }
 
 bool DlssNr_Cadence_Dx12::Carry(ID3D12GraphicsCommandList* InCmdList, const Frame& InFrame, bool InChainStart,
-                                ID3D12Resource* InUiAlpha, ID3D12Resource* InOut)
+                                ID3D12Resource* InUiAlpha, const Smooth& InSmooth, ID3D12Resource* InOut)
 {
     if (!_init || InCmdList == nullptr || _device == nullptr || InOut == nullptr || InFrame.proxy == nullptr ||
         InFrame.depth == nullptr || InFrame.motion == nullptr)
@@ -326,14 +366,32 @@ bool DlssNr_Cadence_Dx12::Carry(ID3D12GraphicsCommandList* InCmdList, const Fram
     Transition(InCmdList, next, kWrite, kRest);
     _current ^= 1;
 
+    // Smoothing: the walk's share of the stored fade, and whether the answer goes through the light limiter first.
+    // Without smoothing surfaces both are off, and the dispatch below is the one it always was.
+    const bool limited = _smoothing && InSmooth.limit;
+    const float fadeWeight = _smoothing && std::isfinite(InSmooth.fadeWeight) && InSmooth.fadeWeight > 0.0f
+                                 ? std::min(InSmooth.fadeWeight, 1.0f)
+                                 : 0.0f;
+    ID3D12Resource* const answer = limited ? _shown : InOut;
+    ID3D12Resource* const fade = fadeWeight > 0.0f ? _fade : nullptr;
+
     // The answer the model would have written: the proxy plus the edit moved along the chain just made.
+    if (limited)
+        Transition(InCmdList, _shown, kRest, kWrite);
     {
         Constants c = Base(3, InFrame);
         c.HaveUi = InUiAlpha != nullptr ? 1u : 0u;
-        ID3D12Resource* const srvs[kSrvCount] = { nullptr,    InFrame.proxy, InFrame.depth, nullptr,      next,
-                                                  _depthThen, _proxyThen,    _residual,     _residualLow, InUiAlpha };
-        ID3D12Resource* const uavs[kUavCount] = { InOut };
+        c.FadeWeight = fadeWeight;
+        ID3D12Resource* const srvs[kSrvCount] = { nullptr,    InFrame.proxy, InFrame.depth, nullptr,   next, _depthThen,
+                                                  _proxyThen, _residual,     _residualLow,  InUiAlpha, fade };
+        ID3D12Resource* const uavs[kUavCount] = { answer };
         Run(InCmdList, c, srvs, uavs, (_width + kThreads - 1) / kThreads, (_height + kThreads - 1) / kThreads);
+    }
+
+    if (limited)
+    {
+        Transition(InCmdList, _shown, kWrite, kRest);
+        return Show(InCmdList, InFrame, InUiAlpha, InSmooth, InOut);
     }
 
     // The caller moves InOut out of UNORDERED_ACCESS for the resolve, which orders the write; this orders it
@@ -367,4 +425,95 @@ ID3D12Resource* DlssNr_Cadence_Dx12::ModelMotion(ID3D12GraphicsCommandList* InCm
     }
     Transition(InCmdList, handed, kWrite, kRest);
     return handed;
+}
+
+bool DlssNr_Cadence_Dx12::Fade(ID3D12GraphicsCommandList* InCmdList, const Frame& InFrame, ID3D12Resource* InUiAlpha,
+                               ID3D12Resource* InAnswer, const Smooth& InSmooth)
+{
+    if (!_init || !_smoothing || InCmdList == nullptr || _device == nullptr || InAnswer == nullptr ||
+        InFrame.proxy == nullptr || InFrame.depth == nullptr || InFrame.motion == nullptr)
+    {
+        return false;
+    }
+
+    // The last link from the chain the last carried frame left, exactly as ModelMotion computed it for the model's
+    // vectors; the carried answer it gives is what a carried frame would have shown. The stored edit is still the
+    // previous model frame's: Record overwrites it after this.
+    Transition(InCmdList, _shown, kRest, kWrite);
+    Transition(InCmdList, _fade, kRest, kWrite);
+    {
+        Constants c = Base(5, InFrame);
+        c.HaveUi = InUiAlpha != nullptr ? 1u : 0u;
+        c.FadeWeight = std::isfinite(InSmooth.fadeWeight) ? std::clamp(InSmooth.fadeWeight, 0.0f, 1.0f) : 0.0f;
+        ID3D12Resource* const srvs[kSrvCount] = { InAnswer,         InFrame.proxy, InFrame.depth, InFrame.motion,
+                                                  _chain[_current], _depthThen,    _proxyThen,    _residual,
+                                                  _residualLow,     InUiAlpha };
+        ID3D12Resource* const uavs[kUavCount] = { _shown, _fade };
+        Run(InCmdList, c, srvs, uavs, (_width + kThreads - 1) / kThreads, (_height + kThreads - 1) / kThreads);
+    }
+    Transition(InCmdList, _shown, kWrite, kRest);
+    Transition(InCmdList, _fade, kWrite, kRest);
+    return true;
+}
+
+bool DlssNr_Cadence_Dx12::ShowFaded(ID3D12GraphicsCommandList* InCmdList, const Frame& InFrame,
+                                    ID3D12Resource* InUiAlpha, const Smooth& InSmooth, ID3D12Resource* InOut)
+{
+    return Show(InCmdList, InFrame, InUiAlpha, InSmooth, InOut);
+}
+
+bool DlssNr_Cadence_Dx12::Show(ID3D12GraphicsCommandList* InCmdList, const Frame& InFrame, ID3D12Resource* InUiAlpha,
+                               const Smooth& InSmooth, ID3D12Resource* InOut)
+{
+    if (!_init || !_smoothing || InCmdList == nullptr || _device == nullptr || InOut == nullptr ||
+        InFrame.proxy == nullptr)
+    {
+        return false;
+    }
+
+    const uint32_t passthrough = InSmooth.passthrough ? 1u : 0u;
+    const uint32_t haveUi = InUiAlpha != nullptr ? 1u : 0u;
+
+    // The light of what would be shown and of the proxy, summed per tile, the interface left out.
+    Transition(InCmdList, _lightGrid, kRest, kWrite);
+    {
+        Constants c = Base(6, InFrame);
+        c.Passthrough = passthrough;
+        c.HaveUi = haveUi;
+        ID3D12Resource* const srvs[kSrvCount] = { _shown,  InFrame.proxy, nullptr, nullptr, nullptr,
+                                                  nullptr, nullptr,       nullptr, nullptr, InUiAlpha };
+        ID3D12Resource* const uavs[kUavCount] = { _lightGrid };
+        Run(InCmdList, c, srvs, uavs, DlssNr::Cadence::kLightGrid, DlssNr::Cadence::kLightGrid);
+    }
+    Transition(InCmdList, _lightGrid, kWrite, kRest);
+
+    // One group: the edit's light held to the last limited frame's, and the gain that does it, in the state. The
+    // barrier before orders this write after the last frame's read, should both land in one command list.
+    UavBarrier(InCmdList, _lightState);
+    {
+        Constants c = Base(7, InFrame);
+        c.LimitValid = InSmooth.limit && !InSmooth.limitReset ? 1u : 0u;
+        c.LimitStep = std::isfinite(InSmooth.limitStep) && InSmooth.limitStep > 0.0f ? InSmooth.limitStep : 0.0f;
+        c.LimitInputTol = DlssNr::Cadence::kLightInputStops;
+        c.LimitMaxGain = DlssNr::Cadence::kLightMaxGainStops;
+        ID3D12Resource* const srvs[kSrvCount] = { _lightGrid };
+        ID3D12Resource* const uavs[kUavCount] = { nullptr, nullptr, _lightState };
+        Run(InCmdList, c, srvs, uavs, 1, 1);
+    }
+    UavBarrier(InCmdList, _lightState);
+
+    // The shown answer times the gain, into the surface the resolve reads; the interface keeps its answer as it is.
+    {
+        Constants c = Base(8, InFrame);
+        c.Passthrough = passthrough;
+        c.HaveUi = haveUi;
+        ID3D12Resource* const srvs[kSrvCount] = { _shown,  nullptr, nullptr, nullptr, nullptr,
+                                                  nullptr, nullptr, nullptr, nullptr, InUiAlpha };
+        ID3D12Resource* const uavs[kUavCount] = { InOut, nullptr, _lightState };
+        Run(InCmdList, c, srvs, uavs, (_width + kThreads - 1) / kThreads, (_height + kThreads - 1) / kThreads);
+    }
+
+    // As Carry: the caller's transition orders the write for the resolve; this orders it against a UAV reader.
+    UavBarrier(InCmdList, InOut);
+    return true;
 }

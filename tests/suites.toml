@@ -126,7 +126,7 @@ summary = "Timing metadata and UI boundary, plus placement of the timing markers
 [nr-cadence]
 tier = "host"
 timeout = 300
-summary = "Model cadence: the production scheduler (age in presents the pass ran at, held reset, forced model frames, every refusal and its reason, off allocates nothing) and the production per-pixel rules over synthetic sequences (still scene exact, pans, an occluder restarting the chain, no match no fill), plus source guards on the pass."
+summary = "Model cadence: the production scheduler (age in presents the pass ran at, held reset, forced model frames, every refusal and its reason, off allocates nothing, smoothing's decisions) and the production per-pixel rules over synthetic sequences (still scene exact, pans, an occluder restarting the chain, no match no fill, the smoothing walk and light limiter), plus source guards on the pass."
 
 [nr-enlarge]
 tier = "host"
@@ -192,6 +192,16 @@ summary = "DLSS-NR NvAPI CUDA kernel classification by prefix, FP8 variant detec
 tier = "host"
 timeout = 120
 summary = "The Measure detail CPU tile reduction and statistical aggregation (flicker, detail, saturation, shadows)."
+
+[nr-residual-limit]
+tier = "host"
+timeout = 120
+summary = "The residual limit, the composition's own bound sliced out of dlssnr.hlsl and held against the guard alone (off is the guard to the bit; on bounds both ways in stops, only narrows, stays inside the guard), the host's clamp, and where the constant is read, set, logged and shown."
+
+[nr-pulse-metric]
+tier = "host"
+timeout = 120
+summary = "The pulse metric's CPU half (edit light from the grid, consecutive frames paired into light steps by kind, windows, reset, words, log rate, a synthetic cadence's pulse) and source guards on its pass: off builds and records nothing, one sample per present."
 
 [nr-present-guides]
 tier = "host"

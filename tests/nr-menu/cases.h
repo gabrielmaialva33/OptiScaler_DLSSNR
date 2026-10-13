@@ -31,27 +31,31 @@ int main() {
  ImGui::Reset(); ImGui::actions["3/Skin structure/Override###override"]=true; run(); assert(c.overrides.at(2).SkinStructure==-1.0f);
  // Model cadence (docs/dlssnr/design/model-cadence.md, DEVELOPMENT.md rule 2): nothing on native Vulkan; with the driver
  // proxy or without the shader, no control and one line only when a cadence is configured; the frame-generation
- // opt-in and the status line only above a cadence of 1; a hand-edited out-of-range value reads as off.
+ // opt-in, smoothing (cadence-smoothing.md) and the status line only above a cadence of 1; a hand-edited out-of-range
+ // value reads as off.
  const std::string combo = "Model cadence###nrCadence", optIn = "Allow with frame generation###nrCadenceFrameGen";
+ const std::string smooth = "Smooth the model's frames###nrCadenceSmoothing";
  auto cadence = [&](bool vulkan = false) { DlssNr::RenderCadenceControls(&c, vulkan); assert(ImGui::stack.empty()); assert(ImGui::actions.empty()); };
  auto said = [](const char* text) { return std::any_of(ImGui::texts.begin(), ImGui::texts.end(), [&](const std::string& s) { return s.find(text) != std::string::npos; }); };
  c.DlssNrCadence.value=2;
- ImGui::Reset(); cadence(true); assert(!ImGui::Saw(combo) && !ImGui::Saw(optIn) && ImGui::texts.empty());
+ ImGui::Reset(); cadence(true); assert(!ImGui::Saw(combo) && !ImGui::Saw(optIn) && !ImGui::Saw(smooth) && ImGui::texts.empty());
  c.DlssNrUseProxy.value=true; c.DlssNrCadence.value=1;
  ImGui::Reset(); cadence(); assert(!ImGui::Saw(combo) && ImGui::texts.empty());
  c.DlssNrCadence.value=2;
- ImGui::Reset(); cadence(); assert(!ImGui::Saw(combo) && !ImGui::Saw(optIn) && ImGui::texts.size()==1 && said("driver proxy"));
+ ImGui::Reset(); cadence(); assert(!ImGui::Saw(combo) && !ImGui::Saw(optIn) && !ImGui::Saw(smooth) && ImGui::texts.size()==1 && said("driver proxy"));
  c.DlssNrUseProxy.value=false; DlssNr::cadenceAvailable=false;
  ImGui::Reset(); cadence(); assert(!ImGui::Saw(combo) && ImGui::texts.size()==1 && said("no model cadence shader"));
  DlssNr::cadenceAvailable=true; c.DlssNrCadence.value=1;
- ImGui::Reset(); cadence(); assert(ImGui::Saw(combo) && !ImGui::Saw(optIn));
+ ImGui::Reset(); cadence(); assert(ImGui::Saw(combo) && !ImGui::Saw(optIn) && !ImGui::Saw(smooth));
  ImGui::Reset(); ImGui::actions[combo]=1; cadence(); assert(c.DlssNrCadence.value==2);
- ImGui::Reset(); cadence(); assert(ImGui::Saw(combo) && ImGui::Saw(optIn) && !c.DlssNrCadenceWithFrameGen.value);
+ ImGui::Reset(); cadence(); assert(ImGui::Saw(combo) && ImGui::Saw(optIn) && ImGui::Saw(smooth) && !c.DlssNrCadenceWithFrameGen.value);
  ImGui::Reset(); ImGui::actions[optIn]=true; cadence(); assert(c.DlssNrCadenceWithFrameGen.value);
+ ImGui::Reset(); ImGui::actions[smooth]=true; cadence(); assert(c.DlssNrCadenceSmoothing.value);
+  ImGui::Reset(); ImGui::actions[smooth]=false; cadence(); assert(!c.DlssNrCadenceSmoothing.value);
  ImGui::Reset(); ImGui::actions[combo]=3; cadence(); assert(c.DlssNrCadence.value==4);
  ImGui::Reset(); ImGui::actions[combo]=0; cadence(); assert(c.DlssNrCadence.value==1);
  ImGui::Reset(); cadence(); assert(ImGui::Saw(combo) && !ImGui::Saw(optIn));
  c.DlssNrCadence.value=9;
- ImGui::Reset(); cadence(); assert(ImGui::Saw(combo) && !ImGui::Saw(optIn));
- std::cout << "PASS: 31 scripted menu frames: unsupported paths, inheritance, seven fields, clear, retained inactive passes, preset hidden at one weight set, skin inert with the mask off; model cadence hidden on native Vulkan, a line only under the proxy or without its shader, the frame-generation opt-in only above a cadence of 1\n";
+ ImGui::Reset(); cadence(); assert(ImGui::Saw(combo) && !ImGui::Saw(optIn) && !ImGui::Saw(smooth));
+ std::cout << "PASS: 33 scripted menu frames: unsupported paths, inheritance, seven fields, clear, retained inactive passes, preset hidden at one weight set, skin inert with the mask off; model cadence hidden on native Vulkan, a line only under the proxy or without its shader, the frame-generation opt-in and smoothing only above a cadence of 1\n";
 }

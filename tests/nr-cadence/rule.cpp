@@ -13,10 +13,12 @@
 
 using std::abs;
 using std::cos;
+using std::exp2;
 using std::floor;
 using std::isfinite;
 using std::max;
 using std::min;
+using std::pow;
 using std::sin;
 
 struct float2
@@ -63,7 +65,7 @@ template <class T> struct Image
 
 // What the shader's t-registers hold.
 Image<float> g_depthNow, g_depthThen, g_ui;
-Image<float3> g_proxyNow, g_proxyThen, g_residual, g_low;
+Image<float3> g_proxyNow, g_proxyThen, g_residual, g_low, g_fade;
 Image<float2> g_motion, g_chain;
 } // namespace
 
@@ -79,6 +81,7 @@ Image<float2> g_motion, g_chain;
 #define CR_RESIDUAL(ax_, ay_) g_residual.At(ax_, ay_)
 #define CR_RESIDUAL_LOW(ax_, ay_) g_low.At(ax_, ay_)
 #define CR_UI(ax_, ay_) g_ui.At(ax_, ay_)
+#define CR_FADE(ax_, ay_) g_fade.At(ax_, ay_)
 #include <shaders/dlssnr/precompile/dlssnr_cadence_rule.h>
 
 namespace
@@ -155,6 +158,35 @@ struct Machine
         for (int y = 0; y < H; ++y)
             for (int x = 0; x < W; ++x)
                 out.Ref(x, y) = CadenceModelMotion(x, y, CadenceChainStep(x, y, false, P), P);
+        return out;
+    }
+
+    // A smoothed model frame (mode 5), after ModelMotion and before Record: the same last link, the fade stored, the
+    // shown answer returned.
+    Image<float3> Fade(const Image<float3>& answer, float weight)
+    {
+        Image<float3> shown, fade;
+        shown.Resize(W, H);
+        fade.Resize(W, H);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x)
+            {
+                const float3 f = CadenceFade(x, y, CadenceChainStep(x, y, false, P), answer.At(x, y), P);
+                fade.Ref(x, y) = f;
+                shown.Ref(x, y) = CadenceFadeShown(answer.At(x, y), f, weight);
+            }
+        g_fade = fade;
+        return shown;
+    }
+
+    // A carried frame of the walk (mode 3 with a weight).
+    Image<float3> SynthesizeFaded(float weight) const
+    {
+        Image<float3> out;
+        out.Resize(W, H);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x)
+                out.Ref(x, y) = CadenceSynthesizeFaded(x, y, g_chain.At(x, y), weight, P);
         return out;
     }
 };
@@ -562,6 +594,336 @@ void ReversibleReplace_HighlightCarriedReachesClamp()
     assert(out.x == 1.0f && out.y == 1.0f && out.z == 1.0f);
     ++g_cases;
 }
+
+// --- Smoothing (docs/dlssnr/design/cadence-smoothing.md) -----------------------------------------------------------
+
+// The model re-decides its light a little every time it runs: the stand-in, lifted by `drift` everywhere.
+Image<float3> Drifted(const Image<float3>& proxy, float drift)
+{
+    Image<float3> answer = Model(proxy);
+    for (auto& c : answer.px)
+        c = c + float3(drift, drift, drift);
+    return answer;
+}
+
+float MeanLuma(const Image<float3>& image)
+{
+    double sum = 0.0;
+    for (const auto& c : image.px)
+        sum += CadenceLuma(c);
+    return float(sum / double(image.px.size()));
+}
+
+bool Same(float3 a, float3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
+
+void FadedCarry_AtWeightZeroIsTheCarryExactly()
+{
+    // An occluder sequence -- moved edit, fill, restarted chains, the edge -- with the fade full of NaN: at weight 0
+    // it must not be read, and every pixel is CadenceSynthesize's to the bit.
+    Machine m;
+    Occluded(0);
+    m.Record(Model(g_proxyNow));
+    g_fade.Resize(W, H, float3(std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f));
+    for (int k = 1; k <= 3; ++k)
+    {
+        Occluded(k);
+        m.Step(k == 1);
+        const auto plain = m.Synthesize();
+        const auto faded = m.SynthesizeFaded(0.0f);
+        for (size_t i = 0; i < plain.px.size(); ++i)
+            assert(Same(plain.px[i], faded.px[i]));
+        // And a fade that is not finite is dropped at any weight, not carried into the frame.
+        const auto poisoned = m.SynthesizeFaded(0.5f);
+        for (size_t i = 0; i < plain.px.size(); ++i)
+            assert(Same(plain.px[i], poisoned.px[i]));
+    }
+    ++g_cases;
+}
+
+void Fade_WalksTheNewAnswerInInEqualSteps()
+{
+    // A still view at cadence 3. The model frame at k = 3 answers 0.03 brighter than the one at k = 0 did. Without
+    // smoothing the light steps 0, 0, 0.03, 0, 0; with it, 0.01 on each of the model frame and the two carried after.
+    const float drift = 0.03f;
+    Machine m;
+    Pan(0.0f, 0.0f, 0);
+    const auto a0 = Drifted(g_proxyNow, 0.0f);
+    m.Record(a0);
+    std::vector<float> light { MeanLuma(a0) };
+    for (int k = 1; k <= 2; ++k)
+    {
+        Pan(0.0f, 0.0f, k);
+        m.Step(k == 1);
+        light.push_back(MeanLuma(m.Synthesize()));
+    }
+
+    Pan(0.0f, 0.0f, 3);
+    const auto a1 = Drifted(g_proxyNow, drift);
+    m.ModelMotion();
+    const auto shown3 = m.Fade(a1, DlssNr::Cadence::FadeWeight(0, 3));
+    m.Record(a1);
+    light.push_back(MeanLuma(shown3));
+    for (size_t i = 0; i < a1.px.size(); ++i)
+        assert(MaxAbs(shown3.px[i], a0.px[i] + float3(drift, drift, drift) * (1.0f / 3.0f)) < 1e-6f);
+
+    for (int k = 4; k <= 5; ++k)
+    {
+        Pan(0.0f, 0.0f, k);
+        m.Step(k == 4);
+        const float weight = DlssNr::Cadence::FadeWeight(uint32_t(k - 3), 3);
+        const auto out = m.SynthesizeFaded(weight);
+        const float share = 1.0f - weight; // of the new answer
+        for (size_t i = 0; i < out.px.size(); ++i)
+            assert(MaxAbs(out.px[i], a0.px[i] + float3(drift, drift, drift) * share) < 1e-6f);
+        light.push_back(MeanLuma(out));
+    }
+
+    // The light: still across the carried frames, then three equal steps of a third of the drift.
+    assert(abs(light[1] - light[0]) < 1e-6f && abs(light[2] - light[1]) < 1e-6f);
+    for (int k = 3; k <= 5; ++k)
+        assert(abs((light[k] - light[k - 1]) - drift / 3.0f) < 1e-5f);
+    ++g_cases;
+}
+
+void Fade_IsMovedWithTheSurface()
+{
+    // An integer pan. Old and new answers both belong to the surface, so every frame of the walk away from the
+    // entering edge is a straight line between the two stand-in models of the content under the pixel now.
+    const float drift = 0.04f;
+    Machine m;
+    Pan(2.0f, 1.0f, 0);
+    m.Record(Drifted(g_proxyNow, 0.0f));
+    for (int k = 1; k <= 2; ++k)
+    {
+        Pan(2.0f, 1.0f, k);
+        m.Step(k == 1);
+    }
+    Pan(2.0f, 1.0f, 3);
+    m.ModelMotion();
+    const auto shown3 = m.Fade(Drifted(g_proxyNow, drift), DlssNr::Cadence::FadeWeight(0, 3));
+    m.Record(Drifted(g_proxyNow, drift));
+
+    int checked = 0;
+    for (int k = 3; k <= 5; ++k)
+    {
+        Image<float3> out = shown3;
+        if (k > 3)
+        {
+            Pan(2.0f, 1.0f, k);
+            m.Step(k == 4);
+            out = m.SynthesizeFaded(DlssNr::Cadence::FadeWeight(uint32_t(k - 3), 3));
+        }
+        const float oldShare = DlssNr::Cadence::FadeWeight(uint32_t(k - 3), 3);
+        const auto before = Drifted(g_proxyNow, 0.0f);
+        const auto after = Drifted(g_proxyNow, drift);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x)
+            {
+                // Back to frame 0 through both chains, and the stand-in's one-pixel reach, away from every edge.
+                const float px = x + 0.5f, py = y + 0.5f;
+                if (DistanceToEdge(px - k * 2.0f, py - k * 1.0f) < 16.0f || DistanceToEdge(px, py) < 4.0f)
+                    continue;
+                const float3 expected = after.At(x, y) * (1.0f - oldShare) + before.At(x, y) * oldShare;
+                assert(MaxAbs(out.At(x, y), expected) < 1e-5f);
+                ++checked;
+            }
+    }
+    assert(checked > W * H / 2); // three frames of the interior
+    ++g_cases;
+}
+
+void Fade_TakesTheNewAnswerAtOnceWhereTheCarryHadNoSurface()
+{
+    // NoMatch_NoFill's hole, still open on the model frame: the carried answer there was the plain frame, a guess, so
+    // the new answer is shown at once and nothing of the guess is walked from. Elsewhere the walk runs.
+    Machine m;
+    Pan(0.0f, 0.0f, 0, 0.9f);
+    m.Record(Drifted(g_proxyNow, 0.0f));
+    const int hx = 40, hy = 25, hs = 10;
+    auto openHole = []()
+    {
+        for (int y = hy; y < hy + hs; ++y)
+            for (int x = hx; x < hx + hs; ++x)
+            {
+                g_depthNow.Ref(x, y) = 0.1f;
+                g_proxyNow.Ref(x, y) = float3(0.2f, 0.25f, 0.6f);
+            }
+    };
+    Pan(0.0f, 0.0f, 1, 0.9f);
+    openHole();
+    m.Step(true);
+    Pan(0.0f, 0.0f, 2, 0.9f);
+    openHole();
+    m.ModelMotion();
+    const auto answer = Drifted(g_proxyNow, 0.05f);
+    const auto shown = m.Fade(answer, DlssNr::Cadence::FadeWeight(0, 2));
+    for (int y = hy + 2; y < hy + hs - 2; ++y)
+        for (int x = hx + 2; x < hx + hs - 2; ++x)
+        {
+            assert(Same(g_fade.At(x, y), float3(0.0f, 0.0f, 0.0f)));
+            assert(Same(shown.At(x, y), answer.At(x, y)));
+        }
+    // On the wall the walk runs: half of the 0.05 lift is still to come.
+    assert(abs(shown.At(10, 10).x - (answer.At(10, 10).x - 0.025f)) < 1e-5f);
+    ++g_cases;
+}
+
+void Fade_LeavesTheInterfaceToTheModel()
+{
+    Machine m;
+    Pan(0.0f, 0.0f, 0);
+    m.Record(Drifted(g_proxyNow, 0.0f));
+    Pan(0.0f, 0.0f, 1);
+    m.Step(true);
+    Pan(0.0f, 0.0f, 2);
+    g_ui.Resize(W, H, 0.0f);
+    for (int x = 10; x < 30; ++x)
+        g_ui.Ref(x, 10) = 1.0f;
+    m.P.haveUi = 1;
+    m.ModelMotion();
+    const auto answer = Drifted(g_proxyNow, 0.05f);
+    const auto shown = m.Fade(answer, 0.5f);
+    for (int x = 10; x < 30; ++x)
+        assert(Same(shown.At(x, 10), answer.At(x, 10)));
+    assert(!Same(shown.At(40, 30), answer.At(40, 30)));
+    ++g_cases;
+}
+
+void Limiter_Rule()
+{
+    const float step = DlssNr::Cadence::LimitStep(1.0f / 60.0f);
+    const float tol = DlssNr::Cadence::kLightInputStops;
+    const float maxGain = DlssNr::Cadence::kLightMaxGainStops;
+
+    // Nothing to hold to: the frame passes.
+    CadenceLimit r = CadenceLimitLight(0.3f, 1.0f, 0.0f, 1.0f, 0, step, tol, maxGain);
+    assert(r.shown == 0.3f && r.gainStops == 0.0f);
+    // A change inside the step passes untouched.
+    r = CadenceLimitLight(0.01f, 1.0f, 0.0f, 1.0f, 1, step, tol, maxGain);
+    assert(r.shown == 0.01f && r.gainStops == 0.0f);
+    // A half-stop re-grade on a still frame is held to the step, either way.
+    r = CadenceLimitLight(0.5f, 1.0f, 0.0f, 1.0f, 1, step, tol, maxGain);
+    assert(abs(r.shown - step) < 1e-7f && abs(r.gainStops - (step - 0.5f)) < 1e-7f);
+    r = CadenceLimitLight(-0.5f, 1.0f, 0.0f, 1.0f, 1, step, tol, maxGain);
+    assert(abs(r.shown + step) < 1e-7f && abs(r.gainStops - (0.5f - step)) < 1e-7f);
+    // The frame's own light moved: a cut, a flash, another room. The edit's light follows at once.
+    r = CadenceLimitLight(0.5f, 1.0f + tol * 1.01f, 0.0f, 1.0f, 1, step, tol, maxGain);
+    assert(r.shown == 0.5f && r.gainStops == 0.0f);
+    r = CadenceLimitLight(0.5f, 1.0f - tol * 0.99f, 0.0f, 1.0f, 1, step, tol, maxGain);
+    assert(r.gainStops < 0.0f);
+    // Three stops at once on a still frame: the gain stops at one, and the light shown is what that gives.
+    r = CadenceLimitLight(3.0f, 1.0f, 0.0f, 1.0f, 1, step, tol, maxGain);
+    assert(r.gainStops == -maxGain && r.shown == 3.0f - maxGain);
+    // Not finite anywhere: pass, nothing held.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (int i = 0; i < 4; ++i)
+    {
+        r = CadenceLimitLight(i == 0 ? nan : 0.5f, i == 1 ? nan : 1.0f, i == 2 ? nan : 0.0f, i == 3 ? nan : 1.0f, 1,
+                              step, tol, maxGain);
+        assert(r.gainStops == 0.0f);
+    }
+    ++g_cases;
+}
+
+void Limiter_LightAndGainAgree()
+{
+    // The light the limiter measures, and the gain it applies, in the composition's space: sRGB decoded, or the values
+    // themselves on a frame the game tone mapped. No gain is the answer to the bit.
+    const float3 c { 0.55f, 0.40f, 0.30f };
+    for (int passthrough = 0; passthrough <= 1; ++passthrough)
+    {
+        assert(Same(CadenceApplyGain(c, 0.0f, passthrough), c));
+        const float before = CadenceLight(c, passthrough);
+        const float after = CadenceLight(CadenceApplyGain(c, 0.25f, passthrough), passthrough);
+        assert(abs(std::log2(after / before) - 0.25f) < 1e-4f);
+    }
+    assert(Same(CadenceApplyGain(c, -0.5f, 1), c * exp2(-0.5f)));
+    assert(abs(CadenceLight(float3(1.0f, 1.0f, 1.0f), 0) - 1.0f) < 1e-6f);
+    assert(abs(CadenceLight(float3(0.5f, 0.5f, 0.5f), 0) - 0.2140411f) < 1e-5f);
+    assert(CadenceLight(float3(std::numeric_limits<float>::infinity(), 0.0f, 0.0f), 1) == 0.0f);
+    ++g_cases;
+}
+
+// The walk and the limiter together, as Show runs them: a re-grade of the whole picture arriving on a model frame of a
+// still view. The fade spreads it over three frames; the limiter then holds the edit's light to 1.5 stops a second,
+// and once the frame's own light jumps it lets go at once.
+void Limiter_HoldsAReGradeToTheRate()
+{
+    const float step = DlssNr::Cadence::LimitStep(1.0f / 60.0f);
+    Machine m;
+    Pan(0.0f, 0.0f, 0);
+    m.Record(Drifted(g_proxyNow, 0.0f));
+    auto sums = [](const Image<float3>& shown)
+    {
+        double s = 0.0, p = 0.0;
+        for (size_t i = 0; i < shown.px.size(); ++i)
+        {
+            s += CadenceLight(shown.px[i], 0);
+            p += CadenceLight(g_proxyNow.px[i], 0);
+        }
+        return std::pair<float, float>(float(std::log2(s / p)), float(std::log2(p)));
+    };
+
+    float prevShown = 0.0f, prevInput = 0.0f;
+    int valid = 0;
+    std::vector<float> shownLight;
+    auto limitAndApply = [&](const Image<float3>& shown)
+    {
+        const auto [raw, input] = sums(shown);
+        const CadenceLimit r =
+            CadenceLimitLight(raw, input, prevShown, prevInput, valid, step, DlssNr::Cadence::kLightInputStops,
+                              DlssNr::Cadence::kLightMaxGainStops);
+        Image<float3> out = shown;
+        for (auto& c : out.px)
+            c = CadenceApplyGain(c, r.gainStops, 0);
+        // What the gain gives is what the state says is shown.
+        assert(abs(sums(out).first - r.shown) < 2e-3f);
+        prevShown = r.shown;
+        prevInput = input;
+        valid = 1;
+        shownLight.push_back(r.shown);
+        return r;
+    };
+
+    for (int k = 1; k <= 2; ++k)
+    {
+        Pan(0.0f, 0.0f, k);
+        m.Step(k == 1);
+        limitAndApply(m.Synthesize());
+    }
+    // The re-grade: 0.15 brighter in encoded values, about half a stop of light.
+    Pan(0.0f, 0.0f, 3);
+    m.ModelMotion();
+    const auto answer = Drifted(g_proxyNow, 0.15f);
+    limitAndApply(m.Fade(answer, DlssNr::Cadence::FadeWeight(0, 3)));
+    m.Record(answer);
+    int frames = 0;
+    for (int k = 4; k <= 40; ++k)
+    {
+        Pan(0.0f, 0.0f, k);
+        m.Step(k == 4);
+        const uint32_t age = uint32_t((k - 3) % 3);
+        const auto r = limitAndApply(m.SynthesizeFaded(k <= 5 ? DlssNr::Cadence::FadeWeight(age, 3) : 0.0f));
+        if (r.gainStops != 0.0f)
+            ++frames;
+    }
+    // Every step of the shown light within the rate, and the whole re-grade through in about a third of a second.
+    for (size_t i = 1; i < shownLight.size(); ++i)
+        assert(shownLight[i] - shownLight[i - 1] <= step + 1e-5f);
+    const float regrade = sums(answer).first - shownLight[1];
+    assert(regrade > 0.3f);
+    assert(frames >= int(regrade / step) - 4 && frames <= int(regrade / step) + 2);
+    assert(abs(shownLight.back() - sums(answer).first) < 1e-4f);
+
+    // The frame's own light jumps (a light switched on in the room): the limit lets go on that frame.
+    for (auto& c : g_proxyNow.px)
+        c = c * 1.6f;
+    const auto [raw, input] = sums(Drifted(g_proxyNow, 0.0f));
+    const CadenceLimit r = CadenceLimitLight(raw, input, prevShown, prevInput, 1, step,
+                                             DlssNr::Cadence::kLightInputStops, DlssNr::Cadence::kLightMaxGainStops);
+    assert(abs(input - prevInput) >= DlssNr::Cadence::kLightInputStops && r.gainStops == 0.0f);
+    ++g_cases;
+}
 } // namespace
 
 int main()
@@ -578,10 +940,20 @@ int main()
     NoMatch_NoFill();
     UiProtection_KeepsTheFrameUnderTheInterface();
     ReversibleReplace_HighlightCarriedReachesClamp();
-    if (g_cases != 12)
+    FadedCarry_AtWeightZeroIsTheCarryExactly();
+    Fade_WalksTheNewAnswerInInEqualSteps();
+    Fade_IsMovedWithTheSurface();
+    Fade_TakesTheNewAnswerAtOnceWhereTheCarryHadNoSurface();
+    Fade_LeavesTheInterfaceToTheModel();
+    Limiter_Rule();
+    Limiter_LightAndGainAgree();
+    Limiter_HoldsAReGradeToTheRate();
+    if (g_cases != 20)
         return 2;
     std::printf("PASS %d rule cases over synthetic sequences: still scene exact, integer pan exact and sub-pixel pan "
-                "within interpolation, chain off the picture, occluder restarts the chain, no match no fill, UI kept\n",
+                "within interpolation, chain off the picture, occluder restarts the chain, no match no fill, UI kept; "
+                "smoothing: weight 0 is the carry to the bit, the walk in equal steps and moved with the surface, a "
+                "disocclusion and the interface take the answer at once, the light limiter's rule, space and rate\n",
                 g_cases);
     return 0;
 }

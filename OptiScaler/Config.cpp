@@ -414,6 +414,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
             DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
             DlssNrHighlightRecovery.set_from_config(readBool("DlssNr", "HighlightRecovery"));
+            DlssNrResidualLimit.set_from_config(readFloat("DlssNr", "ResidualLimit"));
             DlssNrTransfer.set_from_config(readUInt("DlssNr", "Transfer"));
 
             DlssNrWhitePointFromExposure.set_from_config(readBool("DlssNr", "WhitePointFromExposure"));
@@ -491,6 +492,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrStabilizerTolerance.set_from_config(readFloat("DlssNr", "StabilizerTolerance"));
             DlssNrCadence.set_from_config(readUInt("DlssNr", "Cadence"));
             DlssNrCadenceWithFrameGen.set_from_config(readBool("DlssNr", "CadenceWithFrameGen"));
+            DlssNrCadenceSmoothing.set_from_config(readBool("DlssNr", "CadenceSmoothing"));
+            DlssNrPulseMetric.set_from_config(readBool("DlssNr", "PulseMetric"));
             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
 
             RenderPresetOverride.set_from_config(readBool("DLSS", "RenderPresetOverride"));
@@ -1400,6 +1403,8 @@ bool Config::SaveIni()
         ini.SetValue("DlssNr", "MaxRatio", GetFloatValue(Instance()->DlssNrMaxRatio.value_for_config()).c_str());
         ini.SetValue("DlssNr", "HighlightRecovery",
                      GetBoolValue(Instance()->DlssNrHighlightRecovery.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "ResidualLimit",
+                     GetFloatValue(Instance()->DlssNrResidualLimit.value_for_config()).c_str());
         ini.SetValue("DlssNr", "Transfer", GetIntValue(Instance()->DlssNrTransfer.value_for_config()).c_str());
 
         ini.SetValue("DlssNr", "ProbeD3D11", GetBoolValue(Instance()->DlssNrProbeD3D11.value_for_config()).c_str());
@@ -1491,6 +1496,9 @@ bool Config::SaveIni()
         ini.SetValue("DlssNr", "Cadence", GetIntValue(Instance()->DlssNrCadence.value_for_config()).c_str());
         ini.SetValue("DlssNr", "CadenceWithFrameGen",
                      GetBoolValue(Instance()->DlssNrCadenceWithFrameGen.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "CadenceSmoothing",
+                     GetBoolValue(Instance()->DlssNrCadenceSmoothing.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "PulseMetric", GetBoolValue(Instance()->DlssNrPulseMetric.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",
                      GetBoolValue(Instance()->RenderPresetOverride.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetForAll",
