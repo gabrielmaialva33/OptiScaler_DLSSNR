@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""D3D11 DLSS route (docs/dlssnr/design/dx11-native-dlss-guides.md, step 1): the decision header and the production
-layer compiled under ASan/UBSan, the second against a minimal Config stub, plus source guards on the call site, on
-what the stub mirrors, and on the pt-BR entries for the panel's text."""
+"""D3D11 DLSS route (docs/dlssnr/design/dx11-native-dlss-guides.md, steps 1 and 2): the decision header and the
+production layer compiled under ASan/UBSan, the second against a minimal Config stub, plus source guards on the
+call sites, on what the stub mirrors, and on the pt-BR entries for the panel's text."""
 from pathlib import Path
 import re
 import subprocess
@@ -30,12 +30,25 @@ def function_body(source, signature):
     return source[start:end if end >= 0 else len(source)]
 
 
-# --- The call site: one line, where the decision is right ----------------------------------------------------
+# --- Call sites: one line each, where the decision is right -------------------------------------------------
 
 dx11 = read('OptiScaler/inputs/NVNGX_DLSS_Dx11.cpp')
 require('#include <dlssnr/DlssNr_Dx11Upscaler.h>' in dx11, 'NVNGX_DLSS_Dx11.cpp does not include the route layer')
-require(dx11.count('DlssNr') == 2, 'NVNGX_DLSS_Dx11.cpp should name DlssNr exactly twice: the include and one '
-                                   f'one-line call (found {dx11.count("DlssNr")})')
+require(dx11.count('DlssNr') == 3, 'NVNGX_DLSS_Dx11.cpp should name DlssNr exactly three times: the include and two '
+                                   f'one-line calls (found {dx11.count("DlssNr")})')
+
+create = function_body(dx11, 'NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_CreateFeature(')
+default_at = create.find('upscalerChoice = Upscaler::DLSS;')
+call_at = create.find('upscalerChoice = DlssNr::Dx11DefaultUpscaler(upscalerChoice);')
+key_at = create.find('if (Config::Instance()->Dx11Upscaler.has_value())')
+require(0 <= default_at < call_at < key_at,
+        'CreateFeature must call Dx11DefaultUpscaler after its own DLSS default and before the Dx11Upscaler key, '
+        'so an explicit key still wins (cases.cpp mirrors that order)')
+require(create.count('Dx11DefaultUpscaler') == 1 and dx11.count('Dx11DefaultUpscaler') == 1,
+        'Dx11DefaultUpscaler is called once, in CreateFeature')
+supersampling_at = create.find('if (InFeatureID == NVSDK_NGX_Feature_SuperSampling)')
+rr_at = create.find('else if (InFeatureID == NVSDK_NGX_Feature_RayReconstruction)')
+require(0 <= supersampling_at < call_at < rr_at, 'the default is replaced for super resolution only')
 
 evaluate = function_body(dx11, 'NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_EvaluateFeature(')
 type_at = evaluate.find('auto upscaler = deviceContext->GetUpscalerType();')
@@ -48,12 +61,16 @@ require(dx11.count('NoteDx11Evaluate') == 1, 'NoteDx11Evaluate is called once, i
 # --- The production layer: inert with NR off ------------------------------------------------------------------
 
 layer = read('retoque/dlssnr/DlssNr_Dx11Upscaler.h')
-for marker in ('inline void NoteDx11Evaluate(', 'inline Dx11Route::Report Dx11RouteReport('):
+for marker in ('inline ::Upscaler Dx11DefaultUpscaler(', 'inline void NoteDx11Evaluate(',
+               'inline Dx11Route::Report Dx11RouteReport('):
     require(marker in layer, f'DlssNr_Dx11Upscaler.h no longer has {marker!r}; update this runner')
 note = layer[layer.find('inline void NoteDx11Evaluate('):layer.find('inline Dx11Route::Report Dx11RouteReport(')]
 gate = note.find('if (!cfg.DlssNrEnabled.value_or_default())\n        return;')
 require(0 <= gate < note.find('g_lastRoute.store') and gate < note.find('LOG_'),
         'NoteDx11Evaluate must return with NR off before it stores or logs anything')
+choose = layer[layer.find('inline ::Upscaler Dx11DefaultUpscaler('):layer.find('inline void NoteDx11Evaluate(')]
+require('cfg.DlssNrEnabled.value_or_default()' in choose and 'cfg.Dx11Upscaler.has_value()' in choose,
+        'Dx11DefaultUpscaler decides from DlssNrEnabled and whether Dx11Upscaler is set')
 require(re.search(r'case ::Upscaler::DLSS:\s*return Dx11Route::Kind::NativeDlss;', layer) and
         re.search(r'case ::Upscaler::DLSS_on12:\s*return Dx11Route::Kind::BridgedDlss;', layer),
         'KindOf maps dlss to native DLSS and dlss_12 to the bridge')

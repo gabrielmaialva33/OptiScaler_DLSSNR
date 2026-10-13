@@ -90,7 +90,9 @@ Invariant checks against this table: the line exists only when NR is on and the 
 as well: it reads "upscaled: active on the upscaler's output" (or Auto's "upscaled") whatever the route, and would
 say the opposite of the line above. With the pass running (a present host built at HookMethod 2), "Running"
 stays and the line follows it; the two do not contradict, because the line says what is missing, not that nothing
-runs. The log says each row once per process (`DlssNr_Dx11Route.h`, `LogOnce`).
+runs. The log says each row once per process (`DlssNr_Dx11Route.h`, `LogOnce`). Since step 2, native `dlss`
+with NR on means an explicit `Dx11Upscaler=dlss` (ini or menu), or NR switched on over a feature created while it
+was off; with the key on auto, NR on creates `dlss_12`.
 
 ---
 

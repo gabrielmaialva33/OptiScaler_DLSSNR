@@ -381,6 +381,11 @@ and comparison of the NR edit with the upscaler's output. The full section, incl
 `Enabled`, model settings and stage selection, is in the distributed [OptiScaler.ini](OptiScaler.ini).
 `auto` uses the declared default; the entries below do not enable NR.
 
+With `Enabled=true`, a D3D11 game that calls DLSS and leaves `[Upscalers] Dx11Upscaler` on `auto` gets `dlss_12`
+(DLSS on OptiScaler's D3D12 bridge, which runs the pass) where it would have had native D3D11 DLSS, which cannot
+carry the pass. An explicit `Dx11Upscaler=dlss` is kept, and the log and the NR panel then say the pass cannot run
+there.
+
 ```ini
 [DlssNr]
 ; Keep NR off for one session after a session that ended without closing while NR ran (crash, killed

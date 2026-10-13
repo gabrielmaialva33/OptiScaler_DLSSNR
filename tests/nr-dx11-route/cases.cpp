@@ -1,5 +1,5 @@
-// tests/nr-dx11-route: the D3D11 DLSS route decision (retoque/dlssnr/DlssNr_Dx11Route.h) and the production layer
-// that the call site and the panel use (retoque/dlssnr/DlssNr_Dx11Upscaler.h), the latter against stubs/Config.h.
+// tests/nr-dx11-route: the D3D11 DLSS route decisions (retoque/dlssnr/DlssNr_Dx11Route.h) and the production layer
+// that the call sites use (retoque/dlssnr/DlssNr_Dx11Upscaler.h), the latter against stubs/Config.h.
 //
 //   cases            run every case, exit non-zero on a failure
 //   cases --texts    print each report text the panel translates, one per line, for run.py's pt-BR check
@@ -32,12 +32,80 @@ bool Contains(const char* text, const char* part) { return text != nullptr && st
 using DlssNr::Dx11Route::Decide;
 using DlssNr::Dx11Route::Inputs;
 using DlssNr::Dx11Route::Kind;
+using DlssNr::Dx11Route::PreferBridge;
 using DlssNr::Dx11Route::Report;
 using DlssNr::Dx11Route::ReportText;
 
 constexpr Kind kKinds[] = { Kind::Other, Kind::NativeDlss, Kind::BridgedDlss };
 constexpr Report kReports[] = { Report::NoPass, Report::NoGuides };
 constexpr uint32_t kHookMethods[] = { 0, 1, 2, 3, 0xffffffffu };
+
+// NVSDK_NGX_D3D11_CreateFeature's choice for super resolution, line for line as it stands with the call in it
+// (run.py holds the production lines to this order), and as it stood before.
+Upscaler CreateFeatureChoice(bool nrEnabled, std::optional<Upscaler> key, bool dlssCapable, bool ngxInited,
+                             bool withCall)
+{
+    Upscaler upscalerChoice = Upscaler::FSR22;
+
+    if (dlssCapable && ngxInited)
+        upscalerChoice = Upscaler::DLSS;
+
+    if (withCall)
+    {
+        const Kind kind = upscalerChoice == Upscaler::DLSS ? Kind::NativeDlss : Kind::Other;
+        if (PreferBridge(nrEnabled, key.has_value(), kind))
+            upscalerChoice = Upscaler::DLSS_on12;
+    }
+
+    if (key.has_value())
+        upscalerChoice = *key;
+
+    return upscalerChoice;
+}
+
+void PureChoice()
+{
+    // Exhaustive: only NR on, key unset and a native-DLSS default changes anything.
+    for (bool nr : { false, true })
+        for (bool keySet : { false, true })
+            for (Kind kind : kKinds)
+                Require(PreferBridge(nr, keySet, kind) == (nr && !keySet && kind == Kind::NativeDlss),
+                        "PreferBridge is true exactly for NR on, key unset, native DLSS default");
+
+    const std::optional<Upscaler> keys[] = {
+        std::nullopt,         Upscaler::DLSS, Upscaler::DLSS_on12, Upscaler::FSR22,
+        Upscaler::FSR22_on12, Upscaler::XeSS, Upscaler::FFX_on12,  Upscaler::FSR31
+    };
+
+    for (const auto& key : keys)
+        for (bool capable : { false, true })
+            for (bool ngx : { false, true })
+            {
+                // NR off: every combination as it was.
+                Require(CreateFeatureChoice(false, key, capable, ngx, true) ==
+                            CreateFeatureChoice(false, key, capable, ngx, false),
+                        "NR off leaves CreateFeature's choice as it was, for every key, GPU and NGX state");
+
+                // NR on with a key set: the key, always.
+                if (key.has_value())
+                    Require(CreateFeatureChoice(true, key, capable, ngx, true) == *key,
+                            "an explicit Dx11Upscaler is respected with NR on");
+            }
+
+    Require(CreateFeatureChoice(true, std::nullopt, true, true, true) == Upscaler::DLSS_on12,
+            "NR on, key unset, DLSS-capable GPU with NGX loaded: dlss_12");
+    Require(CreateFeatureChoice(true, std::nullopt, false, true, true) == Upscaler::FSR22,
+            "NR on with a GPU that is not DLSS-capable does not pick dlss_12");
+    Require(CreateFeatureChoice(true, std::nullopt, true, false, true) == Upscaler::FSR22,
+            "NR on without the original NGX does not pick dlss_12");
+    Require(CreateFeatureChoice(true, Upscaler::DLSS, true, true, true) == Upscaler::DLSS,
+            "NR on with Dx11Upscaler=dlss keeps native DLSS");
+
+    Require(Contains(DlssNr::Dx11Route::kAutoChoiceText, "dlss_12") &&
+                Contains(DlssNr::Dx11Route::kAutoChoiceText, "Dx11Upscaler=dlss ") &&
+                Contains(DlssNr::Dx11Route::kAutoChoiceText, "auto"),
+            "the auto-choice line names dlss_12, the key being auto, and Dx11Upscaler=dlss as the way back");
+}
 
 void PureReport()
 {
@@ -216,6 +284,40 @@ void ProductionReport()
     ResetConfig();
 }
 
+void ProductionChoice()
+{
+    Config& cfg = *Config::Instance();
+    ResetConfig();
+    const size_t base = g_fakeLog.size();
+    const auto lines = [base] { return g_fakeLog.size() - base; };
+
+    // --- NR off: the default is handed back, whatever it is, and nothing is said.
+    for (Upscaler upscaler : { Upscaler::DLSS, Upscaler::FSR22, Upscaler::DLSS_on12, Upscaler::XeSS })
+        Require(DlssNr::Dx11DefaultUpscaler(upscaler) == upscaler, "NR off: the default is handed back unchanged");
+    Require(lines() == 0, "NR off: the choice logs nothing");
+
+    // --- NR on, key unset: dlss_12 in place of native DLSS, said once.
+    cfg.DlssNrEnabled = true;
+
+    Require(DlssNr::Dx11DefaultUpscaler(Upscaler::DLSS) == Upscaler::DLSS_on12, "NR on, key unset: dlss_12");
+    Require(lines() == 1 && LastLine() == std::string("INFO DLSS-NR: ") + DlssNr::Dx11Route::kAutoChoiceText,
+            "the auto choice is logged, at info");
+    Require(DlssNr::Dx11DefaultUpscaler(Upscaler::DLSS) == Upscaler::DLSS_on12 && lines() == 1,
+            "the auto choice is logged once, however many features are created");
+    Require(DlssNr::Dx11DefaultUpscaler(Upscaler::FSR22) == Upscaler::FSR22,
+            "a default that is not native DLSS (no capable GPU, no NGX) stays");
+
+    // --- NR on, key set: respected, and the key itself still applies after the call.
+    for (Upscaler key : { Upscaler::DLSS, Upscaler::DLSS_on12, Upscaler::FSR22, Upscaler::XeSS })
+    {
+        cfg.Dx11Upscaler = key;
+        Require(DlssNr::Dx11DefaultUpscaler(Upscaler::DLSS) == Upscaler::DLSS,
+                "with Dx11Upscaler set, the default is handed back for the key to replace");
+    }
+    Require(lines() == 1, "an explicit key logs nothing");
+
+    ResetConfig();
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -227,10 +329,12 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    PureChoice();
     PureReport();
     PureOnce();
     PureSeen();
     ProductionReport();
+    ProductionChoice();
 
     if (g_failures != 0)
     {
@@ -238,7 +342,8 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    std::printf("PASS: D3D11 route -- NR off says nothing; native D3D11 DLSS is reported once per report and shown "
-                "while it runs\n");
+    std::printf("PASS: D3D11 route -- NR off changes nothing; NR on with Dx11Upscaler unset picks dlss_12 over native "
+                "DLSS and says so once; an explicit key is kept; native D3D11 DLSS is reported once per report and "
+                "shown while it runs\n");
     return 0;
 }

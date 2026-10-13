@@ -1,7 +1,7 @@
 # Native D3D11 DLSS and Neural Rendering: getting the game's guides and image across the bridge
 
-Status: step 1 of the Recommendation implemented on 2026-10-13 (see "Implemented" below); the rest is design for
-review. Written against `93730d39`. Line numbers are into that tree. Nothing here has been run in a game; the cost
+Status: steps 1 and 2 of the Recommendation implemented on 2026-10-13 (see "Implemented" below); the rest is design
+for review. Written against `93730d39`. Line numbers are into that tree. Nothing here has been run in a game; the cost
 figures are arithmetic from stated formats, not measurements.
 
 Read first: [nr-dx11-bridge-host.md](nr-dx11-bridge-host.md) (the swapchain bridge and its hazards),
@@ -259,6 +259,28 @@ A driver around the existing bridge, not a second bridge. The pieces are already
 - `tests/nr-dx11-route` covers the decision, the once-only log, the panel's window, the production layer against a
   `Config.h` stub, the call site's position, and the pt-BR entries.
 
+**Step 2**, 2026-10-13, as proposed. A separate commit, so it can be reverted alone if open question 2 is answered
+the other way.
+
+- `PreferBridge` in the same header: NR on, `Dx11Upscaler` unset, and the default upstream already chose is native
+  DLSS. `Dx11DefaultUpscaler(upscalerChoice)` is one line in `NVSDK_NGX_D3D11_CreateFeature`, after upstream's own
+  DLSS default and before the key is applied, so an explicit key still wins by upstream's own line, and GPU
+  capability and NGX stay upstream's two conditions rather than inputs copied into the header. The suite mirrors
+  those lines with and without the call, and a source guard holds the production order to the mirror.
+- The choice is logged once, at info, saying what was chosen and that `Dx11Upscaler=dlss` keeps native DLSS.
+  `OptiScaler.ini` (under `[DlssNr] Enabled`) and `Config.md` say it too.
+- Found while implementing, not anticipated above. `FeatureProvider_Dx11::GetFeature` writes `Dx11Upscaler` with
+  whatever it created, and the key is a `SoftDefault`: after the first feature the key is set for the session, and
+  saving from the menu writes it. So NR switched on over a native feature keeps native DLSS until a restart or a
+  switch in the Upscalers card (step 1 reports it); NR switched off keeps `dlss_12` until a restart or a switch; and
+  a user who saved while NR chose `dlss_12` keeps
+  `Dx11Upscaler=dlss_12` with NR off later, as today an auto `dlss` is written. Stopping that would take a second
+  upstream line after `GetFeature`, and was not done.
+- Unchanged, as the Risks section says: a `dlss_12` that fails to load or to run falls back to FSR 2.2, not to
+  native DLSS, with upstream's toast; and since `GetFeature` then writes `fsr22` into the key, the rest of the
+  session stays on FSR 2.2. The in-game check for step 2 is therefore that `dlss_12` is what the Upscalers card
+  shows after the first frames, not merely what the log line says was chosen.
+
 ## Config surface
 
 **No new key.** Where DLSS runs for a D3D11 game is already one quantity, `Dx11Upscaler` (`dlss`
@@ -351,7 +373,8 @@ and NR on against native `dlss`, and a Hold-frame pair for the image.
 1. Which D3D11 titles in the library call `NVSDK_NGX_D3D11_*` directly, and which use Streamline? That
    decides whether any of this reaches BG3 or Satisfactory, and which title tests steps 3 and 4.
 2. Is step 2 (choose `dlss_12` when NR is on and the upscaler is unset) acceptable, or should the
-   default stay native and only report? It changes which DLSS runs for NR users.
+   default stay native and only report? It changes which DLSS runs for NR users. (Implemented as proposed, in a
+   commit of its own; reverting it leaves step 1's report in place.)
 3. Should a bridge route refuse `MVJittered` motion as NeuRotic's does (their comment: "convention is
    not validated"), or keep parity with the D3D12 route, which ignores the flag?
 4. Is a present-time route for D3D11 DLSS titles ((c)) wanted at all, given its HUD cost, or is

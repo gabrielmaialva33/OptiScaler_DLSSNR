@@ -596,6 +596,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_CreateFeature(ID3D11DeviceContext
         if (IdentifyGpu::getPrimaryGpu().dlssCapable && NVNGXProxy::IsDx11Inited())
             upscalerChoice = Upscaler::DLSS;
 
+        upscalerChoice = DlssNr::Dx11DefaultUpscaler(upscalerChoice); // dlss_12 when NR is on and the key unset
         if (Config::Instance()->Dx11Upscaler.has_value())
             upscalerChoice = Config::Instance()->Dx11Upscaler.value();
 

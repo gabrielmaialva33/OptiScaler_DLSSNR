@@ -4,7 +4,7 @@
 #include <chrono>
 #include <cstdint>
 
-// Neural Rendering and a D3D11 game's own DLSS (docs/dlssnr/design/dx11-native-dlss-guides.md, step 1).
+// Neural Rendering and a D3D11 game's own DLSS (docs/dlssnr/design/dx11-native-dlss-guides.md, steps 1 and 2).
 //
 // A D3D11 game that calls DLSS gets one of two DLSS routes. "dlss" is the driver's own D3D11 DLSS, evaluated on the
 // game's device and context with the game's parameter block: a pass-through that never forms a D3D12 resource, list
@@ -12,12 +12,14 @@
 // D3D11-to-D3D12 bridge, which runs the pass right after it with its copies of the game's depth and motion
 // (IFeature_Dx11wDx12::Evaluate). With NR on, "dlss" was a route on which the pass did nothing and nothing said so.
 //
-// The decision is here, standard library only, so tests/nr-dx11-route compiles this header as it is.
+// The decisions are here, standard library only, so tests/nr-dx11-route compiles this header as it is.
 // DlssNr_Dx11Upscaler.h is the layer that reads the config and writes the log.
 //
+//   PreferBridge  whether CreateFeature's default becomes dlss_12 instead of native DLSS (step 2)
 //   Decide        what to say when the route in use leaves the pass inert (step 1)
 //
-// With NR off Decide answers None whatever else is true, so nothing is said or shown.
+// With NR off both are no-ops whatever else is true: PreferBridge answers false and Decide answers None, so the
+// D3D11 route is exactly what it was before this header existed.
 
 namespace DlssNr::Dx11Route
 {
@@ -29,7 +31,25 @@ enum class Kind : uint8_t
     BridgedDlss, // "dlss_12": a D3D12 DLSS on the bridge, which runs the pass after it
 };
 
-// What the NR panel and the log say about the route in use.
+// Step 2. upstreamDefault is what NVSDK_NGX_D3D11_CreateFeature chose before it applies [Upscalers] Dx11Upscaler:
+// native DLSS when the GPU is DLSS-capable and the original NGX loaded, FSR 2.2 otherwise. Only that default is
+// replaced, and only while the key is unset. A key the user set, in the ini or in the menu, is never overridden:
+// Dx11Upscaler=dlss keeps native DLSS, and step 1 then says what that costs. A GPU that does not get native DLSS by
+// default does not get dlss_12 either. FeatureProvider_Dx11::GetFeature writes the key with whatever it created, so
+// after the first feature of a session the key is set and this answers false: NR switched on later, over a native
+// DLSS feature, keeps native DLSS until a restart, and step 1 reports it.
+inline bool PreferBridge(bool nrEnabled, bool upscalerKeySet, Kind upstreamDefault)
+{
+    return nrEnabled && !upscalerKeySet && upstreamDefault == Kind::NativeDlss;
+}
+
+// Said once in the log when PreferBridge has changed the default.
+inline constexpr const char* kAutoChoiceText =
+    "Neural Rendering is on and [Upscalers] Dx11Upscaler is auto, so this D3D11 game's DLSS is created as dlss_12 "
+    "(DLSS on OptiScaler's D3D12 bridge, which carries the pass) instead of native D3D11 DLSS. Dx11Upscaler=dlss "
+    "keeps native D3D11 DLSS, where the pass does not run.";
+
+// Step 1. What the NR panel and the log say about the route in use.
 enum class Report : uint8_t
 {
     None,     // nothing to say: NR off, or a route this header does not judge
