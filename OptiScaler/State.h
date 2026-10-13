@@ -359,8 +359,6 @@ class State
 
     // Vulkan stuff
     bool vulkanCreatingSC = false;
-    bool creatingD3DDevice = false;
-    bool vulkanSkipHooks = false;
     bool vulkanHooksSkipped = false; // [Vulkan] SkipHooks or the Linux marker file: no vulkan-1.dll hooks,
                                      // the menu uses the D3D overlay path (dllmain ResolveVulkanHookPolicy)
 
@@ -592,18 +590,21 @@ class ScopedSkipHeapCapture
     ~ScopedSkipHeapCapture() { State::Instance().skipHeapCapture = previousState; }
 };
 
+// Per thread, like ScopedCreatingD3DDevice: OptiScaler's own Vulkan work (and the dxvk device a GPU check or Anti-Lag 2
+// makes) runs on the thread that sets this, while the game's swapchains and devices are made on its own threads. One
+// process-wide flag skipped the game's hooks whenever the two overlapped, a scope that finished out of order left it
+// set (or cleared an outer scope's) for good, and the menu cleared it on every frame it was open (janblade 35b84c17).
 class ScopedSkipVulkanHooks
 {
   private:
-    bool previousState;
+    inline static thread_local int depth = 0;
 
   public:
-    ScopedSkipVulkanHooks()
-    {
-        previousState = State::Instance().vulkanSkipHooks;
-        State::Instance().vulkanSkipHooks = true;
-    }
-    ~ScopedSkipVulkanHooks() { State::Instance().vulkanSkipHooks = previousState; }
+    ScopedSkipVulkanHooks() { ++depth; }
+    ~ScopedSkipVulkanHooks() { --depth; }
+
+    // This thread skips OptiScaler's Vulkan hooks
+    static bool Active() { return depth > 0; }
 };
 
 class ScopedVulkanCreatingSC
@@ -620,18 +621,21 @@ class ScopedVulkanCreatingSC
     ~ScopedVulkanCreatingSC() { State::Instance().vulkanCreatingSC = previousState; }
 };
 
+// Per thread: dxvk and vkd3d-proton make their Vulkan instance and device on the thread that creates the D3D device.
+// One process-wide flag was left set when two threads' creations overlapped and finished out of order (the later one
+// restored the earlier one's "set"), and the game's own Vulkan device then went without OptiScaler's extensions
+// (janblade c135beb5).
 class ScopedCreatingD3DDevice
 {
   private:
-    bool previousState;
+    inline static thread_local int depth = 0;
 
   public:
-    ScopedCreatingD3DDevice()
-    {
-        previousState = State::Instance().creatingD3DDevice;
-        State::Instance().creatingD3DDevice = true;
-    }
-    ~ScopedCreatingD3DDevice() { State::Instance().creatingD3DDevice = previousState; }
+    ScopedCreatingD3DDevice() { ++depth; }
+    ~ScopedCreatingD3DDevice() { --depth; }
+
+    // This thread is inside a D3D device creation
+    static bool Active() { return depth > 0; }
 };
 
 // Resources OptiScaler's own backends create through the game's device: FFX contexts and swapchains

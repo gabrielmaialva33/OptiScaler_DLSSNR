@@ -116,7 +116,7 @@ static bool IsDxgiBackedCaller(void* returnAddress)
 static PFN_vkVoidFunction LowLatencyInputHook(const char* pName, PFN_vkVoidFunction orgFunc, void* returnAddress)
 {
 #ifdef LOW_LATENCY_INPUTS
-    if (pName == nullptr || State::Instance().vulkanSkipHooks)
+    if (pName == nullptr || ScopedSkipVulkanHooks::Active())
         return nullptr;
 
     // Also captured here in case the device was created before OptiScaler's hooks
@@ -155,7 +155,7 @@ static PFN_vkVoidFunction LowLatencyInputHook(const char* pName, PFN_vkVoidFunct
 
 static void HookDevice(VkDevice InDevice)
 {
-    if (o_CreateSwapchainKHR != nullptr || State::Instance().vulkanSkipHooks)
+    if (o_CreateSwapchainKHR != nullptr || ScopedSkipVulkanHooks::Active())
         return;
 
     LOG_FUNC();
@@ -203,7 +203,7 @@ static VkResult hkvkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32Surf
     auto procHwnd = Util::GetProcessWindow();
     LOG_DEBUG("procHwnd: {0:X}, swapchain hwnd: {1:X}", (UINT64) procHwnd, (UINT64) pCreateInfo->hwnd);
 
-    if (result == VK_SUCCESS && !State::Instance().vulkanSkipHooks)
+    if (result == VK_SUCCESS && !ScopedSkipVulkanHooks::Active())
     {
         MenuOverlayVk::DestroyVulkanObjects(false);
 
@@ -251,7 +251,7 @@ static VkResult hkvkCreateInstance(const VkInstanceCreateInfo* pCreateInfo, cons
     }
 
     // Disabled to prevent unnecessary object release
-    // if (result == VK_SUCCESS && !State::Instance().vulkanSkipHooks)
+    // if (result == VK_SUCCESS && !ScopedSkipVulkanHooks::Active())
     //{
     //     MenuOverlayVk::DestroyVulkanObjects(false);
     // }
@@ -356,7 +356,7 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
 
     if (result == VK_SUCCESS && Config::Instance()->OverlayMenu.value_or_default())
     {
-        if (!State::Instance().vulkanSkipHooks)
+        if (!ScopedSkipVulkanHooks::Active())
         {
             // Disabled to prevent unnecessary object release
             // MenuOverlayVk::DestroyVulkanObjects(false);
@@ -407,8 +407,8 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     }
 
     // The driver's VK_NV_low_latency2, only there when the device has it enabled
-    if (result == VK_SUCCESS && o_vkGetDeviceProcAddr && !State::Instance().vulkanSkipHooks &&
-        !State::Instance().creatingD3DDevice && TimelineSemaphoresEnabled(&localCreteInfo))
+    if (result == VK_SUCCESS && o_vkGetDeviceProcAddr && !ScopedSkipVulkanHooks::Active() &&
+        !ScopedCreatingD3DDevice::Active() && TimelineSemaphoresEnabled(&localCreteInfo))
     {
         auto getProc = [&](const char* name) { return o_vkGetDeviceProcAddr(*pDevice, name); };
 
@@ -519,7 +519,7 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
     // Menu blur copies the swapchain image
     VkSwapchainCreateInfoKHR localCreateInfo {};
     if (pCreateInfo != nullptr && Config::Instance()->OverlayMenu.value_or_default() &&
-        !State::Instance().vulkanSkipHooks && !dxgiBacked && _PD != VK_NULL_HANDLE &&
+        !ScopedSkipVulkanHooks::Active() && !dxgiBacked && _PD != VK_NULL_HANDLE &&
         (pCreateInfo->imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0)
     {
         VkSurfaceCapabilitiesKHR surfaceCaps {};
@@ -537,7 +537,7 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
     VkSwapchainLatencyCreateInfoNV latencyCreateInfo {};
     bool lowLatencySwapchain = false;
 
-    if (pCreateInfo != nullptr && device == _lowLatency2Device && !State::Instance().vulkanSkipHooks && !dxgiBacked)
+    if (pCreateInfo != nullptr && device == _lowLatency2Device && !ScopedSkipVulkanHooks::Active() && !dxgiBacked)
     {
         auto next = (const VkBaseInStructure*) pCreateInfo->pNext;
 
@@ -577,7 +577,7 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
 #endif
 
     if (result == VK_SUCCESS && device != VK_NULL_HANDLE && pCreateInfo != nullptr && *pSwapchain != VK_NULL_HANDLE &&
-        !State::Instance().vulkanSkipHooks && !dxgiBacked)
+        !ScopedSkipVulkanHooks::Active() && !dxgiBacked)
     {
         State::Instance().screenWidth = static_cast<float>(pCreateInfo->imageExtent.width);
         State::Instance().screenHeight = static_cast<float>(pCreateInfo->imageExtent.height);

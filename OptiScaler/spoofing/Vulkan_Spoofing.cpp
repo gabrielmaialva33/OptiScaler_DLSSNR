@@ -237,7 +237,7 @@ inline static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
 VkResult VulkanSpoofing::hkvkCreateInstance(VkInstanceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator,
                                             VkInstance* pInstance)
 {
-    if (State::Instance().creatingD3DDevice)
+    if (ScopedCreatingD3DDevice::Active())
     {
         LOG_INFO("Skipping because DXVK/VKD3D is creating a D3D device");
         return VK_SUCCESS;
@@ -389,7 +389,7 @@ VkResult VulkanSpoofing::hkvkCreateInstance(VkInstanceCreateInfo* pCreateInfo, c
 VkResult VulkanSpoofing::hkvkCreateDevice(VkPhysicalDevice physicalDevice, VkDeviceCreateInfo* pCreateInfo,
                                           const VkAllocationCallbacks* pAllocator, VkDevice* pDevice)
 {
-    if (State::Instance().creatingD3DDevice)
+    if (ScopedCreatingD3DDevice::Active())
     {
         LOG_INFO("Skipping because DXVK/VKD3D is creating a D3D device");
         return VK_SUCCESS;

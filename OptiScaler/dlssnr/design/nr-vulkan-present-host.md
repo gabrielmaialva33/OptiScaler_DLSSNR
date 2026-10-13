@@ -71,9 +71,9 @@ The five requested commits were read with `git show`:
 
 There is an important correction to the premise: **the marker does not set `vulkanSkipHooks`.**
 `dllmain.cpp:947–964` sets `vulkanHooksSkipped` and does not call the hook installer. The distinct
-`HookDevice:56` guard uses `vulkanSkipHooks`, which also participates in scoped suppression during
-internal device work (`State.h`'s `ScopedSkipVulkanHooks`). Do not clear that flag to bypass the
-marker: doing so defeats a different recursion/device-capture guard.
+`HookDevice:56` guard uses `ScopedSkipVulkanHooks::Active()`, the scoped suppression during internal
+device work (a per-thread count since 2026-10-13; before that the process-wide `vulkanSkipHooks`). Do
+not use it to bypass the marker: it is a different recursion/device-capture guard.
 
 Nor is marker presence a complete static proof that no hooks can exist: the late Vulkan load path
 in `hooks/LibraryLoad_Hooks.cpp:392–401` calls `VulkanHooks::Hook(module)` without checking the

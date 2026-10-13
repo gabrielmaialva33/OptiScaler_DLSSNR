@@ -6700,7 +6700,7 @@ VkResult Vulkan_wDx12::hk_vkResetCommandPool(VkDevice device, VkCommandPool comm
 
 PFN_vkVoidFunction Vulkan_wDx12::GetDeviceProcAddr(const PFN_vkVoidFunction original, const char* pName)
 {
-    if (State::Instance().creatingD3DDevice)
+    if (ScopedCreatingD3DDevice::Active())
         return nullptr;
 
     return GetAddress(original, pName);
@@ -6708,7 +6708,7 @@ PFN_vkVoidFunction Vulkan_wDx12::GetDeviceProcAddr(const PFN_vkVoidFunction orig
 
 PFN_vkVoidFunction Vulkan_wDx12::GetInstanceProcAddr(const PFN_vkVoidFunction original, const char* pName)
 {
-    if (State::Instance().creatingD3DDevice)
+    if (ScopedCreatingD3DDevice::Active())
         return nullptr;
 
     return GetAddress(original, pName);
@@ -9260,7 +9260,7 @@ void Vulkan_wDx12::Hook(HMODULE vulkanModule)
     if (o_vkQueueSubmit != nullptr)
         return;
 
-    if (State::Instance().creatingD3DDevice)
+    if (ScopedCreatingD3DDevice::Active())
         return;
 
     o_vkQueueSubmit = (PFN_vkQueueSubmit) GetProcAddress(vulkanModule, "vkQueueSubmit");
