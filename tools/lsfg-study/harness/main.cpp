@@ -1,4 +1,4 @@
-// Standalone LSFG 3.1 quality/SDR/flow=1 study. Shader binaries are user-supplied.
+// Standalone LSFG 3.1 SDR study and GPU benchmark. Shader binaries are user-supplied.
 #define NOMINMAX
 #include <windows.h>
 #include <d3d12.h>
@@ -11,6 +11,9 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <chrono>
+#include <cmath>
+#include <iomanip>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -104,7 +107,8 @@ public:
     UINT increment = 0, samplerIncrement = 0, used = 0;
     UINT64 serial = 0;
     UINT width, height;
-    bool half;
+    bool half, performance;
+    float flow;
     fs::path shaders;
     std::map<UINT, Shader> programs;
     std::vector<std::unique_ptr<Texture>> textures;
@@ -113,8 +117,8 @@ public:
     Texture* source = nullptr;
     Texture* output = nullptr;
 
-    Harness(UINT w, UINT h, bool fp16, const fs::path& dir, bool debug, bool gbv)
-        : width(w), height(h), half(fp16), shaders(dir) {
+    Harness(UINT w, UINT h, bool fp16, bool perf, float scale, const fs::path& dir, bool debug, bool gbv)
+        : width(w), height(h), half(fp16), performance(perf), flow(scale), shaders(dir) {
         if (debug || gbv) {
             ComPtr<ID3D12Debug> layer;
             check(D3D12GetDebugInterface(IID_PPV_ARGS(&layer)), "D3D12 debug layer requested but unavailable");
@@ -324,22 +328,25 @@ public:
     void pass(std::vector<Pass>& dst, UINT rid, UINT i, UINT special, UINT w, UINT h, UINT group,
               std::vector<Texture*> reads, std::vector<Texture*> writes) {
         for (auto r : reads) require(std::find(writes.begin(), writes.end(), r) == writes.end(), "pass SRV/UAV overlap");
-        dst.push_back({rid + (half && rid >= 3 ? 48 : 0), i, special, (w + group - 1) / group, (h + group - 1) / group,
+        dst.push_back({rid + (rid >= 3 ? (half ? 48 : 0) + (performance ? 24 : 0) : 0), i, special, (w + group - 1) / group, (h + group - 1) / group,
                        std::move(reads), std::move(writes), {}});
     }
     void graph() {
+        const UINT fw = UINT(float(width) * flow), fh = UINT(float(height) * flow);
+        const UINT mul = performance ? 1 : 2;
+        require(fw >= 64 && fh >= 64, "flow-scaled input extent must be at least 64 on both axes");
         source = texture(width, height, 2, DXGI_FORMAT_R8G8B8A8_UNORM); pools[4] = {source};
-        for (UINT i = 0; i < 7; ++i) add(5, std::max(width >> i, 1u), std::max(height >> i, 1u), 1, DXGI_FORMAT_R8_UNORM);
-        pass(pre, 0, 0, 0, width, height, 64, {source}, pools[5]);
+        for (UINT i = 0; i < 7; ++i) add(5, std::max(fw >> i, 1u), std::max(fh >> i, 1u), 1, DXGI_FORMAT_R8_UNORM);
+        pass(pre, 0, 0, 0, fw, fh, 64, {source}, pools[5]);
         std::array<Texture*, 7> alpha{}, gamma{};
         std::array<Texture*, 3> delta{}, epsilon{};
         for (UINT i = 0; i < 7; ++i) {
-            UINT w = ((width >> (6 - i)) + 1) / 2, h = ((height >> (6 - i)) + 1) / 2;
-            auto a = add(7, w, h, 2); auto b = add(9, w, h, 2);
+            UINT w = ((fw >> (6 - i)) + 1) / 2, h = ((fh >> (6 - i)) + 1) / 2;
+            auto a = add(7, w, h, mul); auto b = add(9, w, h, mul);
             pass(pre, 13, i, 0, w, h, 8, {pools[5][6-i]}, {a});
             pass(pre, 14, i, 0, w, h, 8, {a}, {b});
             w = (w + 1) / 2; h = (h + 1) / 2;
-            auto c = add(11, w, h, 4); alpha[i] = add(13, w, h, 12);
+            auto c = add(11, w, h, 2*mul); alpha[i] = add(13, w, h, 6*mul);
             pass(pre, 15, i, 0, w, h, 8, {b}, {c}); pass(pre, 16, i, 0, w, h, 8, {c}, {alpha[i]});
         }
         UINT bw = alpha[6]->w, bh = alpha[6]->h; Texture* prev = alpha[6];
@@ -364,14 +371,14 @@ public:
             };
             std::vector<Texture*> gr{alpha[i]}, gr4{pools[23][i == 0 ? 5 : 6-i]};
             if (i) { gr.push_back(gamma[i-1]); gr4.push_back(gamma[i-1]); }
-            gamma[i] = chain(3, 25, i, 3, 4, gr, gr4, i == 0);
+            gamma[i] = chain(3, 25, i, 3, 2*mul, gr, gr4, i == 0);
             if (i >= 4) {
                 UINT j = i - 4; std::vector<Texture*> dr{alpha[i]}, dr4{pools[23][6-i]};
                 if (j) { dr.push_back(delta[j-1]); dr4.push_back(delta[j-1]); }
-                delta[j] = chain(8, 35, j, 3, 4, dr, dr4, j == 0);
+                delta[j] = chain(8, 35, j, 3, 2*mul, dr, dr4, j == 0);
                 std::vector<Texture*> er{alpha[i], gamma[i-1]}, er4;
                 if (j) { er.push_back(delta[j-1]); er4.push_back(epsilon[j-1]); }
-                epsilon[j] = chain(17, 45, j, 2, 2, er, er4, j == 0);
+                epsilon[j] = chain(17, 45, j, mul, mul, er, er4, j == 0);
             }
         }
         output = add(55, width, height, 1);
@@ -379,12 +386,13 @@ public:
         require(pre.size() == 34 && main.size() == 66, "graph pass count drift");
     }
     void constants(UINT frame, float timestamp) {
-        Uniform cb{}; cb.source = frame; cb.timestamp = timestamp;
+        Uniform cb{}; cb.source = frame; cb.timestamp = timestamp; cb.invScale = 1.f / flow;
         void* mapped = nullptr; D3D12_RANGE noRead{}; check(uniforms->Map(0, &noRead, &mapped), "uniform map");
         memset(mapped, 0, 256); memcpy(mapped, &cb, sizeof(cb)); uniforms->Unmap(0, nullptr);
     }
-    void execute(std::vector<Pass>& passes) {
+    void execute(std::vector<Pass>& passes, ID3D12QueryHeap* queries = nullptr, UINT queryBase = 0) {
         for (auto& p : passes) {
+            if (queries) list->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, queryBase++);
             auto& s = programs.at(p.rid);
             for (auto t : p.reads) transition(*t, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             for (auto t : p.writes) transition(*t, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -396,7 +404,98 @@ public:
             }
             list->Dispatch(p.gx, p.gy, 1);
             for (auto t : p.writes) uavBarrier(*t);
+            if (queries) list->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, queryBase++);
         }
+    }
+    static std::pair<double, double> statistics(std::vector<double> values) {
+        require(!values.empty(), "empty timing sample");
+        std::sort(values.begin(), values.end());
+        const size_t n = values.size();
+        const double median = n % 2 ? values[n/2] : (values[n/2-1] + values[n/2]) * .5;
+        return {median, values[size_t(std::ceil(.95 * double(n))) - 1]};
+    }
+    void benchmark(UINT warmup, UINT iterations, const fs::path& out) {
+        require(iterations >= 2 && iterations <= 100000 && warmup >= 3 && warmup <= 100000,
+                "timing requires 2..100000 iterations and 3..100000 warm-up iterations");
+        UINT64 frequency = 0; check(queue->GetTimestampFrequency(&frequency), "timestamp frequency");
+        require(frequency > 0, "zero timestamp frequency");
+        constexpr UINT count = 204; // total, main phase, and two timestamps for each of 100 passes
+        D3D12_QUERY_HEAP_DESC qd{}; qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP; qd.Count = count;
+        ComPtr<ID3D12QueryHeap> queries; check(device->CreateQueryHeap(&qd, IID_PPV_ARGS(&queries)), "timestamp heap");
+        auto results = buffer(count * sizeof(UINT64), D3D12_HEAP_TYPE_READBACK);
+        std::array<std::vector<double>, 103> samples; // total, main, pre, each pass
+        std::vector<double> coarseTotal, coarseMain;
+        std::array<double, 2> wall{};
+        std::ofstream raw(out / "timing-samples.csv");
+        raw << "sweep,sample,total_ms,main_ms,pre_ms";
+        for (UINT i = 0; i < 100; ++i) raw << ",pass_" << i << "_ms";
+        raw << "\n" << std::setprecision(9);
+        UINT frame = 0;
+        for (UINT sweep = 0; sweep < 2; ++sweep) {
+            const bool detailed = sweep == 1;
+            std::chrono::steady_clock::time_point start;
+            for (UINT iteration = 0; iteration < warmup + iterations; ++iteration, ++frame) {
+                if (iteration == warmup) start = std::chrono::steady_clock::now();
+                // The source stays zero (no CPU uploads); feature history still rotates per iteration.
+                constants(frame, .5f); begin();
+                list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+                execute(pre, detailed ? queries.Get() : nullptr, 4);
+                list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2);
+                execute(main, detailed ? queries.Get() : nullptr, 4 + 2 * UINT(pre.size()));
+                list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 3);
+                list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+                list->ResolveQueryData(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, detailed ? count : 4, results.Get(), 0);
+                submit(); // fence protects query reuse, readback and the next constant update
+                UINT64* ticks = nullptr; D3D12_RANGE range{0, count * sizeof(UINT64)};
+                check(results->Map(0, &range, reinterpret_cast<void**>(&ticks)), "timestamp map");
+                auto ms = [&](UINT a, UINT b) {
+                    require(ticks[b] >= ticks[a], "non-monotonic GPU timestamps");
+                    return double(ticks[b] - ticks[a]) * 1000. / double(frequency);
+                };
+                if (iteration >= warmup) {
+                    const double total = ms(0, 1), generation = ms(2, 3), preprocessing = ms(0, 2);
+                    raw << (detailed ? "passes" : "total") << ',' << iteration-warmup << ',' << total << ',' << generation << ',' << preprocessing;
+                    if (detailed) {
+                        samples[0].push_back(total); samples[1].push_back(generation); samples[2].push_back(preprocessing);
+                        for (UINT i = 0; i < 100; ++i) { double t = ms(4 + 2*i, 5 + 2*i); samples[3+i].push_back(t); raw << ',' << t; }
+                    } else { coarseTotal.push_back(total); coarseMain.push_back(generation); }
+                    raw << '\n';
+                }
+                D3D12_RANGE noWrite{}; results->Unmap(0, &noWrite);
+            }
+            wall[sweep] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / iterations;
+        }
+        std::ofstream json(out / "timing.json");
+        require(bool(json) && bool(raw), "timing report file failure");
+        auto emit = [&](const char* name, const std::vector<double>& v) {
+            auto [median, p95] = statistics(v);
+            json << "\"" << name << "\":{\"median_ms\":" << median << ",\"p95_ms\":" << p95 << "}";
+        };
+        json << std::setprecision(9) << "{\"width\":" << width << ",\"height\":" << height
+             << ",\"performance\":" << (performance ? "true" : "false") << ",\"fp16_variant\":" << (half ? "true" : "false")
+             << ",\"flow_scale\":" << flow << ",\"multiplier\":2,\"warmup\":" << warmup << ",\"iterations\":" << iterations
+             << ",\"frequency_hz\":" << frequency << ",\"wall_mean_ms\":" << wall[0] << ',';
+        emit("total", coarseTotal); json << ','; emit("generation", coarseMain); json << ',';
+        emit("instrumented_total", samples[0]); json << ','; emit("instrumented_generation", samples[1]); json << ',';
+        emit("instrumented_preprocessing", samples[2]); json << ",\"passes\":[";
+        std::ofstream csv(out / "timing-passes.csv"); csv << "phase,pass,rid,level,median_ms,p95_ms\n" << std::setprecision(9);
+        const char* names[]{"mipmaps", "generate", "generate_hdr", "gamma0", "gamma1", "gamma2", "gamma3", "gamma4",
+                            "delta0", "delta1", "delta2", "delta3", "delta4", "alpha0", "alpha1", "alpha2", "alpha3",
+                            "epsilon0", "epsilon1", "epsilon2", "epsilon3", "epsilon4", "beta0", "beta1", "beta2", "beta3", "beta4"};
+        for (UINT i = 0; i < 100; ++i) {
+            const bool isPre = i < pre.size(); const auto& p = isPre ? pre[i] : main[i-UINT(pre.size())];
+            UINT base = p.rid < 3 ? p.rid : p.rid - (half ? 48 : 0) - (performance ? 24 : 0);
+            auto [median, p95] = statistics(samples[i+3]);
+            if (i) json << ',';
+            json << "{\"phase\":\"" << (isPre ? "pre" : "main") << "\",\"name\":\"" << names[base]
+                 << "\",\"rid\":" << p.rid << ",\"level\":" << p.index << ",\"median_ms\":" << median << ",\"p95_ms\":" << p95 << '}';
+            csv << (isPre ? "pre" : "main") << ',' << names[base] << ',' << p.rid << ',' << p.index << ',' << median << ',' << p95 << '\n';
+        }
+        json << "]}\n";
+        auto [median, p95] = statistics(coarseTotal);
+        printf("GPU total: median %.6f ms, p95 %.6f ms; wall mean %.6f ms (%u samples after %u warm-up)\n",
+               median, p95, wall[0], iterations, warmup);
+        printf("Per-pass timings: timing-passes.csv; raw samples: timing-samples.csv; summary: timing.json\n");
     }
     void upload(const Pixels& p, UINT frame) {
         auto d = source->resource->GetDesc(); D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{}; UINT64 bytes = 0;
@@ -426,18 +525,33 @@ public:
 };
 int wmain(int argc, wchar_t** argv) {
     try {
-        fs::path shaders, out; std::vector<fs::path> paths; UINT multiplier = 2; bool half = false, debug = false, gbv = false;
+        fs::path shaders, out; std::vector<fs::path> paths; UINT multiplier = 2; bool half = false, debug = false, gbv = false, perf = false, timing = false;
+        float flow = 1.f; UINT width = 1920, height = 1080, iterations = 400, warmup = 100;
         for (int i = 1; i < argc; ++i) {
             std::wstring a = argv[i];
             if (a == L"--fp16") half = true;
+            else if (a == L"--performance") perf = true;
+            else if (a == L"--benchmark") timing = true;
             else if (a == L"--debug") debug = true;
             else if (a == L"--gpu-validation") gbv = true;
-            else if (a == L"--shaders" || a == L"--out" || a == L"--multiplier") {
+            else if (a == L"--shaders" || a == L"--out" || a == L"--multiplier" || a == L"--flow-scale" || a == L"--width" || a == L"--height" || a == L"--iterations" || a == L"--warmup") {
                 require(i + 1 < argc, "option requires a value"); auto value = argv[++i];
-                if (a == L"--shaders") shaders = value; else if (a == L"--out") out = value; else multiplier = std::stoul(value);
+                if (a == L"--shaders") shaders = value; else if (a == L"--out") out = value; else if (a == L"--multiplier") multiplier = std::stoul(value);
+                else if (a == L"--flow-scale") flow = std::stof(value);
+                else if (a == L"--width") width = std::stoul(value);
+                else if (a == L"--height") height = std::stoul(value);
+                else if (a == L"--iterations") iterations = std::stoul(value);
+                else warmup = std::stoul(value);
             } else { require(!a.starts_with(L"--"), "unknown option"); paths.emplace_back(a); }
         }
         require(!shaders.empty() && !out.empty() && (multiplier == 2 || multiplier == 3), "usage: lsfg-harness --shaders DIR --out DIR [--multiplier 2|3] [--fp16] [--debug] [--gpu-validation] FOLDER | PREV.png CURRENT.png");
+        require(std::isfinite(flow) && flow >= .25f && flow <= 1.f, "flow scale must be .25..1");
+        if (timing) {
+            require(paths.empty() && multiplier == 2, "benchmark accepts no PNG inputs and requires multiplier 2");
+            require(width >= 64 && height >= 64 && width <= 16384 && height <= 16384, "invalid benchmark extent");
+            fs::create_directories(out);
+            Harness h(width, height, half, perf, flow, shaders, debug, gbv); h.benchmark(warmup, iterations, out); return 0;
+        }
         if (paths.size() == 1 && fs::is_directory(paths[0])) {
             auto folder = paths[0]; paths.clear();
             for (const auto& entry : fs::directory_iterator(folder)) if (entry.path().extension() == L".png") paths.push_back(entry.path());
@@ -451,7 +565,7 @@ int wmain(int argc, wchar_t** argv) {
         check(CoInitializeEx(nullptr, COINIT_MULTITHREADED), "COM init");
         check(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic)), "WIC factory");
         fs::create_directories(out); auto first = readPNG(paths[0]);
-        Harness h(first.w, first.h, half, shaders, debug, gbv);
+        Harness h(first.w, first.h, half, perf, flow, shaders, debug, gbv);
         for (UINT f = 0; f < paths.size(); ++f) {
             auto p = f == 0 ? first : readPNG(paths[f]); require(p.w == first.w && p.h == first.h, "frame dimensions differ");
             h.upload(p, f); h.constants(f, 0.f); h.begin(); h.execute(h.pre); h.submit();

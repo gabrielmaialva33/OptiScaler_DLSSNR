@@ -44,6 +44,13 @@ def main():
     ap.add_argument('--output', type=Path)
     ap.add_argument('--multiplier', type=int, choices=(2, 3), default=2)
     ap.add_argument('--fp16', action='store_true', help='select original FP16 shader variants (+48)')
+    ap.add_argument('--performance', action='store_true')
+    ap.add_argument('--flow-scale', type=float, default=1.0)
+    ap.add_argument('--benchmark', action='store_true')
+    ap.add_argument('--width', type=int, default=1920)
+    ap.add_argument('--height', type=int, default=1080)
+    ap.add_argument('--iterations', type=int, default=400)
+    ap.add_argument('--warmup', type=int, default=100)
     ap.add_argument('--debug', action='store_true', help='require D3D12 debug layer')
     ap.add_argument('--gpu-validation', action='store_true', help='require GPU based validation')
     ap.add_argument('inputs', nargs='*', type=Path, help='one folder of numbered PNGs or two PNG paths')
@@ -70,14 +77,17 @@ def main():
             shutil.copy2(src, dst)
     if args.build_only:
         return
-    if len(args.inputs) not in (1, 2):
+    if not args.benchmark and len(args.inputs) not in (1, 2):
         ap.error('supply a folder or two PNG paths')
     output = (args.output or base / 'out').resolve()
     output.mkdir(parents=True, exist_ok=True)
     win = lambda p: 'Z:' + str(p.resolve())
     cmd = ['wine', work / 'lsfg-harness.exe', '--shaders', win(base / 'dxil'), '--out', win(output),
-           '--multiplier', str(args.multiplier)]
-    for flag in ('fp16', 'debug', 'gpu_validation'):
+           '--multiplier', str(args.multiplier), '--flow-scale', str(args.flow_scale)]
+    if args.benchmark:
+        for name in ('width', 'height', 'iterations', 'warmup'):
+            cmd += ['--' + name, str(getattr(args, name))]
+    for flag in ('fp16', 'performance', 'benchmark', 'debug', 'gpu_validation'):
         if getattr(args, flag):
             cmd += ['--' + flag.replace('_', '-')]
     cmd += list(map(win, args.inputs))
