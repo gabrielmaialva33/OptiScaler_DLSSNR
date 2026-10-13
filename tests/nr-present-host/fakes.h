@@ -340,7 +340,8 @@ inline DlssNrFrameInfo PresentFrameDefaults(bool reset)
 }
 
 inline bool CapturedPresentGuides(ID3D12GraphicsCommandList*, ID3D12Resource**, ID3D12Resource**, DlssNrFrameInfo*,
-                                  ID3D12CommandQueue* = nullptr)
+                                  ID3D12CommandQueue* = nullptr, const void* = nullptr, unsigned int = 0,
+                                  unsigned int = 0)
 {
     return false;
 }

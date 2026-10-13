@@ -61,6 +61,7 @@
 #include "DlssNr_Pulse_Dx12.h"
 #include <dlssnr/DlssNr_Pulse.h>
 #include <dlssnr/DlssNr_PresentGuideRing.h>
+#include <dlssnr/DlssNr_PresentGuideIdentity.h>
 
 namespace
 {
@@ -6033,6 +6034,115 @@ static void ParkNrClone(ID3D12Resource*& res, const DlssNr::Submission::Usage& u
     g_nrRetired.push_back(r);
 }
 
+// Present-guide identity, step 0 of docs/dlssnr/design/present-real-guides.md: the stamp each capture carries, and
+// what the identity rules (DlssNr_PresentGuideIdentity.h) would have answered at each present. Log only: nothing here
+// changes which slot a present reads, and nothing here runs at HookMethod=1 or without a capture. Guarded by
+// g_nrMutex, which every user already holds: the capture, both consumers' presents, and shutdown.
+struct PresentGuideIdentityState
+{
+    DlssNr::PresentGuideIdentity::Tracker tracker;
+    DlssNr::PresentGuideIdentity::Consumer present { "D3D12 present" };
+    DlssNr::PresentGuideIdentity::Consumer bridge { "D3D11 bridge" };
+};
+static PresentGuideIdentityState g_guideIdentity;
+
+// The stamp, at capture: which device, what the upscaler produced and where, how much of the guides is real.
+static void StampPresentGuide(size_t slot, NVSDK_NGX_Parameter* params, const DlssNrFrameInfo& frame,
+                              const void* device, uint32_t depthWidth, uint32_t depthHeight)
+{
+    DlssNr::PresentGuideIdentity::Stamp stamp;
+    stamp.device = device;
+
+    if (ID3D12Resource* output = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output"))
+    {
+        const auto desc = output->GetDesc();
+        stamp.outputWidth = static_cast<uint32_t>(desc.Width);
+        stamp.outputHeight = desc.Height;
+    }
+
+    params->Get(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X, &stamp.outputBaseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y, &stamp.outputBaseY);
+
+    const auto render = DlssNr::PresentGuideIdentity::RenderExtent(frame.RenderSubrectWidth, frame.RenderSubrectHeight,
+                                                                   depthWidth, depthHeight);
+    stamp.renderWidth = render.width;
+    stamp.renderHeight = render.height;
+
+    g_guideIdentity.tracker.StampCapture(slot, stamp, NowMs());
+}
+
+// What the rules would have answered for this present, counted against what the present does today. Never touches
+// the ring: it reads the slots and writes only its own record.
+static void NoteGuideIdentity(DlssNr::PresentGuideIdentity::Consumer& consumer, const void* device,
+                              const void* presenter, unsigned int width, unsigned int height, size_t picked,
+                              DlssNr::PresentGuideIdentity::Today today)
+{
+    // A ring that never recorded -- a title with no upscaler -- has nothing to identify and says nothing.
+    if (g_presentGuideRing.NewestRecordedSequence() == 0)
+        return;
+
+    DlssNr::PresentGuideIdentity::Present present;
+    present.device = device;
+    present.width = width;
+    present.height = height;
+    present.swapchain = presenter;
+    present.lastConsumed = consumer.LastConsumed();
+    present.nowMs = NowMs();
+
+    const auto decision = g_guideIdentity.tracker.AtPresent(picked, g_presentGuideRing, present);
+
+    std::string line;
+    if (consumer.Note(decision, picked, g_presentGuideRing, g_guideIdentity.tracker.Stamped(), present, today,
+                      std::chrono::steady_clock::now(), &line))
+    {
+        LOG_INFO("{}", line);
+    }
+}
+
+// The D3D12 present pass, right after its pick. Today it reads the picked slot, unless no capture was recorded since
+// its last pass, the skip that follows the pick in RunPresentPass; the same test is made here.
+static void NotePresentPassIdentity(IDXGISwapChain3* swapchain, ID3D12Device* device, unsigned int width,
+                                    unsigned int height, size_t picked)
+{
+    using DlssNr::PresentGuideIdentity::Today;
+
+    const auto newestRecordedSeq = g_presentGuideRing.NewestRecordedSequence();
+    const bool skips = newestRecordedSeq > 0 && newestRecordedSeq == g_nrLastEnhancedRecordedSeq;
+    const Today today = skips ? Today::Skipped : picked < DlssNr::PresentGuides::kRingSize ? Today::Read : Today::None;
+
+    NoteGuideIdentity(g_guideIdentity.present, device, swapchain, width, height, picked, today);
+}
+
+// The D3D11 bridge's present host, right after its pick in CapturedPresentGuides. Today it reads the picked slot
+// whenever the slot holds both copies; it has no skip. A host once built keeps asking after the pass is switched off
+// or HookMethod leaves 2, the only value the bridge is built for; it is not counted then, nor is a caller that names
+// no presenter.
+static void NoteBridgeIdentity(ID3D12GraphicsCommandList* cmdList, const void* presenter, unsigned int width,
+                               unsigned int height, size_t picked)
+{
+    using DlssNr::PresentGuideIdentity::Today;
+
+    const Config& cfg = *Config::Instance();
+
+    if (g_presentGuideRing.NewestRecordedSequence() == 0 || presenter == nullptr || cmdList == nullptr ||
+        !cfg.DlssNrEnabled.value_or_default() || cfg.DlssNrHookMethod.value_or_default() != 2)
+    {
+        return;
+    }
+
+    // The device the bridge's list reads the copies on. Compared as an identity only; the list keeps it alive.
+    ID3D12Device* device = nullptr;
+    if (FAILED(cmdList->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
+        return;
+    device->Release();
+
+    const bool reads = picked < DlssNr::PresentGuides::kRingSize && g_presentGuideClones[picked].depth != nullptr &&
+                       g_presentGuideClones[picked].motion != nullptr;
+
+    NoteGuideIdentity(g_guideIdentity.bridge, device, presenter, width, height, picked,
+                      reads ? Today::Read : Today::None);
+}
+
 static void ReleasePresentTemporal()
 {
     g_bridgeRead = {};
@@ -6051,6 +6161,7 @@ static void ReleasePresentTemporal()
         clone = PresentGuideClone {};
     }
     g_presentGuideRing.Reset();
+    g_guideIdentity = {};
     g_temporalValid = false;
 }
 
@@ -6241,6 +6352,7 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
 
     ++g_renderSeq; // Count render frame at successful CaptureTemporal (Correction 5b)
 
+    StampPresentGuide(slot, params, frame, devId, clone.width, clone.height);
     g_presentGuideRing.CommitRecord(slot, clone.width, clone.height, frame.DepthInverted, NowMs(),
                                     &clone.captureWriteUsage, &clone);
     g_temporalValid = true;
@@ -6758,6 +6870,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     };
 
     const size_t pickedSlot = g_presentGuideRing.PickForPresent(isEligible, nowMs);
+    NotePresentPassIdentity(swapchain, device, width, height, pickedSlot);
 
     DlssNr::Submission::Usage savedReadUsage {};
     DlssNr::Submission::Usage savedPresentReadUsage {};
@@ -7774,7 +7887,8 @@ void SynthMotionGuide::Release()
 }
 
 bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** depth, ID3D12Resource** motion,
-                           DlssNrFrameInfo* frame, ID3D12CommandQueue* queue)
+                           DlssNrFrameInfo* frame, ID3D12CommandQueue* queue, const void* presenter,
+                           unsigned int presentWidth, unsigned int presentHeight)
 {
     if (depth == nullptr || motion == nullptr || frame == nullptr)
         return false;
@@ -7797,6 +7911,7 @@ bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** 
     };
 
     const size_t pickedSlot = g_presentGuideRing.PickForPresent(isEligible, NowMs());
+    NoteBridgeIdentity(cmdList, presenter, presentWidth, presentHeight, pickedSlot);
 
     if (pickedSlot >= DlssNr::PresentGuides::kRingSize)
         return false;

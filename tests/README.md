@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Thirty-six suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
+**Host tier.** Thirty-seven suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit,
@@ -63,6 +63,11 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   only when frame generation could be involved (`DlssNr_PresentSync.h`). The wait itself is not exercised.
 - `nr-present-guides` — selection and completion tracking for the present-time guide snapshot ring
   (`DlssNr_PresentGuideRing.h`), preventing cross-queue GPU waits and DLSS-G deadlocks.
+- `nr-present-guide-identity` — step 0 of `docs/dlssnr/design/present-real-guides.md`, log only: the identity
+  decision (`DlssNr_PresentGuideIdentity.h`) rule by rule and in its first-failing order, that it only ever narrows the
+  ring's pick, the null swapchain stamp, ring scenarios (frame generation, a late copy, portraits, a resize, a second
+  swapchain), the per-window record and its line and rate, and the renderer's glue sliced out and run against fakes.
+  Source guards hold that the present pass and the bridge still read the slot `PickForPresent` gave them. No GPU.
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
   ownership and deferred release against scripted COM/Win32 fakes, and which FG input and output
   the bridge is built for. Also a refused presenter resize and its recovery, and the D3D12 overlay's

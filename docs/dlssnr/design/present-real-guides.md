@@ -1,7 +1,9 @@
 # Real guides for the present pass: proving the capture belongs to the frame being presented
 
-Status: design for review, not implementation, 2026-10-13. Written against `93730d39`. Line numbers are
-into that tree. Nothing here is built, and nothing here has been run.
+Status: design for review, 2026-10-13. **Step 0 (log only) is built**, on branch `feat/present-guide-identity`:
+the stamp, the decision header and both consumers' calls, acting on nothing; see
+[Step 0 as built](#step-0-as-built). Steps after it are not built. Nothing here has been run in a game. Written
+against `93730d39`; line numbers are into that tree.
 
 Read first: [nr-present-hook.md](nr-present-hook.md) (the present host, and the ring this note builds
 on), [synthesized-motion.md](synthesized-motion.md) (what runs when there are no game guides),
@@ -341,6 +343,92 @@ accepts the copy formats, that the pairing is visually right, that DLSS-G does n
 Native Windows on Rafael's RTX 3060 for the D3D12 debug layer on the depth-copy formats is the
 standing request in `nr-present-hook.md`; this change adds no new copy, so it neither adds nor
 retires that request.
+
+## Step 0 as built
+
+The maintainer chose the log-only first slice (open question 3). What exists, all of it inert at the default
+`HookMethod=1`, with the pass off, and in a title whose ring never records:
+
+- **The stamp.** `CaptureTemporal` calls `StampPresentGuide` after both copies are recorded and right before
+  `CommitRecord`, under `g_nrMutex`. It reads the `Output` resource's extent and `DLSS.Output.Subrect.Base.X/Y` from the
+  evaluate's parameters, and takes the render extent, the device, the boundary count, the ordinal and the swapchain.
+- **The decision header**, `retoque/dlssnr/DlssNr_PresentGuideIdentity.h`: `Decide` applies D2's eight rules in
+  order to `PickForPresent`'s answer and returns that slot or none, with the first failing reason. `Tracker` keeps the
+  stamps, the presenting-swapchain registry and the boundary count; `Consumer` is step 0's record.
+- **Both consumers ask, and neither listens.** `RunPresentPass` calls `NotePresentPassIdentity` on the line after its
+  pick. `CapturedPresentGuides` calls `NoteBridgeIdentity` there too; the bridge host now passes itself as its presenter
+  and the frame's extent (new defaulted arguments), and is counted only with the pass on and at `HookMethod=2`, the
+  only value the bridge is built for. Both return `void`; the slot each present reads is still `pickedSlot`, and
+  `tests/nr-present-guide-identity` holds that by source guard.
+
+Where it departs from D1 and D2 as written, and why:
+
+1. **The boundary count is the identity layer's own**, not `g_presentFlip`. It advances once per present that
+   reaches the pick, on either consumer, under `g_nrMutex`. `g_presentFlip` is written on the present thread outside
+   the lock while captures read on the render thread, and the D3D11 bridge never advances it. Presents that return
+   earlier (the four warm-up flips, an HDR decline, the wrapped entry standing down for the FG hook) mark no boundary.
+   The captures made during such a run all share one count, so the first present after it can read `ambiguous` once.
+2. **`evalsSincePresent` is counted since the last boundary**, not since the last consuming present: the capture's
+   ordinal on its device at its output extent. That is rule 4's "all but one older than a frame boundary that a present
+   marked", made countable at capture. A capture after the picked one and still in the ring is added at the decision.
+   A fifth extent in one frame counts as unknown, which rule 4 reads as ambiguous.
+3. **The output reads are in `CaptureTemporal`, not `GatherFrame`.** `GatherFrame` runs on every evaluate, at
+   `HookMethod=1` too, so the reads go only where the capture is.
+4. **Rule 8's render extent is the stated subrect, or else the depth texture's extent.** The pass reads the depth
+   texture's extent when the game states no subrect (`DlssNrFrameInfo`: "zero means the game did not say"). Refusing
+   zero literally would refuse every DLAA title without subrect keys. Half a subrect is refused.
+5. **The registry counts presenters seen at the pick in the last 1000 ms, per device.** The D3D12 pass registers the
+   swapchain it was handed; the bridge registers its `PresentHost`. A capture made before any present has no stamp, and
+   it matches a present that is alone on its device.
+6. **Rule 5 compares against the last capture this consumer read today.** Each consumer keeps its own record.
+
+### The log line
+
+One line per consumer per window, from `Consumer::Note`. A window lasts at least 2 s. While it uses the same buckets
+as the last line written, it is held up to 30 s, with its counts carried over the whole interval; a change is written
+at 2 s. Each consumer's first window is always written. A ring that never recorded logs nothing. Example (counts made
+up):
+
+```
+DLSS-NR present guides, identity check (log only, nothing refused), D3D12 present: 120 presents in 2.0 s | today 118 read a capture, 2 skipped with no new capture, 0 had none | of those read, 112 would pass, 6 would be refused (lag 6) | skipped but would pass 0 | epoch lag of new captures 0:0 1:112 2:6 3:0 4+:0 | captures per frame at their extent 1:118 2:0 3+:0
+```
+
+- `D3D12 present` or `D3D11 bridge`: which consumer.
+- `presents`: the presents that reached the pick in the window.
+- `today`: what the present does now with the pick. It reads it; or it skips (`RunPresentPass`'s own skip, nothing
+  recorded since its last pass, which is the generated-frame case; the bridge has no skip); or nothing was eligible,
+  and zero or synthesized guides run.
+- `of those read`: the decision over today's reads. Refusals are counted by first failing reason, the non-zero ones
+  only, in rule order: `device`, `extent`, `output-base`, `swapchain`, `ambiguous`, `consumed`, `lag`, `stale`,
+  `subrect`. `consumed` here means today re-read a capture an earlier present had already read. That happens when a
+  newer capture exists but its copy has not completed.
+- `skipped but would pass`: today's skip passed over a capture the rules accept. That is a capture recorded while
+  the last pass ran, completed since.
+- `epoch lag of new captures`: the present's boundary count minus the capture's, counted once per capture at the first
+  present it is offered to. `1` means captured in the interval just before this present.
+- `captures per frame at their extent`: rule 4's count for each newly offered capture (same device, same output
+  extent, same boundary).
+- `last extent refusal: output WxH at (X,Y), backbuffer WxH`: present only when the window had an `extent` or
+  `output-base` refusal.
+
+How to read it for step 1:
+
+- **`kLag`.** Add the lag buckets over a session. Mass at `1` keeps `kLag = 1`. Mass at `2` means a render thread a
+  frame ahead, or copies completing a frame late on another queue; in the second case `consumed` shows among the reads
+  beside it. Then `kLag = 2`. If there is no small cutoff, rule 6 is dropped for that title (D2).
+- **Rule 4.** Non-zero `2:` or `3+:` means the title evaluates more than once per frame at one extent, and
+  `ambiguous` is the number of real-guide frames step 1 would take away from it. If those buckets stay zero, rule 4
+  costs nothing there.
+- **Rule 2.** `extent` or `output-base` outside a resize means the title scales, letterboxes or crops after the
+  upscaler, or renders into part of a larger texture; the trailing field says by how much.
+- **Device and swapchain.** Any `device` refusal is a stamp that disagrees on device, the last question step 0
+  asks. `swapchain` refusals with no second window on screen mean the registry misreads which chain presents.
+- **The design's own test.** If `would be refused` is a large share of `read` across a session that looks right on
+  screen, the rules are wrong, and this note is rewritten before step 1.
+
+Run the test plan's step 0 on it: Crimson Desert with DLSS-G off, `HookMethod=2` and `0`, through a menu, a cutscene,
+a resolution change and Alt-Tab. Then `HookMethod=1`, where the line must not appear. The string
+`identity check (log only` is in the DLL when the slice is linked in.
 
 ## Risks
 
