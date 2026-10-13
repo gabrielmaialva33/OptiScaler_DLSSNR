@@ -8,7 +8,7 @@
 //
 // Precompiled like dlssnr.hlsl: editing this or the rule alone changes nothing. From this directory:
 //   dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect dlssnr_uimask.hlsl -Fo DlssNr_UiMask_Shader.cso
-//   python ../../shader_tools/create_header.py DlssNr_UiMask_Shader.cso DlssNr_UiMask_Shader.h DlssNr_UiMask_cso
+//   python ../../../../OptiScaler/shaders/shader_tools/create_header.py DlssNr_UiMask_Shader.cso DlssNr_UiMask_Shader.h DlssNr_UiMask_cso
 
 Texture2D<float4>         gInput    : register(t0); // the model's input at the working size
 Texture2D<float>          gLumaPrev : register(t1); // last frame's luma of that input
@@ -59,7 +59,7 @@ float2 AccPrevAt(int2 p) { return gAccPrev.Load(int3(Clamped(p), 0)); }
 #define UM_CHANGE(px_, py_) ChangeAt(int2(px_, py_))
 #define UM_PROT(px_, py_) AccPrevAt(int2(px_, py_)).x
 #define UM_STREAK(px_, py_) AccPrevAt(int2(px_, py_)).y
-#include "../../synth_motion/precompile/static_overlay_rule.h"
+#include "../../../../OptiScaler/shaders/synth_motion/precompile/static_overlay_rule.h"
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)

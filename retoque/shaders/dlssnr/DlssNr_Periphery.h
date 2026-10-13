@@ -7,7 +7,7 @@
 //   - Axis and BuildAxis are ported verbatim from PeripheralWarp ABI v2 at 64902dd6 (Copyright (c) 2026
 //     Yuri Grib (BeliyG3), MIT; Licenses/PeripheralWarp_LICENSE.txt), through wilsjo2's SpatialWarp.h.
 //   - EvenExtent and the validity rules in Build are ported from wilsjo2's
-//     OptiScaler-DLSSNR-PreSR-Multipass v0.8.91, OptiScaler/shaders/dlssnr/DlssNr_Spatial.h (GPL-3.0).
+//     OptiScaler-DLSSNR-PreSR-Multipass v0.8.91, retoque/shaders/dlssnr/DlssNr_Spatial.h (GPL-3.0).
 //     v1 has one centre and one work value for both axes and no offset or shift, so its MaxCenterOffset,
 //     MinimumWorkPercent and WorkShiftLimits are not ported: nothing here could reach them.
 //

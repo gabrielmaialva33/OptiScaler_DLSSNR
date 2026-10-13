@@ -1,4 +1,4 @@
-// Peripheral compression's layout and mapping (OptiScaler/shaders/dlssnr/DlssNr_Periphery.h and the shared
+// Peripheral compression's layout and mapping (retoque/shaders/dlssnr/DlssNr_Periphery.h and the shared
 // precompile/dlssnr_periphery_warp.h the shader includes), pinned against the cases they were written for.
 // docs/dlssnr/design/peripheral-compression.md.
 //

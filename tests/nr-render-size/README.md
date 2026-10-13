@@ -4,7 +4,7 @@
 python3 tests/nr-render-size/run.py
 ```
 
-The runner compiles `OptiScaler/dlssnr/DlssNr_RenderSize.h` against mock NGX parameter blocks with g++ C++20, ASan/UBSan, and `-Werror`.
+The runner compiles `retoque/dlssnr/DlssNr_RenderSize.h` against mock NGX parameter blocks with g++ C++20, ASan/UBSan, and `-Werror`.
 
 ## What this covers
 

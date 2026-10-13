@@ -1,4 +1,4 @@
-#include "OptiScaler/dlssnr/DlssNr_GpuTimingModel.h"
+#include "retoque/dlssnr/DlssNr_GpuTimingModel.h"
 #include <array>
 #include <cassert>
 #include <iostream>

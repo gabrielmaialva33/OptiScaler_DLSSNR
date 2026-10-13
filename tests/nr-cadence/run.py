@@ -9,10 +9,15 @@ import tempfile
 here = Path(__file__).resolve().parent
 root = here.parents[1]
 opti = root / 'OptiScaler'
+retoque = root / 'retoque'
 
 
 def read(relative):
     return (opti / relative).read_text()
+
+
+def read_nr(relative):
+    return (retoque / relative).read_text()
 
 
 def strip_comments(text):
@@ -21,11 +26,11 @@ def strip_comments(text):
 
 # --- Source guards -------------------------------------------------------------------------------------------
 
-shader = read('shaders/dlssnr/precompile/dlssnr_cadence.hlsl')
-rule = read('shaders/dlssnr/precompile/dlssnr_cadence_rule.h')
-pass_h = read('shaders/dlssnr/DlssNr_Cadence_Dx12.h')
-pass_cpp = read('shaders/dlssnr/DlssNr_Cadence_Dx12.cpp')
-renderer = read('shaders/dlssnr/DlssNr_Dx12.cpp')
+shader = read_nr('shaders/dlssnr/precompile/dlssnr_cadence.hlsl')
+rule = read_nr('shaders/dlssnr/precompile/dlssnr_cadence_rule.h')
+pass_h = read_nr('shaders/dlssnr/DlssNr_Cadence_Dx12.h')
+pass_cpp = read_nr('shaders/dlssnr/DlssNr_Cadence_Dx12.cpp')
+renderer = read_nr('shaders/dlssnr/DlssNr_Dx12.cpp')
 
 # The constant struct and the cbuffer are one ordered list of 4-byte scalars (DEVELOPMENT.md rule 5, for this
 # pass's own pair), and the struct is a multiple of 256 bytes, the size every constant-buffer view must have.
@@ -78,7 +83,7 @@ for field in ('driverProxy = useProxy', 'available = DlssNr_Cadence_Dx12::Availa
               'capture = g_capture.isActive()'):
     assert f'cadenceInputs.{field};' in renderer, field
 # Only an upscaler's own guides count as the game's: a present host with nothing captured has none.
-assert 'bool GameGuides = false;' in read('shaders/dlssnr/DlssNr_Common.h')
+assert 'bool GameGuides = false;' in read_nr('shaders/dlssnr/DlssNr_Common.h')
 assert renderer.count('frame.GameGuides = true;') == 1
 gather = renderer[renderer.index('DlssNrFrameInfo GatherFrame('):]
 assert gather.index('frame.GameGuides = true;') < gather.index('\n}\n')
@@ -100,11 +105,11 @@ for axis in 'XY':
 # Registered in the project, once each.
 project = read('OptiScaler.vcxproj')
 filters = read('OptiScaler.vcxproj.filters')
-for item in ('<ClCompile Include="shaders\\dlssnr\\DlssNr_Cadence_Dx12.cpp" />',
-             '<ClInclude Include="shaders\\dlssnr\\DlssNr_Cadence_Dx12.h" />',
-             '<ClInclude Include="dlssnr\\DlssNr_Cadence.h" />'):
+for item in ('<ClCompile Include="..\\retoque\\shaders\\dlssnr\\DlssNr_Cadence_Dx12.cpp" />',
+             '<ClInclude Include="..\\retoque\\shaders\\dlssnr\\DlssNr_Cadence_Dx12.h" />',
+             '<ClInclude Include="..\\retoque\\dlssnr\\DlssNr_Cadence.h" />'):
     assert project.count(item) == 1, item
-assert filters.count('<ClInclude Include="dlssnr\\DlssNr_Cadence.h">') == 1
+assert filters.count('<ClInclude Include="..\\retoque\\dlssnr\\DlssNr_Cadence.h">') == 1
 
 # The ported rules carry their attribution, and the licence ships.
 licence = (root / 'Licenses/OptimizerFps_LICENSE.txt').read_text()
@@ -121,6 +126,6 @@ with tempfile.TemporaryDirectory(prefix='optiscaler-nr-cadence-') as directory:
     for name in ('scheduler', 'rule'):
         binary = str(Path(directory) / name)
         subprocess.run(['g++', '-std=c++20', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
-                        '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-I', str(opti),
+                        '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-I', str(retoque), '-I', str(opti),
                         str(here / f'{name}.cpp'), '-o', binary], check=True)
         subprocess.run([binary], check=True)

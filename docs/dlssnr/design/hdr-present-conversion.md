@@ -28,16 +28,16 @@ The mathematical solution and architecture are established across community inje
 
 ## 2. What exists in this codebase today
 
-- **Refusal table:** `OptiScaler/dlssnr/DlssNr_PresentColour.h:35-58` intercepts present calls and rejects:
+- **Refusal table:** `retoque/dlssnr/DlssNr_PresentColour.h:35-58` intercepts present calls and rejects:
   - `DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020` (HDR10 PQ);
   - `DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709` (scRGB);
   - Formats `DXGI_FORMAT_R10G10B10A2_UNORM` and `DXGI_FORMAT_R16G16B16A16_FLOAT` when paired with non-sRGB colour spaces.
 - **Present-time call sites:**
-  - `OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp:5748-5765` (`RunPresentPass`): queries `PresentColourRefusal` and skips recording on refusal.
-  - `OptiScaler/dlssnr/DlssNr_PresentHost.cpp:115-132` (D3D11 bridge host): queries `PresentColourRefusal` and skips bridge capture.
-  - `OptiScaler/dlssnr/DlssNrFeature_Vk.cpp` / Vulkan present path: declines non-sRGB swapchains.
+  - `retoque/shaders/dlssnr/DlssNr_Dx12.cpp:5748-5765` (`RunPresentPass`): queries `PresentColourRefusal` and skips recording on refusal.
+  - `retoque/dlssnr/DlssNr_PresentHost.cpp:115-132` (D3D11 bridge host): queries `PresentColourRefusal` and skips bridge capture.
+  - `retoque/dlssnr/DlssNrFeature_Vk.cpp` / Vulkan present path: declines non-sRGB swapchains.
 - **Signed-value pipeline:**
-  - `OptiScaler/dlssnr/README.md` ("Signed values survive the pass"): commit `75e62d22` ensures linear HDR frames with negative chromaticity values (arising from wide gamut conversion into BT.709) preserve negative channels instead of clamping them to zero.
+  - `retoque/dlssnr/README.md` ("Signed values survive the pass"): commit `75e62d22` ensures linear HDR frames with negative chromaticity values (arising from wide gamut conversion into BT.709) preserve negative channels instead of clamping them to zero.
 
 ---
 
@@ -100,18 +100,18 @@ Instead of aborting presentation on HDR swapchains, wrap the present-time DLSS-N
 
 ## 4. Integration points
 
-1. **`OptiScaler/dlssnr/DlssNr_PresentColour.h`:**
+1. **`retoque/dlssnr/DlssNr_PresentColour.h`:**
    - Restrict `PresentColourRefusal` to unsupported formats (e.g. HLG `DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709` or unknown enum values).
    - Export helper `ResolveSdrWhiteNits(bool forceHdr, float userOverride)`.
-2. **`OptiScaler/shaders/dlssnr/`:**
+2. **`retoque/shaders/dlssnr/`:**
    - Add compute shader pass `dlssnr_hdr_present.hlsl` (compiled to DXIL and SPIR-V headers):
      - Pass 0: Decode (PQ/scRGB -> Linear BT.709 FP16);
      - Pass 1: Encode (Linear BT.709 FP16 -> PQ/scRGB).
-3. **`OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp` (`RunPresentPass`):**
+3. **`retoque/shaders/dlssnr/DlssNr_Dx12.cpp` (`RunPresentPass`):**
    - Bind intermediate FP16 target for decoded frame.
    - Configure `resolveParams.ColourTransform = 1` (Linear HDR).
    - Set paper white constant to $1.0$ (since normalization by $W$ already occurs in decode).
-4. **`OptiScaler/dlssnr/DlssNr_PresentHost.cpp` and Vulkan Present Host:**
+4. **`retoque/dlssnr/DlssNr_PresentHost.cpp` and Vulkan Present Host:**
    - Mirror the decode/encode sandwich around the bridge swapchain blit.
 
 ---

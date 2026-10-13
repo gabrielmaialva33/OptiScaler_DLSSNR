@@ -6,7 +6,7 @@
 #include <optional>
 #include <string>
 #include <vector>
-#include "OptiScaler/dlssnr/DlssNr_PassSettings.h"
+#include "retoque/dlssnr/DlssNr_PassSettings.h"
 #define LOG_INFO(...) do {} while (false)
 
 template<class T> struct Option {

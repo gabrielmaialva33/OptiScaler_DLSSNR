@@ -1,7 +1,7 @@
 # NR present host
 
 Run `python3 tests/nr-present-host/run.py`. The runner compiles the production
-`OptiScaler/dlssnr/DlssNr_PresentHost.{h,cpp}` — the bodies themselves, not a copy — against host
+`retoque/dlssnr/DlssNr_PresentHost.{h,cpp}` — the bodies themselves, not a copy — against host
 fakes with ASan/UBSan. `--source <file>` compiles another copy of the `.cpp` instead, so a fix can be
 shown to be what the cases detect by running them against the code from before it.
 

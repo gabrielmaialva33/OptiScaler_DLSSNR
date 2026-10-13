@@ -11,14 +11,14 @@
 //
 // The mapping is dlssnr_periphery_warp.h (BeliyG3's PeripheralWarp, MIT), the same file the host tests run.
 //
-// Build (from OptiScaler/shaders/dlssnr/precompile, dxc under the msvc-wine prefix on Linux, never beside a
+// Build (from retoque/shaders/dlssnr/precompile, dxc under the msvc-wine prefix on Linux, never beside a
 // running DLL build):
 //   dxc -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect -D PERIPHERY_COLOUR -Fo DlssNr_PeripheryColour_Shader.cso dlssnr_periphery.hlsl
 //   dxc -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect -D PERIPHERY_GUIDES -Fo DlssNr_PeripheryGuides_Shader.cso dlssnr_periphery.hlsl
 //   dxc -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect -D PERIPHERY_UNPACK -Fo DlssNr_PeripheryUnpack_Shader.cso dlssnr_periphery.hlsl
-//   python3 ../../shader_tools/create_header.py DlssNr_PeripheryColour_Shader.cso DlssNr_PeripheryColour_Shader.h DlssNr_PeripheryColour_cso
-//   python3 ../../shader_tools/create_header.py DlssNr_PeripheryGuides_Shader.cso DlssNr_PeripheryGuides_Shader.h DlssNr_PeripheryGuides_cso
-//   python3 ../../shader_tools/create_header.py DlssNr_PeripheryUnpack_Shader.cso DlssNr_PeripheryUnpack_Shader.h DlssNr_PeripheryUnpack_cso
+//   python3 ../../../../OptiScaler/shaders/shader_tools/create_header.py DlssNr_PeripheryColour_Shader.cso DlssNr_PeripheryColour_Shader.h DlssNr_PeripheryColour_cso
+//   python3 ../../../../OptiScaler/shaders/shader_tools/create_header.py DlssNr_PeripheryGuides_Shader.cso DlssNr_PeripheryGuides_Shader.h DlssNr_PeripheryGuides_cso
+//   python3 ../../../../OptiScaler/shaders/shader_tools/create_header.py DlssNr_PeripheryUnpack_Shader.cso DlssNr_PeripheryUnpack_Shader.h DlssNr_PeripheryUnpack_cso
 // DlssNr_Periphery_Dx12.cpp picks the three headers up through __has_include; without all three the feature
 // reports itself unavailable and the pass runs exactly as it did before.
 

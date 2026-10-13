@@ -42,7 +42,7 @@
 #include <vector>
 #include <chrono>
 #include "precompile/DlssNr_Shader.h"
-#include "../output_scaling/OS_Dx12.h"
+#include <shaders/output_scaling/OS_Dx12.h>
 #include "DlssNr_Stabilizer_Dx12.h"
 #include "DlssNr_UiMask_Dx12.h"
 #include "DlssNr_GuideMatch.h"

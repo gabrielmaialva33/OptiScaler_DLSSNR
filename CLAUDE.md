@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A fork chain, three deep. Upstream **optiscaler/OptiScaler** (a Windows DLL that sits between a game and
 its upscaler / frame-gen SDKs and swaps the backend) → **Dagherbou/OptiScaler_DLSSNR** (adds the DLSS 5
-Neural Rendering module under `OptiScaler/dlssnr/`) → **gabrielmaialva33/OptiScaler_DLSSNR** (this
+Neural Rendering module under `retoque/dlssnr/`) → **gabrielmaialva33/OptiScaler_DLSSNR** (this
 repo), which adds Linux/Proton overlay patches on top.
 
 - Working and default branch: `dlss-neural-rendering`. It began as Dagherbou's `v0.2.0-dlssnr`
@@ -63,9 +63,15 @@ repo), which adds Linux/Proton overlay patches on top.
   Canonical Project Structure) says `src/`, `include/`, `tools/`, `docs/`. Do not apply it here.
   Most tracked files live under `OptiScaler/` and belong to upstream; moving them turns every
   `git merge optiscaler/master` into a whole-tree conflict, and this branch carries hundreds of
-  commits of our own (393 not in Dagherbou's fork as of 2026-09-27). Organise inside what this fork owns — `tests/`, `tools/`, `docs/`,
+  commits of our own (393 not in Dagherbou's fork as of 2026-09-27). Organise inside what this fork owns — `retoque/`, `tests/`, `tools/`, `docs/`,
   `CLAUDE.md`, `.github/workflows/nr-tests.yml`, `.clang-format-ignore`, and the files listed under
   "Linux / Proton patches" — and leave upstream's paths byte-identical.
+  The NR module lives in top-level `retoque/` (`retoque/dlssnr/`, `retoque/shaders/dlssnr/`), which is
+  ours alone: `OptiScaler.vcxproj` adds `..\retoque\` as an include root (in the fork-owned tail, not in
+  upstream's `IncludePath`), so `<dlssnr/...>` and `<shaders/dlssnr/...>` resolve unchanged, and
+  `nr-invariants` fails if `OptiScaler/dlssnr` or `OptiScaler/shaders/dlssnr` ever reappears. Upstream's
+  paths under `OptiScaler/` stay byte-identical. `OptiScaler/shaders/synth_motion/` and a few other fork
+  files remain under `OptiScaler/` for now.
 
 ## Build
 
@@ -144,7 +150,7 @@ commands below work as written, from any cwd. The other scripts we own (`tools/d
 
 ```bash
 WINEPREFIX=~/.local/opt/msvc-wineprefix WINEDEBUG=-all ~/.local/opt/msvc/bin/x64/msbuild \
-  OptiScaler/dlssnr/forwarder/dlssnr_forwarder.vcxproj /nologo /v:normal \
+  retoque/dlssnr/forwarder/dlssnr_forwarder.vcxproj /nologo /v:normal \
   /p:Configuration=Release /p:Platform=x64 \
   "/p:SolutionDir=Z:$(pwd | tr / '\\')\\" \
   /p:CL_MPCount=4 /p:WholeProgramOptimization=true \
@@ -206,8 +212,9 @@ Vendored headers the build includes directly live in `OptiScaler/include/` and `
 ### Formatting
 
 CI runs clang-format **22** over `OptiScaler/` excluding `external/`, `OptiScaler/include/` and
-`/precompile/` (`.github/workflows/clang-format.yml`, moved from 20 to 22 in `cec3c146` along with
-upstream). Style is in `.clang-format`: LLVM base, Allman braces, 4-space indent, 120 columns,
+`/precompile/` (`.github/workflows/clang-format.yml`, upstream's; moved from 20 to 22 in `cec3c146` along
+with upstream), and over `retoque/` excluding `/precompile/` (the `clang-format-retoque` job in
+`nr-tests.yml`, ours). Style is in `.clang-format`: LLVM base, Allman braces, 4-space indent, 120 columns,
 `SortIncludes: false`, `Type* ptr` pointer alignment.
 
 **Use clang-format 22**, the version CI pins, and **not the one on `PATH`**: Arch moved that to 23.x
@@ -217,7 +224,7 @@ binary at `/usr/lib/llvm20/bin/clang-format` was the pin before that and disagre
 direction: it flags upstream's 22-formatted `Config.h` and `NVNGX_Proxy.h`.
 
 ```bash
-for f in $(fd -e cpp -e h . OptiScaler --exclude include --exclude external --exclude precompile); do
+for f in $(fd -e cpp -e h . OptiScaler retoque --exclude include --exclude external --exclude precompile); do
     uvx -q --from 'clang-format==22.*' clang-format --dry-run --Werror "$f" >/dev/null 2>&1 || echo "$f"
 done
 ```
@@ -261,7 +268,7 @@ behaviour, image quality or performance. `vulkan-overlay` builds a real DLL and 
 baseline `660303ec` that no runner calls.
 
 CI: `.github/workflows/nr-tests.yml` runs the host tier on Linux for pushes and PRs that touch
-`tests/` or `OptiScaler/`. It checks out only `simpleini`, `spdlog` and `vulkan` — never
+`tests/`, `OptiScaler/` or `retoque/`. It checks out only `simpleini`, `spdlog` and `vulkan` — never
 FidelityFX-SDK. Upstream's `test.yml` is **not** a test workflow despite the name; it publishes the
 nightly release. Nothing runs the wine tier in CI; that stays local.
 
@@ -347,10 +354,13 @@ On Linux, `dxc.exe`/`fxc.exe` run under the msvc-wine prefix
 (`WINEPREFIX=~/.local/opt/msvc-wineprefix wine ../../shader_tools/dxc.exe ...`), then
 `python3 ../../shader_tools/create_header.py <in.cso|in.spv> <out.h> <array_name>`.
 
-For the NR shader (`shaders/dlssnr/precompile/dlssnr.hlsl`) rebuild **both** targets: DX12 via dxc
+The NR passes are the exception: they live in `retoque/shaders/dlssnr/precompile/`, so from there use
+`../../../../OptiScaler/shaders/shader_tools/` in place of `../../shader_tools/` in the commands above.
+
+For the NR shader (`retoque/shaders/dlssnr/precompile/dlssnr.hlsl`) rebuild **both** targets: DX12 via dxc
 `cs_6_0` into `DlssNr_Shader.h` (array `DlssNr_cso`) and Vulkan via dxc `-spirv -D VK_MODE` into
 `DlssNr_Shader_Vk.h` (array `dlssnr_spv`). The committed `.cso` is a DXIL container, so
-`docs/dlssnr/design/DEVELOPMENT.md` invariant 6 is authoritative; `OptiScaler/dlssnr/README.md` carries the
+`docs/dlssnr/design/DEVELOPMENT.md` invariant 6 is authoritative; `retoque/dlssnr/README.md` carries the
 same recipe, with its old fxc `cs_5_0` instruction already corrected.
 
 ## Architecture
@@ -431,14 +441,14 @@ it. `.github/workflows/` are registered on this fork so CI builds this branch.
 
 ### DLSS Neural Rendering module
 
-`OptiScaler/dlssnr/` (menu, capture, exposure scan, forwarder, driver-proxy experiment) and
-`OptiScaler/shaders/dlssnr/` (the pass: encode → NGX feature 18 → resolve). Read
-`OptiScaler/dlssnr/README.md` before touching it; its "Design notes worth knowing" section records
+`retoque/dlssnr/` (menu, capture, exposure scan, forwarder, driver-proxy experiment) and
+`retoque/shaders/dlssnr/` (the pass: encode → NGX feature 18 → resolve). Read
+`retoque/dlssnr/README.md` before touching it; its "Design notes worth knowing" section records
 dead ends already paid for with device hangs (never free under the GPU, one lock, debounced feature
 rebuild, no temporal accumulator).
 
 - **Forwarder.** The NVIDIA snippet rejects callers whose module path lacks `nvngx.dll`, so all NGX
-  calls go through `nvngx.dll_dlssnr.dll` (`dlssnr/forwarder/`, built by `dlssnr_forwarder.vcxproj`
+  calls go through `nvngx.dll_dlssnr.dll` (`retoque/dlssnr/forwarder/`, built by `dlssnr_forwarder.vcxproj`
   into `x64/<Config>/a/`, also buildable standalone with CMake). It must not tail-call the snippet;
   results go through a `volatile` local so the forwarder's frame stays on the stack.
 - **`[DlssNr] ModelLoader=direct`** (default `forwarder`) makes the same D3D12 calls from OptiScaler.dll
@@ -500,5 +510,5 @@ choices).
 
 `docs/README.md` indexes everything this fork owns: NR design notes (`docs/dlssnr/design/`, topic index in
 `docs/dlssnr/README.md`), Linux/Proton notes, user guides and history. Upstream's own docs stay at the root.
-Code-adjacent READMEs (`OptiScaler/dlssnr/`, `OptiScaler/shaders/synth_motion/`) and `tests/` READMEs stay
+Code-adjacent READMEs (`retoque/dlssnr/`, `OptiScaler/shaders/synth_motion/`) and `tests/` READMEs stay
 beside what they describe.

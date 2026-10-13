@@ -18,11 +18,11 @@ with tempfile.TemporaryDirectory(prefix="nr-gpu-timing-") as directory:
                     "-fno-omit-frame-pointer", "-Wall", "-Wextra", "-Werror",
                     "-I", str(ROOT / "tests/nr-gpu-timing/stubs"), "-I", str(ROOT),
                     str(ROOT / "tests/nr-gpu-timing/runtime.cpp"),
-                    str(ROOT / "OptiScaler/dlssnr/DlssNr_GpuTiming.cpp"), "-o", str(runtime)], check=True)
+                    str(ROOT / "retoque/dlssnr/DlssNr_GpuTiming.cpp"), "-o", str(runtime)], check=True)
     subprocess.run([str(runtime)], check=True)
     subprocess.run([str(runtime), "--cadence"], check=True)
 
-source = (ROOT / "OptiScaler/dlssnr/DlssNr_Submission.cpp").read_text()
+source = (ROOT / "retoque/dlssnr/DlssNr_Submission.cpp").read_text()
 batch = source.split("Batch::Batch(", 1)[1].split("void Batch::Submitted()", 1)[0]
 assert re.search(r"else\s+Detail::Model::CountExecution\(e\)", batch), "duplicate execution guard missing"
 print("PASS duplicate-list occurrence guard at the production submission boundary")

@@ -6,7 +6,7 @@ g++ C++23, ASan and UBSan and `-Werror`, then runs two source checks in Python. 
 ## Why this suite exists
 
 Two decisions about loading `nvngx_dlssnr.dll` are made from raw bytes, before anything is called.
-Both come from `OptiScaler/dlssnr/DlssNr_PeScan.h`, which is header-only and free of
+Both come from `retoque/dlssnr/DlssNr_PeScan.h`, which is header-only and free of
 `<windows.h>` so it can be tested here as shipped:
 
 - **`ModelLoader=direct`** (`DlssNr_DirectRuntime`) needs the model's `GetModuleFileNameW/A`

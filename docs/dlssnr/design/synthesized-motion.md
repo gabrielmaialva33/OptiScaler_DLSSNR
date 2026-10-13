@@ -77,7 +77,7 @@ precompiled header, and are not referenced by any existing source. Written again
 
 Read first: [nr-without-game-dlss.md](nr-without-game-dlss.md) (why guides are a quality axis, not a
 gate, and the reference precedents), the "Zero guidance, colour and history" section of
-[nr-dx11-bridge-host.md](nr-dx11-bridge-host.md), and [DlssNr_ZeroGuides.h](../../../OptiScaler/dlssnr/DlssNr_ZeroGuides.h)
+[nr-dx11-bridge-host.md](nr-dx11-bridge-host.md), and [DlssNr_ZeroGuides.h](../../../retoque/dlssnr/DlssNr_ZeroGuides.h)
 (the resource this replaces, and the contract it already meets). This note is the third step those two
 defer: real motion, reconstructed from consecutive frames, with no game engine buffers.
 
@@ -552,7 +552,7 @@ table, the same format and access FidelityFX's search already uses there).
 
 The present-time host feeds the model `DlssNr::ZeroGuides` — one `R32_FLOAT` depth and one
 `R16G16_FLOAT` motion field, cleared to zero once and never rewritten
-([DlssNr_ZeroGuides.h:9-26](../../../OptiScaler/dlssnr/DlssNr_ZeroGuides.h)). Two facts, both measured this session, bound the
+([DlssNr_ZeroGuides.h:9-26](../../../retoque/dlssnr/DlssNr_ZeroGuides.h)). Two facts, both measured this session, bound the
 work:
 
 - **At WorkingScale 1.0 the zero field is fine.** Divinity: Original Sin 2 and The Witcher 3 (DX11,
@@ -818,7 +818,7 @@ other.
 
 ## 10. Skeleton files in this change (unbuilt)
 
-All under `OptiScaler/shaders/dlssnr/motion/`, none in any `.vcxproj`, none generating a precompiled
+All under `retoque/shaders/dlssnr/motion/`, none in any `.vcxproj`, none generating a precompiled
 header, none referenced by existing source. Each carries a banner saying so.
 
 - `DlssNr_SynthMotion.h` — the producer class interface: `Ensure` / `Record` / `Motion` /

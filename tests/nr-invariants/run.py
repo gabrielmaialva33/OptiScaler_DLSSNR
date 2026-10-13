@@ -25,6 +25,14 @@ import tempfile
 here = Path(__file__).resolve().parent
 root = here.parents[1]
 failures = []
+# The NR module lives in retoque/, not under OptiScaler/ (upstream's tree). Every path into it goes through `nr`.
+nr = root / 'retoque'
+
+# The module moved on 2026-10-13. A stale copy under OptiScaler/ would shadow retoque/ through $(ProjectDir) in the
+# build, so its mere existence is a failure.
+for stale in ('retoque/dlssnr', 'retoque/shaders/dlssnr'):
+    if (root / stale).exists():
+        failures.append(f'{stale} exists: the NR module lives in retoque/ and a stale copy shadows it')
 
 
 def fail(message):
@@ -102,8 +110,8 @@ def body(source, tag):
     return source[opening + 1:source.index('};', opening)]
 
 
-common = (root / 'OptiScaler/shaders/dlssnr/DlssNr_Common.h').read_text()
-hlsl_path = root / 'OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl'
+common = (nr / 'shaders/dlssnr/DlssNr_Common.h').read_text()
+hlsl_path = nr / 'shaders/dlssnr/precompile/dlssnr.hlsl'
 hlsl = hlsl_path.read_text()
 
 cpp_fields = re.findall(r'\b(uint32_t|float)\s+(\w+)\s*;',
@@ -129,7 +137,7 @@ if len(failures) == before:
 # --- 3. Headers are the committed bytecode --------------------------------------------------------
 
 before = len(failures)
-precompile = root / 'OptiScaler/shaders/dlssnr/precompile'
+precompile = nr / 'shaders/dlssnr/precompile'
 create_header = root / 'OptiScaler/shaders/shader_tools/create_header.py'
 targets = [
     ('DlssNr_Shader.cso', 'DlssNr_Shader.h', 'DlssNr_cso', b'DXBC'),
@@ -221,9 +229,9 @@ if len(failures) == before:
 # --- 4. Retired identifiers -------------------------------------------------------------------------
 
 before = len(failures)
-sources = [p for p in (root / 'OptiScaler').rglob('*') if p.suffix in ('.cpp', '.h')
+sources = [p for base in (root / 'OptiScaler', nr) for p in base.rglob('*') if p.suffix in ('.cpp', '.h')
            and 'external' not in p.parts and 'include' not in p.parts]
-forwarder = (root / 'OptiScaler/dlssnr/forwarder/dlssnr_forwarder.cpp').read_text()
+forwarder = (nr / 'dlssnr/forwarder/dlssnr_forwarder.cpp').read_text()
 
 RETIRED = [
     # The present-time pass sat behind this macro, which nothing defined, so LTCG dropped it from every
@@ -261,7 +269,8 @@ if len(failures) == before:
 # 48-byte view took Rafael's RTX 3060 down on 2026-09-28. Every view sized by sizeof(T) in a shader pass
 # needs T declared alignas(256), which also makes the upload buffer behind it large enough.
 before = len(failures)
-shader_sources = sorted((root / 'OptiScaler/shaders').rglob('*.cpp')) + sorted((root / 'OptiScaler/shaders').rglob('*.h'))
+shader_sources = [p for base in (root / 'OptiScaler/shaders', nr / 'shaders') for pattern in ('*.cpp', '*.h')
+                  for p in sorted(base.rglob(pattern))]
 shader_text = {path: path.read_text(errors='replace') for path in shader_sources if 'precompile' not in path.parts}
 cbv_sites = 0
 for path, text in shader_text.items():
@@ -288,7 +297,7 @@ before = len(failures)
 config_types = dict((name, kind) for kind, name in
                     re.findall(r'CustomOptional<([^>]+)>\s+(DlssNr\w+)\b', (root / 'OptiScaler/Config.h').read_text()))
 bool_reads = 0
-for path in sorted((root / 'OptiScaler/shaders/dlssnr').glob('*.cpp')) + sorted((root / 'OptiScaler/dlssnr').glob('*.cpp')):
+for path in sorted((nr / 'shaders/dlssnr').glob('*.cpp')) + sorted((nr / 'dlssnr').glob('*.cpp')):
     text = path.read_text(errors='replace')
     for match in re.finditer(r'\bbool\s+\w+\s*=\s*cfg\.(DlssNr\w+)\.value_or_default\(\)', text):
         bool_reads += 1

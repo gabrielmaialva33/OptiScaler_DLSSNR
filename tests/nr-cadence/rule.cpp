@@ -1,4 +1,4 @@
-// Model cadence's per-pixel rules (OptiScaler/shaders/dlssnr/precompile/dlssnr_cadence_rule.h), the exact code
+// Model cadence's per-pixel rules (retoque/shaders/dlssnr/precompile/dlssnr_cadence_rule.h), the exact code
 // the shader runs, over synthetic frame sequences. The shader's texture loads become array lookups with the same
 // clamping; the five dispatches become loops in the order DlssNr_Cadence_Dx12 records them. Everything else is
 // the production header.

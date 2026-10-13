@@ -7,8 +7,8 @@ Source:   https://github.com/jlrouzies-fr/DLSS5-Feeder
 What is derived from it
 -----------------------
 
-The output stabilizer in OptiScaler/shaders/dlssnr/precompile/dlssnr_stabilizer.hlsl
-and OptiScaler/shaders/dlssnr/DlssNr_Stabilizer_Dx12.cpp is taken from Feeder's
+The output stabilizer in retoque/shaders/dlssnr/precompile/dlssnr_stabilizer.hlsl
+and retoque/shaders/dlssnr/DlssNr_Stabilizer_Dx12.cpp is taken from Feeder's
 src/feed_hold12.h (v1.17): the anchor-based gate -- a 3x3 box of the input compared
 against the box as it was when the pixel last moved, relative to local brightness,
 with a soft edge from the tolerance to twice it -- and the hold/creep it drives.

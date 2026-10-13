@@ -4,7 +4,7 @@
 python3 tests/nr-present-sync/run.py
 ```
 
-The runner compiles `OptiScaler/dlssnr/DlssNr_PresentSync.h` with g++ C++20, ASan/UBSan, and `-Werror`.
+The runner compiles `retoque/dlssnr/DlssNr_PresentSync.h` with g++ C++20, ASan/UBSan, and `-Werror`.
 
 ## What this covers
 

@@ -25,7 +25,7 @@ The solution is established across community projects:
 ## 2. What exists in this codebase today
 
 - **Present skipping on stale guides:**
-  In `OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp:5884` (under `HookMethod=2`, Present mode):
+  In `retoque/shaders/dlssnr/DlssNr_Dx12.cpp:5884` (under `HookMethod=2`, Present mode):
   ```cpp
   if (temporalValid && temporalSeq == g_nrLastEnhancedSeq)
   {
@@ -86,10 +86,10 @@ Under `HookMethod=1`, `RunPresentPass` normally stands down entirely. When `Menu
 
 1. **`OptiScaler/Config.h` / `Config.cpp`:**
    Declare `CustomOptional<bool> DlssNrMenuMode { false };`, mapped to `[DlssNr] MenuMode`.
-2. **`OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp`:**
+2. **`retoque/shaders/dlssnr/DlssNr_Dx12.cpp`:**
    - In `RunPresentPass`: implement timeout detection tracking elapsed presents and wall-clock time since `g_upscaleRenders` last incremented.
    - Switch to zero guides and set reset flags upon state transition.
-3. **`OptiScaler/dlssnr/DlssNr_Menu.cpp`:**
+3. **`retoque/dlssnr/DlssNr_Menu.cpp`:**
    Add toggle under the Compatibility or Advanced sub-panel.
 
 ---

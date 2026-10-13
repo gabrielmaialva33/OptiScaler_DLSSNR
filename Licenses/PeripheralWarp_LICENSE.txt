@@ -12,8 +12,8 @@ What is derived from it
 Peripheral compression's mapping between the frame and the model's packed input:
 the rational radius curve and its exact inverse, the per-side pack and unpack around
 the centre band, and the per-axis budget split (BuildAxis), in
-OptiScaler/shaders/dlssnr/precompile/dlssnr_periphery_warp.h and
-OptiScaler/shaders/dlssnr/DlssNr_Periphery.h. The logic is theirs line for line.
+retoque/shaders/dlssnr/precompile/dlssnr_periphery_warp.h and
+retoque/shaders/dlssnr/DlssNr_Periphery.h. The logic is theirs line for line.
 
 What is not theirs: the extent and validity rules ported from wilsjo2's
 DlssNr_Spatial.h (GPL-3.0), the compression floor, the exact area filter of the

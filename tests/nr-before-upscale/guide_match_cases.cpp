@@ -1,4 +1,4 @@
-// The reduced-scale guide rules (OptiScaler/shaders/dlssnr/DlssNr_GuideMatch.h), pinned with the
+// The reduced-scale guide rules (retoque/shaders/dlssnr/DlssNr_GuideMatch.h), pinned with the
 // numbers of the cases they were written for. docs/dlssnr/design/reduced-scale-guides.md.
 #include <shaders/dlssnr/DlssNr_GuideMatch.h>
 

@@ -1,7 +1,7 @@
 # NR zero guides
 
 Run `python3 tests/nr-zero-guides/run.py`. The runner compiles the production
-`OptiScaler/dlssnr/DlssNr_ZeroGuides.{h,cpp}` — the bodies themselves, not a copy — against strict
+`retoque/dlssnr/DlssNr_ZeroGuides.{h,cpp}` — the bodies themselves, not a copy — against strict
 host D3D12 fakes with ASan/UBSan.
 
 ## What this covers

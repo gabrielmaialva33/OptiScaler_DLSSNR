@@ -4,3 +4,6 @@
 OptiScaler/shaders/*/precompile/*_Shader.h
 OptiScaler/shaders/*/precompile/*_Shader_Dx11.h
 OptiScaler/shaders/*/precompile/*_Shader_Vk.h
+retoque/shaders/*/precompile/*_Shader.h
+retoque/shaders/*/precompile/*_Shader_Dx11.h
+retoque/shaders/*/precompile/*_Shader_Vk.h

@@ -14,6 +14,7 @@ with tempfile.TemporaryDirectory(prefix="optiscaler-detail-measure-") as tmp:
     cmd = [
         "g++", "-std=c++20", "-O2", "-Wall", "-Wextra", "-Werror",
         "-fsanitize=address,undefined",
+        f"-I{ROOT / 'retoque'}",
         f"-I{ROOT / 'OptiScaler'}",
         str(HERE / "test.cpp"),
         "-o", str(bin_path)

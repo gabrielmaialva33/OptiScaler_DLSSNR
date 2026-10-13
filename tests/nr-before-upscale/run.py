@@ -7,8 +7,8 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 OUT = HERE / 'artifacts'
 OUT.mkdir(exist_ok=True)
-source = (ROOT / 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp').read_text()
-header = (ROOT / 'OptiScaler/dlssnr/DlssNrFeature_Dx12.h').read_text()
+source = (ROOT / 'retoque/shaders/dlssnr/DlssNr_Dx12.cpp').read_text()
+header = (ROOT / 'retoque/dlssnr/DlssNrFeature_Dx12.h').read_text()
 
 
 def between(text, start, end):
@@ -38,6 +38,6 @@ subprocess.run([str(OUT / 'boundary')], check=True)
 # sizes and flags, compiled straight from the production header.
 subprocess.run(['g++', '-std=c++20', '-g', '-O1', '-fno-omit-frame-pointer',
                 '-fsanitize=address,undefined', '-Wall', '-Wextra', '-Werror',
-                '-I' + str(ROOT / 'OptiScaler'), str(HERE / 'guide_match_cases.cpp'),
+                '-I' + str(ROOT / 'retoque'), '-I' + str(ROOT / 'OptiScaler'), str(HERE / 'guide_match_cases.cpp'),
                 '-o', str(OUT / 'guide_match')], check=True)
 subprocess.run([str(OUT / 'guide_match')], check=True)

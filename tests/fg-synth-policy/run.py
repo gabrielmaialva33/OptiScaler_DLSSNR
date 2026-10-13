@@ -17,7 +17,7 @@ repo = root.parents[1]
 THRESHOLD = re.compile(r'constexpr\s+(?:float|uint32_t)\s+(k[A-Z]\w*)\s*=\s*([0-9.]+)f?\s*;')
 names = ('kStaticEps', 'kCoreEps', 'kMotionTau', 'kDetailMin', 'kDecay', 'kDropTau', 'kStreakMin', 'kSupportMin',
          'kSidesMin')
-nr = dict(THRESHOLD.findall((repo / 'OptiScaler/shaders/dlssnr/DlssNr_UiMask_Dx12.cpp').read_text()))
+nr = dict(THRESHOLD.findall((repo / 'retoque/shaders/dlssnr/DlssNr_UiMask_Dx12.cpp').read_text()))
 fg = dict(THRESHOLD.findall((repo / 'OptiScaler/shaders/synth_motion/SynthOverlay_Dx12.cpp').read_text()))
 missing = [n for n in names if n not in nr or n not in fg]
 differ = [f'{n}: DLSS-NR {nr[n]}, frame generation {fg[n]}' for n in names
@@ -40,7 +40,7 @@ KNOWN_SWIZZLE_HAZARD = set()
 # UM_ for the strict rule's includers, UL_ for the UI layer's own mask (static_overlay_layer.h), whose macros are
 # handed the same way.
 DEFINE = re.compile(r'^\s*#\s*define\s+(U[ML]_\w+)\(([^)]*)\)(.*)$', re.M)
-includers = [p for p in (repo / 'OptiScaler/shaders').rglob('*.hlsl')
+includers = [p for p in [*(repo / 'OptiScaler/shaders').rglob('*.hlsl'), *(repo / 'retoque/shaders').rglob('*.hlsl')]
              if 'static_overlay_rule.h' in p.read_text(errors='replace')]
 if len(includers) < 2:
     print(f'FAIL: expected the rule\'s two shader includers, found {[str(p) for p in includers]}')

@@ -16,7 +16,7 @@ The detail measurement and scene calibration compute pass structure:
     avoiding pipeline stalls.
 
 Files:
-  * OptiScaler/dlssnr/DlssNr_DetailStats.h
-  * OptiScaler/shaders/dlssnr/DlssNr_DetailStats_Dx12.h
-  * OptiScaler/shaders/dlssnr/DlssNr_DetailStats_Dx12.cpp
-  * OptiScaler/shaders/dlssnr/precompile/dlssnr_detail_stats.hlsl
+  * retoque/dlssnr/DlssNr_DetailStats.h
+  * retoque/shaders/dlssnr/DlssNr_DetailStats_Dx12.h
+  * retoque/shaders/dlssnr/DlssNr_DetailStats_Dx12.cpp
+  * retoque/shaders/dlssnr/precompile/dlssnr_detail_stats.hlsl

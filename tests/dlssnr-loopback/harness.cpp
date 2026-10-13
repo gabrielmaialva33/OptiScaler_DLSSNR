@@ -307,7 +307,7 @@ static void PumpMessages()
     }
 }
 
-#include "../../OptiScaler/dlssnr/DlssNr_Identity.h"
+#include "../../retoque/dlssnr/DlssNr_Identity.h"
 #include "cold_nr.h"
 #include "present_nr.h"
 

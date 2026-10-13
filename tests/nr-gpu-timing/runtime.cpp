@@ -1,6 +1,6 @@
-#include "OptiScaler/dlssnr/DlssNr_GpuTiming.h"
-#include "OptiScaler/dlssnr/DlssNr_Submission.h"
-#include "OptiScaler/dlssnr/DlssNr_GpuTimingModel.h"
+#include "retoque/dlssnr/DlssNr_GpuTiming.h"
+#include "retoque/dlssnr/DlssNr_Submission.h"
+#include "retoque/dlssnr/DlssNr_GpuTimingModel.h"
 #include <array>
 #include <cassert>
 #include <cstring>

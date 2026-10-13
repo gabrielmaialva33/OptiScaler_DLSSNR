@@ -9,7 +9,7 @@ What is derived from it
 -----------------------
 
 The optional highlight recovery step in the DLSS Neural Rendering resolve
-(OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl, [DlssNr] HighlightRecovery,
+(retoque/shaders/dlssnr/precompile/dlssnr.hlsl, [DlssNr] HighlightRecovery,
 off by default) reimplements, in HLSL, the highlight recovery of RTX Remix's
 inverse tone mapping pass:
 
@@ -26,7 +26,7 @@ per-channel inverse of it. Neither is used here. The exposed frame is the
 pass's own normalised frame (the frame over its white point), and what the
 model was shown is the pass's own encode curve (soft knee, Neutwo or Hybrid)
 reproduced per pixel. The composition the mask is applied over is described in
-OptiScaler/dlssnr/README.md and is not derived from Remix. The analysis is in
+retoque/dlssnr/README.md and is not derived from Remix. The analysis is in
 docs/dlssnr/design/hdr-highlight-recovery.md.
 
 No Remix source file is redistributed.

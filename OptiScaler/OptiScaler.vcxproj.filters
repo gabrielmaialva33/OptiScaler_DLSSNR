@@ -1801,94 +1801,94 @@
     <ClInclude Include="misc\Localization.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_GpuTiming.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_GpuTiming.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_GpuTimingModel.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_GpuTimingModel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_Submission.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_Submission.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_WorkingScale.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_WorkingScale.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_SubmissionModel.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_SubmissionModel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_PassSettings.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_PassSettings.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_Exposure.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_Exposure.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_ModelLog.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_ModelLog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_NgxInfo.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_NgxInfo.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_DirectRuntime.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_DirectRuntime.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_PeScan.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_PeScan.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_PresentColour.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_PresentColour.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_Chain.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_Chain.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_Cadence.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_Cadence.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_Enlarge.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_Enlarge.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_PrivateSr.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_PrivateSr.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_DetailStats.h">
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_DetailStats.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\dlssnr\DlssNr_DetailStats_Dx12.h">
+    <ClInclude Include="..\retoque\shaders\dlssnr\DlssNr_DetailStats_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClCompile Include="misc\Localization.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="dlssnr\DlssNr_GpuTiming.cpp">
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_GpuTiming.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="dlssnr\DlssNr_Submission.cpp">
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_Submission.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="dlssnr\DlssNr_Consumers.cpp">
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_Consumers.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="dlssnr\DlssNr_ModelLog.cpp">
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_ModelLog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="dlssnr\DlssNr_NgxInfo.cpp">
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_NgxInfo.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="dlssnr\DlssNr_DirectRuntime.cpp">
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_DirectRuntime.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="dlssnr\DlssNr_ZeroGuides.cpp">
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_ZeroGuides.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="dlssnr\DlssNr_WorkingScale.cpp">
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_WorkingScale.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="dlssnr\DlssNr_PresentHost.cpp">
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_PresentHost.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="dlssnr\DlssNr_PrivateSr.cpp">
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_PrivateSr.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="shaders\dlssnr\DlssNr_DetailStats_Dx12.cpp">
+    <ClCompile Include="..\retoque\shaders\dlssnr\DlssNr_DetailStats_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

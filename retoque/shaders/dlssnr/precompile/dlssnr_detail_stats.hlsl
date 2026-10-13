@@ -17,7 +17,7 @@
 // Precompiled like dlssnr.hlsl: editing this alone changes nothing. From this directory (dxc under
 // the msvc-wine prefix on Linux, never while a build is using it):
 //   dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect dlssnr_detail_stats.hlsl -Fo DlssNr_DetailStats_Shader.cso
-//   python3 ../../shader_tools/create_header.py DlssNr_DetailStats_Shader.cso DlssNr_DetailStats_Shader.h DlssNr_DetailStats_cso
+//   python3 ../../../../OptiScaler/shaders/shader_tools/create_header.py DlssNr_DetailStats_Shader.cso DlssNr_DetailStats_Shader.h DlssNr_DetailStats_cso
 // DlssNr_DetailStats_Dx12.cpp picks the header up through __has_include; without it the pass reports itself
 // unavailable and the menu hides the button.
 

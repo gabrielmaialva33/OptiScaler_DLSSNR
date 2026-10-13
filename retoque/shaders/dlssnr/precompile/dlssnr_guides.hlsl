@@ -8,9 +8,9 @@
 // The texel read is the destination texel's centre mapped into the region, floored -- the same integer
 // expression as DlssNr::GuideMatch::PointSource, which the host tests pin.
 //
-// Build (from OptiScaler/shaders/dlssnr/precompile, dxc under the msvc-wine prefix on Linux):
+// Build (from retoque/shaders/dlssnr/precompile, dxc under the msvc-wine prefix on Linux):
 //   dxc -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect -Fo DlssNr_Guides_Shader.cso dlssnr_guides.hlsl
-//   python3 ../../shader_tools/create_header.py DlssNr_Guides_Shader.cso DlssNr_Guides_Shader.h DlssNr_Guides_cso
+//   python3 ../../../../OptiScaler/shaders/shader_tools/create_header.py DlssNr_Guides_Shader.cso DlssNr_Guides_Shader.h DlssNr_Guides_cso
 // DlssNr_GuideMatch_Dx12.cpp picks the header up through __has_include; without it the pass reports
 // itself unavailable and the model keeps the frame-size guides.
 

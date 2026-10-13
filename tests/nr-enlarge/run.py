@@ -16,16 +16,16 @@ import tempfile
 
 here = Path(__file__).resolve().parent
 root = here.parents[1]
-renderer = (root / 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp').read_text()
-shader = (root / 'OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl').read_text()
-common = (root / 'OptiScaler/shaders/dlssnr/DlssNr_Common.h').read_text()
-rules = (root / 'OptiScaler/dlssnr/DlssNr_Enlarge.h').read_text()
-vulkan = (root / 'OptiScaler/dlssnr/DlssNrFeature_Vk.cpp').read_text()
-menu = (root / 'OptiScaler/dlssnr/DlssNr_Menu.cpp').read_text()
+renderer = (root / 'retoque/shaders/dlssnr/DlssNr_Dx12.cpp').read_text()
+shader = (root / 'retoque/shaders/dlssnr/precompile/dlssnr.hlsl').read_text()
+common = (root / 'retoque/shaders/dlssnr/DlssNr_Common.h').read_text()
+rules = (root / 'retoque/dlssnr/DlssNr_Enlarge.h').read_text()
+vulkan = (root / 'retoque/dlssnr/DlssNrFeature_Vk.cpp').read_text()
+menu = (root / 'retoque/dlssnr/DlssNr_Menu.cpp').read_text()
 
 FLAGS = ['g++', '-std=c++20', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
          '-fno-omit-frame-pointer']
-INCLUDES = ['-I' + str(root / 'OptiScaler'), '-I' + str(root / 'external/nvngx_dlss_sdk'), '-I' + str(here)]
+INCLUDES = ['-I' + str(root / 'retoque'), '-I' + str(root / 'OptiScaler'), '-I' + str(root / 'external/nvngx_dlss_sdk'), '-I' + str(here)]
 
 
 def between(source, start, end):
@@ -143,7 +143,7 @@ with tempfile.TemporaryDirectory(prefix='optiscaler-nr-enlarge-') as directory:
     subprocess.run([str(out / 'rules')], check=True)
 
     subprocess.run(FLAGS + ['-I' + str(here / 'stubs')] + INCLUDES +
-                   ['-c', str(root / 'OptiScaler/dlssnr/DlssNr_PrivateSr.cpp'), '-o', str(out / 'privatesr.o')],
+                   ['-c', str(root / 'retoque/dlssnr/DlssNr_PrivateSr.cpp'), '-o', str(out / 'privatesr.o')],
                    check=True)
     subprocess.run(FLAGS + INCLUDES + [str(here / 'adapter.cpp'), str(out / 'privatesr.o'), '-o', str(out / 'adapter')],
                    check=True)

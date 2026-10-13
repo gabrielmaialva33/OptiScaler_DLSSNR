@@ -23,7 +23,7 @@ def digest(path):
 
 def sources():
     files = list(HERE.glob('*.cpp')) + list(HERE.glob('*.py')) + list(HERE.glob('stubs/**/*.h'))
-    files += [ROOT / 'OptiScaler/dlssnr' / name for name in (
+    files += [ROOT / 'retoque/dlssnr' / name for name in (
         'DlssNr_GpuTiming.cpp', 'DlssNr_GpuTiming.h', 'DlssNr_GpuTimingModel.h',
         'DlssNr_Submission.cpp', 'DlssNr_Submission.h', 'DlssNr_SubmissionModel.h')]
     return {str(path.relative_to(ROOT)): digest(path) for path in files}
@@ -49,9 +49,9 @@ def build():
     work = OUT / 'run'
     work.mkdir(exist_ok=True)
     command([MSVC / 'cl', '/nologo', '/std:c++latest', '/EHsc', '/MD', '/W4', '/Od',
-             '/I' + str(HERE / 'stubs'), '/I' + str(ROOT / 'OptiScaler/dlssnr'),
+             '/I' + str(HERE / 'stubs'), '/I' + str(ROOT / 'retoque/dlssnr'),
              '/I' + str(ROOT / 'OptiScaler/include'), HERE / 'harness.cpp',
-             ROOT / 'OptiScaler/dlssnr/DlssNr_GpuTiming.cpp', ROOT / 'OptiScaler/dlssnr/DlssNr_Submission.cpp',
+             ROOT / 'retoque/dlssnr/DlssNr_GpuTiming.cpp', ROOT / 'retoque/dlssnr/DlssNr_Submission.cpp',
              '/Fo' + str(OUT) + '/', '/Fe' + str(work / 'nr-timing-harness.exe'), '/link',
              '/LIBPATH:' + str(ROOT / 'OptiScaler/library/detours'), 'detours.lib', 'd3d12.lib',
              'dxgi.lib', 'dxguid.lib'], env=env, logfile=OUT / 'build.log', timeout=600)

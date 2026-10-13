@@ -7,8 +7,8 @@ root = Path(__file__).resolve().parents[2]
 here = Path(__file__).resolve().parent
 out = here / 'artifacts'
 out.mkdir(exist_ok=True)
-renderer = (root / 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp').read_text()
-menu = (root / 'OptiScaler/dlssnr/DlssNr_Menu.cpp').read_text()
+renderer = (root / 'retoque/shaders/dlssnr/DlssNr_Dx12.cpp').read_text()
+menu = (root / 'retoque/dlssnr/DlssNr_Menu.cpp').read_text()
 
 def between(source, start, end):
     assert source.count(start) == 1, f'production boundary changed: {start}'
@@ -43,7 +43,7 @@ assert 'if (!carried && chain.completed != passSnapshot.Count)\n        timing.R
 assert 'timing.FinishOnScopeExit(carried ? 0u : chain.completed, timingComplete);' in dispatch
 assert 'if (!carried)\n        g_nr.reset = false;' in dispatch
 assert dispatch.count('g_nr.reset = false;') == 2  # the proxy path and the model frame, never a carried one
-header = (root / 'OptiScaler/dlssnr/DlssNr_GpuTiming.h').read_text()
+header = (root / 'retoque/dlssnr/DlssNr_GpuTiming.h').read_text()
 records = between(header, 'struct Metadata\n', '// Collection never waits')
 unit = (here / 'fakes.h').read_text()
 unit += '\nnamespace DlssNr::GpuTiming {\n' + records + '\n}\n'

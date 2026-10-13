@@ -24,7 +24,7 @@ $stage = "$root\release\$Version"
 $zip = "$root\release\OptiScaler-DLSSNR-$Version.zip"
 
 if (-not $SkipBuild) {
-    foreach ($proj in @("$root\OptiScaler\dlssnr\forwarder\dlssnr_forwarder.vcxproj", "$root\OptiScaler.sln")) {
+    foreach ($proj in @("$root\retoque\dlssnr\forwarder\dlssnr_forwarder.vcxproj", "$root\OptiScaler.sln")) {
         $out = & $msb $proj /p:Configuration=Release /p:Platform=x64 /v:minimal /m 2>&1
         $err = $out | Select-String "error "
         if ($err) { Write-Host "FAILED: $proj"; $err | Select-Object -First 6; exit 1 }
@@ -40,7 +40,7 @@ $src = "$root\x64\Release\a"
 # A fresh checkout has no per-project output directory until that project has been built on its own,
 # so fall back to the shared folder rather than failing. The export check below is what actually
 # guards against a stale one, and it runs either way.
-$forwarder = "$root\OptiScaler\dlssnr\forwarder\x64\Release\a\nvngx.dll_dlssnr.dll"
+$forwarder = "$root\retoque\dlssnr\forwarder\x64\Release\a\nvngx.dll_dlssnr.dll"
 
 if (-not (Test-Path $forwarder)) {
     $forwarder = "$root\x64\Release\a\nvngx.dll_dlssnr.dll"

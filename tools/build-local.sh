@@ -106,7 +106,7 @@ run_msbuild() {
 }
 
 run_msbuild forwarder "$ROOT/x64/build-forwarder.log" \
-  OptiScaler/dlssnr/forwarder/dlssnr_forwarder.vcxproj "${common[@]}" "${@:2}"
+  retoque/dlssnr/forwarder/dlssnr_forwarder.vcxproj "${common[@]}" "${@:2}"
 run_msbuild optiscaler "$ROOT/x64/build-optiscaler.log" \
   OptiScaler/OptiScaler.vcxproj "${common[@]}" "${@:2}"
 

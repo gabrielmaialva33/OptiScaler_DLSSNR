@@ -16,12 +16,14 @@ on:
     paths:
       - 'tests/**'
       - 'OptiScaler/**'
+      - 'retoque/**'
       - 'OptiScaler.ini'
       - '.github/workflows/nr-tests.yml'
   pull_request:
     paths:
       - 'tests/**'
       - 'OptiScaler/**'
+      - 'retoque/**'
       - 'OptiScaler.ini'
       - '.github/workflows/nr-tests.yml'
 
@@ -69,3 +71,17 @@ jobs:
           name: test-logs
           path: ${{ runner.temp }}/test-logs
           retention-days: 7
+
+  # Fork-owned twin of upstream's clang-format.yml, which only checks OptiScaler/.
+  # Same action and version; retoque/ holds our NR module.
+  clang-format-retoque:
+    name: Formatting check (retoque)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run clang-format style check on retoque/
+        uses: jidicula/clang-format-action@v4.18.0
+        with:
+          clang-format-version: '22'
+          check-path: 'retoque'
+          exclude-regex: '/precompile/'

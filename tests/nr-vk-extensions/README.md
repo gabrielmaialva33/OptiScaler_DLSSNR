@@ -1,7 +1,7 @@
 # NR Vulkan device extensions
 
 Run `python3 tests/nr-vk-extensions/run.py`. The runner compiles the production
-`OptiScaler/dlssnr/DlssNr_VkExtensions.h` as it is, against the real Vulkan headers in
+`retoque/dlssnr/DlssNr_VkExtensions.h` as it is, against the real Vulkan headers in
 `external/vulkan` (the submodule CI checks out), with g++ C++20, ASan/UBSan and `-Werror`.
 
 ## What this covers

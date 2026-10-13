@@ -78,7 +78,7 @@ with tempfile.TemporaryDirectory(prefix='nr-gpu-timing-config-') as directory:
     (directory / 'test.cpp').write_text(source)
     subprocess.run(['g++', '-std=c++23', '-O1', '-g', '-pthread', '-fsanitize=address,undefined',
                     '-fno-omit-frame-pointer', '-Wall', '-Wextra', '-Werror',
-                    '-isystem', str(root / 'external/simpleini'), '-I' + str(root / 'OptiScaler/dlssnr'),
+                    '-isystem', str(root / 'external/simpleini'), '-I' + str(root / 'retoque/dlssnr'),
                     str(directory / 'test.cpp'), '-o', str(directory / 'test')], check=True)
     subprocess.run([str(directory / 'test')], cwd=directory, check=True)
 
@@ -93,5 +93,5 @@ for name in ('OptiScaler.vcxproj', 'OptiScaler.vcxproj.filters'):
     project = ET.parse(root / 'OptiScaler' / name)
     entries = [node.attrib.get('Include') for node in project.iter()]
     for filename in ('DlssNr_GpuTiming.cpp', 'DlssNr_GpuTiming.h', 'DlssNr_GpuTimingModel.h'):
-        assert entries.count('dlssnr\\' + filename) == 1, (name, filename)
+        assert entries.count('..\\retoque\\dlssnr\\' + filename) == 1, (name, filename)
 print('PASS: four config points, actual INI round-trip and unique build registrations')

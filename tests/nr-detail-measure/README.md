@@ -1,6 +1,6 @@
 # nr-detail-measure
 
-Host test suite for "Measure detail" CPU tile reduction and statistical aggregation (`OptiScaler/dlssnr/DlssNr_DetailStats.h`).
+Host test suite for "Measure detail" CPU tile reduction and statistical aggregation (`retoque/dlssnr/DlssNr_DetailStats.h`).
 
 Run: `python3 tests/nr-detail-measure/run.py` (needs `g++` with C++20, ASan and UBSan).
 

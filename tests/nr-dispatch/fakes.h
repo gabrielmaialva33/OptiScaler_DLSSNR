@@ -1,4 +1,4 @@
-#include "OptiScaler/shaders/dlssnr/DlssNr_Common.h"
+#include "retoque/shaders/dlssnr/DlssNr_Common.h"
 
 // The descriptor ring's size, as DLSSNR_NUM_OF_HEAPS says it (cases.h holds the two equal). The fakes come
 // before the header that defines the macro, so the number is spelled here once.

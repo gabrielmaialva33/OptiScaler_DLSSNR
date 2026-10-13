@@ -1,4 +1,4 @@
-# DLSS 5 Neural Rendering (`OptiScaler/dlssnr`)
+# DLSS 5 Neural Rendering (`retoque/dlssnr`)
 
 A self-contained module that drives NVIDIA's DLSS Neural Rendering model (`nvngx_dlssnr.dll`, NGX
 feature 18) over the frames OptiScaler already handles. Nothing in it is officially supported by
@@ -14,7 +14,7 @@ claimed to be — one line each — so deleting them is the removal.
 
 **The procedure, in full:**
 
-1. Delete `OptiScaler/dlssnr/` and `OptiScaler/shaders/dlssnr/`.
+1. Delete `retoque/dlssnr/` and `retoque/shaders/dlssnr/`.
 2. Drop `dlssnr_forwarder.vcxproj` from the solution.
 3. Delete the call sites below, and the `[DlssNr]` block in `Config.h` / `Config.cpp`.
 
@@ -86,11 +86,11 @@ experiment.
 both headers (`../../docs/dlssnr/design/DEVELOPMENT.md` invariant 6 is the authority):
 
 ```
-cd OptiScaler/shaders/dlssnr/precompile
-../../shader_tools/dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect dlssnr.hlsl -Fo DlssNr_Shader.cso
-../../shader_tools/dxc.exe -spirv -T cs_6_0 -E CSMain -O3 -Qstrip_debug -D VK_MODE -Cc -Vi dlssnr.hlsl -Fo DlssNr_Shader_Vk.spv
-python ../../shader_tools/create_header.py DlssNr_Shader.cso DlssNr_Shader.h DlssNr_cso
-python ../../shader_tools/create_header.py DlssNr_Shader_Vk.spv DlssNr_Shader_Vk.h dlssnr_spv
+cd retoque/shaders/dlssnr/precompile
+../../../../OptiScaler/shaders/shader_tools/dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect dlssnr.hlsl -Fo DlssNr_Shader.cso
+../../../../OptiScaler/shaders/shader_tools/dxc.exe -spirv -T cs_6_0 -E CSMain -O3 -Qstrip_debug -D VK_MODE -Cc -Vi dlssnr.hlsl -Fo DlssNr_Shader_Vk.spv
+python ../../../../OptiScaler/shaders/shader_tools/create_header.py DlssNr_Shader.cso DlssNr_Shader.h DlssNr_cso
+python ../../../../OptiScaler/shaders/shader_tools/create_header.py DlssNr_Shader_Vk.spv DlssNr_Shader_Vk.h dlssnr_spv
 ```
 
 On Linux run `dxc.exe` under the msvc-wine prefix (`WINEPREFIX=~/.local/opt/msvc-wineprefix wine

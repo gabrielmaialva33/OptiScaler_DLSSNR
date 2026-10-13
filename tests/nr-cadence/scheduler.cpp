@@ -1,4 +1,4 @@
-// Model cadence's scheduler (OptiScaler/dlssnr/DlssNr_Cadence.h), the production header, driven the way
+// Model cadence's scheduler (retoque/dlssnr/DlssNr_Cadence.h), the production header, driven the way
 // DlssNr_Dx12::Dispatch drives it: Decide once per call, then Recorded, Carried or Drop for what happened.
 #include <dlssnr/DlssNr_Cadence.h>
 

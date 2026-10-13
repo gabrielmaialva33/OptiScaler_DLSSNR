@@ -6,7 +6,7 @@ what is being tested.
 
 ## What it runs
 
-**The scheduler** (`scheduler.cpp`), the production `OptiScaler/dlssnr/DlssNr_Cadence.h` driven the
+**The scheduler** (`scheduler.cpp`), the production `retoque/dlssnr/DlssNr_Cadence.h` driven the
 way `DlssNr_Dx12::Dispatch` drives it: decide, then record, carry or drop. Eighteen cases:
 
 - off (`Cadence=1`, or anything outside 2..4) runs the model every frame and keeps no surfaces, so
@@ -28,7 +28,7 @@ way `DlssNr_Dx12::Dispatch` drives it: decide, then record, carry or drop. Eight
   reject it).
 
 **The per-pixel rules** (`rule.cpp`), the production
-`OptiScaler/shaders/dlssnr/precompile/dlssnr_cadence_rule.h` -- the header the shader includes --
+`retoque/shaders/dlssnr/precompile/dlssnr_cadence_rule.h` -- the header the shader includes --
 with its texture loads turned into clamped array reads and the pass's five dispatches into loops in
 the order `DlssNr_Cadence_Dx12` records them. A smooth texture on an infinite plane and a stand-in
 model (a light sharpening and a lift; a strong lift on a red occluder) make eleven cases:

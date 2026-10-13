@@ -31,7 +31,7 @@ with tempfile.TemporaryDirectory(prefix='nr-pass-config-') as temp:
     (temp / 'test.cpp').write_text(source)
     subprocess.run(['g++', '-std=c++20', '-O1', '-g', '-pthread', '-fsanitize=address,undefined',
                     '-fno-omit-frame-pointer', '-Wall', '-Wextra', '-Werror',
-                    '-isystem', str(root / 'external/simpleini'), '-I' + str(root / 'OptiScaler/dlssnr'),
+                    '-isystem', str(root / 'external/simpleini'), '-I' + str(root / 'retoque/dlssnr'),
                     str(temp / 'test.cpp'), '-o', str(temp / 'test')], check=True)
     subprocess.run([str(temp / 'test')], cwd=temp, check=True)
 # Four config points and scoped parsing: tests may not substitute generic parser rewrites.

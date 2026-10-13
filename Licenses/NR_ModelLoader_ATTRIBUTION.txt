@@ -24,8 +24,8 @@ nvngx.dll path only for the calling OptiScaler module and only during a direct
 call, and that chains every other query to whatever the slot held before,
 loader and overlay wrappers included.
 
-Files: OptiScaler/dlssnr/DlssNr_DirectRuntime.h/.cpp and the import scan in
-OptiScaler/dlssnr/DlssNr_PeScan.h.
+Files: retoque/dlssnr/DlssNr_DirectRuntime.h/.cpp and the import scan in
+retoque/dlssnr/DlssNr_PeScan.h.
 
 
 2. The NGX loader's feature-18 route, and the model it faults with
@@ -48,8 +48,8 @@ What is derived from it:
     (NrSnippetIsOlderThanLoader).
 
 Files: the table scan and ModelKnownToFaultOnLoaderRoute in
-OptiScaler/dlssnr/DlssNr_PeScan.h, used by OptiScaler/dlssnr/DlssNr_NgxInfo.cpp
-and OptiScaler/dlssnr/DlssNr_Proxy.cpp.
+retoque/dlssnr/DlssNr_PeScan.h, used by retoque/dlssnr/DlssNr_NgxInfo.cpp
+and retoque/dlssnr/DlssNr_Proxy.cpp.
 
 MIT License
 

@@ -6,7 +6,7 @@ python3 tests/run_all.py --only nr-log-rate -v
 ```
 
 The runner extracts and compiles the four real report types and their initializers from
-`OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp`, then exercises them with the production
+`retoque/shaders/dlssnr/DlssNr_Dx12.cpp`, then exercises them with the production
 `DlssNr_LogRate.h` and injected `Clock::time_point`s. The composition fixture also uses the
 production `DlssNr_Exposure.h` white-point law. Acquisition/config containers are host stubs;
 the classification and its field wiring are not copied into the test. There are no sleeps.

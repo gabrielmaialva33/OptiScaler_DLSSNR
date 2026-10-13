@@ -29,7 +29,7 @@ The concept originates from **janblade** (`OptiScaler` fork, `origin/main` branc
 - **NvAPI Hooking:**
   `OptiScaler/nvapi/NvApiHooks.cpp:190-245` intercepts `NvAPI_QueryInterface` and routes between the host driver, `fakenvapi`, and internal wrappers.
 - **Model Dispatch:**
-  `OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp:4650-4750` evaluates the model feature (`g_nr.evaluate`) on the command list.
+  `retoque/shaders/dlssnr/DlssNr_Dx12.cpp:4650-4750` evaluates the model feature (`g_nr.evaluate`) on the command list.
 - **Theoretical cost model:**
   `docs/dlssnr/design/model-cost-across-architectures.md` discusses relative costs across GPU architectures based on external benchmarks, but currently lacks live kernel-level breakdown data on this machine (RTX 4090) and Rafael's PC (RTX 3060).
 
@@ -60,11 +60,11 @@ Once kernel timings confirm that `cc_vit_1d_*` accounts for $\sim 18-22\%$ of to
 
 1. **`OptiScaler/nvapi/NvApiHooks.cpp`:**
    Add interception inside `hkNvAPI_QueryInterface` for CUDA kernel launch tables.
-2. **`OptiScaler/dlssnr/DlssNr_KernelProfile.h`:**
+2. **`retoque/dlssnr/DlssNr_KernelProfile.h`:**
    Header-only telemetry collector for Step 1.
-3. **`OptiScaler/dlssnr/DlssNr_VitSkip.h`:**
+3. **`retoque/dlssnr/DlssNr_VitSkip.h`:**
    Header-only state tracker managing skip cadence and signature matching.
-4. **`OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp`:**
+4. **`retoque/shaders/dlssnr/DlssNr_Dx12.cpp`:**
    Delimit `g_nr.evaluate` with profiler/skip markers.
 
 ---
@@ -94,7 +94,7 @@ Once kernel timings confirm that `cc_vit_1d_*` accounts for $\sim 18-22\%$ of to
 ## 7. Implementation status and test plan
 
 ### Step 1 (Implemented)
-- `OptiScaler/dlssnr/DlssNr_KernelProfile.h`: manages query heaps, classifies kernel names by prefix, detects `_fp8` variants, and aggregates GPU timings.
+- `retoque/dlssnr/DlssNr_KernelProfile.h`: manages query heaps, classifies kernel names by prefix, detects `_fp8` variants, and aggregates GPU timings.
 - Hooked in `OptiScaler/nvapi/NvApiHooks.cpp` behind `[DlssNr] KernelProfile=true`.
 - Zero overhead when disabled: hooks remain uninstalled and no queries/heaps are created.
 - Host test suite: `tests/nr-kernel-profile` verifying classification rules, `_fp8` detection, and statistical report generation.

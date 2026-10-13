@@ -8,8 +8,8 @@ What is derived from it
 -----------------------
 
 The carry of DLSS-NR's model cadence, in
-OptiScaler/shaders/dlssnr/precompile/dlssnr_cadence_rule.h and
-OptiScaler/shaders/dlssnr/precompile/dlssnr_cadence.hlsl, is taken from its temporal
+retoque/shaders/dlssnr/precompile/dlssnr_cadence_rule.h and
+retoque/shaders/dlssnr/precompile/dlssnr_cadence.hlsl, is taken from its temporal
 mode (core/shaders/temporal_mapping.hlsli, temporal_reproject.hlsli and
 temporal_residual.hlsli): the depth mismatch with its 0..1 depth term and the best of
 four texels around the reprojected point; the colour gate on chromaticity and luma;

@@ -4,16 +4,16 @@
 #include <chrono>
 #include <cstdint>
 #include <limits>
-#include "OptiScaler/dlssnr/DlssNr_Exposure.h"
+#include "retoque/dlssnr/DlssNr_Exposure.h"
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include "OptiScaler/dlssnr/DlssNr_PreUpscale.h"
-#include "OptiScaler/dlssnr/DlssNr_Coverage.h"
-#include "OptiScaler/dlssnr/DlssNr_Chain.h"
+#include "retoque/dlssnr/DlssNr_PreUpscale.h"
+#include "retoque/dlssnr/DlssNr_Coverage.h"
+#include "retoque/dlssnr/DlssNr_Chain.h"
 #define FMT_HEADER_ONLY
 #include "external/spdlog/include/spdlog/fmt/bundled/format.h"
 
@@ -159,7 +159,7 @@ struct NVSDK_NGX_Parameter
     void Set(const char* k, ID3D12Resource* r) { ++sets; typed[k] = r; }
     void Set(const char* k, void* r) { ++sets; untyped[k] = r; }
 };
-#include "OptiScaler/dlssnr/DlssNr_RenderSize.h"
+#include "retoque/dlssnr/DlssNr_RenderSize.h"
 template<typename T> struct Option : std::optional<T>
 {
     T value_or_default() const { return this->value_or(T{}); }

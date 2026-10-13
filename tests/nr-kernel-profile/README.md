@@ -1,6 +1,6 @@
 # nr-kernel-profile
 
-Host unit test for the DLSS-NR NvAPI CUDA kernel classification and aggregation (`OptiScaler/dlssnr/DlssNr_KernelProfile.h`).
+Host unit test for the DLSS-NR NvAPI CUDA kernel classification and aggregation (`retoque/dlssnr/DlssNr_KernelProfile.h`).
 
 Run: `python3 tests/nr-kernel-profile/run.py` (needs `g++` with C++20, ASan and UBSan).
 

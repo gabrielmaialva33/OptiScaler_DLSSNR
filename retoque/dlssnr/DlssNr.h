@@ -5,9 +5,9 @@
 // Two halves, and only one of them is a shader.
 //
 // The model is an NGX feature -- created and evaluated rather than dispatched -- and it lives here,
-// under OptiScaler/dlssnr/. The composition pass, which builds the proxy the model is shown and
+// under retoque/dlssnr/. The composition pass, which builds the proxy the model is shown and
 // transfers its answer back onto the frame, is an ordinary compute shader and lives with the others
-// under OptiScaler/shaders/dlssnr/.
+// under retoque/shaders/dlssnr/.
 //
 // The two are named a letter apart, so which is which:
 //   dlssnr/DlssNrFeature_Dx12    the model, as an NGX feature

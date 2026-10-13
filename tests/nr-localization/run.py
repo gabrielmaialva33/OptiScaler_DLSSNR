@@ -15,7 +15,7 @@ with tempfile.TemporaryDirectory(prefix="nr-localization-") as temp:
     binary = Path(temp) / "cases"
     label_pattern = re.compile(r'Localization::Label\(((?:"(?:\\.|[^"\\])*"\s*)+)\)')
     labels = []
-    for relative in ("OptiScaler/dlssnr/DlssNr_Menu.cpp", "OptiScaler/menu/menu_common.cpp"):
+    for relative in ("retoque/dlssnr/DlssNr_Menu.cpp", "OptiScaler/menu/menu_common.cpp"):
         labels.extend(label_pattern.findall((ROOT / relative).read_text()))
     assert len(labels) >= 60, "ZERO/LOW COVERAGE: expected actual production menu label call sites"
 
@@ -49,7 +49,7 @@ with tempfile.TemporaryDirectory(prefix="nr-localization-") as temp:
                                  line.split("\t")[0]))
     text_pattern = re.compile(r'(?:Localization::Tr|\bHelpMarker)\(((?:"(?:\\.|[^"\\])*"\s*)+)\)')
     missing = []
-    for relative in ("OptiScaler/dlssnr/DlssNr_Menu.cpp", "OptiScaler/menu/menu_common.cpp"):
+    for relative in ("retoque/dlssnr/DlssNr_Menu.cpp", "OptiScaler/menu/menu_common.cpp"):
         for literals in text_pattern.findall((ROOT / relative).read_text()):
             text = c_text(literals)
             if re.search(r"[A-Za-z]{2}", text) and text not in pack_keys:

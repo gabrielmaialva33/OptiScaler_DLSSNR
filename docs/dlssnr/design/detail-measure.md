@@ -11,7 +11,7 @@ Originates from **janblade** (`OptiScaler` fork, `origin/main` branch):
   - `daeb388f` (2026-09-30): introduced the "Measure detail" button, compute pass, and readback ring;
   - `28daeebf` (2026-09-30): added OkLab chromaticity / warmth metrics and shadow crushing / darkening statistics.
 - **Shader:**
-  `OptiScaler/shaders/dlssnr/precompile/dlssnr_detail_stats.hlsl`:
+  `retoque/shaders/dlssnr/precompile/dlssnr_detail_stats.hlsl`:
   A 64x64 tile compute pass measuring 1/4 of pixels across the frame into a 256x64 grid of float4 values.
 - **Licence:** GPL-3.0 (same licence as this repository).
 
@@ -58,9 +58,9 @@ Originates from **janblade** (`OptiScaler` fork, `origin/main` branch):
 ## 5. Implementation details
 
 - **Architecture:**
-  - `OptiScaler/dlssnr/DlssNr_DetailStats.h`: pure CPU header containing `ReduceGrid()` and `Measurement` aggregation.
-  - `OptiScaler/shaders/dlssnr/DlssNr_DetailStats_Dx12.h/.cpp`: D3D12 compute pass running `dlssnr_detail_stats.hlsl`.
-  - `OptiScaler/dlssnr/DlssNr_Menu.cpp`: button and readout under Compare section.
+  - `retoque/dlssnr/DlssNr_DetailStats.h`: pure CPU header containing `ReduceGrid()` and `Measurement` aggregation.
+  - `retoque/shaders/dlssnr/DlssNr_DetailStats_Dx12.h/.cpp`: D3D12 compute pass running `dlssnr_detail_stats.hlsl`.
+  - `retoque/dlssnr/DlssNr_Menu.cpp`: button and readout under Compare section.
 - **Resource allocation:**
   - Zero allocation at startup. Scratch textures and readback ring are instantiated only when the user clicks "Measure detail".
   - Resources retire safely through `Park*` lists upon completion or cancellation.

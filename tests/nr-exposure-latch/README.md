@@ -4,7 +4,7 @@
 python3 tests/nr-exposure-latch/run.py
 ```
 
-The runner compiles `OptiScaler/dlssnr/DlssNr_Exposure.h` with g++ C++20, ASan/UBSan, and `-Werror`.
+The runner compiles `retoque/dlssnr/DlssNr_Exposure.h` with g++ C++20, ASan/UBSan, and `-Werror`.
 
 ## What this covers
 

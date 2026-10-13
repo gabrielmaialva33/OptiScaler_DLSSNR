@@ -107,7 +107,7 @@ mask almost everywhere.
 
 ## 3. What our pass does with highlights today
 
-`OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl`, default configuration: `ReversibleMode=0`, detail 1,
+`retoque/shaders/dlssnr/precompile/dlssnr.hlsl`, default configuration: `ReversibleMode=0`, detail 1,
 colour 1, guard 2. This is Crimson Desert's: "colour transform on (linear HDR), transfer matched
 residual, guard 2.0x", `WhitePointSource=1`.
 

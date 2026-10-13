@@ -4,7 +4,7 @@
 //
 // Precompiled like dlssnr.hlsl: editing this alone changes nothing. From this directory:
 //   dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect dlssnr_stabilizer.hlsl -Fo DlssNr_Stabilizer_Shader.cso
-//   python ../../shader_tools/create_header.py DlssNr_Stabilizer_Shader.cso DlssNr_Stabilizer_Shader.h DlssNr_Stabilizer_cso
+//   python ../../../../OptiScaler/shaders/shader_tools/create_header.py DlssNr_Stabilizer_Shader.cso DlssNr_Stabilizer_Shader.h DlssNr_Stabilizer_cso
 
 Texture2D<float4>   gInput      : register(t0); // the frame before the edit, as the upscaler left it
 Texture2D<float4>   gAnchorPrev : register(t1); // per pixel, the input box as it was when it last moved

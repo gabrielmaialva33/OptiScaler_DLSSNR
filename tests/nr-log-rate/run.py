@@ -7,7 +7,7 @@ import re
 
 here = Path(__file__).resolve().parent
 root = here.parents[1]
-source = (root / 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp').read_text()
+source = (root / 'retoque/shaders/dlssnr/DlssNr_Dx12.cpp').read_text()
 
 
 def report(name):
@@ -117,14 +117,14 @@ with tempfile.TemporaryDirectory(prefix='optiscaler-nr-log-sites-') as directory
     cpp.write_text(sites)
     subprocess.run(['g++', '-std=c++20', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                     '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-                    '-I' + str(root / 'OptiScaler'), str(cpp), '-o', str(binary)], check=True)
+                    '-I' + str(root / 'retoque'), '-I' + str(root / 'OptiScaler'), str(cpp), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
 
 with tempfile.TemporaryDirectory(prefix='optiscaler-nr-log-rate-') as directory:
     binary = Path(directory) / 'rate'
     subprocess.run(['g++', '-std=c++20', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                     '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-                    '-I' + str(root / 'OptiScaler'), str(here / 'rate.cpp'), '-o', str(binary)], check=True)
+                    '-I' + str(root / 'retoque'), '-I' + str(root / 'OptiScaler'), str(here / 'rate.cpp'), '-o', str(binary)], check=True)
     subprocess.run([str(binary), str(here / 'crimson-compose.trace')], check=True)
 
 # The header only decides; these are the sites that have to ask it. A limiter nothing calls is a
@@ -150,7 +150,7 @@ assert 'composeReporter.Observe(composeNow, DlssNr::LogRate::Clock::now())' in b
 assert body.index('composeReporter.Observe') < body.index('LOG_INFO'), 'the line must be gated, not merely counted'
 
 # Nothing the GPU or the timing evidence depends on goes through a rate limiter.
-timing = (root / 'OptiScaler/dlssnr/DlssNr_GpuTiming.cpp').read_text()
+timing = (root / 'retoque/dlssnr/DlssNr_GpuTiming.cpp').read_text()
 assert 'LogRate' not in timing, 'GPU timing samples must not be rate limited'
 assert 'gpu timing confirmed' in timing
 

@@ -97,7 +97,7 @@ pins them with the numbers of the cases they were written for.
   failure mode: `nr-invariants` does not compare HLSL with bytecode, so a stale composition shader
   would run a mode it does not know.
 
-**Build the shader** from `OptiScaler/shaders/dlssnr/precompile`, with dxc under the msvc-wine prefix.
+**Build the shader** from `retoque/shaders/dlssnr/precompile`, with dxc under the msvc-wine prefix.
 Never do it while a DLL build is running.
 
 ```

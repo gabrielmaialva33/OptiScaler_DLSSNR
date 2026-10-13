@@ -3,9 +3,9 @@
 The notes in [design/](design/) are dated records: each carries its own status header, which can be
 older than the code. They sit in one flat folder because they link to each other and to
 `../../../tests/`. This page groups them by topic. For the code, read
-[OptiScaler/dlssnr/README.md](../../OptiScaler/dlssnr/README.md) first (module overview, file index,
+[retoque/dlssnr/README.md](../../retoque/dlssnr/README.md) first (module overview, file index,
 shader rebuild). The forwarder DLL is explained in
-[OptiScaler/dlssnr/forwarder/README.md](../../OptiScaler/dlssnr/forwarder/README.md), and the evidence
+[retoque/dlssnr/forwarder/README.md](../../retoque/dlssnr/forwarder/README.md), and the evidence
 log of the attempt to drop it is [../history/FORWARDER_INVESTIGATION.md](../history/FORWARDER_INVESTIGATION.md).
 
 ## Rules and review
@@ -76,4 +76,4 @@ Related, outside that sequence:
 
 - [ngx-driver-616.md](design/ngx-driver-616.md): NVIDIA 616.64 and the loader's own route to feature 18.
 - [ngx-shutdown-order.md](design/ngx-shutdown-order.md): the D3D12 NGX core shutdown ABI.
-- [../history/FORWARDER_INVESTIGATION.md](../history/FORWARDER_INVESTIGATION.md) and [OptiScaler/dlssnr/forwarder/README.md](../../OptiScaler/dlssnr/forwarder/README.md) (linked, not design notes).
+- [../history/FORWARDER_INVESTIGATION.md](../history/FORWARDER_INVESTIGATION.md) and [retoque/dlssnr/forwarder/README.md](../../retoque/dlssnr/forwarder/README.md) (linked, not design notes).

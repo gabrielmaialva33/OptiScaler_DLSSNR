@@ -8,7 +8,7 @@ What is derived from it
 -----------------------
 
 1. Colour composition:
-The colour composition in OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl is taken
+The colour composition in retoque/shaders/dlssnr/precompile/dlssnr.hlsl is taken
 from RenoDX's DLSS 5 Neural Rendering addon. Specifically:
 
   * UpgradeToneMap -- the two-branch luminance ratio: below the proxy's luminance
@@ -34,7 +34,7 @@ from RenoDX's DLSS 5 Neural Rendering addon. Specifically:
 2. Present-time guide snapshot ring:
 The present-time guide snapshot ring, clone creation, barriers and cross-queue completion selection
 (present_path.hpp:30-33, 96-100, 155-168, 880-1090, commit 9bb6c0f, v8.5dev) adapted in
-OptiScaler/dlssnr/DlssNr_PresentGuideRing.h and OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp,
+retoque/dlssnr/DlssNr_PresentGuideRing.h and retoque/shaders/dlssnr/DlssNr_Dx12.cpp,
 which copies depth and motion at evaluate, tracks submissions, avoids cross-queue
 GPU waits, and falls back to completed frames or neutral guides under DLSS-G.
 

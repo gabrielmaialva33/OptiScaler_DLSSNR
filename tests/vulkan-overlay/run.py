@@ -45,7 +45,7 @@ def instrument(ref):
     name = 'OptiScaler/menu/menu_overlay_vk.cpp'
     source = subprocess.check_output(['git', 'show', f'{ref}:{name}'], cwd=ROOT, text=True)
     # Keep the rest of the DLL identical to the source revision being claimed.
-    if subprocess.check_output(['git', 'diff', ref, '--', 'OptiScaler', 'external'], cwd=ROOT):
+    if subprocess.check_output(['git', 'diff', ref, '--', 'OptiScaler', 'retoque', 'external'], cwd=ROOT):
         raise RuntimeError('production tree differs from requested revision; refusing a mixed-version test')
     digest = hashlib.sha256(source.encode()).hexdigest()
     anchor = '// Vulkan overlay code adopted from here:'

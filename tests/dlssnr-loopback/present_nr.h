@@ -7,8 +7,8 @@
 #include <tuple>
 #include <cmath>
 #include "hud_fixture.h"
-#include "../../OptiScaler/shaders/dlssnr/DlssNr_Common.h"
-#include "../../OptiScaler/shaders/dlssnr/precompile/DlssNr_Shader.h"
+#include "../../retoque/shaders/dlssnr/DlssNr_Common.h"
+#include "../../retoque/shaders/dlssnr/precompile/DlssNr_Shader.h"
 
 namespace PresentNr
 {

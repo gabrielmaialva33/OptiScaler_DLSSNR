@@ -7,8 +7,8 @@ import tempfile
 
 here = Path(__file__).resolve().parent
 root = here.parents[1]
-renderer = (root / 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp').read_text()
-header = (root / 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.h').read_text()
+renderer = (root / 'retoque/shaders/dlssnr/DlssNr_Dx12.cpp').read_text()
+header = (root / 'retoque/shaders/dlssnr/DlssNr_Dx12.h').read_text()
 
 
 def between(source, start, end):

@@ -6,8 +6,8 @@ import tempfile
 
 here = Path(__file__).resolve().parent
 root = here.parents[1]
-source = (root / 'OptiScaler/dlssnr/DlssNr_ZeroGuides.cpp').read_text()
-header = (root / 'OptiScaler/dlssnr/DlssNr_ZeroGuides.h').read_text()
+source = (root / 'retoque/dlssnr/DlssNr_ZeroGuides.cpp').read_text()
+header = (root / 'retoque/dlssnr/DlssNr_ZeroGuides.h').read_text()
 
 # The production translation unit, minus the includes the fakes stand in for. Taking the body rather
 # than a copy is the point: a change to the provider is compiled by this suite or it is not tested.

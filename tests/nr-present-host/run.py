@@ -17,8 +17,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--source', type=Path, help='compile this DlssNr_PresentHost.cpp instead of the tree\'s')
 args = parser.parse_args()
 
-source = (args.source or root / 'OptiScaler/dlssnr/DlssNr_PresentHost.cpp').read_text()
-header = (root / 'OptiScaler/dlssnr/DlssNr_PresentHost.h').read_text()
+source = (args.source or root / 'retoque/dlssnr/DlssNr_PresentHost.cpp').read_text()
+header = (root / 'retoque/dlssnr/DlssNr_PresentHost.h').read_text()
 
 # The includes fakes.h stands in for. If production grows a new one, this suite has to learn it rather
 # than compile past it.
@@ -36,7 +36,7 @@ def strip_includes(text):
 
 # DlssNr_PresentColour.h is not faked: which frames the host declines is its rule, and the cases below
 # exercise it as production has it. Its one include (dxgi1_4.h) is what fakes.h supplies.
-colour = (root / 'OptiScaler/dlssnr/DlssNr_PresentColour.h').read_text()
+colour = (root / 'retoque/dlssnr/DlssNr_PresentColour.h').read_text()
 colour_includes = {l.strip() for l in colour.splitlines() if l.startswith('#include')}
 assert colour_includes == {'#include <dxgi1_4.h>'}, f'DlssNr_PresentColour.h includes changed: {colour_includes}'
 

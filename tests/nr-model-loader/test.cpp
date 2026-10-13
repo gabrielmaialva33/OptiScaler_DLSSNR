@@ -1,4 +1,4 @@
-// The two byte-level answers the NR model loaders act on (OptiScaler/dlssnr/DlssNr_PeScan.h), against
+// The two byte-level answers the NR model loaders act on (retoque/dlssnr/DlssNr_PeScan.h), against
 // synthetic PE64 images; plus, when run.py finds them on this machine, the real NGX loader and model.
 //
 // DlssNr_PeScan.h is included as shipped. DriverFromLoaderVersion is sliced out of DlssNr_NgxInfo.cpp

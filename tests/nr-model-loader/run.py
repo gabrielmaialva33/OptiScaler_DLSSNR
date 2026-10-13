@@ -12,7 +12,7 @@ import tempfile
 
 root = Path(__file__).resolve().parent
 repo = root.parents[1]
-dlssnr = repo / 'OptiScaler/dlssnr'
+dlssnr = repo / 'retoque/dlssnr'
 
 
 def fail(message):
@@ -74,8 +74,8 @@ with tempfile.TemporaryDirectory(prefix='optiscaler-nr-model-loader-') as direct
 
 # --- 2. Drift: the direct runtime writes what the forwarder writes, in the same order --------------
 
-forwarder_path = 'OptiScaler/dlssnr/forwarder/dlssnr_forwarder.cpp'
-direct_path = 'OptiScaler/dlssnr/DlssNr_DirectRuntime.cpp'
+forwarder_path = 'retoque/dlssnr/forwarder/dlssnr_forwarder.cpp'
+direct_path = 'retoque/dlssnr/DlssNr_DirectRuntime.cpp'
 forwarder = strip_comments((repo / forwarder_path).read_text())
 direct = strip_comments((repo / direct_path).read_text())
 
@@ -137,7 +137,7 @@ print(f'PASS: direct runtime matches the forwarder -- {total} parameter writes, 
 
 # --- 3. Wiring -------------------------------------------------------------------------------------
 
-host = strip_comments((repo / 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp').read_text())
+host = strip_comments((repo / 'retoque/shaders/dlssnr/DlssNr_Dx12.cpp').read_text())
 ensure = body(host, 'bool EnsureForwarder()', 'DlssNr_Dx12.cpp')
 direct_at = ensure.find('NrModelLoader::Direct')
 load_at = ensure.find('LoadLibraryW(')

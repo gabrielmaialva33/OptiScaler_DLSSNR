@@ -1,6 +1,6 @@
 # nr-present-guides
 
-Host unit test for the present-time guide snapshot ring (`OptiScaler/dlssnr/DlssNr_PresentGuideRing.h`).
+Host unit test for the present-time guide snapshot ring (`retoque/dlssnr/DlssNr_PresentGuideRing.h`).
 
 Run: `python3 tests/nr-present-guides/run.py` (needs `g++` with C++20, ASan and UBSan).
 

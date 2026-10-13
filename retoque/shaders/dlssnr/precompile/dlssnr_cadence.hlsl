@@ -13,7 +13,7 @@
 // Precompiled like dlssnr.hlsl: editing this or the rule alone changes nothing. From this directory (dxc under
 // the msvc-wine prefix on Linux, never while a build is using it):
 //   dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect dlssnr_cadence.hlsl -Fo DlssNr_Cadence_Shader.cso
-//   python3 ../../shader_tools/create_header.py DlssNr_Cadence_Shader.cso DlssNr_Cadence_Shader.h DlssNr_Cadence_cso
+//   python3 ../../../../OptiScaler/shaders/shader_tools/create_header.py DlssNr_Cadence_Shader.cso DlssNr_Cadence_Shader.h DlssNr_Cadence_cso
 // DlssNr_Cadence_Dx12.cpp picks the header up through __has_include; without it the cadence reports itself
 // unavailable and the model runs every frame.
 
