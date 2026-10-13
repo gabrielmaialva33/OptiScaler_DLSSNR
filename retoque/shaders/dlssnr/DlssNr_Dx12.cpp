@@ -5615,10 +5615,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // own.
         if (g_capture.isActive())
         {
-            // The pre-upscale capture compares the original HDR frame to the edited HDR copy.
-            // Preserve the legacy capture source on the default after-upscale path.
-            g_capture.record(cmdList, device, sourceIsTarget ? g_nr.colorCopy : g_nr.hdrCopy,
-                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, target,
+            // "Before" is hdrCopy, the encode's keep: the frame value for value, the one the pass read (the held
+            // frame while Hold is on), on every route. The in-place routes used to record colorCopy, which is the
+            // proxy the model was shown -- soft-knee and sRGB-encoded for a linear frame -- so "before" was not the
+            // frame the manifest says it is (docs/dlssnr/design/comparison-capture.md, open question 4).
+            g_capture.record(cmdList, device, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, target,
                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
             if (g_capture.readyToWrite() && g_captureWriteAtFrame == 0)
