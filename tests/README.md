@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Thirty-six suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
+**Host tier.** Thirty-seven suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit,
@@ -87,6 +87,12 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   header over fixtures: a glyph and a 1 px frame over a pan are taken whole, and a swaying silhouette, a moving
   patch, rain and a straight edge along a pan are not.
 - `nr-before-upscale` — pre-upscale boundary functions against strict host fakes.
+- `nr-capture` — the comparison capture's pure half (`docs/dlssnr/design/comparison-capture.md`): the PNG writer
+  (stored deflate, CRC-32, Adler-32, the provenance tEXt chunk) and PFM, decoded with Python's `zlib` and checked
+  pixel by pixel against readback-shaped sources with padding, every half and R11G11B10 value, the
+  request/record/ticket/hand-off state machine over a fake backend (nothing read before completion, nothing freed
+  before it is proven safe), the menu button's table, names and the 64-pair cap, write-then-rename, the record in its
+  three forms with the repository's privacy patterns run over it, and source guards on the pass. No GPU.
 - `nr-cadence` — model cadence (`docs/dlssnr/design/model-cadence.md`): the production scheduler (age
   in presents the pass ran at, the held reset, forced model frames, every refusal with its reason, off
   allocating nothing) and the production per-pixel rules -- the header the shader includes -- over

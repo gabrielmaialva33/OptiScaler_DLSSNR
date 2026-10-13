@@ -189,6 +189,10 @@ struct DlssNrFrameInfo
     // True when running on the swapchain backbuffer at present time.
     bool PresentSource = false;
 
+    // True when the present host is the D3D11-to-D3D12 bridge's (DlssNr_PresentHost), not the D3D12 swapchain hook.
+    // Only labels the route in a comparison capture's provenance; nothing in the pass reads it.
+    bool BridgeHost = false;
+
     // Whether the model may work above native (working scale > 1). Supersampling makes it synthesise
     // pixels the source does not have, and to place them it needs real motion: measured, it accepts
     // 2x with a game's own depth+motion (Crimson) and refuses zero guides with FAIL_InvalidParameter

@@ -1,0 +1,622 @@
+#include "pch.h"
+
+// Same-frame comparison capture: the D3D12 backend and the writer thread (docs/dlssnr/design/comparison-capture.md).
+//
+// The render thread records two copies on the list that ran the pass and remembers a ticket; it polls the ticket
+// once a dispatch and, once the GPU is proven past the copies, hands the readbacks to the writer thread. The writer
+// maps them, converts, writes the files under temporary names, renames them, and lets go of its references. The
+// render thread keeps its own reference until the list that carried the copies can never run again, so nothing is
+// freed under the GPU. Nothing on the render thread waits for the GPU, maps, or touches a file.
+
+#include "DlssNr_PairCaptureDx12.h"
+#include "DlssNr_PairCapture.h"
+#include "DlssNr_ImageFile.h"
+#include "DlssNr_Readback.h"
+#include "DlssNr_Submission.h"
+#include "DlssNr_NgxInfo.h"
+#include "DlssNrFeature_Dx12.h"
+
+#include <BuildInfo.h>
+#include <Logger.h>
+#include <State.h>
+#include <Util.h>
+#include <proxies/Dxgi_Proxy.h>
+
+#include <dxgi1_4.h>
+
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <deque>
+#include <filesystem>
+#include <format>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+namespace ImageDxgi = DlssNr::ImageFile::Dxgi;
+static_assert(ImageDxgi::R32G32B32A32_TYPELESS == DXGI_FORMAT_R32G32B32A32_TYPELESS);
+static_assert(ImageDxgi::R32G32B32A32_FLOAT == DXGI_FORMAT_R32G32B32A32_FLOAT);
+static_assert(ImageDxgi::R16G16B16A16_TYPELESS == DXGI_FORMAT_R16G16B16A16_TYPELESS);
+static_assert(ImageDxgi::R16G16B16A16_FLOAT == DXGI_FORMAT_R16G16B16A16_FLOAT);
+static_assert(ImageDxgi::R10G10B10A2_TYPELESS == DXGI_FORMAT_R10G10B10A2_TYPELESS);
+static_assert(ImageDxgi::R10G10B10A2_UNORM == DXGI_FORMAT_R10G10B10A2_UNORM);
+static_assert(ImageDxgi::R11G11B10_FLOAT == DXGI_FORMAT_R11G11B10_FLOAT);
+static_assert(ImageDxgi::R8G8B8A8_TYPELESS == DXGI_FORMAT_R8G8B8A8_TYPELESS);
+static_assert(ImageDxgi::R8G8B8A8_UNORM == DXGI_FORMAT_R8G8B8A8_UNORM);
+static_assert(ImageDxgi::R8G8B8A8_UNORM_SRGB == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+static_assert(ImageDxgi::B8G8R8A8_UNORM == DXGI_FORMAT_B8G8R8A8_UNORM);
+static_assert(ImageDxgi::B8G8R8A8_TYPELESS == DXGI_FORMAT_B8G8R8A8_TYPELESS);
+static_assert(ImageDxgi::B8G8R8A8_UNORM_SRGB == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+
+namespace DlssNr::PairCapture
+{
+namespace
+{
+constexpr const char* kReasonShape = "The two surfaces differ in shape; nothing was captured.";
+constexpr const wchar_t* kDirectoryName = L"retoque-captures";
+
+int64_t NowMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+// Everything the writer needs besides the readbacks. The record carries no path; the directory travels beside it.
+struct CapturePayload
+{
+    Record record;
+    ImageFile::Plan plan;
+    std::filesystem::path directory;
+    std::string exe;
+    UtcStamp stamp;
+    LUID luid {};
+};
+
+struct Job
+{
+    capture::Shot shots[2];
+    CapturePayload payload;
+    Completion completion = Completion::AssumedFrames;
+};
+
+class Writer
+{
+  public:
+    // Starts the thread on first use. False, with nothing taken, when it cannot.
+    bool Push(Job&& job)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!started_)
+        {
+            try
+            {
+                // Detached and never joined: the writer and this object live for the process. Joining at static
+                // destruction would run under the loader lock, and a joinable std::thread destroyed there calls
+                // std::terminate. A write cut short by the process ending leaves a ".tmp", never a final name.
+                std::thread([this] { Run(); }).detach();
+            }
+            catch (...)
+            {
+                return false;
+            }
+            started_ = true;
+        }
+        jobs_.push_back(std::move(job));
+        wake_.notify_one();
+        return true;
+    }
+
+  private:
+    void Run();
+
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    std::deque<Job> jobs_;
+    bool started_ = false;
+};
+
+// Never destroyed: the session is touched by the menu, the render thread and the writer, and the writer outlives
+// static destruction. The same reason g_presentMotion is heap-allocated in DlssNr_Dx12.cpp.
+Writer& TheWriter()
+{
+    static Writer* writer = new Writer();
+    return *writer;
+}
+
+std::atomic<bool> g_directoryFailed { false };
+std::atomic<uint32_t> g_seq { 0 };
+
+struct Dx12Backend
+{
+    using Readback = capture::Shot;
+    using Ticket = DlssNr::Submission::Usage;
+    using Payload = CapturePayload;
+
+    struct Recording
+    {
+        ID3D12GraphicsCommandList* cmd = nullptr;
+        ID3D12Device* device = nullptr;
+        ID3D12Resource* surface[2] = {};
+        D3D12_RESOURCE_STATES state[2] = {};
+    };
+
+    bool Alloc(Recording& recording, int which, Readback& out)
+    {
+        const D3D12_RESOURCE_DESC desc = recording.surface[which]->GetDesc();
+        return capture::AllocReadback(recording.device, desc, out);
+    }
+
+    // Before any copy is recorded, as Submission::Track requires.
+    bool Track(Recording& recording, Ticket& ticket) { return DlssNr::Submission::Track(recording.cmd, ticket); }
+
+    void Copy(Recording& recording, int which, Readback& readback)
+    {
+        capture::CopyToReadback(recording.cmd, recording.surface[which], recording.state[which], readback);
+    }
+
+    bool Completed(const Ticket& ticket) { return DlssNr::Submission::Completed(ticket); }
+    bool Ready(const Ticket& ticket) { return DlssNr::Submission::Ready(ticket); }
+
+    void Release(Readback& readback)
+    {
+        if (readback.readback != nullptr)
+            readback.readback->Release();
+        readback = {};
+    }
+
+    bool Hand(Readback (&readbacks)[2], CapturePayload&& payload, Completion completion)
+    {
+        Job job;
+        for (int i = 0; i < 2; ++i)
+        {
+            job.shots[i] = readbacks[i];
+            if (job.shots[i].readback != nullptr)
+                job.shots[i].readback->AddRef(); // the writer's own; the session keeps its reference
+        }
+        job.payload = std::move(payload);
+        job.completion = completion;
+        if (TheWriter().Push(std::move(job)))
+            return true;
+
+        // Not taken: drop the references just added. The session still holds its own, so nothing is freed here.
+        for (int i = 0; i < 2; ++i)
+            if (job.shots[i].readback != nullptr)
+                job.shots[i].readback->Release();
+        return false;
+    }
+
+    // Completion will never be proven, so the buffers are kept for the rest of the process: forgetting the
+    // references is the point (DEVELOPMENT.md rule 8's D3D12 counterpart).
+    void Leak(Readback (&readbacks)[2])
+    {
+        static bool said = false;
+        if (!said)
+        {
+            said = true;
+            LOG_WARN("DLSS-NR capture: the GPU never confirmed a capture's copies; its readback buffers are kept until "
+                     "the process ends rather than freed under the GPU");
+        }
+        readbacks[0] = {};
+        readbacks[1] = {};
+    }
+};
+
+Session<Dx12Backend>& TheSession()
+{
+    static Session<Dx12Backend>* session = new Session<Dx12Backend>();
+    return *session;
+}
+
+// --- The writer thread ---------------------------------------------------------------------------------------
+
+struct Adapter
+{
+    std::string name = "unknown";
+    std::string driver = "unknown";
+};
+
+std::string Narrow(const wchar_t* text)
+{
+    std::string out;
+    for (; text != nullptr && *text != 0; ++text)
+        out.push_back(*text >= 0x20 && *text < 0x7F ? static_cast<char>(*text) : '?');
+    return out;
+}
+
+// The adapter the device was made on, by its LUID: the name and the user-mode driver version, nothing else.
+// Real values, not what spoofing tells the game, which is what a bug report needs. Asked once, on this thread.
+Adapter QueryAdapter(LUID luid)
+{
+    Adapter out;
+    ScopedSkipSpoofingThread skipSpoofing {};
+    const auto create = DxgiProxy::CreateDxgiFactory1_();
+    if (create == nullptr)
+        return out;
+
+    IDXGIFactory1* factory = nullptr;
+    {
+        ScopedCreatingD3DDevice creating {};
+        if (FAILED(create(__uuidof(IDXGIFactory1), &factory)) || factory == nullptr)
+            return out;
+    }
+
+    IDXGIFactory4* factory4 = nullptr;
+    if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory4))) && factory4 != nullptr)
+    {
+        IDXGIAdapter1* adapter = nullptr;
+        if (SUCCEEDED(factory4->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter))) && adapter != nullptr)
+        {
+            DXGI_ADAPTER_DESC1 desc {};
+            if (SUCCEEDED(adapter->GetDesc1(&desc)))
+                out.name = Narrow(desc.Description);
+
+            LARGE_INTEGER umd {};
+            if (SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd)))
+                out.driver = std::format("{}.{}.{}.{}", HIWORD(umd.HighPart), LOWORD(umd.HighPart), HIWORD(umd.LowPart),
+                                         LOWORD(umd.LowPart));
+            adapter->Release();
+        }
+        factory4->Release();
+    }
+    factory->Release();
+    return out;
+}
+
+const Adapter& AdapterFor(LUID luid)
+{
+    // Writer thread only, so no lock: one device per session in practice, and a second LUID is asked again.
+    static Adapter cached;
+    static LUID cachedLuid {};
+    static bool have = false;
+    if (!have || cachedLuid.LowPart != luid.LowPart || cachedLuid.HighPart != luid.HighPart)
+    {
+        cached = QueryAdapter(luid);
+        cachedLuid = luid;
+        have = true;
+    }
+    return cached;
+}
+
+// The readback as rows, from its placed footprint.
+ImageFile::Rows RowsOf(const capture::Shot& shot, const void* mapped)
+{
+    ImageFile::Rows rows;
+    rows.base = static_cast<const uint8_t*>(mapped);
+    rows.offset = shot.layout.Offset;
+    rows.rowPitch = shot.layout.Footprint.RowPitch;
+    rows.width = shot.layout.Footprint.Width;
+    rows.height = shot.layout.Footprint.Height;
+    rows.bytes = shot.bytes;
+    return rows;
+}
+
+std::FILE* OpenForWriting(const std::filesystem::path& path) { return _wfopen(path.c_str(), L"wb"); }
+
+std::string Number(double value) { return std::format("{:.6g}", value); }
+
+// Returns null on success, or the reason.
+const char* WritePair(Job& job, void* const (&mapped)[2], std::string& stemOut)
+{
+    CapturePayload& p = job.payload;
+    const ImageFile::Rows rows[2] = { RowsOf(job.shots[0], mapped[0]), RowsOf(job.shots[1], mapped[1]) };
+    for (const auto& r : rows)
+    {
+        if (!r.Fits(p.plan.source))
+        {
+            LOG_ERROR("DLSS-NR capture: a readback is smaller than its footprint says; nothing written");
+            return kReasonWrite;
+        }
+    }
+
+    // The record is complete before the first byte, so both images carry the same one.
+    const ImageFile::Mean means[2] = { ImageFile::MeanOf(rows[0], p.plan), ImageFile::MeanOf(rows[1], p.plan) };
+    const Adapter& adapter = AdapterFor(p.luid);
+    p.record.Set("completion", CompletionName(job.completion));
+    p.record.Set("gpu", adapter.name);
+    p.record.Set("gpu_driver", adapter.driver);
+    p.record.Set("mean_original", Number(means[0].Value()));
+    p.record.Set("mean_processed", Number(means[1].Value()));
+    if (p.plan.kind == ImageFile::FileKind::Pfm)
+    {
+        p.record.Set("nonfinite_original", std::to_string(means[0].nonFinite));
+        p.record.Set("nonfinite_processed", std::to_string(means[1].nonFinite));
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(p.directory, ec);
+    if (ec || !std::filesystem::is_directory(p.directory, ec))
+    {
+        if (!g_directoryFailed.exchange(true))
+            LOG_ERROR("DLSS-NR capture: the retoque-captures folder beside OptiScaler could not be created ({}); "
+                      "the capture is off for this session",
+                      ec.message());
+        return kReasonDirectory;
+    }
+
+    // The cap: delete the oldest pairs so this one makes at most kMaxPairs. Only names of ours are considered.
+    {
+        std::vector<std::string> names;
+        for (std::filesystem::directory_iterator it(p.directory, ec), end; !ec && it != end; it.increment(ec))
+        {
+            const std::wstring name = it->path().filename().wstring();
+            std::string ascii;
+            bool plain = true;
+            for (const wchar_t c : name)
+            {
+                plain = plain && c > 0 && c < 0x80;
+                ascii.push_back(static_cast<char>(c));
+            }
+            if (plain)
+                names.push_back(std::move(ascii));
+        }
+        const auto victims = RotationVictims(names, kMaxPairs);
+        for (const auto& victim : victims)
+            std::filesystem::remove(p.directory / victim, ec);
+        if (!victims.empty())
+            LOG_INFO("DLSS-NR capture: removed {} file(s) of the oldest pairs to keep {} pairs", victims.size(),
+                     kMaxPairs);
+    }
+
+    // A stem no file has yet, so nothing is overwritten even if the clock went back.
+    std::string stem;
+    uint32_t seq = 0;
+    for (int attempt = 0; attempt < 1000; ++attempt)
+    {
+        seq = ++g_seq;
+        stem = Stem(p.stamp.compact, p.exe, seq);
+        bool taken = false;
+        for (const Part part : { Part::Original, Part::Processed, Part::Sidecar })
+            taken = taken || std::filesystem::exists(p.directory / FileName(stem, part, p.plan.kind), ec);
+        if (!taken)
+            break;
+    }
+
+    const std::string names[3] = { FileName(stem, Part::Original, p.plan.kind),
+                                   FileName(stem, Part::Processed, p.plan.kind),
+                                   FileName(stem, Part::Sidecar, p.plan.kind) };
+    p.record.Set("seq", std::to_string(seq));
+    p.record.Set("original_file", names[0]);
+    p.record.Set("processed_file", names[1]);
+    p.record.Set("sidecar", names[2]);
+
+    const std::string line = p.record.Line();
+    const std::string json = p.record.Json();
+    const std::filesystem::path paths[3] = { p.directory / names[0], p.directory / names[1], p.directory / names[2] };
+
+    const auto image = [&p, &line](const ImageFile::Rows& r)
+    {
+        return [&r, &p, &line](std::FILE* f)
+        {
+            auto sink = [f](const uint8_t* data, size_t size) { return std::fwrite(data, 1, size, f) == size; };
+            return ImageFile::WriteImage(sink, r, p.plan, kTextKeyword, line);
+        };
+    };
+    const bool ok = WriteViaTemporary(paths[0], OpenForWriting, image(rows[0])) &&
+                    WriteViaTemporary(paths[1], OpenForWriting, image(rows[1])) &&
+                    WriteViaTemporary(paths[2], OpenForWriting, [&json](std::FILE* f)
+                                      { return std::fwrite(json.data(), 1, json.size(), f) == json.size(); });
+
+    if (!ok)
+    {
+        // A pair or nothing: whatever of this stem was renamed into place goes again.
+        for (const auto& path : paths)
+            std::filesystem::remove(path, ec);
+        LOG_ERROR("DLSS-NR capture: writing {} failed; nothing kept", stem);
+        return kReasonWrite;
+    }
+
+    LOG_INFO("DLSS-NR capture: wrote {}, {} and {} to retoque-captures beside OptiScaler", names[0], names[1],
+             names[2]);
+    LOG_INFO("DLSS-NR capture provenance: {}", line);
+    stemOut = stem;
+    return nullptr;
+}
+
+void Writer::Run()
+{
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+
+    for (;;)
+    {
+        Job job;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            wake_.wait(lock, [this] { return !jobs_.empty(); });
+            job = std::move(jobs_.front());
+            jobs_.pop_front();
+        }
+
+        // The ticket proved the copies complete before this job existed, so mapping reads finished data.
+        void* mapped[2] = {};
+        bool isMapped[2] = {};
+        for (int i = 0; i < 2; ++i)
+        {
+            const D3D12_RANGE read { 0, static_cast<SIZE_T>(job.shots[i].bytes) };
+            isMapped[i] = job.shots[i].readback != nullptr &&
+                          SUCCEEDED(job.shots[i].readback->Map(0, &read, &mapped[i])) && mapped[i] != nullptr;
+        }
+
+        const char* failure = kReasonWrite;
+        std::string stem;
+        if (isMapped[0] && isMapped[1])
+            failure = WritePair(job, mapped, stem);
+        else
+            LOG_ERROR("DLSS-NR capture: a readback could not be mapped; nothing written");
+
+        for (int i = 0; i < 2; ++i)
+        {
+            if (isMapped[i])
+            {
+                const D3D12_RANGE none { 0, 0 }; // nothing written by the CPU
+                job.shots[i].readback->Unmap(0, &none);
+            }
+            // The writer's reference only; the session's is let go when the list can never run again.
+            if (job.shots[i].readback != nullptr)
+                job.shots[i].readback->Release();
+        }
+
+        TheSession().Finished(failure == nullptr, failure, std::move(stem));
+    }
+}
+
+const char* RouteToken(DlssNr::PeScan::Feature18Route route)
+{
+    switch (route)
+    {
+    case DlssNr::PeScan::Feature18Route::Present:
+        return "loader-routes-feature-18";
+    case DlssNr::PeScan::Feature18Route::Absent:
+        return "loader-does-not-route-feature-18";
+    default:
+        return "unknown";
+    }
+}
+
+std::string Version(const uint16_t v[4])
+{
+    if (v[0] == 0 && v[1] == 0 && v[2] == 0 && v[3] == 0)
+        return "unknown";
+    return std::format("{}.{}.{}.{}", v[0], v[1], v[2], v[3]);
+}
+} // namespace
+
+void Poll()
+{
+    // Idle with nothing held: one relaxed load, no clock read.
+    auto& session = TheSession();
+    if (!session.Busy())
+        return;
+    Dx12Backend backend;
+    session.Poll(backend, NowMs());
+}
+
+bool Wanted() { return TheSession().Current() == Phase::Requested; }
+
+void AtRecordSite(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D12Resource* original,
+                  D3D12_RESOURCE_STATES originalState, ID3D12Resource* processed, D3D12_RESOURCE_STATES processedState,
+                  const FrameFacts& facts)
+{
+    auto& session = TheSession();
+    if (session.Current() != Phase::Requested || cmdList == nullptr || device == nullptr || original == nullptr ||
+        processed == nullptr)
+        return;
+
+    const D3D12_RESOURCE_DESC o = original->GetDesc();
+    const D3D12_RESOURCE_DESC p = processed->GetDesc();
+    const DXGI_FORMAT format = capture::TypedForCopy(p.Format);
+    const ImageFile::Plan plan = ImageFile::PlanFor(static_cast<uint32_t>(format), facts.linearHdr);
+
+    const char* refusal = facts.proxy                ? kReasonProxy
+                          : facts.compare != 0       ? kReasonCompare
+                          : facts.debugView != 0     ? kReasonDebugView
+                          : g_directoryFailed.load() ? kReasonDirectory
+                                                     : plan.refusal;
+    // One footprint shape for both, and a texture a copy to a buffer can take: one sample, two dimensions.
+    if (refusal == nullptr &&
+        (o.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || p.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+         o.SampleDesc.Count != 1 || p.SampleDesc.Count != 1 || o.Width != p.Width || o.Height != p.Height ||
+         capture::TypedForCopy(o.Format) != format))
+        refusal = kReasonShape;
+
+    CapturePayload payload;
+    if (refusal == nullptr)
+    {
+        const auto seconds =
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        payload.stamp = FormatUtc(seconds);
+        payload.plan = plan;
+        payload.directory = Util::DllPath().remove_filename() / kDirectoryName;
+        payload.exe = SanitizeExeStem(Util::ExePath().stem().wstring());
+        payload.luid = device->GetAdapterLuid();
+
+        Record& r = payload.record;
+        r.Set("record", "retoque-comparison-capture");
+        r.Set("record_version", "1");
+        r.Set("build", BuildInfo::ProductVersion());
+        r.Set("time_utc", payload.stamp.iso);
+        r.Set("exe", payload.exe);
+        r.Set("route", facts.route);
+        r.Set("surface", facts.surface);
+        r.Set("hook_method", std::to_string(facts.hookMethod));
+        r.Set("original", "the frame the pass read (hdrCopy)");
+        r.Set("processed", "the frame the pass wrote");
+        r.Set("width", std::to_string(p.Width));
+        r.Set("height", std::to_string(p.Height));
+        r.Set("original_format", ImageFile::FormatName(static_cast<uint32_t>(o.Format)));
+        r.Set("processed_format", ImageFile::FormatName(static_cast<uint32_t>(p.Format)));
+        r.Set("file_kind", ImageFile::FileKindName(plan.kind));
+        if (plan.quantisedFrom != nullptr)
+            r.Set("quantised_from", plan.quantisedFrom);
+        r.Set("linear_hdr", facts.linearHdr ? "1" : "0");
+        r.Set("held", facts.held ? "1" : "0");
+        r.Set("carried", facts.carried ? "1" : "0");
+        r.Set("white_point", Number(facts.whitePoint));
+        r.Set("frame", std::to_string(facts.frame));
+        r.Set("present", std::to_string(facts.present));
+        r.Set("model", facts.modelIdentity);
+
+        // The NGX loader and model the first build already logs; their versions only, never their paths.
+        if (const auto model = NgxInfo::FindModel(); model.has_value())
+        {
+            const auto& ngx = NgxInfo::Describe(*model);
+            r.Set("model_version", Version(ngx.modelVersion));
+            r.Set("ngx_loader", Version(ngx.loaderVersion));
+            r.Set("ngx_route", RouteToken(ngx.route));
+        }
+        r.Set("settings", facts.settings);
+    }
+
+    Dx12Backend backend;
+    Dx12Backend::Recording recording;
+    recording.cmd = cmdList;
+    recording.device = device;
+    recording.surface[0] = original;
+    recording.surface[1] = processed;
+    recording.state[0] = originalState;
+    recording.state[1] = processedState;
+
+    if (session.Record(backend, recording, std::move(payload), refusal))
+    {
+        LOG_INFO("DLSS-NR capture: copies of {}x{} {} recorded on the pass's list ({}, {})", p.Width, p.Height,
+                 ImageFile::FormatName(static_cast<uint32_t>(format)), facts.route, ImageFile::FileKindName(plan.kind));
+    }
+    else if (const char* why = session.LastOutcome().reason; why != nullptr)
+    {
+        LOG_INFO("DLSS-NR capture: not taken: {}", why);
+    }
+}
+
+void Shutdown()
+{
+    Dx12Backend backend;
+    TheSession().Shutdown(backend);
+}
+} // namespace DlssNr::PairCapture
+
+namespace DlssNr
+{
+bool RequestPairCapture()
+{
+    const bool accepted = PairCapture::TheSession().Request(PairCapture::NowMs());
+    if (accepted)
+        LOG_INFO("DLSS-NR capture: requested");
+    return accepted;
+}
+
+PairCaptureStatus GetPairCaptureStatus()
+{
+    auto& session = PairCapture::TheSession();
+    session.ExpireIfStale(PairCapture::NowMs());
+
+    PairCaptureStatus status;
+    status.phase = session.Current();
+    status.directoryFailed = PairCapture::g_directoryFailed.load();
+    const auto outcome = session.LastOutcome();
+    status.ok = outcome.ok;
+    status.reason = outcome.reason;
+    status.lastStem = outcome.stem;
+    return status;
+}
+} // namespace DlssNr

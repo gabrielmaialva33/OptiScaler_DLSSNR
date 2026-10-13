@@ -3,6 +3,7 @@
 #include <dlssnr/DlssNr.h>
 
 #include <dlssnr/DlssNr_Capture.h>
+#include <dlssnr/DlssNr_PairCaptureDx12.h>
 #include <dlssnr/DlssNr_Proxy.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
 #include <dlssnr/DlssNr_Exposure.h>
@@ -39,6 +40,8 @@
 #include <optional>
 #include <tuple>
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 #include <chrono>
@@ -583,15 +586,12 @@ const std::string& TimingModelIdentity()
     return identity;
 }
 
-// Exact text comparison gives each configuration a session-local generation. Hash is only a compact
-// lookup key; the INFO contract line carries the values and never claims cryptographic identity.
-// Legacy scalar settings are not one atomic render transaction: keep configuration fixed during A/B.
-DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSnapshot& passes, uint64_t evaluation,
-                                           uint64_t present, const char* stage, unsigned renderWidth,
-                                           unsigned renderHeight, unsigned width, unsigned height, unsigned workWidth,
-                                           unsigned workHeight, float workScale, bool reset, bool captureActive,
-                                           bool linearHdr, unsigned format, unsigned cadence, bool carried,
-                                           uint32_t effectiveTransfer, const char* enlarge)
+// Every setting that shapes the picture, as text: the timing contract, and the settings in a comparison capture's
+// provenance (docs/dlssnr/design/comparison-capture.md, section 4.4). One function for both, so the two cannot drift.
+std::string TimingContract(const Config& cfg, const DlssNrPassSnapshot& passes, const char* stage, unsigned renderWidth,
+                           unsigned renderHeight, unsigned width, unsigned height, unsigned workWidth,
+                           unsigned workHeight, float workScale, bool linearHdr, unsigned format, unsigned cadence,
+                           uint32_t effectiveTransfer, const char* enlarge)
 {
     auto contract = std::format(
         "stage={} render={}x{} compose={}x{} model={}x{} scale={} passes={} individual={} "
@@ -632,6 +632,21 @@ DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSn
     // it adds work per bright pixel, and off keeps the default contract's text and hash.
     if (linearHdr && cfg.DlssNrHighlightRecovery.value_or_default())
         contract += " highlight_recovery=1";
+    return contract;
+}
+
+// Exact text comparison gives each configuration a session-local generation. Hash is only a compact
+// lookup key; the INFO contract line carries the values and never claims cryptographic identity.
+// Legacy scalar settings are not one atomic render transaction: keep configuration fixed during A/B.
+DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSnapshot& passes, uint64_t evaluation,
+                                           uint64_t present, const char* stage, unsigned renderWidth,
+                                           unsigned renderHeight, unsigned width, unsigned height, unsigned workWidth,
+                                           unsigned workHeight, float workScale, bool reset, bool captureActive,
+                                           bool linearHdr, unsigned format, unsigned cadence, bool carried,
+                                           uint32_t effectiveTransfer, const char* enlarge)
+{
+    const auto contract = TimingContract(cfg, passes, stage, renderWidth, renderHeight, width, height, workWidth,
+                                         workHeight, workScale, linearHdr, format, cadence, effectiveTransfer, enlarge);
     static std::string previous;
     static uint64_t generation = 0;
     static uint64_t hash = 0;
@@ -704,6 +719,10 @@ unsigned long long g_captureWriteAtFrame = 0;
 
 // Dropping a file named dlssnr-capture.trigger beside OptiScaler requests a capture, so a session can
 // be asked for one from outside the game -- no alt-tab, no menu. Checked once a second, effectively.
+//
+// It asks for the comparison capture: one frame, read and written, as image files with provenance
+// (docs/dlssnr/design/comparison-capture.md). A file whose content is the word "burst" asks for the raw
+// eight-frame burst instead, which temporal research still uses.
 void CheckCaptureTrigger()
 {
     if ((g_frames % 60) != 0)
@@ -714,9 +733,29 @@ void CheckCaptureTrigger()
 
     if (std::filesystem::exists(trigger, ec))
     {
+        char content[16] = {};
+        if (std::FILE* f = _wfopen(trigger.wstring().c_str(), L"rb"))
+        {
+            std::fread(content, 1, sizeof(content) - 1, f);
+            std::fclose(f);
+        }
         std::filesystem::remove(trigger, ec);
-        DlssNr::RequestCapture(capture::kMaxFrames);
-        LOG_INFO("DLSS-NR capture requested by trigger file");
+
+        std::string word(content);
+        word.erase(std::remove_if(word.begin(), word.end(), [](unsigned char c) { return std::isspace(c) != 0; }),
+                   word.end());
+        std::transform(word.begin(), word.end(), word.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        if (word == "burst")
+        {
+            DlssNr::RequestCapture(capture::kMaxFrames);
+            LOG_INFO("DLSS-NR capture: the raw burst requested by trigger file");
+        }
+        else if (!DlssNr::RequestPairCapture())
+        {
+            LOG_INFO("DLSS-NR capture: trigger file ignored, a capture is already under way");
+        }
     }
 }
 
@@ -3290,6 +3329,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // so one it skips breaks a pair of light steps instead of being bridged (docs/dlssnr/design/pulse-metric.md).
     NotePulsePresent(State::Instance().frameCount);
 
+    // The comparison capture's ticket (docs/dlssnr/design/comparison-capture.md), before anything can return, so a
+    // capture recorded on an earlier frame is handed to its writer -- or given up on -- whatever this frame does.
+    // Idle, one relaxed load.
+    DlssNr::PairCapture::Poll();
+
     if (g_nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr || motion == nullptr ||
         output == nullptr)
     {
@@ -5624,6 +5668,37 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
             if (g_capture.readyToWrite() && g_captureWriteAtFrame == 0)
                 g_captureWriteAtFrame = g_frames + 8;
+        }
+
+        // The comparison capture: the frame the pass read and the frame it wrote, copied on this list after the last
+        // write to the target, so the pair is one frame by construction (docs/dlssnr/design/comparison-capture.md).
+        // Only a frame the resolve wrote. Idle, one relaxed load; the description is built only when one is wanted.
+        if (wrote && DlssNr::PairCapture::Wanted())
+        {
+            DlssNr::PairCapture::FrameFacts facts;
+            facts.route = frame.PresentSource            ? (frame.BridgeHost ? "d3d11-bridge" : "d3d12-present")
+                          : beforeUpscale                ? "before-upscale"
+                          : frame.AfterRayReconstruction ? "after-rr"
+                                                         : "after-upscale";
+            facts.surface = frame.PresentSource ? "present-final" : beforeUpscale ? "render-input" : "upscaler-output";
+            facts.hookMethod = cfg.DlssNrHookMethod.value_or_default();
+            facts.held = g_nr.heldActive;
+            facts.carried = carried;
+            facts.linearHdr = isHdrBuffer;
+            facts.proxy = useProxy;
+            facts.compare = cfg.DlssNrCompare.value_or_default();
+            facts.debugView = cfg.DlssNrDebugView.value_or_default();
+            facts.whitePoint = resolveParams.WhitePoint;
+            facts.frame = g_frames;
+            facts.present = observedFrame;
+            facts.modelIdentity = TimingModelIdentity();
+            facts.settings = TimingContract(cfg, passSnapshot, beforeUpscale ? "before" : stageForTiming, guideWidth,
+                                            guideHeight, width, height, workWidth, workHeight, workScale, isHdrBuffer,
+                                            static_cast<unsigned>(desc.Format), cadence.cadence, enlargePlan.transfer,
+                                            DlssNr::Enlarge::Token(enlargePlan.why));
+            DlssNr::PairCapture::AtRecordSite(cmdList, device, g_nr.hdrCopy,
+                                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, target,
+                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, facts);
         }
     }
     else if (carried)
@@ -8879,6 +8954,7 @@ void Shutdown()
     }
 
     g_capture.release();
+    PairCapture::Shutdown();
     GpuTiming::SetEnabled(false);
 
     g_compose.reset();

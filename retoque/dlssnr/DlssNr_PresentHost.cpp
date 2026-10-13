@@ -472,6 +472,9 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         frame.Reset = true;
     }
 
+    // Which present host this is, for a comparison capture's provenance only.
+    frame.BridgeHost = true;
+
     const char* frameReason = "";
     const bool passed = EvaluateAtPresent(cmdList, _toWorking->Buffer(), depth, motion, frame, queue, &frameReason);
 
