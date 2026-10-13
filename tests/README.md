@@ -28,7 +28,7 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `vulkan-query-readiness`, `mfg-pattern`, `fg-synth-policy`, `sl-log-repeat` and `repo-privacy` |
+| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `fg-synth-policy`, `sl-log-repeat` and `repo-privacy` |
 | `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Forty suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
+**Host tier.** Forty-one suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit,
@@ -76,7 +76,13 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
   ownership and deferred release against scripted COM/Win32 fakes, and which FG input and output
   the bridge is built for. Also a refused presenter resize and its recovery, and the D3D12 overlay's
-  render-target release under the present-thread race that caused it. No GPU coverage.
+  render-target release under the present-thread race that caused it. Also a second swapchain taking the
+  window over: the old wrapper's surrender, and its `Present`, resizes, fullscreen and release afterwards.
+  No GPU coverage.
+- `bridge-window` — the takeover's device-free header (`retoque/with_dx12/Dx11wDx12_Window.h`): live bridges
+  by window, newest first, with a count at zero never revived and `acquire` run under the lock `Remove` takes.
+  Also the presenter gate, against a race of calling threads, and the sequence: only on E_ACCESSDENIED, one
+  release, one retry. No D3D11, D3D12 or DXGI.
 - `vulkan-query-readiness` — production Vulkan GPU timer (`GpuTime_Vk`, which upstream put under
   every `Shader_Vk`, NR's included, in place of the deleted `UpscalerTime_Vk`): its three-pair ring,
   nonblocking readiness retry, no publication on error, single consumption. No frame-identity or GPU

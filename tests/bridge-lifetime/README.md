@@ -250,3 +250,72 @@ Eight mutations were each confirmed to fail a case:
 What these fakes cannot show: that Streamline recreates its proxy buffers on the retried resize, or that
 DLSS-G's present thread is really idle when the real swapchain's cleanup runs. The log supports the second
 (`flushAll` precedes the real swapchain's `ResizeBuffers` in both resizes); the first needs a game.
+
+## A second swapchain on the same window (2026-10-13)
+
+Metal: Hellsinger on Rafael's RTX 3060 under Windows: a D3D11 Unity title with NR at `HookMethod=2` on this bridge.
+The game created a second swapchain on its window while the first lived. DXGI allows one flip-model swapchain per window,
+so the second presenter was refused with `80070005`, and the title fell back to a plain D3D11 swapchain, with no bridge
+and no neural pass, for the session. The fix and its log lines are in `docs/dlssnr/design/nr-dx11-bridge-host.md`,
+"A second swapchain on the same window". The device-free half has a suite of its own, `bridge-window`.
+
+`takeoverCases` compiles the production `RetryAfterTakeover`, `_SurrenderPresenter`, `_AcquireForTakeover`,
+`_Windows`, `_ResizeHiddenOnly`, `Present`, `GetFullscreenState` and `ResizeTarget` with everything this suite already
+runs. `run.py` puts `retoque/` on the include path for the production header. `Present`'s device steps are counted
+stubs in the fake class.
+
+- **The Hellsinger shape.** NR only, so no frame generation object; the plain presenter; a frame already out.
+  - On E_ACCESSDENIED the creation is made again once.
+  - The presenter is released once, behind a drain that reached both queues, with no reference left on its buffers.
+  - The overlay is cleaned, the interop objects are freed and the neural host is destroyed.
+  - The interop present registration is cleared, and the takeover's own reference is dropped.
+  - State names neither the presenter nor the wrapper. The D3D11 device and the interop mode, which the new wrapper
+    shares, are left as they were.
+- **The old wrapper afterwards.**
+  - `Present` returns S_OK and reaches none of its steps.
+  - Both resizes reach the hidden swapchain alone. A zero extent is resolved against the game's window. No global
+    changes.
+  - Fullscreen is remembered for `GetFullscreenState` and touches neither the window, a swapchain nor State.
+  - `ResizeTarget` is a no-op.
+  - A third swapchain finds nothing to take, and says so once.
+  - The final release with the new wrapper named everywhere changes none of it, releases nothing twice and leaves the
+    overlay alone.
+- **Refusals.**
+  - Any other result is untouched, and so is another window.
+  - Frame generation's presenter is refused, the gate is reopened and the next `Present` goes out. A wrapper with no
+    frame generation object is taken over even when FGHooks' one plain-presenter slot names another bridge's.
+  - An unproven drain frees nothing and reopens the gate.
+  - A call of the game's in flight means no takeover.
+  - A count at zero is never revived.
+- **Both devices lost.** The presenter still goes, and the overlay is not touched.
+- **The retry refused again.** The game gets that result, logged once.
+- **The game's release first.** The game's release lands inside the retry, before the new wrapper is named. It leaves
+  the D3D11 device and the interop mode alone, because the surrender stopped naming the wrapper current.
+- **Two wrappers on the window.** The newest that still presents gives the window up. The older one is untouched, and
+  takes the next takeover.
+- **No ownership without a presenter.** A surrendered wrapper owns no presenter, frame generation or overlay, even when
+  named current again with no FG swapchain.
+
+Twenty mutations of the fix were each confirmed to fail a case, in this suite or in `bridge-window`:
+
+- State still naming the old wrapper;
+- `Present`, `ResizeBuffers` or `SetFullscreenState` ungated;
+- no drain;
+- a surrendered wrapper taken again;
+- a count at zero revived;
+- no overlay cleanup;
+- `currentFGSwapchain` kept;
+- `_OwnsPresenter` without its null guard;
+- frame generation's presenter taken;
+- an NR-only wrapper's plain presenter refused;
+- the neural host kept;
+- the gate left closed after an unproven drain;
+- a retry on any failure;
+- no release on a refusal;
+- the oldest bridge first;
+- `Remove` without the lock;
+- a gate that closes over a call;
+- a call admitted through a closed gate.
+
+What these fakes cannot show is that Windows frees the window once the presenter's last reference goes, so that the
+retry succeeds. That needs the game on native Windows.

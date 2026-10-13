@@ -4,6 +4,7 @@
 #include <Config.h>
 #include <dlssnr/DlssNr_PresentHost.h>
 #include <inputs/FG/Synth_Inputs.h>
+#include <with_dx12/Dx11wDx12_Window.h>
 
 #include "dxgi1_6.h"
 #include "d3d11_4.h"
@@ -12,6 +13,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <functional>
 
 using Microsoft::WRL::ComPtr;
 
@@ -135,8 +137,18 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
 
     HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type, UINT Size, void* pMetaData) override;
 
+    // A second swapchain on a window an earlier bridge still presents to (with_dx12/Dx11wDx12_Window.h). Every
+    // creation site hands it what its presenter's creation returned. On E_ACCESSDENIED with a live bridge presenting
+    // to hWnd, that bridge gives its presenter up and create runs once more, and its result is returned; anything
+    // else comes back unchanged, create never called.
+    static HRESULT RetryAfterTakeover(HWND hWnd, HRESULT result, const std::function<HRESULT()>& create);
+
   private:
     virtual ~Dx11wDx12SC();
+    Dx11wDx12::Window::Surrender _SurrenderPresenter();
+    static bool _AcquireForTakeover(Dx11wDx12SC* bridge);
+    static Dx11wDx12::Window::Registry<Dx11wDx12SC>& _Windows();
+    HRESULT _ResizeHiddenOnly(UINT bufferCount, UINT width, UINT height, DXGI_FORMAT format, UINT flags);
     bool _InitInteropObjects();
     bool _RequestSharedBackBuffer(UINT index);
     bool _CopyDx11BackBufferToShared(UINT index);
@@ -269,6 +281,10 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     // Null unless that input was active and frame generation wanted at creation, read once for the
     // same reason as _nrHost.
     std::unique_ptr<SynthInputs> _synthInputs;
+
+    // The game's Present, resizes and fullscreen calls on one side, a takeover of this wrapper's window on the other;
+    // closed for good once the presenter is given up (_SurrenderPresenter).
+    Dx11wDx12::Window::PresenterGate _presenterGate;
 
     // Intrusive retirement needs no allocation at the failure boundary. Deliberately no static
     // destructor: unproven live-device work stays quarantined until process exit.

@@ -50,6 +50,15 @@ signatures = [
     'void Dx11wDx12SC::_ReleaseInteropBackBuffers()',
     'bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(',
     'ID3D12CommandQueue* Dx11wDx12SC::_PresentQueueForFrame()',
+    # A second swapchain on the same window: the takeover, and what the old wrapper answers after it.
+    'HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(',
+    'HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetFullscreenState(',
+    'HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeTarget(',
+    'Dx11wDx12::Window::Registry<Dx11wDx12SC>& Dx11wDx12SC::_Windows()',
+    'bool Dx11wDx12SC::_AcquireForTakeover(',
+    'HRESULT Dx11wDx12SC::RetryAfterTakeover(',
+    'Dx11wDx12::Window::Surrender Dx11wDx12SC::_SurrenderPresenter()',
+    'HRESULT Dx11wDx12SC::_ResizeHiddenOnly(',
 ]
 wait_source = (root / 'OptiScaler/with_dx12/with_dx12.cpp').read_text()
 waiter = function('HRESULT WaitForBridgeFence(', wait_source)
@@ -79,7 +88,7 @@ with tempfile.TemporaryDirectory(prefix='optiscaler-bridge-lifetime-') as direct
     cpp.write_text(unit)
     subprocess.run(['g++', '-std=c++20', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-                    str(cpp), '-o', str(binary)], check=True)
+                    '-I', str(root / 'retoque'), str(cpp), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
 
 # The D3D12 overlay's render-target lifetime, which the bridge's resize contract leans on: the production
@@ -156,5 +165,5 @@ with tempfile.TemporaryDirectory(prefix='optiscaler-upscaler-fence-') as directo
     # read before and after a wait) whose only reader is a LOG_WARN.
     subprocess.run(['g++', '-std=c++20', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', '-Wno-unused-variable', '-fsanitize=address,undefined',
-                    '-fno-omit-frame-pointer', str(cpp), '-o', str(binary)], check=True)
+                    '-fno-omit-frame-pointer', '-I', str(root / 'retoque'), str(cpp), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

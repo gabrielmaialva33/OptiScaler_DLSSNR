@@ -623,6 +623,11 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
                             ScopedSkipParentWrapping skipParentWrapping {};
                             fgScResult = o_CreateSwapChain(realFactory, dx12Queue, &fgDesc, &fgSwapChain);
+
+                            // An earlier bridge may still present to this window: Dx11wDx12SC::RetryAfterTakeover.
+                            const auto createAgain = [&]()
+                            { return o_CreateSwapChain(realFactory, dx12Queue, &fgDesc, &fgSwapChain); };
+                            fgScResult = Dx11wDx12SC::RetryAfterTakeover(fgDesc.OutputWindow, fgScResult, createAgain);
                         }
 
                         if (SUCCEEDED(fgScResult) && fgSwapChain != nullptr)
@@ -1025,6 +1030,14 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                             ScopedSkipParentWrapping skipParentWrapping {};
                             fgScResult = o_CreateSwapChainForHwnd(realFactory, dx12Queue, hWnd, &fgDesc, nullptr,
                                                                   pRestrictToOutput, &fgSwapChain1);
+
+                            // An earlier bridge may still present to this window: Dx11wDx12SC::RetryAfterTakeover.
+                            const auto createAgain = [&]()
+                            {
+                                return o_CreateSwapChainForHwnd(realFactory, dx12Queue, hWnd, &fgDesc, nullptr,
+                                                                pRestrictToOutput, &fgSwapChain1);
+                            };
+                            fgScResult = Dx11wDx12SC::RetryAfterTakeover(hWnd, fgScResult, createAgain);
                         }
 
                         if (fgScResult == S_OK && fgSwapChain1 != nullptr)

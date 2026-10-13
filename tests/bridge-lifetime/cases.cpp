@@ -1071,6 +1071,294 @@ void refusedResizeCases()
     }
 }
 
+// A second swapchain on the same window (docs/dlssnr/design/nr-dx11-bridge-host.md, "A second swapchain on the same
+// window"): Metal: Hellsinger on Rafael's RTX 3060, 2026-10-13. The game made another swapchain on its window while the
+// first lived, DXGI refused the second presenter with E_ACCESSDENIED, and the title lost its bridge for good. The
+// production RetryAfterTakeover, _SurrenderPresenter, Present, both resizes, fullscreen and final Release, run here.
+void takeoverCases()
+{
+    const auto window = reinterpret_cast<HWND>(456); // the Fixture's _handle
+    const auto succeeds = [](int& creates)
+    {
+        return [&creates]()
+        {
+            ++creates;
+            return S_OK;
+        };
+    };
+
+    // The Hellsinger shape: NR only, so no frame generation object, the plain presenter, and frames already out.
+    {
+        Fixture f;
+        auto& state = State::Instance();
+        f.sc->_fg = nullptr;
+        state.currentFG = nullptr;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        Dx11wDx12SC::_Windows().Add(window, f.sc);
+        f.sc->_hasInteropWork = true;
+        assert(f.sc->_CopyDx11SharedToDx12FGBackBuffer(0));
+        assert(f.presenter.buffer.refs == 2); // the copy destination pins a buffer of the presenter
+        const int hostsBefore = DlssNr::PresentHost::destroyed;
+        const int warningsBefore = logWarnings;
+        FGHooks::interopClears = 0;
+        FGHooks::lastInteropCleared = nullptr;
+
+        int creates = 0;
+        assert(Dx11wDx12SC::RetryAfterTakeover(window, E_ACCESSDENIED, succeeds(creates)) == S_OK);
+        assert(creates == 1 && logWarnings == warningsBefore);
+
+        // The presenter went, once, behind a drain of both queues, with nothing left pinning its buffers.
+        assert(f.presenter.releases == 1 && f.presenter.refs == 0 && f.sc->_fgSwapChain == nullptr);
+        assert(f.presenter.buffer.refs == 1);
+        assert(f.copyQueue.signaled.size() == 2 && f.presentQueue.signaled.size() == 1);
+        assert(MenuOverlayDx::cleanups == 1);
+        assert(f.shadow.releases == 1 && f.allocator.releases == 1 && f.copyFence.releases == 1);
+        assert(DlssNr::PresentHost::destroyed == hostsBefore + 1 && f.sc->_nrHost == nullptr);
+        assert(FGHooks::interopClears == 1 && FGHooks::lastInteropCleared == &f.presenter);
+        // The takeover's own reference is back; the game's is the one left.
+        assert(f.sc->_presenterGate.Closed() && f.sc->_refcount == 1);
+        // State names neither the presenter nor this wrapper. The D3D11 device and the interop mode stay: the new
+        // wrapper shares both, and the creation site names it everywhere else.
+        assert(state.currentFGSwapchain == nullptr && state.currentSwapchain == nullptr);
+        assert(state.currentWrappedSwapchain == nullptr && state.currentRealSwapchain == nullptr);
+        assert(state.currentD3D11Device == &f.dx11 && state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12);
+
+        // What the game may still call on it before letting it go. Present: S_OK, and nothing at all happens.
+        const int executions = f.copyQueue.executions;
+        assert(f.sc->Present(1, 0) == S_OK);
+        assert(f.real.presents == 0 && f.copyQueue.executions == executions && MenuOverlayDx::presents == 0);
+        assert(f.sc->interopInits == 0 && f.sc->sharedRequests == 0 && f.sc->dx11Copies == 0);
+
+        // A resize reaches the hidden swapchain alone, the game's zero resolved against its window, never 1x1.
+        assert(f.sc->ResizeBuffers(2, 800, 600, 0, 0) == S_OK);
+        assert(f.real.resizes == 1 && f.real.lastResizeWidth == 800 && f.presenter.resizes == 0);
+        assert(f.sc->ResizeBuffers(0, 0, 0, 0, 0) == S_OK);
+        assert(f.real.resizes == 2 && f.real.lastResizeWidth == 841 && f.real.lastResizeHeight == 1356);
+        f.sc->_real3 = &f.real;
+        f.real.AddRef();
+        assert(f.sc->ResizeBuffers1(2, 640, 480, 0, 0, nullptr, nullptr) == S_OK);
+        assert(f.real.resizes == 3 && f.real.lastResizeWidth == 640 && f.presenter.resizes == 0);
+        assert(!state.scChanged && state.screenWidth == 0 && f.sc->refreshes == 0);
+        assert(f.sc->Present(1, 0) == S_OK && f.real.presents == 0);
+
+        // Fullscreen is remembered for GetFullscreenState and touches neither the window, nor a swapchain, nor State.
+        assert(f.sc->SetFullscreenState(TRUE, nullptr) == S_OK);
+        BOOL fullscreen = FALSE;
+        assert(f.sc->GetFullscreenState(&fullscreen, nullptr) == S_OK && fullscreen == TRUE);
+        assert(f.sc->SetFullscreenState(FALSE, nullptr) == S_OK);
+        assert(f.sc->GetFullscreenState(&fullscreen, nullptr) == S_OK && fullscreen == FALSE);
+        assert(f.sc->borderlessEntries == 0 && f.sc->borderlessExits == 0);
+        assert(f.real.fullscreenChanges == 0 && f.presenter.fullscreenChanges == 0);
+        assert(!state.SCExclusiveFullscreen && !state.realExclusiveFullscreen);
+        assert(f.sc->ResizeTarget(nullptr) == S_OK && f.real.targetResizes == 0 && f.presenter.targetResizes == 0);
+
+        // A third swapchain on the window finds nothing left to take, and says so once.
+        creates = 0;
+        assert(Dx11wDx12SC::RetryAfterTakeover(window, E_ACCESSDENIED, succeeds(creates)) == E_ACCESSDENIED);
+        assert(creates == 0 && logWarnings == warningsBefore + 1 && f.sc->_refcount == 1);
+
+        // The game lets it go with the new wrapper named everywhere: none of that is touched, nothing is released
+        // twice, and the overlay the new presenter draws is left alone.
+        Swapchain newPresenter, newReal;
+        int newWrapper = 0;
+        state.currentSwapchain = &newWrapper;
+        state.currentWrappedSwapchain = &newWrapper;
+        state.currentRealSwapchain = &newReal;
+        state.currentFGSwapchain = &newPresenter;
+        const int deathsBefore = deaths;
+        assert(f.sc->Release() == 0);
+        f.sc = nullptr;
+        assert(deaths == deathsBefore + 1 && Dx11wDx12SC::_Windows().Count(window) == 0);
+        assert(f.presenter.releases == 1 && MenuOverlayDx::cleanups == 1 && FGHooks::interopClears == 1);
+        assert(state.currentSwapchain == &newWrapper && state.currentWrappedSwapchain == &newWrapper);
+        assert(state.currentRealSwapchain == &newReal && state.currentFGSwapchain == &newPresenter);
+        assert(state.currentD3D11Device == &f.dx11 && state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12);
+        assert(f.real.refs == 0 && f.shadow.releases == 1 && f.copyFence.releases == 1);
+    }
+
+    // Anything but E_ACCESSDENIED: handled as it always was, the window's bridge untouched and nothing created again.
+    for (const HRESULT result : { S_OK, E_FAIL, DXGI_ERROR_INVALID_CALL })
+    {
+        Fixture f;
+        Dx11wDx12SC::_Windows().Add(window, f.sc);
+        const int warningsBefore = logWarnings;
+        int creates = 0;
+        assert(Dx11wDx12SC::RetryAfterTakeover(window, result, succeeds(creates)) == result);
+        assert(creates == 0 && logWarnings == warningsBefore && f.presenter.releases == 0);
+        assert(!f.sc->_presenterGate.Closed() && f.sc->_refcount == 1);
+        assert(State::Instance().currentSwapchain == f.sc && State::Instance().currentFGSwapchain == &f.presenter);
+    }
+
+    // E_ACCESSDENIED on another window: nothing of ours is there.
+    {
+        Fixture f;
+        Dx11wDx12SC::_Windows().Add(window, f.sc);
+        int creates = 0;
+        assert(Dx11wDx12SC::RetryAfterTakeover(reinterpret_cast<HWND>(789), E_ACCESSDENIED, succeeds(creates)) ==
+               E_ACCESSDENIED);
+        assert(creates == 0 && f.presenter.releases == 0 && f.sc->_refcount == 1);
+    }
+
+    // Frame generation's swapchain is its backend's: refused, the gate opened again, and the next Present goes out.
+    {
+        Fixture f;
+        Dx11wDx12SC::_Windows().Add(window, f.sc);
+        FGHooks::interopPresenter = false;
+        f.fg.queue = &f.presentQueue;
+        const int warningsBefore = logWarnings;
+        int creates = 0;
+        assert(Dx11wDx12SC::RetryAfterTakeover(window, E_ACCESSDENIED, succeeds(creates)) == E_ACCESSDENIED);
+        assert(creates == 0 && logWarnings == warningsBefore + 1 && f.presenter.releases == 0);
+        assert(!f.sc->_presenterGate.Closed() && f.sc->_refcount == 1 && MenuOverlayDx::cleanups == 0);
+        assert(f.sc->Present(1, 0) == S_OK && f.presenter.presents == 1 && f.real.presents == 1);
+        FGHooks::interopPresenter = true;
+    }
+
+    // An NR-only wrapper whose plain presenter is no longer the one FGHooks names -- a bridge on another window was
+    // created after it -- is still taken over: with no frame generation object its presenter can only be the plain one.
+    {
+        Fixture f;
+        Dx11wDx12SC::_Windows().Add(window, f.sc);
+        FGHooks::interopPresenter = false;
+        f.sc->_fg = nullptr;
+        State::Instance().currentFG = nullptr;
+        int creates = 0;
+        assert(Dx11wDx12SC::RetryAfterTakeover(window, E_ACCESSDENIED, succeeds(creates)) == S_OK);
+        assert(creates == 1 && f.presenter.releases == 1 && f.sc->_presenterGate.Closed());
+        FGHooks::interopPresenter = true;
+    }
+
+    // GPU work not proved finished: nothing freed, the gate open again, and the game keeps its presenter.
+    {
+        Fixture f;
+        Dx11wDx12SC::_Windows().Add(window, f.sc);
+        f.sc->_hasInteropWork = true;
+        f.sc->_copyAllocatorFenceValues[0] = 7;
+        const int warningsBefore = logWarnings;
+        int creates = 0;
+        assert(Dx11wDx12SC::RetryAfterTakeover(window, E_ACCESSDENIED, succeeds(creates)) == E_ACCESSDENIED);
+        assert(creates == 0 && logWarnings == warningsBefore + 1);
+        assert(f.presenter.releases == 0 && f.shadow.releases == 0 && MenuOverlayDx::cleanups == 0);
+        assert(!f.sc->_presenterGate.Closed() && f.sc->_refcount == 1);
+        assert(State::Instance().currentSwapchain == f.sc && State::Instance().currentFGSwapchain == &f.presenter);
+        f.copyFence.completed = 7;
+    }
+
+    // A call of the game's in flight on it: no takeover, and nothing waits.
+    {
+        Fixture f;
+        Dx11wDx12SC::_Windows().Add(window, f.sc);
+        int creates = 0;
+        {
+            Dx11wDx12::Window::PresenterGate::Use present(f.sc->_presenterGate);
+            assert(Dx11wDx12SC::RetryAfterTakeover(window, E_ACCESSDENIED, succeeds(creates)) == E_ACCESSDENIED);
+        }
+        assert(creates == 0 && f.presenter.releases == 0 && !f.sc->_presenterGate.Closed() && f.sc->_refcount == 1);
+    }
+
+    // A count already at zero -- quarantined after an unproven teardown, its presenter perhaps still bound -- is never
+    // revived.
+    {
+        Fixture f;
+        Dx11wDx12SC::_Windows().Add(window, f.sc);
+        f.sc->_refcount = 0;
+        int creates = 0;
+        assert(Dx11wDx12SC::RetryAfterTakeover(window, E_ACCESSDENIED, succeeds(creates)) == E_ACCESSDENIED);
+        assert(creates == 0 && f.sc->_refcount == 0 && f.presenter.releases == 0);
+        f.sc->_refcount = 1;
+    }
+
+    // Both devices lost: nothing left to drain, the presenter still goes, and the overlay is not touched.
+    {
+        Fixture f;
+        Dx11wDx12SC::_Windows().Add(window, f.sc);
+        f.sc->_hasInteropWork = true;
+        f.sc->_copyAllocatorFenceValues[0] = 7;
+        f.dx11.reason = DXGI_ERROR_DEVICE_REMOVED;
+        f.dx12.reason = DXGI_ERROR_DEVICE_REMOVED;
+        int creates = 0;
+        assert(Dx11wDx12SC::RetryAfterTakeover(window, E_ACCESSDENIED, succeeds(creates)) == S_OK);
+        assert(creates == 1 && f.presenter.releases == 1 && MenuOverlayDx::cleanups == 0);
+    }
+
+    // The retry refused again: the game gets that, said once; the old wrapper stays given up.
+    {
+        Fixture f;
+        Dx11wDx12SC::_Windows().Add(window, f.sc);
+        const int warningsBefore = logWarnings;
+        int creates = 0;
+        const auto refusedAgain = [&]()
+        {
+            ++creates;
+            return E_ACCESSDENIED;
+        };
+        assert(Dx11wDx12SC::RetryAfterTakeover(window, E_ACCESSDENIED, refusedAgain) == E_ACCESSDENIED);
+        assert(creates == 1 && logWarnings == warningsBefore + 1);
+        assert(f.presenter.releases == 1 && f.sc->_presenterGate.Closed() && f.sc->_refcount == 1);
+    }
+
+    // The game's own release lands before the new wrapper is named -- here, inside the retry. With this wrapper no
+    // longer current, its release leaves the D3D11 device and the interop mode alone, which the new wrapper shares and
+    // a failed retry's plain fallback does not set again.
+    {
+        Fixture f;
+        Dx11wDx12SC::_Windows().Add(window, f.sc);
+        auto& state = State::Instance();
+        const int deathsBefore = deaths;
+        const auto gameReleasesFirst = [&]()
+        {
+            assert(f.sc->Release() == 0);
+            return S_OK;
+        };
+        assert(Dx11wDx12SC::RetryAfterTakeover(window, E_ACCESSDENIED, gameReleasesFirst) == S_OK);
+        f.sc = nullptr;
+        assert(deaths == deathsBefore + 1 && f.presenter.releases == 1 && f.fg.releases == 0);
+        assert(state.currentD3D11Device == &f.dx11 && state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12);
+    }
+
+    // Two wrappers on the window: the newest one that still presents gives it up, and the older one is not touched.
+    {
+        Fixture f;
+        Dx11wDx12SC::_Windows().Add(window, f.sc);
+        Swapchain newerPresenter;
+        auto newer = new Dx11wDx12SC;
+        newer->_fgSwapChain = &newerPresenter;
+        newer->_nextLive = Dx11wDx12SC::_live;
+        Dx11wDx12SC::_live = newer;
+        Dx11wDx12SC::_Windows().Add(window, newer);
+        int creates = 0;
+        assert(Dx11wDx12SC::RetryAfterTakeover(window, E_ACCESSDENIED, succeeds(creates)) == S_OK);
+        assert(creates == 1 && newerPresenter.releases == 1 && newer->_presenterGate.Closed());
+        assert(f.presenter.releases == 0 && !f.sc->_presenterGate.Closed() && f.sc->_refcount == 1);
+        assert(State::Instance().currentFGSwapchain == &f.presenter && State::Instance().currentSwapchain == f.sc);
+
+        // A fourth swapchain: the newer wrapper has nothing left to give, so the older one, still presenting, does.
+        assert(Dx11wDx12SC::RetryAfterTakeover(window, E_ACCESSDENIED, succeeds(creates)) == S_OK);
+        assert(creates == 2 && f.presenter.releases == 1 && f.sc->_presenterGate.Closed() && newer->_refcount == 1);
+        assert(newerPresenter.releases == 1);
+
+        assert(newer->Release() == 0);
+        assert(newerPresenter.releases == 1 && Dx11wDx12SC::_Windows().Count(window) == 1);
+    }
+
+    // Without a presenter a wrapper owns none, nor the overlay, even named current again with no FG swapchain: its
+    // release must not clean the overlay of the presenter that took its window.
+    {
+        Fixture f;
+        Dx11wDx12SC::_Windows().Add(window, f.sc);
+        int creates = 0;
+        assert(Dx11wDx12SC::RetryAfterTakeover(window, E_ACCESSDENIED, succeeds(creates)) == S_OK);
+        auto& state = State::Instance();
+        state.currentSwapchain = f.sc;
+        state.currentFGSwapchain = nullptr;
+        assert(!f.sc->_OwnsPresenter() && !f.sc->_OwnsFgPresenter() && !f.sc->_OwnsOverlay());
+        const int cleanups = MenuOverlayDx::cleanups;
+        assert(f.sc->Release() == 0);
+        f.sc = nullptr;
+        assert(MenuOverlayDx::cleanups == cleanups && f.presenter.releases == 1);
+    }
+}
+
 int main()
 {
     waitCases();
@@ -1090,7 +1378,8 @@ int main()
     fullscreenCases();
     refusedResizeCases();
     predicateCases();
+    takeoverCases();
     assert(Dx11wDx12SC::_retired == nullptr);
     std::cout << "bridge lifetime: production wait, copy, resize, release, retirement, neural host, synthesized input, "
-                 "coexistence, fullscreen, refused-resize and predicate cases passed\n";
+                 "coexistence, fullscreen, refused-resize, predicate and window takeover cases passed\n";
 }

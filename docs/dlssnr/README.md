@@ -58,7 +58,7 @@ Where the pass runs. Reading order for the present-host family:
 1. [nr-without-game-dlss.md](design/nr-without-game-dlss.md): the problem, and where an evaluate could come from when the game never asks.
 2. [no-upscaler-titles.md](design/no-upscaler-titles.md): survey of how the rest of the ecosystem handles titles with no upscaler.
 3. [nr-present-hook.md](design/nr-present-hook.md): the present-time host, with its reviews and updates.
-4. [nr-dx11-bridge-host.md](design/nr-dx11-bridge-host.md): hosting the pass on the D3D11-to-D3D12 bridge.
+4. [nr-dx11-bridge-host.md](design/nr-dx11-bridge-host.md): hosting the pass on the D3D11-to-D3D12 bridge, and its lifetime: fullscreen, resizes, a second swapchain on the same window.
 5. [nr-vulkan-present-host.md](design/nr-vulkan-present-host.md): one Proton host at Vulkan present.
 6. [nr-content-renewal.md](design/nr-content-renewal.md): admission of clean content at present without a present-thread wait.
 7. [nr-virtual-backbuffer.md](design/nr-virtual-backbuffer.md): virtual backbuffers on Proton, building on the previous note.

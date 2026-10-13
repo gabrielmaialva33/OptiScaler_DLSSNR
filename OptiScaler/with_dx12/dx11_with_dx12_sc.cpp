@@ -353,6 +353,8 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
         _nextLive = _live;
         _live = this;
     }
+    // The window this one presents to, for a later swapchain on the same window (RetryAfterTakeover).
+    _Windows().Add(_handle, this);
     _CollectRetired();
 
     State::Instance().swapchainInteropApi = SwapchainInteropApi::Dx11wDx12;
@@ -365,6 +367,9 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
 
 Dx11wDx12SC::~Dx11wDx12SC()
 {
+    // First, under the registry's lock: a takeover looking for this window can no longer be handed this wrapper.
+    _Windows().Remove(this);
+
     {
         std::lock_guard lock(_retiredMutex);
         auto link = &_live;
@@ -512,6 +517,11 @@ bool Dx11wDx12SC::_OwnsFgPresenter() const
 
 bool Dx11wDx12SC::_OwnsPresenter() const
 {
+    // A wrapper that gave its presenter up (_SurrenderPresenter) owns none. Its null presenter would otherwise match
+    // the first live wrapper without one, itself included.
+    if (_fgSwapChain == nullptr)
+        return false;
+
     // FGPreserveSwapChain can hand the SAME presenter/context to a new wrapper. Its most
     // recent wrapper owns teardown, even if an older wrapper still holds COM references.
     std::lock_guard lock(_retiredMutex);
@@ -693,6 +703,141 @@ void Dx11wDx12SC::_CollectRetired()
     }
 }
 
+// Never destroyed, like the retirement list: a wrapper the game releases while the process exits, after static
+// destructors have run, still removes itself from it.
+Dx11wDx12::Window::Registry<Dx11wDx12SC>& Dx11wDx12SC::_Windows()
+{
+    static auto* windows = new Dx11wDx12::Window::Registry<Dx11wDx12SC>();
+    return *windows;
+}
+
+// Runs under the window registry's lock, which the destructor takes before anything is freed. A count already at
+// zero is a wrapper on its way out, or one quarantined after an unproven teardown: never revived. One that has given
+// its presenter up is passed over, so the newest wrapper that still presents is the one found.
+bool Dx11wDx12SC::_AcquireForTakeover(Dx11wDx12SC* bridge)
+{
+    if (bridge->_presenterGate.Closed())
+        return false;
+
+    LONG count = InterlockedCompareExchange(&bridge->_refcount, 0, 0);
+    while (count > 0)
+    {
+        const LONG seen = InterlockedCompareExchange(&bridge->_refcount, count + 1, count);
+        if (seen == count)
+            return true;
+
+        count = seen;
+    }
+
+    return false;
+}
+
+HRESULT Dx11wDx12SC::RetryAfterTakeover(HWND hWnd, HRESULT result, const std::function<HRESULT()>& create)
+{
+    using namespace Dx11wDx12::Window;
+
+    const auto surrender = [](Dx11wDx12SC* bridge) { return bridge->_SurrenderPresenter(); };
+    const auto release = [](Dx11wDx12SC* bridge) { bridge->Release(); };
+    const auto attempt = TakeOverAndRetry(static_cast<int32_t>(result), _Windows(), hWnd, _AcquireForTakeover,
+                                          surrender, release, create);
+
+    if (attempt.outcome == Outcome::TakenOver && FAILED(attempt.result))
+    {
+        LOG_WARN("Dx11wDx12 the new presenter on window {:X} was refused again after the takeover: {:X}; this "
+                 "swapchain falls back to plain D3D11, with no bridge",
+                 (size_t) hWnd, (UINT) attempt.result);
+    }
+    else if (attempt.outcome != Outcome::NotApplicable && attempt.outcome != Outcome::TakenOver)
+    {
+        LOG_WARN("Dx11wDx12 the new presenter on window {:X} was refused with 80070005 (the window already has a "
+                 "flip-model swapchain) and the window was not taken over: {}",
+                 (size_t) hWnd, Describe(attempt.outcome));
+    }
+
+    return static_cast<HRESULT>(attempt.result);
+}
+
+// The old wrapper's half of a takeover (RetryAfterTakeover). The presenter, and everything that pins its buffers, goes
+// behind the same drain a release and a resize make first. The wrapper stays, for the game, which usually releases it
+// right after.
+//
+// What is left answers the game without a presenter. Present returns S_OK and shows nothing: an error there would
+// read as a lost device to a game about to let it go. A resize reaches the hidden swapchain alone, whose buffers the
+// game still holds (_ResizeHiddenOnly). Fullscreen is remembered for GetFullscreenState and touches neither the window
+// nor a swapchain. The getters fall back to the hidden swapchain, as they do wherever there is no presenter.
+//
+// No global is touched by it again. State's swapchain pointers are the new wrapper's once the creation site returns,
+// and the release that eventually follows owns none of them: without a presenter it owns no presenter, frame
+// generation or overlay (_OwnsPresenter), and is not current.
+Dx11wDx12::Window::Surrender Dx11wDx12SC::_SurrenderPresenter()
+{
+    using Dx11wDx12::Window::Surrender;
+
+    // Neither side waits. A call of the game's in flight on another thread means no takeover, and every call after
+    // this finds the gate closed.
+    if (!_presenterGate.TryClose())
+        return Surrender::Busy;
+
+    // The plain presenter only. A frame generation backend owns its swapchain and tears it down by window
+    // (ReleaseSwapchain(HWND)), and that window is the one the new swapchain is being created on. FGHooks keeps one
+    // plain presenter, the newest bridge's; a wrapper with no frame generation object has the plain one whatever it
+    // says, since FG's swapchain is only ever created with that object (read safely: Present, the one writer, is held
+    // off by the gate).
+    if (_fgSwapChain == nullptr || (!FGHooks::IsDx12InteropPresentSC(_fgSwapChain) && _fg != nullptr))
+    {
+        _presenterGate.Reopen();
+        return Surrender::FrameGeneration;
+    }
+
+    // Never free under the GPU. A drain that fails leaves its markers for this wrapper's next Present or resize, as it
+    // does when a resize is refused for it.
+    const auto drain = _DrainForTeardown(5000);
+    const bool deviceLost = _DevicesRemoved();
+    if (FAILED(drain) && !deviceLost)
+    {
+        LOG_DEBUG("Dx11wDx12SC {}: takeover drain failed: {:X}; presenter kept", _id, (UINT) drain);
+        _presenterGate.Reopen();
+        return Surrender::Undrained;
+    }
+
+    LOG_INFO(
+        "Dx11wDx12SC {}: the game created another swapchain on window {:X} while this one still presented to it, "
+        "and DXGI allows one flip-model swapchain per window. This bridge gives its presenter up and shows nothing "
+        "more; the new swapchain's presenter is created again",
+        _id, (size_t) _handle);
+
+    // The overlay's render targets are this presenter's buffers, and on the plain presenter only this wrapper's Present
+    // draws them. Not through _ReleaseOverlayForResize: _OwnsOverlay is false for a bridge without a frame generation
+    // object, which is every NR-only bridge, and these must go before the presenter can.
+    if (!deviceLost)
+        MenuOverlayDx::CleanupRenderTarget(true, _handle);
+
+    // The copy destinations (the presenter's buffers again), the neural host's textures, the synthesized pair and the
+    // interop objects, all read on the queues the drain covered. The host goes with them: it never records again.
+    _ReleaseInteropObjects();
+    _nrHost.reset();
+
+    // Nothing may name the presenter once it is gone. FG's swapchain release hook acts on whatever currentFGSwapchain
+    // names, and the creation site sets both again for the new presenter.
+    FGHooks::ClearDx12InteropPresentSC(_fgSwapChain);
+    if (State::Instance().currentFGSwapchain == _fgSwapChain)
+        State::Instance().currentFGSwapchain = nullptr;
+
+    // Nor this wrapper as current: the creation site names the new one, or the plain swapchain it falls back to. Its
+    // release, even one racing this takeover, then leaves the D3D11 device and the interop mode alone, which the new
+    // wrapper shares (_DetachWrapperGlobals).
+    auto& state = State::Instance();
+    if (state.currentSwapchain == this)
+        state.currentSwapchain = nullptr;
+    if (state.currentWrappedSwapchain == this)
+        state.currentWrappedSwapchain = nullptr;
+    if (state.currentRealSwapchain == _real)
+        state.currentRealSwapchain = nullptr;
+
+    SafeRelease(_fgSwapChain);
+    return Surrender::Surrendered;
+}
+
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetPrivateData(REFGUID Name, UINT DataSize, const void* pData)
 {
     return _real != nullptr ? _real->SetPrivateData(Name, DataSize, pData) : DXGI_ERROR_DEVICE_REMOVED;
@@ -750,6 +895,11 @@ ID3D12CommandQueue* Dx11wDx12SC::_PresentQueueForFrame()
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 {
+    // Gave its window to a newer swapchain: shows nothing more (_SurrenderPresenter).
+    Dx11wDx12::Window::PresenterGate::Use presenterUse(_presenterGate);
+    if (!presenterUse)
+        return S_OK;
+
     if (_resizeIncomplete)
         return DXGI_ERROR_INVALID_CALL;
 
@@ -940,7 +1090,10 @@ static void ApplyWindowPlacement(HWND hwnd, LONG_PTR style, LONG_PTR exStyle, HW
 // has the game's exclusive fullscreen emulated. Limiting this to the plain presenter left FSR-FG's swapchain
 // created in exclusive fullscreen and handed the game's SetFullscreenState, and it refused every Present
 // with 887A0001 (Generation Zero with synthesized FG on Rafael's RTX 3060, 2026-09-28).
-bool Dx11wDx12SC::_EmulatesFullscreen() const { return _fgSwapChain != nullptr; }
+//
+// A wrapper that gave its window up (_SurrenderPresenter) has no presenter and still answers GetFullscreenState with
+// the fullscreen the game set on it.
+bool Dx11wDx12SC::_EmulatesFullscreen() const { return _fgSwapChain != nullptr || _presenterGate.Closed(); }
 
 void Dx11wDx12SC::_EnterBorderless(IDXGIOutput* target)
 {
@@ -1139,6 +1292,23 @@ void Dx11wDx12SC::_RetryRefusedPresenterResize()
                   _id, kRefusedResizeRetries, (UINT) result);
 }
 
+// The game's resize of a wrapper whose presenter is gone, or going (_SurrenderPresenter): the hidden swapchain alone,
+// whose buffers the game still renders into, at the game's extent resolved against its window. No global is touched;
+// they describe the swapchain that took the window.
+HRESULT Dx11wDx12SC::_ResizeHiddenOnly(UINT bufferCount, UINT width, UINT height, DXGI_FORMAT format, UINT flags)
+{
+    Dx11wDx12::ResolveZeroExtent(_handle, width, height, _real);
+
+    const auto result =
+        _real != nullptr ? _real->ResizeBuffers(bufferCount, width, height, format, flags) : DXGI_ERROR_DEVICE_REMOVED;
+
+    // A takeover still deciding may give the presenter back, which this resize did not reach.
+    if (SUCCEEDED(result))
+        _resizeIncomplete = true;
+
+    return result;
+}
+
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetBuffer(UINT Buffer, REFIID riid, void** ppSurface)
 {
     return _real != nullptr ? _real->GetBuffer(Buffer, riid, ppSurface) : DXGI_ERROR_DEVICE_REMOVED;
@@ -1148,6 +1318,15 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetFullscreenState(BOOL Fullscreen, IDXGI
 {
     LOG_DEBUG("Dx11wDx12SC SetFullscreenState: {}, target: {:X}, caller: {}", Fullscreen, (size_t) pTarget,
               Util::WhoIsTheCaller(_ReturnAddress()));
+
+    // Gave its window up (_SurrenderPresenter): what the game asked is remembered, and the window, both swapchains and
+    // every global are left to the swapchain that took the window.
+    Dx11wDx12::Window::PresenterGate::Use presenterUse(_presenterGate);
+    if (!presenterUse)
+    {
+        _emulatedFullscreen = Fullscreen != FALSE;
+        return S_OK;
+    }
 
     // See _EmulatesFullscreen: the presenter, plain or frame generation's, is kept windowed and the game's
     // fullscreen emulated.
@@ -1226,6 +1405,10 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
 {
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) NewFormat, SwapChainFlags);
+
+    Dx11wDx12::Window::PresenterGate::Use presenterUse(_presenterGate);
+    if (!presenterUse)
+        return _ResizeHiddenOnly(BufferCount, Width, Height, NewFormat, SwapChainFlags);
 
     // The presenter first, with the game's extent as given; the hidden swapchain after it, at the size the
     // presenter took (see ResolveZeroExtent). The resolved extent is for comparing and for falling back.
@@ -1348,6 +1531,12 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeTarget(const DXGI_MODE_DESC* pNewTargetParameters)
 {
+    // Gave its window up (_SurrenderPresenter): the window is the new swapchain's to size, and the hidden one's window
+    // is not the game's.
+    Dx11wDx12::Window::PresenterGate::Use presenterUse(_presenterGate);
+    if (!presenterUse)
+        return S_OK;
+
     return _fgSwapChain != nullptr
                ? _fgSwapChain->ResizeTarget(pNewTargetParameters)
                : (_real != nullptr ? _real->ResizeTarget(pNewTargetParameters) : DXGI_ERROR_DEVICE_REMOVED);
@@ -1529,6 +1718,10 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
 {
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers1: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) Format, SwapChainFlags);
+
+    Dx11wDx12::Window::PresenterGate::Use presenterUse(_presenterGate);
+    if (!presenterUse)
+        return _ResizeHiddenOnly(BufferCount, Width, Height, Format, SwapChainFlags);
 
     if (_real3 == nullptr)
         return ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);

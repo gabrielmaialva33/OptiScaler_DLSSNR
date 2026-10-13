@@ -668,3 +668,103 @@ Tests: `bridge-lifetime`, `refusedResizeCases` and the overlay unit.
 Not proven without a game:
 - that Streamline rebuilds its proxy buffers on the retried resize;
 - that the menu still draws after each resize on a frame-generation presenter.
+
+## A second swapchain on the same window (2026-10-13)
+
+### What broke
+
+Metal: Hellsinger, a D3D11 Unity title, on Rafael's RTX 3060 under Windows: OptiScaler as `dxgi.dll`,
+`[DlssNr] Enabled=true HookMethod=2`, frame generation off. So the presenter is the plain D3D12 one.
+
+The log:
+
+- `18:38:15.763` — `bridge 1 hosts the neural pass`. The pass ran: model 960x540.
+- `18:38:21.122` — the game creates another swapchain on the same window, without releasing the first.
+- `18:38:21.133` — `Dx11wDx12 HWND swapchain creation failed: real 0, fg 80070005`. The hidden swapchain was created,
+  and the presenter was refused.
+- `18:38:21.136` — a plain `WrappedIDXGISwapChain4`. No bridge, so no pass, for the rest of the session.
+
+### Cause
+
+DXGI allows one flip-model swapchain per window. The game's own swapchains are blt model (the second one is
+`R8G8B8A8_UNORM_SRGB`, which flip model refuses), and blt model allows two on one window. The bridge, though, puts the
+game's swapchain on its hidden window and presents through a flip-model swapchain in the game's window. While bridge 1
+lived, its presenter held that window, so the second presenter got `E_ACCESSDENIED` (`80070005`). Proton does not
+refuse it, which is why no D3D11 title run here ever showed it.
+
+### What changed
+
+The new swapchain takes the window over. `Dx11wDx12SC::RetryAfterTakeover` takes what the presenter's creation returned,
+at all four creation sites. The pieces that need no device are in `retoque/with_dx12/Dx11wDx12_Window.h`.
+
+1. **When.** Only on `E_ACCESSDENIED`, and only when a live bridge of ours presents to that window. Live bridges are
+   kept by window: registered at construction, removed first thing in the destructor. Anything else is handled as it
+   always was, and `create` is never called.
+2. **Which bridge.** The newest on the window that still has its presenter and whose COM count is not already zero.
+   The reference is taken under the registry's lock, which the destructor also takes, so a wrapper on its way out, or
+   quarantined after an unproven teardown, is never revived.
+3. **What it gives up** (`_SurrenderPresenter`):
+   - The plain presenter only. Frame generation's swapchain belongs to its backend, which tears it down by window,
+     and that window is the one being created on. A wrapper with no frame-generation object always has the plain
+     one, whichever presenter FGHooks' single slot names.
+   - First the same drain a release and a resize make. A drain that fails frees nothing and declines.
+   - Then the overlay's render targets, which are this presenter's buffers. They are released directly:
+     `_OwnsOverlay` is false on every NR-only bridge (below).
+   - Then the interop objects and copy destinations, and the neural host, destroyed because it never records again.
+   - Then the interop present registration and `currentFGSwapchain`. FG's swapchain release hook acts on whatever
+     `currentFGSwapchain` names.
+   - Then `currentSwapchain`, `currentWrappedSwapchain` and `currentRealSwapchain`, where they name this wrapper. Its
+     release, even one racing the takeover, then leaves the D3D11 device and the interop mode alone. The new wrapper
+     shares both, and a failed retry's plain fallback does not set the device again.
+   - Last, the presenter itself.
+4. **The retry.** The creation is made once more, the plain presenter's. On success the site names the new wrapper
+   everywhere, as for any bridge. On failure it falls back to plain D3D11 as before.
+5. **Threads.** Neither side waits. The game's `Present`, `ResizeBuffers`, `ResizeBuffers1`, `SetFullscreenState` and
+   `ResizeTarget` hold the wrapper's presenter gate for as long as they run. A takeover closes the gate only when no
+   call is inside, and declines otherwise. Once the gate is closed, every call finds it closed. A blocking lock either
+   way could deadlock: `Present` can wait on the window thread inside DXGI, and the swapchain creation may run on that
+   thread.
+
+The old wrapper stays a valid COM object; the game usually releases it right after. Until then it answers without a
+presenter:
+
+| Call | Answer |
+|---|---|
+| `Present`, `Present1` | S_OK, nothing done. An error would read as a lost device to a game about to let it go. |
+| `ResizeBuffers`, `ResizeBuffers1` | the hidden swapchain alone, zeros resolved against the game's window; no global touched |
+| `SetFullscreenState` | remembered for `GetFullscreenState`; the window, both swapchains and State untouched |
+| `ResizeTarget` | S_OK, nothing done: the window is the new swapchain's |
+| `GetBuffer`, `GetDesc`, the other getters and setters | the hidden swapchain, as wherever there is no presenter |
+| final `Release` | frees what is left; owns no presenter, frame generation or overlay, so nothing global is touched |
+
+### What to look for in the log
+
+- **A takeover.** One line, at Info:
+  `Dx11wDx12SC 1: the game created another swapchain on window <hwnd> while this one still presented to it, and DXGI
+  allows one flip-model swapchain per window. This bridge gives its presenter up and shows nothing more`.
+  Then the usual `Created Dx11wDx12SC HWND`, `bridge 2 hosts the neural pass`, and the present host built again.
+- **A retry that still fails.** `Dx11wDx12 the new presenter on window <hwnd> was refused again after the takeover:
+  80070005`, then the old fallback. That would mean Windows still held the window after the presenter's last reference
+  went.
+- **A declined takeover.** `... was refused with 80070005 (the window already has a flip-model swapchain) and the
+  window was not taken over:`, followed by the reason.
+
+Tests: `bridge-window` (the header) and `bridge-lifetime`, `takeoverCases` (the production class). Twenty mutations
+each fail a case; the list is in that suite's README.
+
+### Left open
+
+- **Unproven:** that Windows releases the window as soon as the presenter's last reference goes. The retry is made
+  once, at once.
+- **The hidden window is shared** by every bridge (`misc/HiddenWindow.h`). A game whose own swapchain is flip model
+  would hit the same refusal there first: `creation failed: real 80070005`. That is not handled.
+- **The window's own style is not handed over.** A wrapper that gives its window up while emulating exclusive
+  fullscreen leaves the window borderless, and the taker does not learn the style to restore. A plain release
+  followed by a new swapchain does the same today.
+- **Getters and the waitable object.** Getters other than those above read the presenter without the gate. One running
+  on another thread during the takeover could reach it as it goes. A game still waiting on the old presenter's frame
+  latency object waits until its own timeout.
+- **Found on the way, not changed here.** `_OwnsOverlay` is false on a bridge with no frame-generation object, which is
+  every NR-only bridge: `_OwnsFgPresenter` needs one, and `currentFGSwapchain` names the plain presenter. So neither a
+  resize (`_ReleaseOverlayForResize`) nor a release (`_FinishRelease`) lets go of the overlay's render targets there.
+  On native Windows, `ResizeBuffers` refuses a presenter whose buffers are still referenced.

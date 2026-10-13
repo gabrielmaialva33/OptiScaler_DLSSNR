@@ -8,6 +8,8 @@
 #include <mutex>
 #include <shared_mutex>
 #include <vector>
+// The window takeover's registry, gate and sequence: production's own header (run.py adds retoque/ to the path).
+#include <with_dx12/Dx11wDx12_Window.h>
 using HRESULT = int32_t;
 using UINT = unsigned;
 using UINT64 = uint64_t;
@@ -33,6 +35,10 @@ using DXGI_FORMAT = int;
 constexpr DXGI_FORMAT DXGI_FORMAT_UNKNOWN = 0;
 constexpr HRESULT S_OK = 0, E_FAIL = -1, E_UNEXPECTED = -2, E_INVALIDARG = -3;
 constexpr HRESULT DXGI_ERROR_DEVICE_REMOVED = -4, DXGI_ERROR_DEVICE_HUNG = -5, DXGI_ERROR_INVALID_CALL = -6;
+constexpr HRESULT DXGI_ERROR_DEVICE_RESET = -7;
+// The one result a takeover answers, at its real value: the production header compares against 0x80070005.
+constexpr HRESULT E_ACCESSDENIED = static_cast<HRESULT>(0x80070005u);
+constexpr UINT DXGI_PRESENT_TEST = 1;
 constexpr DWORD ERROR_TIMEOUT = 1460, WAIT_TIMEOUT = 258, WAIT_OBJECT_0 = 0, WAIT_FAILED = UINT32_MAX;
 constexpr UINT DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING = 2048, D3D12_FENCE_FLAG_NONE = 0;
 // DXGI's values, so a mask built from them means what it means in production.
@@ -53,6 +59,13 @@ inline int logWarnings = 0;
 #define LOG_WARN(...) ((void) ++logWarnings)
 HRESULT HRESULT_FROM_WIN32(DWORD error) { return error ? -static_cast<HRESULT>(error) : S_OK; }
 ULONG InterlockedDecrement(LONG* value) { return --*value; }
+LONG InterlockedCompareExchange(LONG* target, LONG exchange, LONG comparand)
+{
+    const LONG seen = *target;
+    if (seen == comparand)
+        *target = exchange;
+    return seen;
+}
 uint64_t clockMs = 0;
 DWORD lastError = 77;
 uint64_t GetTickCount64() { return clockMs; }
@@ -102,6 +115,9 @@ void SafeCloseHandle(HANDLE& value)
     }
 }
 struct IDXGIOutput : Ref
+{
+};
+struct DXGI_MODE_DESC
 {
 };
 // Which swapchain resized when, across all of them.
@@ -261,6 +277,18 @@ struct Swapchain : Ref
         return S_OK;
     }
     UINT GetCurrentBackBufferIndex() { return 0; }
+    int presents = 0, targetResizes = 0;
+    HRESULT presentResult = S_OK;
+    HRESULT Present(UINT, UINT)
+    {
+        ++presents;
+        return presentResult;
+    }
+    HRESULT ResizeTarget(const DXGI_MODE_DESC*)
+    {
+        ++targetResizes;
+        return S_OK;
+    }
     HRESULT GetBuffer(UINT, ID3D12Resource** out)
     {
         *out = &buffer;
@@ -359,7 +387,18 @@ struct ResTrack_Dx11
 {
     inline static int deviceReleases = 0;
     static void OnDeviceReleased(void*) { ++deviceReleases; }
+    static void ClearPossibleHudless() {}
 };
+// Present's HUD fix brackets; only reached with FGInput::Upscaler and [FrameGen] HUDFix on.
+namespace Hudfix_Dx11
+{
+inline void PresentStart() {}
+inline void PresentEnd() {}
+} // namespace Hudfix_Dx11
+namespace Util
+{
+inline void GetDeviceRemovedReason(ID3D12Device*) {}
+} // namespace Util
 enum class SwapchainInteropApi
 {
     None,
@@ -400,7 +439,7 @@ struct State
     SwapchainInteropApi swapchainInteropApi = SwapchainInteropApi::Dx11wDx12;
     bool fgResetCapturedResources = false, fgOnlyUseCapturedResources = false, fgChanged = false;
     bool scChanged = false, SCAllowTearing = false;
-    bool realExclusiveFullscreen = false, SCExclusiveFullscreen = false;
+    bool realExclusiveFullscreen = false, SCExclusiveFullscreen = false, isRunningOnLinux = false;
     float screenWidth = 0, screenHeight = 0, lastMipBias = 0, lastMipBiasMax = 0;
     static State& Instance()
     {
@@ -424,6 +463,7 @@ struct Config
     bool IsFGEnabled() { return FGEnabled.value_or_default(); }
     // The two keys the bridge's neural predicates read, at production's defaults.
     ConfigValue<bool> DlssNrEnabled { false };
+    ConfigValue<bool> FGHUDFix { false };
     ConfigValue<uint32_t> DlssNrHookMethod { 1 };
     static Config* Instance()
     {
@@ -433,15 +473,25 @@ struct Config
 };
 namespace FGHooks
 {
-void ClearDx12InteropPresentSC(Swapchain*) {}
+// Which presenter was last cleared, and how often: a wrapper that gave its presenter up clears it once and never again.
+inline int interopClears = 0;
+inline Swapchain* lastInteropCleared = nullptr;
+void ClearDx12InteropPresentSC(Swapchain* presenter)
+{
+    if (presenter == nullptr)
+        return;
+    ++interopClears;
+    lastInteropCleared = presenter;
+}
 // Whether the presenter is the plain D3D12 one, whose fullscreen the bridge emulates.
 inline bool interopPresenter = true;
 bool IsDx12InteropPresentSC(Swapchain*) { return interopPresenter; }
 } // namespace FGHooks
 namespace MenuOverlayDx
 {
-int cleanups = 0;
+int cleanups = 0, presents = 0;
 void CleanupRenderTarget(bool, HWND) { ++cleanups; }
+void Present(Swapchain*, UINT, UINT, const void*, ID3D12CommandQueue*, HWND, bool) { ++presents; }
 } // namespace MenuOverlayDx
 int deaths = 0;
 struct DeathCounter
@@ -454,6 +504,10 @@ namespace DlssNr
 {
 struct PresentHost
 {
+    // Destroyed with the wrapper, or with its presenter when it gives its window up.
+    inline static int destroyed = 0;
+    ~PresentHost() { ++destroyed; }
+
     bool recordSucceeds = true;
     bool producesOutput = true;
     ID3D12Resource composed {};
@@ -502,7 +556,8 @@ struct PresentHost
 // and is confirmed or abandoned with that list, and its pair is freed only behind a proved drain.
 struct SynthInputs
 {
-    unsigned records = 0, confirms = 0, abandons = 0, releases = 0;
+    unsigned records = 0, confirms = 0, abandons = 0, releases = 0, feeds = 0;
+    void Feed(FG*, ID3D12Device*) { ++feeds; }
     UINT64 lastWidth = 0;
     UINT lastHeight = 0;
     bool recordingOutstanding = false;
@@ -583,6 +638,48 @@ class Dx11wDx12SC
     DeathCounter death;
     ~Dx11wDx12SC();
     ULONG Release();
+    // The window takeover (RetryAfterTakeover) and what is left of a wrapper after it.
+    static HRESULT RetryAfterTakeover(HWND, HRESULT, const std::function<HRESULT()>&);
+    Dx11wDx12::Window::Surrender _SurrenderPresenter();
+    static bool _AcquireForTakeover(Dx11wDx12SC*);
+    static Dx11wDx12::Window::Registry<Dx11wDx12SC>& _Windows();
+    HRESULT _ResizeHiddenOnly(UINT, UINT, UINT, DXGI_FORMAT, UINT);
+    Dx11wDx12::Window::PresenterGate _presenterGate;
+    HRESULT Present(UINT, UINT);
+    HRESULT GetFullscreenState(BOOL*, IDXGIOutput**);
+    HRESULT ResizeTarget(const DXGI_MODE_DESC*);
+    // Present's steps that need a device, counted: a wrapper that gave its window up must reach none of them.
+    int interopInits = 0, sharedRequests = 0, dx11Copies = 0, dx11Waits = 0, presentQueueWaits = 0, fakeAdvances = 0;
+    UINT _bufferCount = 2;
+    bool _presentFailureReported = false;
+    bool _InitInteropObjects()
+    {
+        ++interopInits;
+        return true;
+    }
+    UINT _GetDx11BackBufferIndexForPresent() const { return 0; }
+    bool _RequestSharedBackBuffer(UINT)
+    {
+        ++sharedRequests;
+        return true;
+    }
+    bool _CopyDx11BackBufferToShared(UINT)
+    {
+        ++dx11Copies;
+        _hasInteropWork = true;
+        return true;
+    }
+    bool _WaitDx11ThenDx12()
+    {
+        ++dx11Waits;
+        return true;
+    }
+    bool _WaitForInteropCopyOnPresentQueue()
+    {
+        ++presentQueueWaits;
+        return true;
+    }
+    void _AdvanceFakeBackBufferIndex() { ++fakeAdvances; }
     HRESULT ResizeBuffers(UINT, UINT, UINT, DXGI_FORMAT, UINT);
     HRESULT ResizeBuffers1(UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, IUnknown* const*);
     HRESULT SetFullscreenState(BOOL, IDXGIOutput*);
