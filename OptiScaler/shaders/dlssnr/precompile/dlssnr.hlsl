@@ -317,7 +317,7 @@ float3 TexelEdit(int2 t, int2 last)
 // filter, which flattens exactly the band near the small raster's limit where the model's fine
 // structure lives. Taken in linear light, texel by texel, before it is interpolated. Then held to the
 // range of the four texels around the position: Catmull-Rom overshoots at a step, and an overshooting
-// difference is a halo. dlssnr/design/sharp-residual.md.
+// difference is a halo. docs/dlssnr/design/sharp-residual.md.
 float3 SharpEditAt(float2 uvq, uint w, uint h)
 {
     const float2 pos = uvq * float2(w, h) - 0.5;
@@ -707,7 +707,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    // Transfer 2's carrier (dlssnr/design/dlss-enlargement.md): the model's edit at the working size, in the
+    // Transfer 2's carrier (docs/dlssnr/design/dlss-enlargement.md): the model's edit at the working size, in the
     // space the resolve takes it in, as a signal a private DLSS Super Resolution can enlarge. 0.5 is no change;
     // the signed compression keeps darkening representable, and the 1/64 scale lifts small edits clear of the
     // RGBA16F step near 0.5, where a unit scale rounds them away. gSource is the model's input, gModel its
@@ -1205,7 +1205,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     else if (gReversibleMode == 4)
         result = gPassthrough != 0 ? modelDirect : HybridDecode(modelDirect);
 
-    // Highlight recovery, off by default ([DlssNr] HighlightRecovery; dlssnr/design/hdr-highlight-recovery.md).
+    // Highlight recovery, off by default ([DlssNr] HighlightRecovery; docs/dlssnr/design/hdr-highlight-recovery.md).
     //
     // The model was shown everything above paper white squeezed into the top of its range -- with the soft knee,
     // a saturated pixel's peak divided down to exactly 1 and a near-neutral one rolled to 0.91 at 1x and 0.998 at

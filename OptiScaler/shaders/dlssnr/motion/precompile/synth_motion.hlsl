@@ -1,5 +1,5 @@
 // ===========================================================================================
-// UNBUILT SKELETON. Design: OptiScaler/dlssnr/design/synthesized-motion.md.
+// UNBUILT SKELETON. Design: docs/dlssnr/design/synthesized-motion.md.
 //
 // This shader is compiled by nothing. No _Shader.h (DX12, dxc cs_6_0) or _Shader_Vk.h
 // (Vulkan, dxc -spirv -D VK_MODE) has been generated from it, and DlssNr_SynthMotion.cpp does

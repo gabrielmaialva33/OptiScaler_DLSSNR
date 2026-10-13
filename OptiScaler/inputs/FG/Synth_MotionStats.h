@@ -3,7 +3,7 @@
 // What the sampled rows of the synthesized motion field say, for SynthFgPolicy. Pure: it reads the rows
 // exactly as SynthInputs reads them back from the GPU (R16G16_FLOAT, a pitch per row, every stride-th
 // pixel), so the host tests drive it with the production layout (tests/fg-synth-policy). Design:
-// dlssnr/design/synthesized-frame-generation.md, "Fast-motion response", "Coherence, not speed".
+// docs/dlssnr/design/synthesized-frame-generation.md, "Fast-motion response", "Coherence, not speed".
 //
 // Speed alone does not decide whether interpolation fails: a uniform pan with accurate vectors
 // interpolates at any speed. It fails where neighbouring vectors disagree (parallax, disocclusion, a thin

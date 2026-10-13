@@ -473,7 +473,7 @@ void MfgUnlock::TryApply(HMODULE provider)
             //
             // Ada only, not everything below Blackwell. The one-field read is Ada's kernel, and Ada is
             // where the swap was measured. Below Ada NVIDIA's runtime refuses frame generation outright
-            // (dlssnr/design/model-cost-across-architectures.md), so there was never anything to patch
+            // (docs/dlssnr/design/model-cost-across-architectures.md), so there was never anything to patch
             // -- except under a third-party loader such as dlssg_for_sm86, which makes it run on
             // Ampere. What that loader does to these same kernel images is unknown, and relabelling
             // them underneath it was never tried; AdaBlackwellKernels=true still forces it.

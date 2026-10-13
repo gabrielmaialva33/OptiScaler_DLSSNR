@@ -5,7 +5,7 @@
 // lives here, outside the DLSS-NR module, because frame generation must not depend on that module.
 // The names (UiMaskParams, UiMaskPixel, UM_*) are the ones it had in the NR module: renaming them could
 // change DLSS-NR's committed bytecode, which the move must leave byte-identical.
-// Plain C/HLSL subset: no templates, no references, no texture types. dlssnr/design/hud-protection.md has
+// Plain C/HLSL subset: no templates, no references, no texture types. docs/dlssnr/design/hud-protection.md has
 // the reasoning, including why each gate exists; synthesized-frame-generation.md, "The HUD: near depth and
 // a UI layer", has why frame generation uses it.
 //

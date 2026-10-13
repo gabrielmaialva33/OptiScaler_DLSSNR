@@ -4,7 +4,7 @@
 //   gMask   the mask, 0..1 (R8_UNORM)
 //   gDepth  1.0 where the mask is at least gNearMin, 0.0 elsewhere (R32_FLOAT): the depth FSR-FG is handed,
 //           with inverted depth, so the interface is at the near plane and the scene at the far one
-// Design: dlssnr/design/synthesized-frame-generation.md, "The HUD: near depth and a UI layer"; the rule's
+// Design: docs/dlssnr/design/synthesized-frame-generation.md, "The HUD: near depth and a UI layer"; the rule's
 // own reasoning is hud-protection.md. Class: SynthMotion::Overlay_Dx12 (SynthOverlay_Dx12.cpp).
 //
 // Two permutations of this source. Without SYNTH_OVERLAY_LAYER (SynthOverlay_Detect) it is the mask alone, the

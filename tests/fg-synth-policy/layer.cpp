@@ -4,7 +4,7 @@
 // frame's tile map (four sides, perpendicular orientations around, the camera), then the per-pixel state, then this
 // frame's tile map, stored as the shader stores it (shares in 8 bits). Every decision is the header's.
 //
-// Design: dlssnr/design/synthesized-frame-generation.md, "The HUD layer's own mask: recall and a margin". The GPU
+// Design: docs/dlssnr/design/synthesized-frame-generation.md, "The HUD layer's own mask: recall and a margin". The GPU
 // harness (tests/synth-motion-d3d12) runs the shader itself on the hud_* sequences; these are the fixtures it has
 // no room for: still scenes, a swaying silhouette, a straight edge along the motion, rain.
 #include <algorithm>

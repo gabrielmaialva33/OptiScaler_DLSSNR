@@ -1,7 +1,7 @@
 #pragma once
 
 // Peripheral compression's three passes on D3D12: pack the colour, pack the guides, unpack the model's
-// answer. dlssnr/design/peripheral-compression.md.
+// answer. docs/dlssnr/design/peripheral-compression.md.
 //
 // A pass of its own rather than modes of the composition shader, so its bytecode can be absent: the .cpp
 // includes the three precompiled headers only if they exist, and without all three Available() is false, the

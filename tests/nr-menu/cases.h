@@ -29,7 +29,7 @@ int main() {
  assert(ImGui::shownDisabled.count("3/Skin structure/Override###override")); assert(c.overrides.empty());
  c.master.AutoMask=true;
  ImGui::Reset(); ImGui::actions["3/Skin structure/Override###override"]=true; run(); assert(c.overrides.at(2).SkinStructure==-1.0f);
- // Model cadence (design/model-cadence.md, DEVELOPMENT.md rule 2): nothing on native Vulkan; with the driver
+ // Model cadence (docs/dlssnr/design/model-cadence.md, DEVELOPMENT.md rule 2): nothing on native Vulkan; with the driver
  // proxy or without the shader, no control and one line only when a cadence is configured; the frame-generation
  // opt-in and the status line only above a cadence of 1; a hand-edited out-of-range value reads as off.
  const std::string combo = "Model cadence###nrCadence", optIn = "Allow with frame generation###nrCadenceFrameGen";

@@ -223,7 +223,7 @@ unsigned int Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D1
         // feature 18 into nvngx_dlssnr.dll itself, and with model 310.8.0.0 that route faults inside
         // D3D12 (dlss5-bridge, RTX 5090). Refused before the create rather than caught after it: the
         // fault lands in D3D12 on the game's thread, beyond any guard this path has.
-        // dlssnr/design/ngx-driver-616.md.
+        // docs/dlssnr/design/ngx-driver-616.md.
         if (const auto model = DlssNr::NgxInfo::FindModel();
             model.has_value() && DlssNr::NgxInfo::LoaderRouteKnownToFault(*model))
         {

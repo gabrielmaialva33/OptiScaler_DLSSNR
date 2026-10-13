@@ -2,7 +2,7 @@
 
 // What synthesized frame generation does with a base frame, decided from what the motion field and
 // the frame clock say. Pure logic with no D3D in it, so the host tests drive it directly
-// (tests/fg-synth-policy). Design: dlssnr/design/synthesized-frame-generation.md, "Motion into FG, and
+// (tests/fg-synth-policy). Design: docs/dlssnr/design/synthesized-frame-generation.md, "Motion into FG, and
 // emulator behaviour".
 //
 // - Fast-motion response: FG is fed with Reset, which makes FSR's interpolation copy the frame instead

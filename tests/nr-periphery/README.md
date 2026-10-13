@@ -1,6 +1,6 @@
 # nr-periphery
 
-Peripheral compression's layout and mapping (`OptiScaler/dlssnr/design/peripheral-compression.md`):
+Peripheral compression's layout and mapping (`docs/dlssnr/design/peripheral-compression.md`):
 `OptiScaler/shaders/dlssnr/DlssNr_Periphery.h` and the shared
 `precompile/dlssnr_periphery_warp.h`, which the shader (`dlssnr_periphery.hlsl`) includes too. The suite
 includes the same header in C++, in float, with the colour pack's texture loads replaced by a vector, so

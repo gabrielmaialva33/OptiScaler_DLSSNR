@@ -356,7 +356,7 @@ struct NrState
         ID3D12Resource* passPing = nullptr;
     } alt;
 
-    // Frame hold (design/frame-hold.md): a persistent copy of the output taken on hold-on and restored
+    // Frame hold (docs/dlssnr/design/frame-hold.md): a persistent copy of the output taken on hold-on and restored
     // over the live output before the encode reads it while held, so a setting change re-renders the
     // same frame. heldWhitePoint is the snapshot used while held -- measurement is suspended.
     ID3D12Resource* heldColor = nullptr;
@@ -366,21 +366,21 @@ struct NrState
     DXGI_FORMAT heldFormat = DXGI_FORMAT_UNKNOWN;
     float heldWhitePoint = 1.0f;
 
-    // The output stabilizer (design/output-stabilizer.md). Built for one output size and format, parked
+    // The output stabilizer (docs/dlssnr/design/output-stabilizer.md). Built for one output size and format, parked
     // like the downscalers when that changes or when it is switched off. stabilizerLast is when it last
     // ran, so a gap -- NR toggled, the stabilizer toggled, a stretch on the before-upscale stage --
     // drops history that no longer describes the screen.
     DlssNr_Stabilizer_Dx12* stabilizer = nullptr;
     std::chrono::steady_clock::time_point stabilizerLast {};
 
-    // The static-overlay mask for UI protection (design/hud-protection.md). Built for one working size,
+    // The static-overlay mask for UI protection (docs/dlssnr/design/hud-protection.md). Built for one working size,
     // parked like the stabilizer when that changes or when it is switched off. uiMaskLast is when it last
     // ran, so a gap drops a previous frame that no longer describes the screen.
     DlssNr_UiMask_Dx12* uiMask = nullptr;
     std::chrono::steady_clock::time_point uiMaskLast {};
 
-    // Model cadence (design/model-cadence.md): the surfaces that carry the model's last edit onto the frames
-    // it does not run on. Built for one working size, parked like the stabilizer when that changes or when the
+    // Model cadence (docs/dlssnr/design/model-cadence.md): the surfaces that carry the model's last edit onto the
+    // frames it does not run on. Built for one working size, parked like the stabilizer when that changes or when the
     // cadence is switched off or cannot run on the route. featureGeneration counts feature creations, so a
     // rebuilt model never inherits an edit made by the one before it; cadencePasses is what the last model
     // frame completed, which the menu keeps showing through carried frames.
@@ -1072,8 +1072,8 @@ void ChainStatus(const char* reason)
         LOG_INFO("DLSS-NR chain: {}", reason);
 }
 
-// Model cadence (design/model-cadence.md): which frames run the model and which carry its last edit. Decided
-// once per Dispatch, under the pass's lock.
+// Model cadence (docs/dlssnr/design/model-cadence.md): which frames run the model and which carry its last edit.
+// Decided once per Dispatch, under the pass's lock.
 DlssNr::Cadence::Scheduler g_cadence;
 
 // What the menu shows under the control. Starts as "off", so a session that never turns the cadence on logs
@@ -1186,7 +1186,7 @@ DlssNr::PrivateSr::Api PrivateSrApi()
     return api;
 }
 
-// Transfer 2's private DLSS Super Resolution and everything only it uses (design/dlss-enlargement.md). One
+// Transfer 2's private DLSS Super Resolution and everything only it uses (docs/dlssnr/design/dlss-enlargement.md). One
 // bundle, so it is parked as one object, the retirement cap counts it once, and nothing it read or wrote can
 // be freed before its feature is.
 struct NrEnlarger
@@ -2382,10 +2382,10 @@ void ReportSkipOnce(const char* reason)
 std::mutex g_peripheryStatusMutex;
 DlssNr::PeripheryState g_peripheryStatus;
 
-// Peripheral compression's layout for this frame (design/peripheral-compression.md), or an inactive one with
-// the reason. Builds the pass on first use; says on change what it decided, and drops the model's history
-// when the layout moves, because the history then describes other pixels. A change of the packed extent is
-// also a resolution change, which Dispatch rebuilds for on its own.
+// Peripheral compression's layout for this frame (docs/dlssnr/design/peripheral-compression.md), or an inactive one
+// with the reason. Builds the pass on first use; says on change what it decided, and drops the model's history when the
+// layout moves, because the history then describes other pixels. A change of the packed extent is also a resolution
+// change, which Dispatch rebuilds for on its own.
 //
 // Off -- the default -- is three config reads and a constant shape: no pass, no surface, no log line, and the
 // working size Dispatch takes is the one it always took.
@@ -2522,7 +2522,7 @@ DlssNr::Periphery::Layout PeripheryLayoutFor(const Config& cfg, ID3D12Device* de
 }
 
 // ---------------------------------------------------------------------------------------------
-// Transfer 2: the model's edit enlarged by a private DLSS Super Resolution. design/dlss-enlargement.md.
+// Transfer 2: the model's edit enlarged by a private DLSS Super Resolution. docs/dlssnr/design/dlss-enlargement.md.
 //
 // The rules are DlssNr_Enlarge.h's and the NGX calls DlssNr_PrivateSr's; this is the part that needs the
 // pass's textures, its descriptor ring and its retirement list. wilsjo2's (OptiScaler-DLSSNR-PreSR-Multipass
@@ -3502,7 +3502,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const float workScale = std::clamp(configuredWorkScale, 0.25f, maxWorkScale);
 
     // The uniform grid: the size the model works at, unless peripheral compression packs its input, in which
-    // case it is the grid the model's answer is unpacked back onto (design/peripheral-compression.md). From
+    // case it is the grid the model's answer is unpacked back onto (docs/dlssnr/design/peripheral-compression.md). From
     // here on workWidth/workHeight is the model's extent either way, so the feature, its output, the chain,
     // the settle gates and the format-flip set all follow the packed extent while the periphery runs.
     const auto gridWidth = (unsigned int) (width * workScale + 0.5f);
@@ -3774,7 +3774,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
 
         // Which driver, loader and model this is -- the first thing a report needs and, before this,
-        // the one thing no log said. See dlssnr/design/ngx-driver-616.md.
+        // the one thing no log said. See docs/dlssnr/design/ngx-driver-616.md.
         DlssNr::NgxInfo::Describe(*snippet);
 
         // Before the build, so the model's own account of it ("Created feature ...") is in the log.
@@ -3987,7 +3987,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // represent -- it exists precisely because the proxy is meant to clip. Normalising the highlights
     // away first leaves it nothing to give back.
 
-    // Model cadence (design/model-cadence.md): whether this frame runs the model or carries its last edit.
+    // Model cadence (docs/dlssnr/design/model-cadence.md): whether this frame runs the model or carries its last edit.
     // Decided here, after everything that can ask for a reset except releasing a hold -- which the hold
     // refusal covers, since a hold being released is still a hold this frame -- and before the timing
     // metadata, which says which kind of frame this is. With Cadence=1 nothing is built and every frame runs
@@ -4086,8 +4086,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             reset = true;
     }
 
-    // Transfer 2 (design/dlss-enlargement.md): what the resolve is sent this frame, decided before the timing
-    // contract so a sample says which enlargement it measured. Any other Transfer passes through unchanged and
+    // Transfer 2 (docs/dlssnr/design/dlss-enlargement.md): what the resolve is sent this frame, decided before the
+    // timing contract so a sample says which enlargement it measured. Any other Transfer passes through unchanged and
     // touches nothing. The driver proxy never reaches the resolve, and peripheral compression hands it an edit
     // unpacked onto another grid than the working size this enlarges from, so with either the plan is matched
     // residual, which builds nothing and lets go of a private DLSS built before either was switched on.
@@ -4222,7 +4222,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Frame hold. Freeze the encode's input so a live setting change re-renders the same frame. This
     // is self-contained on purpose: it copies the output aside on hold-on and copies it BACK over the
     // live output before the encode reads it while held, so the encode's own path and barriers below
-    // are untouched and the default (hold off) is byte-identical. See design/frame-hold.md.
+    // are untouched and the default (hold off) is byte-identical. See docs/dlssnr/design/frame-hold.md.
     //
     // `target` is UAV here (normalised at entry, restored by the meter block above). The held copy is
     // left in COPY_SOURCE after capture and stays there for every restore.
@@ -4712,7 +4712,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // now the model's own input at the working size: the same pixels as before at scale 1 (on a present
     // source the proxy is the frame), and a match at any other scale.
     //
-    // UI protection (design/hud-protection.md): with the model built with UICorrection on, an alpha of 1
+    // UI protection (docs/dlssnr/design/hud-protection.md): with the model built with UICorrection on, an alpha of 1
     // makes it return Backbuffer -- its own input -- in that pixel, so the edit there is zero and the
     // resolve hands back the frame as it was. The alpha is the static-overlay mask, handed as both UI and
     // UIAlpha; only a present source has interface in it.
@@ -4769,8 +4769,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return false;
     }
 
-    // Model cadence (design/model-cadence.md): what the carry reads this frame. The game's vectors are put in
-    // working pixels by the size they are measured against, whatever the model itself is told.
+    // Model cadence (docs/dlssnr/design/model-cadence.md): what the carry reads this frame. The game's vectors are put
+    // in working pixels by the size they are measured against, whatever the model itself is told.
     DlssNr_Cadence_Dx12::Frame cadenceFrame {};
     cadenceFrame.proxy = modelInput;
     cadenceFrame.depth = depthForModel;
@@ -5023,7 +5023,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         resolveParams.CompareZoom = std::max(1.0f, cfg.DlssNrCompareZoom.value_or_default());
         resolveParams.CompareSwap = cfg.DlssNrCompareSwap.value_or_default() ? 1u : 0u;
         // Only where the encode compressed anything: on a frame the game already tone mapped the model saw the
-        // frame as it is (design/hdr-highlight-recovery.md). The shader gates on passthrough as well.
+        // frame as it is (docs/dlssnr/design/hdr-highlight-recovery.md). The shader gates on passthrough as well.
         resolveParams.HighlightRecovery = isHdrBuffer && cfg.DlssNrHighlightRecovery.value_or_default() ? 1u : 0u;
 
         // The output stabilizer's two numbers, clamped to what its controls offer, so a hand-edited ini
@@ -5097,7 +5097,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // 0.01 boundary about nine times a second, which is what the 486 composition lines of one
         // Crimson Desert session contained, alongside one model-size change. The Reporter holds
         // measured drift to one line a second; configuration and dimension changes pass immediately.
-        // Source-specific controls are normalized out when inactive. design/nr-log-rate.md.
+        // Source-specific controls are normalized out when inactive. docs/dlssnr/design/nr-log-rate.md.
         const ComposeReport composeNow {
             std::round(resolveParams.WhitePoint * 100.0f) / 100.0f,
             resolveParams.TransferStrength,
@@ -5168,7 +5168,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ID3D12Resource* resolveProxy = resolved.proxy;
         ID3D12Resource* resolveAnswer = resolved.answer;
 
-        // Peripheral compression (design/peripheral-compression.md): the packed proxy and the packed answer
+        // Peripheral compression (docs/dlssnr/design/peripheral-compression.md): the packed proxy and the packed answer
         // brought back onto the uniform grid, once, after every pass of the chain, so the resolve reads them
         // exactly as it reads the uniform path's pair. ForceResidual keeps Transfer 1 and 3 on the residual
         // path when that grid is the frame's own size, where the size test alone would fall back to Classic
@@ -5216,8 +5216,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             resolveParams.DebugView = 1;
         }
 
-        // Transfer 2 (design/dlss-enlargement.md): the edit enlarged by the private DLSS, which is also built
-        // here on the frame it is first wanted. When it does not run, the resolve is sent matched residual.
+        // Transfer 2 (docs/dlssnr/design/dlss-enlargement.md): the edit enlarged by the private DLSS, which is also
+        // built here on the frame it is first wanted. When it does not run, the resolve is sent matched residual.
         ID3D12Resource* enlarged = nullptr;
         if (enlargePlan.keep)
         {
@@ -5290,7 +5290,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
 
-        // The output stabilizer (design/output-stabilizer.md), last, over what the resolve just wrote.
+        // The output stabilizer (docs/dlssnr/design/output-stabilizer.md), last, over what the resolve just wrote.
         //
         // Only where the pass edits the frame in place. Before the upscaler the input is the jittered
         // render-size frame about to go into it: jitter reads as change on every pixel, and a held pixel

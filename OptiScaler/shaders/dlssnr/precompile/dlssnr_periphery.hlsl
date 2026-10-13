@@ -1,5 +1,5 @@
 // Peripheral compression: the model's input packed denser in the centre than at the edges, and its answer
-// brought back onto the uniform grid. dlssnr/design/peripheral-compression.md.
+// brought back onto the uniform grid. docs/dlssnr/design/peripheral-compression.md.
 //
 // One source, three passes, chosen at compile time so each binds exactly the resource types it writes:
 //

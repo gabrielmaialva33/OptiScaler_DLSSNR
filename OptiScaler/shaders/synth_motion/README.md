@@ -2,8 +2,8 @@
 
 A per-pixel motion field reconstructed from consecutive finished frames. It is for passes that get no
 motion vectors from the game: DLSS-NR's present hosts and synthesized frame generation. Designs:
-[synthesized-motion.md](../../dlssnr/design/synthesized-motion.md) (output contract, §4) and
-[synthesized-frame-generation.md](../../dlssnr/design/synthesized-frame-generation.md) (why this
+[synthesized-motion.md](../../../docs/dlssnr/design/synthesized-motion.md) (output contract, §4) and
+[synthesized-frame-generation.md](../../../docs/dlssnr/design/synthesized-frame-generation.md) (why this
 kernel). It lives outside `dlssnr/` because frame generation uses it too, and the NR module has to stay
 removable as one block.
 
@@ -33,7 +33,7 @@ two hypotheses on the level-0 luma pair, over the pixel's 3x3 weighted 1-2-1 by 
 vector `v` rounded, and zero. It writes zero only when `2 * S0 + 64 < Sv`, and `v` otherwise. A tie
 keeps `v`. Nothing is tested where `round(v)` is zero or points outside the frame. The rule, its margin
 and what it cannot fix: "Static overlays" in
-[synthesized-motion.md](../../dlssnr/design/synthesized-motion.md).
+[synthesized-motion.md](../../../docs/dlssnr/design/synthesized-motion.md).
 
 ## What callers must know
 
@@ -150,7 +150,7 @@ MIT, whereas the rest of that SDK is binary-only. The MIT notice ships as
 fixed-function optical-flow engine through `nvofapi64.dll`. That DLL is loaded at runtime from the
 driver on Windows, or from dxvk-nvapi under Proton. `[DlssNr] SynthMotionSource=nvofa` selects it,
 and `DlssNr::SynthMotionGuide` falls back to the estimator above whenever it is unavailable. Design:
-"Motion sources" in [synthesized-motion.md](../../dlssnr/design/synthesized-motion.md).
+"Motion sources" in [synthesized-motion.md](../../../docs/dlssnr/design/synthesized-motion.md).
 
 Where it differs from the table above:
 
@@ -171,7 +171,7 @@ Where it differs from the table above:
 
 Not motion, but it lives here for the same reason as the estimator: frame generation uses it and must
 not depend on the DLSS-NR module. Design: "The HUD: near depth and a UI layer" in
-[synthesized-frame-generation.md](../../dlssnr/design/synthesized-frame-generation.md).
+[synthesized-frame-generation.md](../../../docs/dlssnr/design/synthesized-frame-generation.md).
 
 - **The rule** is DLSS-NR's static-overlay rule, `precompile/static_overlay_rule.h`, moved here from
   `shaders/dlssnr/precompile/` unchanged. DLSS-NR's own pass (`dlssnr_uimask.hlsl`) includes it from

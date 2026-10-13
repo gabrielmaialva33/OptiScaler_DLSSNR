@@ -1,7 +1,7 @@
 #pragma once
 
 // The guide resample for the NR model below its frame size: depth and motion vectors, point-sampled
-// from the upscaler's region into two working-size textures. design/reduced-scale-guides.md.
+// from the upscaler's region into two working-size textures. docs/dlssnr/design/reduced-scale-guides.md.
 //
 // A pass of its own rather than a mode of the composition shader, so that its bytecode can be absent:
 // DlssNr_GuideMatch_Dx12.cpp includes the precompiled header only if it exists, and without it

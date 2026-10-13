@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Peripheral compression's layout and mapping (shaders/dlssnr/DlssNr_Periphery.h and the shared
 precompile/dlssnr_periphery_warp.h the shader includes), compiled under ASan/UBSan, plus the text guards that
-keep the shader, its constant block and the C++ in step. dlssnr/design/peripheral-compression.md."""
+keep the shader, its constant block and the C++ in step. docs/dlssnr/design/peripheral-compression.md."""
 from pathlib import Path
 import re
 import subprocess

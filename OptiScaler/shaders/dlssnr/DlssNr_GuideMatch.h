@@ -3,7 +3,7 @@
 #include <cstdint>
 
 // The guides the model is handed below its frame size, and the motion-vector scale that goes with
-// them. design/reduced-scale-guides.md.
+// them. docs/dlssnr/design/reduced-scale-guides.md.
 //
 // Both rules are jlrouzies-fr's, found and fixed in v0.8.92 of wilsjo2's
 // OptiScaler-DLSSNR-PreSR-Multipass (GPL-3.0): this tree's reduced path had the same shape that

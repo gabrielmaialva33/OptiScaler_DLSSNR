@@ -1,7 +1,7 @@
 # Transfer 2: the edit enlarged by a private DLSS SR
 
 Run `python3 tests/nr-enlarge/run.py`. Needs Python and a `g++` with C++20, `_Float16`, ASan and UBSan.
-Design: `OptiScaler/dlssnr/design/dlss-enlargement.md`.
+Design: `docs/dlssnr/design/dlss-enlargement.md`.
 
 Three binaries, each built under ASan/UBSan with `-Werror`:
 

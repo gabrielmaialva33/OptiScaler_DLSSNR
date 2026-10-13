@@ -1,5 +1,5 @@
 // DLSS-NR model cadence: the model runs on one frame in N, and on the frames between this pass moves the edit
-// it made onto the current frame. dlssnr/design/model-cadence.md is the reasoning; the per-pixel rules are in
+// it made onto the current frame. docs/dlssnr/design/model-cadence.md is the reasoning; the per-pixel rules are in
 // dlssnr_cadence_rule.h beside this file, shared with the host test tests/nr-cadence, and are taken from
 // BeliyG3's optimizer-fps-dlss5 (MIT, Copyright (c) 2026 Yuri Grib; Licenses/OptimizerFps_LICENSE.txt).
 //

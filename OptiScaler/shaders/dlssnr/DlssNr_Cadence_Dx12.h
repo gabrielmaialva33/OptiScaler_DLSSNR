@@ -2,7 +2,7 @@
 
 // Model cadence for Neural Rendering: the model runs on one frame in N, and this pass carries the edit it made
 // onto the frames in between -- along the game's motion, with the depth and colour tests that stop it landing
-// on the wrong surface. dlssnr/design/model-cadence.md is the reasoning; dlssnr/DlssNr_Cadence.h decides which
+// on the wrong surface. docs/dlssnr/design/model-cadence.md is the reasoning; dlssnr/DlssNr_Cadence.h decides which
 // frames carry.
 //
 // One object serves one working size on one device. Its surfaces are sized at construction; a different size

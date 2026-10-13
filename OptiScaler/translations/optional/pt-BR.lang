@@ -352,7 +352,7 @@ V-Sync	V-Sync
 XeFG Settings	Configurações do XeFG
 fakenvapi	fakenvapi
 
-# 2026-10-04: model cadence (dlssnr/design/model-cadence.md): the control, its help, the GPU timing
+# 2026-10-04: model cadence (docs/dlssnr/design/model-cadence.md): the control, its help, the GPU timing
 # kind line and the status line under the control (DlssNr::Cadence::Describe).
 Model cadence	Cadência do modelo
 Every frame	Todo quadro
@@ -385,7 +385,7 @@ The model runs every frame while a capture is running.	O modelo roda em todo qua
 The model runs every frame: the model cadence surfaces could not be allocated.	O modelo roda em todo quadro: as superfícies da cadência do modelo não puderam ser alocadas.
 Waiting for the pass to run.	Aguardando o passe rodar.
 
-# Peripheral compression (dlssnr/design/peripheral-compression.md)
+# Peripheral compression (docs/dlssnr/design/peripheral-compression.md)
 Peripheral compression	Compressão periférica
 Centre band	Faixa central
 Packed extent	Extensão compactada

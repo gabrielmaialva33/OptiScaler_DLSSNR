@@ -7,7 +7,7 @@
 #include <cstdint>
 
 // Transfer 2, "Matched residual + DLSS": the model's edit at the working size, enlarged to the frame by a
-// private DLSS Super Resolution rather than by the resolve's bilinear tap. design/dlss-enlargement.md.
+// private DLSS Super Resolution rather than by the resolve's bilinear tap. docs/dlssnr/design/dlss-enlargement.md.
 //
 // The mode is wilsjo2's (OptiScaler-DLSSNR-PreSR-Multipass v0.8.91, GPL-3.0; upstream PR #1158). The rules
 // here are re-derived for this tree rather than copied: when it runs and what runs instead, the carrier's

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The mechanical guards of dlssnr/design/DEVELOPMENT.md section 4, against the live tree.
+"""The mechanical guards of docs/dlssnr/design/DEVELOPMENT.md section 4, against the live tree.
 
 Four checks, each for an invariant a script can catch so review time goes to the ones it cannot:
 

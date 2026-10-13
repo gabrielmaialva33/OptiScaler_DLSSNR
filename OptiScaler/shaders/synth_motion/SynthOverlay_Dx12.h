@@ -2,7 +2,7 @@
 
 // Synthesized frame generation's HUD mask: DLSS-NR's static-overlay rule (precompile/static_overlay_rule.h,
 // the header DLSS-NR's own mask pass includes) run at display size on the game's frame, for the two HUD
-// fixes of dlssnr/design/synthesized-frame-generation.md, "The HUD: near depth and a UI layer":
+// fixes of docs/dlssnr/design/synthesized-frame-generation.md, "The HUD: near depth and a UI layer":
 // - Depth(): the depth FSR-FG is handed with [FrameGen] SynthesizedHudDepth. With inverted depth, 1.0 (the
 //   near plane) where the mask holds and 0.0 (the far plane) elsewhere, so FSR's disocclusion sees the
 //   interface in front of the scene, and the interface's own vectors win the collisions at the scatter.

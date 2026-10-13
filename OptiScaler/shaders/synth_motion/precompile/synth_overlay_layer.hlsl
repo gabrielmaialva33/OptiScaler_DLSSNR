@@ -1,7 +1,7 @@
 // Synthesized frame generation's UI layer: the frame as it will be presented, with the layer's own mask, grown
 // into a band, as alpha. FFX's frame-generation swapchain composes it over every frame it presents,
 // lerp(backbuffer, layer.rgb, layer.a): in a generated frame the pixels under the alpha are the base frame's, and in
-// a real frame lerp(x, x, a) leaves the frame as it was, whatever a is. Design: dlssnr/design/
+// a real frame lerp(x, x, a) leaves the frame as it was, whatever a is. Design: docs/dlssnr/design/
 // synthesized-frame-generation.md, "The HUD: near depth and a UI layer" and "The HUD layer's own mask: recall and a
 // margin". Class: SynthMotion::Overlay_Dx12.
 //

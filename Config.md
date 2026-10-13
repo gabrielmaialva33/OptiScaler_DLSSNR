@@ -509,7 +509,7 @@ ScanTrim=auto
 ; true or false - Default (auto) is false
 ScanMeter=auto
 
-; NVIDIA's highlight recovery, from RTX Remix (dlssnr/design/hdr-highlight-recovery.md). The model is shown
+; NVIDIA's highlight recovery, from RTX Remix (docs/dlssnr/design/hdr-highlight-recovery.md). The model is shown
 ; everything above paper white squeezed into the top of its range, so its verdict there -- above all its
 ; colour -- is made without knowing how bright the pixel really is. This blends pixels that were very
 ; bright (the brightest channel 1x to 8x paper white) and that the encode compressed hard back toward the
@@ -602,17 +602,17 @@ experimental driver path and is not evidence of equivalence with the forwarder.
 `ModelLoader` chooses which module calls the model on the D3D12 route. `forwarder` (the default)
 keeps `nvngx.dll_dlssnr.dll`. `direct` calls it from OptiScaler itself and answers the model's
 caller check through the model's own `GetModuleFileName` imports, so that route needs no helper
-DLL; native Vulkan keeps the forwarder. See `OptiScaler/dlssnr/FORWARDER_INVESTIGATION.md`. On
+DLL; native Vulkan keeps the forwarder. See `docs/history/FORWARDER_INVESTIGATION.md`. On
 NVIDIA drivers from 616.64 the driver's own NGX loader creates feature 18 itself, and model
 310.8.0.0 faults on that route; `UseProxy` takes it and is refused for that pairing. See
-`OptiScaler/dlssnr/design/ngx-driver-616.md`.
+`docs/dlssnr/design/ngx-driver-616.md`.
 
 ### Frame Generation without an upscaler
 Every other FG input needs the depth and motion vectors a game hands to its upscaler. The
 experimental `synthesized` input is for games that call no upscaler at all: it generates from
 the presented image alone. It works in D3D12 games and in D3D11 games, which OptiScaler carries
 over a D3D12 bridge, with the FSR FG output or the DLSSG output. Design and status:
-[synthesized-frame-generation.md](OptiScaler/dlssnr/design/synthesized-frame-generation.md).
+[synthesized-frame-generation.md](docs/dlssnr/design/synthesized-frame-generation.md).
 The full `[FrameGen]` section is in the distributed [OptiScaler.ini](OptiScaler.ini).
 
 ```ini
@@ -781,7 +781,7 @@ These can be changed from the in-game menu with real-time results.
 
 The FPS overlay can display source-frame cadence from a compatible external
 DLSSG provider without replacing its FG backend. See
-[External DLSSG telemetry](docs/ExternalDlssgTelemetry.md) for setup and measurement limits.
+[External DLSSG telemetry](docs/guides/ExternalDlssgTelemetry.md) for setup and measurement limits.
 
 
 

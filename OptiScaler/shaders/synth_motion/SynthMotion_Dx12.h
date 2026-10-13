@@ -4,8 +4,8 @@
 // passes that get no motion vectors from the game (DLSS-NR's present hosts, synthesized frame
 // generation). It is a port of the FidelityFX SDK's optical flow (MIT; see README.md beside this file
 // for provenance, passes and costs), followed by one pass of ours that turns its 8x8-block vectors into
-// the output contract below. Designs: dlssnr/design/synthesized-motion.md (contract, §4) and
-// dlssnr/design/synthesized-frame-generation.md (why this kernel).
+// the output contract below. Designs: docs/dlssnr/design/synthesized-motion.md (contract, §4) and
+// docs/dlssnr/design/synthesized-frame-generation.md (why this kernel).
 //
 // Outside the DLSS-NR module on purpose: frame generation uses it too, and the module has to stay
 // removable as one block.

@@ -38,7 +38,7 @@ repo), which adds Linux/Proton overlay patches on top.
 - Commit subjects use prefixes seen in history: `DLSS-NR:` for the module, `linux:` for Proton
   patches, `ci:` for workflows.
 - **Do not push. But do not believe the tree is private either.** Never run `git push` unless the
-  user asks for that specific ref (`dlssnr/design/DEVELOPMENT.md` invariant 9). That rule governs
+  user asks for that specific ref (`docs/dlssnr/design/DEVELOPMENT.md` invariant 9). That rule governs
   *your* actions and still holds.
   **What it no longer describes is the repository.** Something on this machine mirrors
   `dlss-neural-rendering` to `origin` on its own, one to six minutes after each commit — verified on
@@ -195,7 +195,7 @@ needs. `external/FidelityFX-SDK-v2` **is** checked out (`60f4ea8`, SDK 2.3.0, 24
 disabled post-build step copies the signed FidelityFX DLLs from its `Kits/FidelityFX/signedbin/`
 (`OptiScaler.vcxproj:259-262`), and its FSR3 frame-interpolation and optical-flow sources are MIT per
 its `docs/license.md` (the rest of that SDK is binary-only), which
-`dlssnr/design/synthesized-frame-generation.md` builds on. The other submodules
+`docs/dlssnr/design/synthesized-frame-generation.md` builds on. The other submodules
 (`simpleini`, `unordered_dense`, `xess`, `vulkan`, `spdlog`, `magic_enum`, `nvapi`) are initialised.
 Vendored headers the build includes directly live in `OptiScaler/include/` and `OptiScaler/library/`.
 
@@ -239,7 +239,7 @@ python3 tests/<name>/run.py         # one suite, unchanged
 Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the twenty-seven
 `nr-*` suites plus `bridge-lifetime`, `vulkan-query-readiness`, `mfg-pattern`, `fg-synth-policy` and
 `sl-log-repeat`. One of them,
-`nr-invariants`, is the `DEVELOPMENT.md` §4 mechanical guard (config round-trip for every `DlssNr`
+`nr-invariants`, is the `docs/dlssnr/design/DEVELOPMENT.md` §4 mechanical guard (config round-trip for every `DlssNr`
 key, struct equals cbuffer, precompiled headers equal the committed bytecode, retired identifiers);
 it is pure Python and the one to run after touching `Config.*`, `OptiScaler.ini` or the shader. **wine** needs the msvc-wine prefix and runs serially, because these suites contend for the
 same prefix `build-local.sh` uses: `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`
@@ -262,7 +262,7 @@ FidelityFX-SDK. Upstream's `test.yml` is **not** a test workflow despite the nam
 nightly release. Nothing runs the wine tier in CI; that stays local.
 
 In-game validation is still required (see "Test target"). For NR changes, follow the
-per-change-type review in `OptiScaler/dlssnr/design/DEVELOPMENT.md` §3 before considering a change
+per-change-type review in `docs/dlssnr/design/DEVELOPMENT.md` §3 before considering a change
 done.
 
 ## Test target
@@ -346,8 +346,8 @@ On Linux, `dxc.exe`/`fxc.exe` run under the msvc-wine prefix
 For the NR shader (`shaders/dlssnr/precompile/dlssnr.hlsl`) rebuild **both** targets: DX12 via dxc
 `cs_6_0` into `DlssNr_Shader.h` (array `DlssNr_cso`) and Vulkan via dxc `-spirv -D VK_MODE` into
 `DlssNr_Shader_Vk.h` (array `dlssnr_spv`). The committed `.cso` is a DXIL container, so
-`DEVELOPMENT.md` invariant 6 is authoritative; the fxc `cs_5_0` instruction in `dlssnr/README.md`
-is stale.
+`docs/dlssnr/design/DEVELOPMENT.md` invariant 6 is authoritative; `OptiScaler/dlssnr/README.md` carries the
+same recipe, with its old fxc `cs_5_0` instruction already corrected.
 
 ## Architecture
 
@@ -446,7 +446,7 @@ rebuild, no temporal accumulator).
   route, and it refuses the known-faulting model, the unpatched 310.8.0.0. The 310.8.2.0 build in use is
   ShortFuse's patch of it, not an NVIDIA release: no newer official model exists as of 2026-10-12, so the
   check means "not 310.8.0.0", not "a fixed NVIDIA build". The first build logs `DLSS-NR NGX:` lines with
-  the loader, its build, the route and the model. See `dlssnr/design/ngx-driver-616.md`.
+  the loader, its build, the route and the model. See `docs/dlssnr/design/ngx-driver-616.md`.
 - **The present-time pass had never shipped.** `RunPresentPass` (wrapped swapchain and FG
   present hooks) sat behind `#ifdef DLSS_NEURAL_RENDERING`, a macro no file, project or script ever
   defined, so LTCG dropped it and every string it owned from every build: `HookMethod=2` on a D3D12
@@ -474,14 +474,14 @@ rebuild, no temporal accumulator).
   inside `__try`; the first fault is recorded, every later call is refused (release included -- the
   model can be left holding its lock), and the host switches NR off for the session with
   `DLSS-NR: the model faulted inside its own code ... (exception 0x... at module+0x...)` in the log.
-- **Invariants** (`dlssnr/design/DEVELOPMENT.md` §1, enforced by review): default-identical when off;
+- **Invariants** (`docs/dlssnr/design/DEVELOPMENT.md` §1, enforced by review): default-identical when off;
   no control shown for a thing that does not exist; one quantity, one control; four-point config
   round-trip; `DlssNrConstants` (C++) and the `Params` cbuffer (HLSL) are one ordered scalar list,
   append-only at the end in both; both shader targets rebuilt; `gPassthrough` gate everywhere the
   encode is reproduced; Vulkan resources drained before free and abandoned (never destroyed) when
   their device is gone.
-- **Design-doc-first.** New NR behaviour gets a design note in `dlssnr/design/` before code
-  (`frame-hold.md`, `multi-point-anchoring.md` are the pattern). `FORWARDER_INVESTIGATION.md` is the
+- **Design-doc-first.** New NR behaviour gets a design note in `docs/dlssnr/design/` before code
+  (`frame-hold.md`, `multi-point-anchoring.md` are the pattern). `docs/history/FORWARDER_INVESTIGATION.md` is the
   evidence log for the attempt to drop the forwarder via the driver core (`DlssNr_Proxy`).
 - The colour composition is RenoDX's design (clshortfuse); `Licenses/RenoDX_ATTRIBUTION.txt` must
   ship with any distributed build.
@@ -491,3 +491,10 @@ rebuild, no temporal accumulator).
 `Config.md` (every INI key), `Spoofing.md`, `Issues.md`, `Changelog.md` (upstream OptiScaler
 releases), `setup_linux.sh` / `setup_windows.bat` (end-user install: pick the proxy DLL name, spoofing
 choices).
+
+## Documentation
+
+`docs/README.md` indexes everything this fork owns: NR design notes (`docs/dlssnr/design/`, topic index in
+`docs/dlssnr/README.md`), Linux/Proton notes, user guides and history. Upstream's own docs stay at the root.
+Code-adjacent READMEs (`OptiScaler/dlssnr/`, `OptiScaler/shaders/synth_motion/`) and `tests/` READMEs stay
+beside what they describe.

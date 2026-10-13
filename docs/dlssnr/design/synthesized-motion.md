@@ -77,7 +77,7 @@ precompiled header, and are not referenced by any existing source. Written again
 
 Read first: [nr-without-game-dlss.md](nr-without-game-dlss.md) (why guides are a quality axis, not a
 gate, and the reference precedents), the "Zero guidance, colour and history" section of
-[nr-dx11-bridge-host.md](nr-dx11-bridge-host.md), and [DlssNr_ZeroGuides.h](../DlssNr_ZeroGuides.h)
+[nr-dx11-bridge-host.md](nr-dx11-bridge-host.md), and [DlssNr_ZeroGuides.h](../../../OptiScaler/dlssnr/DlssNr_ZeroGuides.h)
 (the resource this replaces, and the contract it already meets). This note is the third step those two
 defer: real motion, reconstructed from consecutive frames, with no game engine buffers.
 
@@ -552,7 +552,7 @@ table, the same format and access FidelityFX's search already uses there).
 
 The present-time host feeds the model `DlssNr::ZeroGuides` — one `R32_FLOAT` depth and one
 `R16G16_FLOAT` motion field, cleared to zero once and never rewritten
-([DlssNr_ZeroGuides.h:9-26](../DlssNr_ZeroGuides.h)). Two facts, both measured this session, bound the
+([DlssNr_ZeroGuides.h:9-26](../../../OptiScaler/dlssnr/DlssNr_ZeroGuides.h)). Two facts, both measured this session, bound the
 work:
 
 - **At WorkingScale 1.0 the zero field is fine.** Divinity: Original Sin 2 and The Witcher 3 (DX11,
@@ -593,9 +593,9 @@ synthesized field is a drop-in **iff** it presents the same four things the zero
 
 | Property | Value | Why |
 |---|---|---|
-| Format | `DXGI_FORMAT_R16G16_FLOAT` | What the pass, the model, and every precedent expect (Magpie [extracted_pipeline_notes.md:149](../../../tmp/DLSS5VKLayer/extracted_pipeline_notes.md); bridge `synth.inc:700-712` calls it "what both shipped motion estimation shaders declare") |
+| Format | `DXGI_FORMAT_R16G16_FLOAT` | What the pass, the model, and every precedent expect (Magpie `extracted_pipeline_notes.md:149` (a local extraction of the DLSS5VKLayer sources, not kept in the repo); bridge `synth.inc:700-712` calls it "what both shipped motion estimation shaders declare") |
 | Extent | working resolution, same as `ZeroGuides.Motion()` (full source extent × WorkingScale) | Keeps `MotionVectorsLowResolution=false`, `mvToWork=1`, subrect = full extent — no new subrect maths in the pass |
-| Units | current-to-previous displacement, in **working-resolution pixels** | Same convention Magpie binds (`MVecScale=1`, "MVs are in source pixels, current→previous", [extracted_pipeline_notes.md:130](../../../tmp/DLSS5VKLayer/extracted_pipeline_notes.md)) and NeuralScreen produces ("NGX consumes current-to-previous motion in pixel units", `guides.py:314`) |
+| Units | current-to-previous displacement, in **working-resolution pixels** | Same convention Magpie binds (`MVecScale=1`, "MVs are in source pixels, current→previous", `extracted_pipeline_notes.md:130` (a local extraction of the DLSS5VKLayer sources, not kept in the repo)) and NeuralScreen produces ("NGX consumes current-to-previous motion in pixel units", `guides.py:314`) |
 | Rest state | wherever `GuideRestState(true)` says (today `DepthResourceBarrier`/`MVResourceBarrier` out of config) | The pass transitions the guide *from* the state the caller left it in; the producer must leave it there, exactly as `ZeroGuides::RecordClear`'s `restState` does |
 
 Because the field is full-resolution and in working-res pixels, the integration sets **`MvScaleX = 1.0`,

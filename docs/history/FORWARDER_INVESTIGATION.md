@@ -1,5 +1,7 @@
 # Removing the forwarder — evidence log
 
+> Superseded in part by [`ngx-driver-616.md`](../dlssnr/design/ngx-driver-616.md), which revises the conclusion about driver loaders that route feature 18 themselves.
+
 The forwarder (`nvngx.dll_dlssnr.dll`) exists only to satisfy the snippet's caller check: the model
 resolves its caller's module via `RtlPcToFileHeader` and rejects anything whose path does not contain
 `nvngx.dll`, with `FAIL_PlatformError`, before looking at a single argument. Naming the shim
@@ -166,7 +168,7 @@ model itself (NIGos/dlss5-bridge, MIT). This workstation's wine loader has been 
 So the premise this document opened with, "let the core call the snippet", is live again. It has one
 known failure: model 310.8.0.0 on that route faults inside D3D12. `UseProxy` now refuses exactly that
 pairing before it creates anything, and allows 310.8.2.0 through. The details, the exposure of each
-route and the checks are in `design/ngx-driver-616.md`.
+route and the checks are in `../dlssnr/design/ngx-driver-616.md`.
 
 ## How to reproduce
 Set `[DlssNr] UseProxy=true`. The path is off by default and does not fall back automatically, so a

@@ -1,5 +1,5 @@
 // ===========================================================================================
-// UNBUILT SKELETON. Design: OptiScaler/dlssnr/design/synthesized-motion.md.
+// UNBUILT SKELETON. Design: docs/dlssnr/design/synthesized-motion.md.
 //
 // This file is NOT in OptiScaler.vcxproj and is compiled by nothing. Every method body is a
 // TODO(skeleton) stub that fails closed -- the class never claims a field it did not produce, so

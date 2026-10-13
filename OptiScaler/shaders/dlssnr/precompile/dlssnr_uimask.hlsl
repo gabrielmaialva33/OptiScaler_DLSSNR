@@ -1,6 +1,6 @@
 // The static-overlay mask for DLSS-NR's UI correction: a pixel that stays the same while the scene around
 // it moves is interface, and the model is told to leave it alone (DLSSNR.UIAlpha, with UICorrection on and
-// the model's own input as DLSSNR.Backbuffer). dlssnr/design/hud-protection.md is the reasoning; the idea is
+// the model's own input as DLSSNR.Backbuffer). docs/dlssnr/design/hud-protection.md is the reasoning; the idea is
 // afmf-linux's (MIT) static-overlay test, the gates and hysteresis are ours. The per-pixel rule lives in
 // shaders/synth_motion/precompile/static_overlay_rule.h, shared with synthesized frame generation's HUD mask
 // and the host test tests/nr-uimask-rule; it moved there from this directory unchanged, and this shader's

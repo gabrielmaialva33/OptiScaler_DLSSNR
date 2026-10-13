@@ -27,7 +27,7 @@ pass's own normalised frame (the frame over its white point), and what the
 model was shown is the pass's own encode curve (soft knee, Neutwo or Hybrid)
 reproduced per pixel. The composition the mask is applied over is described in
 OptiScaler/dlssnr/README.md and is not derived from Remix. The analysis is in
-OptiScaler/dlssnr/design/hdr-highlight-recovery.md.
+docs/dlssnr/design/hdr-highlight-recovery.md.
 
 No Remix source file is redistributed.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Model cadence (dlssnr/design/model-cadence.md): the production scheduler and the production per-pixel rules,
+"""Model cadence (docs/dlssnr/design/model-cadence.md): the production scheduler and the production per-pixel rules,
 compiled under ASan/UBSan, plus source guards on the pass that runs them. No GPU, no NGX, no shader compile."""
 from pathlib import Path
 import re

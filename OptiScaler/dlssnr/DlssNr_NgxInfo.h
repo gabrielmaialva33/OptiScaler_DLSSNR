@@ -14,7 +14,7 @@ namespace DlssNr::NgxInfo
 // creates feature 18: the driver's own NGX loader (_nvngx.dll) now routes it into nvngx_dlssnr.dll,
 // and model 310.8.0.0 faults inside D3D12 on that route. Until then nothing in OptiScaler.log said
 // which driver, which loader or which model a report came from -- Rafael's driver version is in
-// none of this repository's logs. See dlssnr/design/ngx-driver-616.md.
+// none of this repository's logs. See docs/dlssnr/design/ngx-driver-616.md.
 struct Snapshot
 {
     std::filesystem::path loaderPath; // the _nvngx.dll the NGX proxy loaded; empty if none

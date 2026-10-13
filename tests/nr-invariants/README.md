@@ -3,7 +3,7 @@
 Run `python3 tests/nr-invariants/run.py`. Pure Python: no compiler and no Wine prefix, so it is safe
 beside a running build.
 
-These are the mechanical guards `OptiScaler/dlssnr/design/DEVELOPMENT.md` §4 asks for, run against
+These are the mechanical guards `docs/dlssnr/design/DEVELOPMENT.md` §4 asks for, run against
 the live tree rather than pinned to a baseline:
 
 1. **Config round-trip (rule 4).** Every `CustomOptional` `DlssNr*` member in `Config.h` is read from

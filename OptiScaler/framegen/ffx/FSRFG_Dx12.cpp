@@ -411,7 +411,7 @@ bool FSRFG_Dx12::Dispatch()
     // The synthesized input's HUD layer ([FrameGen] SynthesizedHudLayer, inputs/FG/Synth_Inputs.cpp) is FFX's own
     // UI resource: its swapchain composes it over every frame it presents. Double buffered, so FFX copies it at
     // its Present and the next base frame may overwrite ours. Every other input keeps the empty registration.
-    // dlssnr/design/synthesized-frame-generation.md, "The HUD: near depth and a UI layer".
+    // docs/dlssnr/design/synthesized-frame-generation.md, "The HUD: near depth and a UI layer".
     if (state.activeFgInput == FGInput::Synthesized)
     {
         auto ui = GetResource(FG_ResourceType::UIColor, fIndex);
