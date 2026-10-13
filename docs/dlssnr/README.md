@@ -67,7 +67,7 @@ Related, outside that sequence:
 
 - [nr-before-upscale.md](design/nr-before-upscale.md): optional NR before the upscaler (Stage=1).
 - [nr-menu-mode.md](design/nr-menu-mode.md): keeping NR running while the upscaler is idle in menus.
-- [present-real-guides.md](design/present-real-guides.md): checking that the guides the present pass reuses belong to the frame being presented (design).
+- [present-real-guides.md](design/present-real-guides.md): checking that the guides the present pass reuses belong to the frame being presented (design; step 0, log only, built).
 - [dx11-native-dlss-guides.md](design/dx11-native-dlss-guides.md): NR for D3D11 games that call DLSS themselves, through `dlss_12` first (design).
 - [pr-improvements.md](design/pr-improvements.md): review of state, exposure, multipass and localization work taken from open PRs.
 
