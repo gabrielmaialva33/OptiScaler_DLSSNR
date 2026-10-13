@@ -9,6 +9,8 @@
 #include "DlssNr_DetailStats.h"
 #include "DlssNr_PresentColour.h"
 #include <memory>
+#include <cstdint>
+#include <string>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <shaders/synth_motion/SynthMotion_Handoff.h>
@@ -459,6 +461,28 @@ PulseStatus GetPulseStatus();
 // The pair is a control: same frames, same run, one variable.
 void RequestCapture(unsigned int frames);
 bool CaptureInProgress();
+
+// The comparison capture (docs/dlssnr/design/comparison-capture.md): the frame the pass read and the frame it
+// wrote, as two image files of the same frame with a provenance record, in retoque-captures beside OptiScaler.
+// D3D12 only. The menu button and the trigger file ask; the next frame the pass writes is the one captured.
+namespace PairCapture
+{
+enum class Phase : uint32_t; // DlssNr_PairCapture.h
+}
+
+struct PairCaptureStatus
+{
+    PairCapture::Phase phase {};
+    bool directoryFailed = false; // the folder could not be created; the capture is off for the session
+    bool gaveUp = false;          // a recording never completed; the capture is off for the session
+    bool ok = false;              // the last capture wrote its files
+    const char* reason = nullptr; // why the last one did not, a literal; null before the first
+    std::string lastStem;         // the last capture's file stem; never a path
+};
+
+// False when a capture is already under way: a second press is ignored.
+bool RequestPairCapture();
+PairCaptureStatus GetPairCaptureStatus();
 
 // The present hook. Runs the pass on the swapchain backbuffer at present time: the frame the game
 // finished, tone-mapped and display-referred. The temporal inputs are the depth and motion the game's

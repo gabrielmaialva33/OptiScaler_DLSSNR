@@ -466,3 +466,23 @@ this GPU cannot read this swapchain's format in a shader or store to it from one
 the HDR conversion's textures could not be created; the frame is shown as the game rendered it	as texturas da conversão HDR não puderam ser criadas; o quadro é mostrado como o jogo o renderizou
 the HDR conversion was built for another D3D12 device; the frame is shown as the game rendered it	a conversão HDR foi criada para outro dispositivo D3D12; o quadro é mostrado como o jogo o renderizou
 the backbuffer's format is not the swapchain's, so the HDR conversion does not trust its colour space; the frame is shown as the game rendered it	o formato do backbuffer não é o do swapchain, então a conversão HDR não confia no seu espaço de cor; o quadro é mostrado como o jogo o renderizou
+# 2026-10-13: the comparison capture (docs/dlssnr/design/comparison-capture.md): the button, its help and its states.
+Capture original and processed	Capturar original e processado
+Saves the next frame twice, as the pass read it and as the pass wrote it, into the\nretoque-captures folder beside OptiScaler. Each file carries a record of the build, the route,\nthe model and every setting that shapes the picture, and a .json beside them says the same.\n\nA display-referred frame is saved as PNG, a linear HDR frame as PFM (32-bit float). On the\npresent routes it is the finished frame before the menu is drawn; after the upscaler it is the\nupscaler's output, before the game's own tonemapper, post-processing and interface.\n\nThe newest 64 pairs are kept. Dropping a file named dlssnr-capture.trigger beside OptiScaler\nasks for the same capture from outside the game.	Salva o próximo quadro duas vezes, como o passe o leu e como o passe o escreveu, na\npasta retoque-captures ao lado do OptiScaler. Cada arquivo leva um registro da build, da rota,\ndo modelo e de cada configuração que molda a imagem, e um .json ao lado diz o mesmo.\n\nUm quadro já pronto para a tela é salvo como PNG; um quadro HDR linear, como PFM (float de 32 bits). Nas\nrotas de present é o quadro final, antes de o menu ser desenhado; depois do upscaler é a saída\ndo upscaler, antes do tone mapping, do pós-processamento e da interface do próprio jogo.\n\nOs 64 pares mais recentes são mantidos. Um arquivo chamado dlssnr-capture.trigger ao lado do OptiScaler\npede a mesma captura de fora do jogo.
+Saved %s (the pair and its .json)	Salvo %s (o par e seu .json)
+Turn off Compare to capture the result.	Desligue Comparar para capturar o resultado.
+Turn off the debug view to capture the result.	Desligue a visualização de depuração para capturar o resultado.
+Not with the driver proxy: it returns before the pass writes the frame.	Não com o proxy do driver: ele retorna antes de o passe escrever o quadro.
+Not on this route yet: the capture is D3D12 only.	Ainda não nesta rota: a captura é só para D3D12.
+The capture folder could not be created (see the log).	Não foi possível criar a pasta de capturas (veja o log).
+No frame reached the pass in time; nothing was captured.	Nenhum quadro chegou ao passe a tempo; nada foi capturado.
+Earlier captures are still held for the GPU; try again shortly.	Capturas anteriores ainda estão retidas para a GPU; tente de novo em instantes.
+The readback buffers could not be created.	Não foi possível criar os buffers de leitura.
+The GPU never confirmed the copies; nothing was written, and the capture is off for this session.	A GPU nunca confirmou as cópias; nada foi gravado, e a captura fica desligada nesta sessão.
+The writer could not be started.	Não foi possível iniciar a gravação.
+The files could not be written (see the log).	Não foi possível gravar os arquivos (veja o log).
+This frame's format is not one the capture can write yet.	A captura ainda não sabe gravar o formato deste quadro.
+The two surfaces differ in shape; nothing was captured.	As duas superfícies têm formatos diferentes; nada foi capturado.
+Waiting for the next frame the pass writes...	Aguardando o próximo quadro que o passe escrever...
+Waiting for the GPU to finish the copies...	Aguardando a GPU terminar as cópias...
+Writing the files...	Gravando os arquivos...

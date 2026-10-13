@@ -16,6 +16,8 @@
 #include <windows.h>
 #include <d3d12.h>
 
+#include "DlssNr_Readback.h"
+
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -26,13 +28,6 @@ namespace capture
 // Bounded on purpose: this writes hundreds of megabytes and must not be able to fill a drive. Each run
 // overwrites the last.
 constexpr unsigned int kMaxFrames = 8;
-
-struct Shot
-{
-    ID3D12Resource* readback = nullptr;
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout = {};
-    unsigned long long bytes = 0;
-};
 
 // Captures a run of consecutive frames of two images at once.
 class FrameCapture
@@ -85,8 +80,8 @@ class FrameCapture
             return;
         }
 
-        copy(cmd, before, beforeState, beforeShots_[captured_]);
-        copy(cmd, after, afterState, afterShots_[captured_]);
+        CopyToReadback(cmd, before, beforeState, beforeShots_[captured_]);
+        CopyToReadback(cmd, after, afterState, afterShots_[captured_]);
         ++captured_;
 
         if (captured_ >= wanted_)
@@ -161,100 +156,12 @@ class FrameCapture
 
         for (unsigned int i = 0; i < wanted_; ++i)
         {
-            if (!alloc(device, beforeDesc_, beforeShots_[i]) || !alloc(device, afterDesc_, afterShots_[i]))
+            if (!AllocReadback(device, beforeDesc_, beforeShots_[i]) ||
+                !AllocReadback(device, afterDesc_, afterShots_[i]))
                 return false;
         }
 
         return true;
-    }
-
-    // A copy needs a fully typed format, and the buffer the upscaler writes is occasionally declared
-    // typeless. A placed footprint carrying a typeless format makes CopyTextureRegion invalid, and an
-    // invalid copy removes the device -- which is what capturing did: it crashed the game every time
-    // the output happened to be one of these.
-    static DXGI_FORMAT TypedForCopy(DXGI_FORMAT f)
-    {
-        switch (f)
-        {
-        case DXGI_FORMAT_R16G16B16A16_TYPELESS:
-            return DXGI_FORMAT_R16G16B16A16_FLOAT;
-        case DXGI_FORMAT_R32G32B32A32_TYPELESS:
-            return DXGI_FORMAT_R32G32B32A32_FLOAT;
-        case DXGI_FORMAT_R10G10B10A2_TYPELESS:
-            return DXGI_FORMAT_R10G10B10A2_UNORM;
-        case DXGI_FORMAT_R8G8B8A8_TYPELESS:
-            return DXGI_FORMAT_R8G8B8A8_UNORM;
-        case DXGI_FORMAT_B8G8R8A8_TYPELESS:
-            return DXGI_FORMAT_B8G8R8A8_UNORM;
-        default:
-            return f;
-        }
-    }
-
-    static bool alloc(ID3D12Device* device, const D3D12_RESOURCE_DESC& desc, Shot& shot)
-    {
-        D3D12_RESOURCE_DESC typed = desc;
-        typed.Format = TypedForCopy(desc.Format);
-
-        unsigned long long total = 0;
-        device->GetCopyableFootprints(&typed, 0, 1, 0, &shot.layout, nullptr, nullptr, &total);
-        shot.bytes = total;
-
-        if (total == 0)
-            return false;
-
-        D3D12_HEAP_PROPERTIES heap = {};
-        heap.Type = D3D12_HEAP_TYPE_READBACK;
-
-        D3D12_RESOURCE_DESC buf = {};
-        buf.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        buf.Width = total;
-        buf.Height = 1;
-        buf.DepthOrArraySize = 1;
-        buf.MipLevels = 1;
-        buf.Format = DXGI_FORMAT_UNKNOWN;
-        buf.SampleDesc.Count = 1;
-        buf.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-        return SUCCEEDED(device->CreateCommittedResource(
-            &heap, D3D12_HEAP_FLAG_NONE, &buf, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&shot.readback)));
-    }
-
-    static void copy(ID3D12GraphicsCommandList* cmd, ID3D12Resource* src, D3D12_RESOURCE_STATES state, Shot& shot)
-    {
-        if (shot.readback == nullptr)
-            return;
-
-        D3D12_RESOURCE_BARRIER b = {};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = src;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = state;
-        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-
-        const bool needsTransition = state != D3D12_RESOURCE_STATE_COPY_SOURCE;
-
-        if (needsTransition)
-            cmd->ResourceBarrier(1, &b);
-
-        D3D12_TEXTURE_COPY_LOCATION dst = {};
-        dst.pResource = shot.readback;
-        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        dst.PlacedFootprint = shot.layout;
-
-        D3D12_TEXTURE_COPY_LOCATION source = {};
-        source.pResource = src;
-        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        source.SubresourceIndex = 0;
-
-        cmd->CopyTextureRegion(&dst, 0, 0, 0, &source, nullptr);
-
-        if (needsTransition)
-        {
-            b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-            b.Transition.StateAfter = state;
-            cmd->ResourceBarrier(1, &b);
-        }
     }
 
     // Mean byte value across the image, sampled sparsely. Correct for 8-bit and 10-bit surfaces;

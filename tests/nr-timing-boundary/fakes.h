@@ -16,7 +16,7 @@ template<class T> struct Option {
 struct TimingSettings { bool Enabled=false; uint32_t Interval=30; };
 struct Config {
     Option<bool> DlssNrEnabled{true}, DlssNrApplyModel{true}, DlssNrHoldFrame, DlssNrScanInverted, DlssNrCompareSwap,
-                 DlssNrScanExposure, DlssNrAutoCapture, DlssNrUseProxy, DlssNrPeripheryCompression,
+                 DlssNrScanExposure, DlssNrUseProxy, DlssNrPeripheryCompression,
                  DlssNrHighlightRecovery;
     Option<uint32_t> DlssNrWhitePointSource, DlssNrTransfer, DlssNrReversibleMode, DlssNrDebugView,
                      DlssNrCompare, DlssNrScalingDownscaler, DlssNrPeripheryCenter{80}, DlssNrPeripheryWork{90};

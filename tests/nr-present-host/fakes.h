@@ -294,6 +294,7 @@ struct DlssNrFrameInfo
     void* ExposureTexture = nullptr;
     float PreExposure = 1.0f;
     bool PresentSource = false;
+    bool BridgeHost = false;
     bool ExtentIsStable = false;
     bool AllowSupersampling = true;
     int OutputState = 0;

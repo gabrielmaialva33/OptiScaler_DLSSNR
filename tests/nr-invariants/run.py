@@ -296,6 +296,10 @@ RETIRED = [
     # Folded into HookMethod=2 by e7ca0209; a saved ini that still has it must stay inert.
     (re.compile(r'"DlssNr",\s*"Dx11BridgeHost"'), [root / 'OptiScaler/Config.cpp'],
      'the Dx11BridgeHost key being read or saved'),
+    # On by default, read and saved, documented as writing a session's frames unprompted, and wired to nothing
+    # (comparison-capture.md, section 4.9). Removed on 2026-10-13; a saved ini that still has it stays inert.
+    (re.compile(r'"DlssNr",\s*"AutoCapture"|\bDlssNrAutoCapture\b|\bkAutoCaptureAfterFrames\b|\bg_autoCaptureDone\b'),
+     sources, 'the retired AutoCapture setting'),
 ]
 
 for pattern, files, what in RETIRED:
@@ -305,6 +309,11 @@ for pattern, files, what in RETIRED:
         if match:
             line = text.count('\n', 0, match.start()) + 1
             fail(f'{path.relative_to(root)}:{line}: {what} is back')
+
+# The shipped ini keeps no retired key, so a fresh install does not carry a setting that does nothing.
+for key in ('AutoCapture', 'Dx11BridgeHost'):
+    if re.search(r'^' + key + r'=', section, re.M):
+        fail(f'OptiScaler.ini still ships the retired [DlssNr] key {key}')
 
 # The model's vocabulary has no GlobalToneStrength; writing it filled a map nothing reads.
 if re.search(r'set\w*\([^;]*"DLSSNR\.GlobalToneStrength"', forwarder):

@@ -61,7 +61,10 @@ experiment.
 | `DlssNr.h` | umbrella header; documents the call sites |
 | `DlssNrFeature_Dx12.h` | the namespace-level API the menu and the call sites use |
 | `DlssNr_Menu.cpp` | the settings panel |
-| `DlssNr_Capture.h` | matched before/after frame dumps |
+| `DlssNr_Capture.h` | the raw burst: eight consecutive before/after frames as raw bytes, for temporal work |
+| `DlssNr_Readback.h` | the texture-to-readback copies both captures use: typed footprint, readback heap, states |
+| `DlssNr_PairCapture.h/.cpp`, `DlssNr_PairCaptureDx12.h` | the comparison capture: one frame as read and as written, copied on the pass's list, read back once the GPU is proven past the copies, written by a thread of its own into `retoque-captures/` with a provenance record; the pure half (state machine, names, cap, record, the menu button) is the header; `../../docs/dlssnr/design/comparison-capture.md`, tested by `tests/nr-capture` |
+| `DlssNr_ImageFile.h` | the capture's PNG (stored deflate, tEXt) and PFM writers and the row conversions; no WIC, no zlib |
 | `DlssNr_WorkingScale.h/.cpp` | what `WorkingScale=auto` resolves to on the GPU the pass runs on; `../../docs/dlssnr/design/working-scale-auto.md` |
 | `DlssNr_Proxy.h/.cpp` | the experiment in reaching the model through the driver core instead of the forwarder; see `../../docs/history/FORWARDER_INVESTIGATION.md` |
 | `forwarder/` | the caller-gate shim, built by `dlssnr_forwarder.vcxproj` into the release layout |

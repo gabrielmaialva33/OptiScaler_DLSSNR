@@ -250,17 +250,17 @@ before committing C++, because nothing local enforces it and it had drifted by 5
 
 ### Tests
 
-`tests/README.md` is the index; read it before adding or changing a suite. Forty-three directories under
+`tests/README.md` is the index; read it before adding or changing a suite. Forty-four directories under
 `tests/`, each self-contained with its own `run.py` and README, registered in `tests/suites.toml`.
 
 ```bash
-python3 tests/run_all.py            # host tier, the default; 39 suites, ~60 s
+python3 tests/run_all.py            # host tier, the default; 40 suites, ~60 s
 python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
 python3 tests/run_all.py --tier all # adds the four wine suites
 python3 tests/<name>/run.py         # one suite, unchanged
 ```
 
-Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the thirty-three
+Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the thirty-four
 `nr-*` suites plus `bridge-lifetime`, `vulkan-query-readiness`, `mfg-pattern`, `fg-synth-policy`,
 `sl-log-repeat` and `repo-privacy` (no home path, LAN/tailnet address or token in a tracked file; the
 tree is public). One of them,
