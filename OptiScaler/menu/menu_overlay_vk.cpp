@@ -31,6 +31,10 @@ static std::mutex _vkPresentMutex;
 
 // imgui stuff
 struct ImGui_ImplVulkan_InitInfo _ImVulkan_Info = {};
+// The queue and family ImGui_ImplVulkan_Init was given. ImGui keeps its own copy of the init info, so moving
+// _ImVulkan_Info to another family does not move ImGui's texture-upload pool with it.
+static VkQueue _imguiInitQueue = VK_NULL_HANDLE;
+static uint32_t _imguiQueueFamily = UINT32_MAX;
 struct ImGui_ImplVulkanH_Frame* _ImVulkan_Frames = VK_NULL_HANDLE;
 static VkSemaphore* _ImVulkan_Semaphores = VK_NULL_HANDLE;
 static VkRenderPass _vkRenderPass = VK_NULL_HANDLE;
@@ -303,7 +307,7 @@ static bool RebuildCommandPoolsForFamily(uint32_t family)
     return true;
 }
 
-void MenuOverlayVk::NoteDeviceQueues(VkDevice device, const VkDeviceCreateInfo* pCreateInfo)
+void MenuOverlayVk::DeviceCreated(VkDevice device, const VkDeviceCreateInfo* pCreateInfo)
 {
     if (device == VK_NULL_HANDLE || pCreateInfo == nullptr || pCreateInfo->pQueueCreateInfos == nullptr)
         return;
@@ -837,6 +841,8 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         _ImVulkan_Info.CheckVkResultFn = CheckVkResult;
 
         bool initResult = ImGui_ImplVulkan_Init(&_ImVulkan_Info);
+        _imguiInitQueue = queue;
+        _imguiQueueFamily = queueFamily;
         _vulkanBackendInited = ImGui::GetIO().BackendRendererUserData != nullptr;
         LOG_DEBUG("ImGui_ImplVulkan_Init result: {}", initResult);
 
@@ -1061,9 +1067,6 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
 
     ImGui_ImplVulkan_NewFrame();
 
-    if (State::Instance().delayMenuRenderBy > 0)
-        State::Instance().delayMenuRenderBy--;
-
     // Menu background blur (upstream f72e47b9). Its images are created once the menu is first opened,
     // and the menu decides whether a frame uses them.
     //
@@ -1100,12 +1103,6 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
 
     // From here on RenderMenu has produced a frame, and ImGui::Render must be called exactly once on
     // every path out of this function.
-    if (State::Instance().delayMenuRenderBy != 0)
-    {
-        ImGui::Render();
-        return true;
-    }
-
     const uint32_t idx = pPresentInfo->pImageIndices[0];
 
     if (idx >= _scImageCount)
@@ -1186,6 +1183,13 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
             LOG_WARN("overlay now records on queue family {0}", presentFamily);
         }
     }
+
+    // ImGui uploads its textures itself, on the queue it holds and from a pool of the family it was
+    // initialised with. With DLSS-G the present comes from Streamline's thread while the game's queue
+    // can be waiting on that thread, so an upload on the queue ImGui was initialised with can deadlock;
+    // the presenting queue cannot. It is only usable when it is of ImGui's family (upstream 01195e9b,
+    // 70f9939f); otherwise ImGui keeps the queue it was initialised with.
+    ImGui_ImplVulkan_SetQueue(presentFamily == _imguiQueueFamily ? queue : _imguiInitQueue);
 
     // The overlay takes over whatever the present was going to wait on, and the present waits on the
     // overlay instead, so every semaphore keeps exactly one signal and one wait. pWaitDstStageMask

@@ -1847,7 +1847,7 @@ void MenuCommon::HandleMenuShortcuts(RenderMenuContext& ctx)
             inputFG = false;
 
             if (state.activeFgInput != FGInput::NoFG && state.activeFgOutput != FGOutput::NoFG &&
-                (state.currentFGSwapchain != nullptr || state.activeFgInput == FGInput::NvngxFG))
+                (state.FGSwapchainExists() || state.activeFgInput == FGInput::NvngxFG))
             {
                 if (fgHotkeyLeftDefault)
                 {
@@ -3571,6 +3571,8 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
     }
 }
 
+static void DrawSliderStepMarks(const ImVec2& framePos, float frameWidth, float frameHeight, int stepCount);
+
 // Slider for overriding the game's FG ratio: Off, Default (no override), 2X, 3X... up to maxInterpolationCount
 static bool RenderRatioOverrideSlider(const char* label, CustomOptional<int, NoDefault>& setting,
                                       int maxInterpolationCount)
@@ -3582,7 +3584,13 @@ static bool RenderRatioOverrideSlider(const char* label, CustomOptional<int, NoD
 
     const std::string preview = index == 0 ? "Off" : index == 1 ? "Default" : std::format("{}X", index);
 
-    if (!ImGui::SliderInt(label, &index, 0, maxInterpolationCount + 1, preview.c_str(), ImGuiSliderFlags_NoInput))
+    const ImVec2 sliderPos = ImGui::GetCursorScreenPos();
+    const float sliderWidth = ImGui::CalcItemWidth();
+    const float sliderHeight = ImGui::GetFrameHeight();
+    const bool changed =
+        ImGui::SliderInt(label, &index, 0, maxInterpolationCount + 1, preview.c_str(), ImGuiSliderFlags_NoInput);
+    DrawSliderStepMarks(sliderPos, sliderWidth, sliderHeight, maxInterpolationCount + 2);
+    if (!changed)
         return false;
 
     if (index == 1)
@@ -3712,10 +3720,6 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         state.swapchainApi == API::DX11 &&
         (streamlineVersion == feature_version { 0, 0, 0 } || streamlineVersion > feature_version { 2, 0, 1 });
     inputOptions[nvngxInputIndex].set_disabled(nukemsUnsupportedApi, "Unsupported API");
-
-    // FSR FG output requirements
-    auto constexpr fsrfgOutputIndex = (uint32_t) FGOutput::FSRFG;
-    outputOptions[fsrfgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
 
     // XeFG output requirements
     auto constexpr xefgOutputIndex = (uint32_t) FGOutput::XeFG;
@@ -4045,7 +4049,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             ImGui::EndDisabled();
         }
 
-        auto fgOutput = reinterpret_cast<IFGFeature_Dx12*>(state.currentFG);
+        auto fgOutput = state.CurrentFG();
         if ((state.activeFgOutput != FGOutput::Reprojection && state.activeFgOutput != FGOutput::NoFG &&
              state.activeFgInput != FGInput::NoFG && state.activeFgInput != FGInput::NvngxFG) &&
             fgOutput)
@@ -4097,7 +4101,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
                 if (showOutputSpecificFGSettings)
                 {
-                    auto fgOutput = reinterpret_cast<IFGFeature_Dx12*>(state.currentFG);
+                    auto fgOutput = state.CurrentFG();
                     if (fgOutput)
                     {
                         ImGui::BeginDisabled(!fgOutput->IsActive());
@@ -4236,6 +4240,28 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     }
 }
 
+// Draws a line wherever an integer slider switches to the next step, so it's visible where to click
+static void DrawSliderStepMarks(const ImVec2& framePos, float frameWidth, float frameHeight, int stepCount)
+{
+    if (stepCount < 2)
+        return;
+    constexpr float grabPadding = 2.0f; // Hardcoded in ImGui as well
+    const float sliderSize = frameWidth - grabPadding * 2.0f;
+    const float grabSize =
+        std::min(std::max(sliderSize / (float) stepCount, ImGui::GetStyle().GrabMinSize), sliderSize);
+    const float firstGrabCenter = framePos.x + grabPadding + grabSize * 0.5f;
+    const float grabTravel = (sliderSize - grabSize) / (float) (stepCount - 1);
+    const float inset = frameHeight * 0.2f;
+    const ImU32 color = ImGui::GetColorU32(ImGuiCol_Text, 0.35f);
+    auto drawList = ImGui::GetWindowDrawList();
+    for (int step = 1; step < stepCount; step++)
+    {
+        // Snapped to the pixel grid to keep the 1 px line sharp, AddLine already centers it on the pixel
+        const float x = std::floor(firstGrabCenter + grabTravel * ((float) step - 0.5f));
+        drawList->AddLine(ImVec2(x, framePos.y + inset), ImVec2(x, framePos.y + frameHeight - inset), color);
+    }
+}
+
 // Replaces the Active checkbox + MFG combo of FG outputs with a single slider
 // maxInterpolationCount of 0 means the output doesn't generate frames, "On" is shown instead of "2X"
 void MenuCommon::RenderFGModeSlider(RenderMenuContext& ctx, const char* label, int maxInterpolationCount,
@@ -4289,6 +4315,11 @@ void MenuCommon::RenderFGModeSlider(RenderMenuContext& ctx, const char* label, i
 
     ImGui::PushItemWidth(150.0f * ctx.menuResScale);
 
+    // Where the slider frame is going to be, used for the step lines
+    const ImVec2 sliderPos = ImGui::GetCursorScreenPos();
+    const float sliderWidth = ImGui::CalcItemWidth();
+    const float sliderHeight = ImGui::GetFrameHeight();
+
     if (ImGui::SliderInt(label, &index, 0, (int) modes.size() - 1, preview.c_str(), ImGuiSliderFlags_NoInput) &&
         modes[index] != current)
     {
@@ -4313,6 +4344,8 @@ void MenuCommon::RenderFGModeSlider(RenderMenuContext& ctx, const char* label, i
             state.fgChanged = true;
     }
 
+    DrawSliderStepMarks(sliderPos, sliderWidth, sliderHeight, (int) modes.size());
+
     ImGui::PopItemWidth();
 
     if (Config::FGCanFollowGame())
@@ -4335,7 +4368,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
     // FSR FG controls
     if (ScopedCard::Shows("fg_fsrfg") && state.activeFgOutput == FGOutput::FSRFG &&
-        state.activeFgInput != FGInput::NoFG && state.currentFGSwapchain != nullptr)
+        state.activeFgInput != FGInput::NoFG && state.FGSwapchainExists())
     {
         if (state.activeFgInput != FGInput::Upscaler ||
             (currentFeature != nullptr && !currentFeature->IsFrozen()) && FfxApiProxy::IsFGReady())
@@ -5313,12 +5346,6 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                     ShowTooltip("Makes a copy of the depth buffer\nCan fix broken visuals in some games on AMD "
                                 "GPUs under Windows\nCan cause stutters, so best to use only when necessary");
                 }
-            }
-            else if (state.swapchainApi == Vulkan)
-            {
-                ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
-                                   "DLSSG is purposefully disabled when this menu is visible");
-                ImGui::Spacing();
             }
         }
 

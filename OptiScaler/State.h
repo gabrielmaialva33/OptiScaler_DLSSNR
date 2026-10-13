@@ -4,7 +4,8 @@
 #include "misc/Quirks.h"
 #include "misc/SkipSpoof.h"
 #include "framegen/IFGFeature_Dx12.h"
-#include <inputs/FG/Streamline_Inputs_Dx12.h>
+#include "framegen/IFGFeature_Vk.h"
+#include <inputs/FG/Streamline_Inputs.h>
 #include <inputs/FG/Streamline_Inputs_Sl1_Dx12.h>
 
 #include <set>
@@ -197,12 +198,6 @@ class State
     bool dlssgInterpolatedOnly = false;
     uint64_t dlssgLastFrame = 0;
 
-    // Presents MenuOverlayVk must skip before it may submit again. Charged to 10 whenever DLSS-G is
-    // pushed active with the menu hidden, decremented once per present. A game that pushes DLSS-G
-    // options every frame therefore pins it non-zero and the Vulkan overlay draws nothing at all --
-    // FPS overlay and notifications included -- for as long as DLSS-G runs.
-    uint32_t delayMenuRenderBy = 0;
-
     // FSR Common
     float lastFsrCameraNear = 0.0f;
     float lastFsrCameraFar = 0.0f;
@@ -214,7 +209,7 @@ class State
     FGNvngxReplacement activeFgNvngx = FGNvngxReplacement::None;
 
     // Streamline FG inputs
-    Sl_Inputs_Dx12 slFGInputs = {};
+    Sl_Inputs slFGInputs = {};
     Sl1_Inputs_Dx12 s_sl1FGInputs {};
 
     // OptiFG
@@ -304,7 +299,7 @@ class State
     int dlssgDetectedInterpolationCount = 0;
 
     // What the game requested from DLSSG when it's used as FG Input
-    // This might need to get moved to Sl_Inputs_Dx12
+    // This might need to get moved to Sl_Inputs
     bool dlssgInputGameEnabled = false;
     int dlssgInputGameInterpolationCount = 1;
 
@@ -372,6 +367,10 @@ class State
     // MenuOverlayVk holds ImGui's renderer backend. Independent of swapchainApi, and the condition
     // MenuOverlayDx::Present stands down on: ImGui has one renderer backend at a time.
     bool menuOverlayIsVulkan = false;
+
+    // Per thread, it's only meant for the call chain of the thread creating the device
+    // and overlapping ScopedCreatingD3DDevice from different threads could leave it stuck
+    inline static thread_local bool creatingD3DDevice = false;
     VkInstance VulkanInstance = nullptr;
 
     // Framegraph
@@ -431,6 +430,7 @@ class State
 
     IFeature* currentFeature = nullptr;
     IFGFeature_Dx12* currentFG = nullptr;
+    IFGFeature_Vk* currentVkFG = nullptr;
     IDXGISwapChain* currentSwapchain = nullptr;
     IDXGISwapChain* currentWrappedSwapchain = nullptr;
     IDXGISwapChain* currentRealSwapchain = nullptr;
@@ -443,6 +443,20 @@ class State
 
     std::vector<ID3D12Device*> d3d12Devices;
     std::vector<ID3D11Device*> d3d11Devices;
+
+    // The FG output of whichever API the game uses
+    IFGFeature* CurrentFG() const
+    {
+        if (currentFG != nullptr)
+            return currentFG;
+
+        return currentVkFG;
+    }
+
+    bool FGSwapchainExists() const
+    {
+        return currentFGSwapchain != nullptr || (currentVkFG != nullptr && currentVkFG->HasSwapchain());
+    }
 
     static UINT GetOwner()
     {
@@ -628,14 +642,15 @@ class ScopedVulkanCreatingSC
 class ScopedCreatingD3DDevice
 {
   private:
-    inline static thread_local int depth = 0;
+    bool previousState;
 
   public:
-    ScopedCreatingD3DDevice() { ++depth; }
-    ~ScopedCreatingD3DDevice() { --depth; }
-
-    // This thread is inside a D3D device creation
-    static bool Active() { return depth > 0; }
+    ScopedCreatingD3DDevice()
+    {
+        previousState = State::Instance().creatingD3DDevice;
+        State::Instance().creatingD3DDevice = true;
+    }
+    ~ScopedCreatingD3DDevice() { State::Instance().creatingD3DDevice = previousState; }
 };
 
 // Resources OptiScaler's own backends create through the game's device: FFX contexts and swapchains
