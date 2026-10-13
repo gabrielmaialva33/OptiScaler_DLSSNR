@@ -9490,7 +9490,7 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
     // Main menu window
     if (windowTitle.empty())
     {
-        windowTitle = StrFmt("%s - %s %s", BuildInfo::ProductName(), state.gameExe.c_str(),
+        windowTitle = StrFmt("Retoque | %s - %s %s", BuildInfo::ProductName(), state.gameExe.c_str(),
                              state.gameName.empty() ? "" : StrFmt("- %s", state.gameName.c_str()).c_str());
     }
 
