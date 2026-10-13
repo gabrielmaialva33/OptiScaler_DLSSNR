@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Thirty-six suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
+**Host tier.** Thirty-seven suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit,
@@ -61,6 +61,10 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   nothing, one sample per present. No GPU, no shader.
 - `nr-present-sync` — what `[DlssNr] PresentSync=auto` means: the D3D12 present pass waits for its write-back
   only when frame generation could be involved (`DlssNr_PresentSync.h`). The wait itself is not exercised.
+- `nr-dx11-route` — a D3D11 game's DLSS with NR on (`docs/dlssnr/design/dx11-native-dlss-guides.md`, step 1):
+  native D3D11 DLSS, where the pass cannot run, reported once in the log and shown in the NR panel while it runs
+  (`DlssNr_Dx11Route.h`, and the production layer `DlssNr_Dx11Upscaler.h` against a Config stub); source guards on
+  the call site in `NVNGX_DLSS_Dx11.cpp` and the panel. No D3D11 device, NGX or DLSS.
 - `nr-present-guides` — selection and completion tracking for the present-time guide snapshot ring
   (`DlssNr_PresentGuideRing.h`), preventing cross-queue GPU waits and DLSS-G deadlocks.
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,

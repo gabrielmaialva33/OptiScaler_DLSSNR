@@ -9,6 +9,8 @@ Can be toggled with a key -- bind it under Keybinds, "Neural Rendering".	Pode se
 Off. The model stays loaded, so turning this back on is immediate.	Desativado. O modelo permanece carregado; reativá-lo é imediato.
 Off for this session: %s.	Desativado nesta sessão: %s.
 Waiting for the upscaler to run.	Aguardando a execução do upscaler.
+This game's DLSS runs natively on D3D11 (Dx11Upscaler dlss), inside the driver on the game's own device, where the pass cannot run after it. DLSS w/Dx12 (dlss_12) runs the same DLSS on OptiScaler's D3D12 bridge, which carries the pass: pick it under Upscalers, or set Dx11Upscaler=dlss_12.	O DLSS deste jogo roda nativamente no D3D11 (Dx11Upscaler dlss), dentro do driver, no próprio dispositivo do jogo, onde o passe não consegue rodar depois dele. DLSS w/Dx12 (dlss_12) roda o mesmo DLSS na ponte D3D12 do OptiScaler, que leva o passe: escolha-o em Upscalers ou defina Dx11Upscaler=dlss_12.
+This game's DLSS runs natively on D3D11 (Dx11Upscaler dlss), so its depth and motion never reach the pass: at present it can only run without them. DLSS w/Dx12 (dlss_12) runs the same DLSS on OptiScaler's D3D12 bridge, which hands them over: pick it under Upscalers, or set Dx11Upscaler=dlss_12.	O DLSS deste jogo roda nativamente no D3D11 (Dx11Upscaler dlss), então a profundidade e o movimento do jogo nunca chegam ao passe: no present, ele só pode rodar sem eles. DLSS w/Dx12 (dlss_12) roda o mesmo DLSS na ponte D3D12 do OptiScaler, que os entrega: escolha-o em Upscalers ou defina Dx11Upscaler=dlss_12.
 Running natively on Vulkan - %llu frames%s	Em execução nativa no Vulkan - %llu quadros%s
 Running.%s	Em execução.%s
   (model running, edit hidden)	  (modelo em execução, resultado oculto)

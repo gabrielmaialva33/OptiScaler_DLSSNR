@@ -1,8 +1,8 @@
 # Native D3D11 DLSS and Neural Rendering: getting the game's guides and image across the bridge
 
-Status: design for review, not implementation, 2026-10-13. Written against `93730d39`. Line numbers are
-into that tree. Nothing here is built, and nothing here has been run; the cost figures are arithmetic
-from stated formats, not measurements.
+Status: step 1 of the Recommendation implemented on 2026-10-13 (see "Implemented" below); the rest is design for
+review. Written against `93730d39`. Line numbers are into that tree. Nothing here has been run in a game; the cost
+figures are arithmetic from stated formats, not measurements.
 
 Read first: [nr-dx11-bridge-host.md](nr-dx11-bridge-host.md) (the swapchain bridge and its hazards),
 [nr-without-game-dlss.md](nr-without-game-dlss.md), [nr-before-upscale.md](nr-before-upscale.md) (the
@@ -235,6 +235,28 @@ A driver around the existing bridge, not a second bridge. The pieces are already
 - **Lifetime.** Shared textures are owned by the `Dx11WithDx12` cache and retired by its generation
   counter. Nothing is freed under the GPU: a cache reset waits for the bridge fence, as it does for
   the upscaler path.
+
+## Implemented
+
+**Step 1**, 2026-10-13, on `f3b42cca`. Not run in a game: the title the test plan asks for is still not in our set.
+
+- `retoque/dlssnr/DlssNr_Dx11Route.h` holds the decision (`Decide`), pure and standard library only, as planned.
+  It takes NR on/off, the route of the evaluate (native `dlss`, `dlss_12`, or anything else) and `HookMethod`, and
+  answers one of two reports: at `HookMethod` 0, 1 or any other value the pass belongs after the upscaler and
+  cannot get there; at 2 the game's depth and motion never reach the bridge's present host. GPU capability and NGX
+  are not inputs to the report: a native `dlss` feature exists only when both held. The texts name the reason, the
+  setting (`Dx11Upscaler dlss`), the menu entry (DLSS w/Dx12, under Upscalers) and `dlss_12`, and deliberately do
+  not claim the pass is or is not running, because a present host built at HookMethod 2 keeps running after the
+  key changes and the panel's own status line already says whether the pass ran.
+- `retoque/dlssnr/DlssNr_Dx11Upscaler.h`, header-only, is what the call site and the panel use.
+  `NoteDx11Evaluate(upscaler)` is one line in `NVSDK_NGX_D3D11_EvaluateFeature`, after the evaluate, with the
+  feature's own `GetUpscalerType()` (so a backend switched in the menu is seen at its next evaluate). With NR off it
+  returns before it stores or logs. Otherwise it keeps the route and its time for the panel and logs each report at
+  warning level once per process (`LogOnce`), not once per frame and not again when the route comes back.
+- The panel's line is DEVELOPMENT.md §2.2. It replaces "Waiting for the upscaler to run.", which on this route was
+  waiting for something that was not coming.
+- `tests/nr-dx11-route` covers the decision, the once-only log, the panel's window, the production layer against a
+  `Config.h` stub, the call site's position, and the pt-BR entries.
 
 ## Config surface
 

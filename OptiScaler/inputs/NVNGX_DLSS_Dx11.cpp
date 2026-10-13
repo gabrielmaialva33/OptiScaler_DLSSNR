@@ -17,6 +17,7 @@
 #include <ankerl/unordered_dense.h>
 #include <imgui/ImGuiNotify.hpp>
 #include <misc/IdentifyGpu.h>
+#include <dlssnr/DlssNr_Dx11Upscaler.h>
 
 static ID3D11Device* D3D11Device = nullptr;
 static ankerl::unordered_dense::map<unsigned int, ContextData<IFeature_Dx11>> Dx11Contexts;
@@ -868,6 +869,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_EvaluateFeature(ID3D11DeviceConte
         Hudfix_Dx11::SetSkipStatus(false);
 
     auto upscaler = deviceContext->GetUpscalerType();
+    DlssNr::NoteDx11Evaluate(upscaler); // NR cannot follow native D3D11 DLSS; says so once
     if (!upscaleResult && !deviceContext->IsInited() &&
         (upscaler == Upscaler::XeSS || upscaler == Upscaler::XeSS_on12 || upscaler == Upscaler::DLSS ||
          upscaler == Upscaler::DLSS_on12 || upscaler == Upscaler::FFX_on12))

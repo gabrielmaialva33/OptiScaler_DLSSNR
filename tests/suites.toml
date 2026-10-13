@@ -48,6 +48,11 @@ tier = "host"
 timeout = 60
 summary = "Session guard: the policy table (early, middle, long unclean ends), marker ownership, unreadable and read-only cases, config-off, plus call-site guards."
 
+[nr-dx11-route]
+tier = "host"
+timeout = 60
+summary = "D3D11 DLSS with NR on: native D3D11 DLSS, where the pass cannot run, reported once and shown while it runs."
+
 [nr-present-sync]
 tier = "host"
 timeout = 60

@@ -71,6 +71,25 @@ exactly 1 anchor (direction is in the data at ≥2). Paper white shows only to s
 to edit a selected row; in the steady state (≥1 anchor, none selected) it is hidden and Anchor captures
 the trimmed effective white instead.
 
+### 2.2 Status → D3D11 route line (`DlssNr_Menu.cpp`, `DlssNr_Dx11Route.h`)
+
+One amber, read-only line under the panel's status line (`dx11-native-dlss-guides.md`, step 1). It is never a
+control: the way out is the Upscalers card, which it names. "Last D3D11 evaluate" is the route of the most recent
+D3D11 super-resolution evaluate, if one arrived in the last second; a game that stops evaluating loses the line.
+
+| NR | Last D3D11 evaluate | HookMethod | Route line | "Waiting for the upscaler to run." |
+|----|---------------------|------------|------------|------------------------------------|
+| off | any | any | none | not shown (the Off line is) |
+| on | none or stale (incl. every D3D12 and Vulkan game) | any | none | as before |
+| on | `dlss_12`, FSR, XeSS, ray reconstruction | any | none | as before |
+| on | native `dlss` | 0, 1, or out of range | **the pass cannot run after native D3D11 DLSS; `dlss_12` carries it** | replaced by the route line |
+| on | native `dlss` | 2 | **the game's depth and motion never reach the pass; `dlss_12` hands them over** | replaced by the route line |
+
+Invariant checks against this table: the line exists only when NR is on and the route leaves the pass inert
+(rule 2; it is a statement, not a control). With the pass running (a present host built at HookMethod 2), "Running"
+stays and the line follows it; the two do not contradict, because the line says what is missing, not that nothing
+runs. The log says each row once per process (`DlssNr_Dx11Route.h`, `LogOnce`).
+
 ---
 
 ## 3. Per-change-type review (run BEFORE deploy)
