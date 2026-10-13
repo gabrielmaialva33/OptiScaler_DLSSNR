@@ -741,9 +741,11 @@ void CheckCaptureTrigger()
         }
         std::filesystem::remove(trigger, ec);
 
+        // Letters only, so a newline, spaces or an editor's byte-order mark around the word do not change it.
         std::string word(content);
-        word.erase(std::remove_if(word.begin(), word.end(), [](unsigned char c) { return std::isspace(c) != 0; }),
-                   word.end());
+        word.erase(
+            std::remove_if(word.begin(), word.end(), [](unsigned char c) { return c >= 0x80 || std::isalpha(c) == 0; }),
+            word.end());
         std::transform(word.begin(), word.end(), word.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 

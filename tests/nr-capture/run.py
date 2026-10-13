@@ -433,6 +433,19 @@ if 'frame.BridgeHost = true;' not in host or 'bool BridgeHost = false;' not in (
         nr / 'shaders/dlssnr/DlssNr_Common.h').read_text():
     fail('the bridge host must label its frames, or its captures read as the D3D12 present hook')
 
+# Every reason the capture can put on the menu's line has a pt-BR entry. nr-localization's drift guard sees only the
+# literals the menu passes to Tr itself; these reach it through a variable.
+pack = {line.split('\t')[0] for line in (root / 'retoque/translations/optional/pt-BR.lang').read_text(
+    encoding='utf-8').splitlines() if line and not line.startswith('#')}
+reasons = []
+for source in (capture_h, capture_cpp, (nr / 'dlssnr/DlssNr_ImageFile.h').read_text()):
+    reasons += re.findall(r'constexpr const char\* k(?:Reason\w*|Refusal\w*|\w+Words) = "((?:\\.|[^"\\])*)"', source)
+if len(reasons) < 15:
+    fail(f'found only {len(reasons)} reason literals; the scan no longer matches the code')
+for reason in reasons:
+    if reason not in pack:
+        fail(f'the capture reason {reason!r} has no pt-BR entry')
+
 # Built: the translation unit is in both project files, once.
 for project in ('OptiScaler.vcxproj', 'OptiScaler.vcxproj.filters'):
     text = (root / 'OptiScaler' / project).read_text(encoding='utf-8-sig')

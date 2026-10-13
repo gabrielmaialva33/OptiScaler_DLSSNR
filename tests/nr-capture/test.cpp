@@ -68,6 +68,7 @@ struct FakeBackend
     bool trackable = true;
     int tracks = 0;
     int copies = 0;
+    int copiesThisRecording = 0; // Track must come before any copy of the recording it tracks
     std::set<int> live;     // ids allocated and not released or leaked
     std::set<int> leaked;   // ids handed to Leak
     std::set<int> writer;   // ids the writer holds a reference to
@@ -81,8 +82,10 @@ struct FakeBackend
     // Anything a real backend could block in. The template must never call one; nothing here can be called to wait.
     int blockingWaits = 0;
 
-    bool Alloc(Recording&, int, Readback& out)
+    bool Alloc(Recording&, int which, Readback& out)
     {
+        if (which == 0)
+            copiesThisRecording = 0;
         ++allocs;
         if (allocs == failAllocAt)
             return false;
@@ -92,6 +95,7 @@ struct FakeBackend
     }
     bool Track(Recording& r, Ticket& t)
     {
+        CHECK(copiesThisRecording == 0); // Submission::Track: before recording any use
         ++tracks;
         if (!trackable)
             return false;
@@ -102,6 +106,7 @@ struct FakeBackend
     {
         CHECK(rb.id != 0);
         ++copies;
+        ++copiesThisRecording;
     }
     bool Completed(const Ticket& t) { return completedLists.count(t.list) != 0; }
     bool Ready(const Ticket& t) { return readyLists.count(t.list) != 0; }
@@ -296,23 +301,28 @@ static void StateMachine()
         ++g_cases;
     }
 
-    // Shutdown frees only what is proven done; a pending capture is kept, not freed.
+    // Shutdown frees only what is proven done: a retained pair whose list is ready is released, one whose list is
+    // complete but not sealed is kept, and so is a capture still pending.
     {
         Session<FakeBackend> s;
         FakeBackend b;
-        FakeBackend::Recording first;
-        first.list = 1;
-        CHECK(s.Request(0) && s.Record(b, first, FakePayload {}, nullptr));
-        b.completedLists.insert(1);
-        s.Poll(b, 0);
-        s.Finished(true, nullptr, "s");
-        FakeBackend::Recording second;
-        second.list = 2;
-        CHECK(s.Request(0) && s.Record(b, second, FakePayload {}, nullptr));
+        for (const int list : { 1, 3 })
+        {
+            FakeBackend::Recording handed;
+            handed.list = list;
+            CHECK(s.Request(0) && s.Record(b, handed, FakePayload {}, nullptr));
+            b.completedLists.insert(list);
+            s.Poll(b, 0);
+            s.Finished(true, nullptr, "s");
+        }
+        FakeBackend::Recording pending;
+        pending.list = 2;
+        CHECK(s.Request(0) && s.Record(b, pending, FakePayload {}, nullptr));
         b.readyLists.insert(1);
         // Not polled since list 1 became ready: Shutdown is what lets it go.
         s.Shutdown(b);
-        CHECK(b.released.size() == 2 && b.leaked.size() == 2 && b.live.empty());
+        CHECK(b.released.size() == 2 && b.leaked.size() == 4 && b.live.empty());
+        CHECK(b.released.count(1) == 1 && b.released.count(2) == 1); // list 1's pair, the first allocated
         ++g_cases;
     }
 }
@@ -434,6 +444,7 @@ static void Names(const fs::path& out)
 
     // The same in a real directory, deleting what it says: foreign files survive.
     const fs::path dir = out / "rotation";
+    fs::remove_all(dir);
     fs::create_directories(dir);
     for (const auto& n : names)
         std::ofstream(dir / n) << "x";
@@ -460,6 +471,7 @@ static std::FILE* OpenPortable(const fs::path& path) { return std::fopen(path.st
 static void WriteThenRename(const fs::path& out)
 {
     const fs::path dir = out / "rename";
+    fs::remove_all(dir);
     fs::create_directories(dir);
     const fs::path final = dir / "20261013-123456-Game-001.json";
     fs::path temporary = final;

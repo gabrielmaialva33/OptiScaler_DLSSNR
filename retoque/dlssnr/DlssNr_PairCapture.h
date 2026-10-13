@@ -126,7 +126,8 @@ template <class Backend> class Session
     // A request nothing took in time goes back to idle, with a reason.
     void ExpireIfStale(int64_t nowMs)
     {
-        if (phase_.load(std::memory_order_relaxed) != Phase::Requested)
+        // Acquire, so the time stored before the request's release is the one read below.
+        if (phase_.load(std::memory_order_acquire) != Phase::Requested)
             return;
         if (nowMs - requestedAt_.load(std::memory_order_relaxed) < kRequestExpiryMs)
             return;

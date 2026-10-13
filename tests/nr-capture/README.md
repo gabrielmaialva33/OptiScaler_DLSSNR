@@ -42,10 +42,17 @@ target (UNORDERED_ACCESS); the burst's "before" is `hdrCopy`; `TimingMetadata` a
 `TimingContract`; the trigger file asks for the pair and for the burst on `burst`; `Shutdown` calls the capture's;
 the bridge host labels its frames; and `DlssNr_PairCapture.cpp` is in both project files once.
 
-Every check was shown to fail on an injected defect before this was registered: an Adler-32 seeded wrong, BGRA not
-swizzled, a subnormal half off by one exponent, PFM rows top to bottom, quantising without rounding, the blue channel
-of R11G11B10 read one bit off, rows read without their pitch, every stored block marked final, and a 16-bit row
-written at 8-bit width.
+Every reason the capture can show on the menu's line must have a pt-BR entry (those reach the menu through a variable,
+which nr-localization's own drift guard cannot see).
+
+Every check was shown to fail on an injected defect before this was registered. In the writers: an Adler-32 seeded
+wrong, BGRA not swizzled, a subnormal half off by one exponent, PFM rows top to bottom, quantising without rounding,
+the blue channel of R11G11B10 read one bit off, rows read without their pitch, every stored block marked final, a
+16-bit row written at 8-bit width. In the state machine: handing off before completion, releasing on `Completed`
+instead of `Ready`, releasing instead of leaking a recording that never completed, a second request accepted while
+one is under way, no retained-pair bound, the untracked path read after one dispatch, tracking after the first copy,
+shutdown releasing what is not ready, no request expiry, a poll that does not count. In the rest: the Compare row
+missing from the button, the cap off by one, a two-digit sequence accepted as ours, ';' left in a record value.
 
 ## What this does not cover
 

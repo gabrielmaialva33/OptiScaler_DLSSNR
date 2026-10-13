@@ -197,8 +197,8 @@ template <class Sink> class PngStream
         if (!begun_ || failed_ || rows_ != height_ || ended_)
             return Fail();
         ended_ = true;
-        // The last block always holds at least the final row, because a full block is only written once more
-        // data arrives; so the stream's final block is never an empty one tacked on.
+        // The last block always holds at least the last byte of the final row, because a full block is only written
+        // once more data arrives; so the stream's final block is never an empty one tacked on.
         if (!FlushBlock(true))
             return false;
         return Chunk("IEND", {});
