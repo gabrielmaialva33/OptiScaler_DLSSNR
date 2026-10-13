@@ -237,3 +237,8 @@ summary = "Present-guide identity, step 0 (log only): every rule of the decision
 tier = "host"
 timeout = 60
 summary = "No home path, LAN or tailnet address, or token in any tracked file outside vendored code; every pattern self-tested."
+
+[lsfg-shader-library]
+tier = "host"
+timeout = 60
+summary = "Runtime LSFG shader library: DLL discovery (Steam VDF, Wine Z:, override), PE RT_RCDATA SPIR-V extraction, and hash-keyed cache."

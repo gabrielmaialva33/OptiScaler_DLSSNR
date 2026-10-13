@@ -194,10 +194,11 @@ def run_lsfg_vk_cli(out_dir: Path, width: int = 1920, height: int = 1080):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic test frames for LSFG study")
+    default_out = Path(__file__).resolve().parents[2] / "Tmp" / "lsfg-study"
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("/home/gabrielmaia/Projects/personal/OptiScaler_DLSSNR/Tmp/lsfg-study"),
+        default=default_out,
         help="Root output directory (default: Tmp/lsfg-study)",
     )
     parser.add_argument("--width", type=int, default=1920, help="Frame width (default: 1920)")
