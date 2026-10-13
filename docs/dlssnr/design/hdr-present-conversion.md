@@ -1,8 +1,9 @@
 # HDR10 and scRGB at present: decode to linear, run the pass, re-encode with the original as reference
 
-Status: design for review, not implementation, 2026-10-13. Revises the 2026-09 note of the same name.
-Line numbers on our side are against `93730d39` (branch `docs/design-hdr-capture`); on upstream's and
-NeuRotic's side against the commits named. Nothing here has been built or run.
+Status: v1 implemented on `feat/hdr-present`, 2026-10-13, default off; not built, not run in a game, not
+measured on an HDR display (section 10 says what the code does where it differs from the text below). Revises the
+2026-09 note of the same name. Line numbers on our side are against `93730d39` (branch `docs/design-hdr-capture`); on
+upstream's and NeuRotic's side against the commits named.
 
 ## 1. The answer
 
@@ -554,3 +555,44 @@ out-of-gamut colours do not shift hue.
 8. **Should the Windows `SDR white` slider be visible** for users who want to tell us their game's paper
    white? Proposed: no, the Paper white multiplier is enough, and a second control for the same quantity
    breaks rule 3.
+
+## 10. v1 as implemented
+
+The maintainer's answers to section 9: `HdrPresent` defaults off (1); no SDR-white query, 203 nits times Paper white
+(2); a colour space is not believed across a resize to another format until it is set again (3); the stabilizer's
+step on HDR10 is a PQ code (4); the synthesized-motion estimator reads the original codes (5); D3D12 DXIL only, SPIR-V
+with the Vulkan present host (7); no SDR-white slider (8).
+
+Where the code differs from sections 4 to 7, and why:
+
+- **The per-swapchain record is keyed by window, not held by the wrapped swapchain** (`DlssNr_SwapchainColour.h`).
+  With frame generation the game presents an FG swapchain whose inner swapchain is the wrapped one, and
+  `RunPresentPass` is entered from both; the object the wrapper would hold its record on is not the one the FG hook
+  passes. Every layer presents to one window, so the record is the window's; a new swapchain on it starts the record
+  over. The wrapped swapchain tells it of a creation, every successful `SetColorSpace1` (the game's and ForceHDR's
+  two) and every resize, one line each. A swapchain with no window has no record, and its HDR frames are declined.
+  With `HdrPresent` off the D3D12 route decides exactly as before, from the process-wide colour space.
+- **The bridge keeps its record in `PresentHost`**, and learns a format change from the frames it is handed rather
+  than from the bridge's `ResizeBuffers`: two format changes with no frame between them are not caught (documented
+  at `PresentHost::NoteColourSpace`).
+- **Decode and encode are one entry point with a mode constant**, so both passes run the same decode and the bypass
+  compares like with like. One `.cso`, one header (`DlssNr_PresentHdr_Shader.h`, optional through
+  `__has_include`).
+- **The bypass slack is as proposed** (`2^-9`, floor `2^-14`), and "four ulps" in section 4.2 is four times FP16's
+  largest rounding error (two ulps at the bottom of a binade). `tests/nr-hdr-math` measures it: every untouched
+  HDR10 and scRGB texel returns bit for bit through FP16 and the composition's divide and multiply, where re-encoding
+  without the reference would move 42% of random HDR10 texels by up to ~200 codes (saturated Rec.2020 colours lose a
+  near-zero channel to FP16). Inside Rec.709 the slack hides no code; outside it, it can hide 0.2% of a pixel's light
+  in a channel near zero, which is many codes at PQ's dark end, and is reported, not bounded.
+- **The stabilizer's HDR10 unit** is `1/128` relative: the finest PQ step from code 64 up (0.90%, near code 800)
+  rounded down to a power of two. scRGB keeps the stabilizer's own FP16 unit.
+- **Timing**: the decode and the encode sit outside the NR Dispatch's GPU-timing interval, so they are their own
+  sample (`GpuTiming::Conversion`), read back under the same proof and shown on its own line under "Fence-confirmed
+  GPU timing", not added into the evaluation's.
+- **The status line** is not changed; `RunPresentPass` logs once per change that the conversion is on (profile,
+  size, white) or off.
+- **The menu** in the converted state shows the switch, the readout and Paper white as a multiple of the display's
+  SDR white. The highlight guard and highlight recovery stay hidden there, as they are under HookMethod 2 today, though
+  recovery now acts on these frames when the ini enables it.
+- **Not written**: the wine-tier `tests/nr-hdr-d3d12` (the identity test on a real D3D12 device) and the
+  `dlssnr-loopback` leg. The host tier covers the maths, the decision, the record and the bridge's sequence.
