@@ -192,3 +192,8 @@ summary = "The Measure detail CPU tile reduction and statistical aggregation (fl
 tier = "host"
 timeout = 120
 summary = "Present-time guide snapshot ring selection, completion tracking, and cross-queue deadlock avoidance."
+
+[repo-privacy]
+tier = "host"
+timeout = 60
+summary = "No home path, LAN or tailnet address, or token in any tracked file outside vendored code; every pattern self-tested."

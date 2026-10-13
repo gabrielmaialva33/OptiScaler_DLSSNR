@@ -28,7 +28,7 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `vulkan-query-readiness`, `mfg-pattern`, `fg-synth-policy` and `sl-log-repeat` |
+| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `vulkan-query-readiness`, `mfg-pattern`, `fg-synth-policy`, `sl-log-repeat` and `repo-privacy` |
 | `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Thirty-two suites. All but `nr-invariants` build real production code with local fakes under
+**Host tier.** Thirty-three suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit,
@@ -63,6 +63,9 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `sl-log-repeat` — the Streamline log repeat filter against the real `setDynamicMFGParams` line
   on a fake clock: one line per 10 s with the folded count, new sites at once, a bounded table that
   fails open. Runs no Streamline and no callback.
+- `repo-privacy` — every tracked file outside `external/` and `OptiScaler/include/` is free of home
+  paths, LAN or tailnet addresses and tokens; each pattern is self-tested against a sample and a near
+  miss. Pure Python. A line that must keep a match says `privacy: allow`.
 - `fg-synth-policy` — synthesized FG's decisions (fast-motion response on incoherent motion
   and its cap, low-fps floor, duplicate-present advice, which HUD fix runs for which output), the
   motion statistics they are made from, and the NR/FG motion handoff, from the production headers,
