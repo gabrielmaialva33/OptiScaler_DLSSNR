@@ -45,6 +45,7 @@ These are records, not designs.
 - [multi-point-anchoring.md](design/multi-point-anchoring.md): more than one anchor for the scanned-exposure white point.
 - [hud-protection.md](design/hud-protection.md): protecting the HUD through the model's UI correction.
 - [output-stabilizer.md](design/output-stabilizer.md): hold still pixels still and follow the model where the game moved.
+- [residual-limit.md](design/residual-limit.md): an optional flat bound, in stops, on how far the model may move a pixel's light, inside the guard.
 - [dlss-enlargement.md](design/dlss-enlargement.md): Transfer 2, the model's edit enlarged by a private DLSS Super Resolution.
 - [sharp-residual.md](design/sharp-residual.md): Transfer 3, matched residual with a sharp enlargement.
 - [frame-hold.md](design/frame-hold.md): freezing the NR input so settings can be A/B'd on one frame.

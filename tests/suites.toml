@@ -188,6 +188,11 @@ tier = "host"
 timeout = 120
 summary = "The Measure detail CPU tile reduction and statistical aggregation (flicker, detail, saturation, shadows)."
 
+[nr-residual-limit]
+tier = "host"
+timeout = 120
+summary = "The residual limit, the composition's own bound sliced out of dlssnr.hlsl and held against the guard alone (off is the guard to the bit; on bounds both ways in stops, only narrows, stays inside the guard), the host's clamp, and where the constant is read, set, logged and shown."
+
 [nr-pulse-metric]
 tier = "host"
 timeout = 120

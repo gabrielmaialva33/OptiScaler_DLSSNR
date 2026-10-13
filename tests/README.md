@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Thirty-four suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
+**Host tier.** Thirty-five suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit,
@@ -46,6 +46,10 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-detail-measure` — the "Measure detail" CPU tile reduction and statistical aggregation (detail added,
   Laplacian raw, flicker beyond native, OkLab chroma/warmth, and shadow darkening/crush), delta comparisons
   and textual metric generation.
+- `nr-residual-limit` — the residual limit (`docs/dlssnr/design/residual-limit.md`): the composition's guard
+  and limit sliced out of `dlssnr.hlsl` and compiled against HLSL's intrinsics, held against the guard alone (off
+  is the guard to the bit; on bounds both ways in stops, only narrows, stays inside the guard, symmetric); the
+  host's clamp; source guards on where the constant is read, set, logged and shown. No GPU, no shader compile.
 - `nr-pulse-metric` — the pulse metric (`docs/dlssnr/design/pulse-metric.md`): the edit's light from the GPU's
   grid, consecutive frames paired into light steps by kind (model, carried, every frame) with holes, gaps,
   late and non-finite readbacks breaking the pair, two-second windows, reset, the menu's words, the log line and

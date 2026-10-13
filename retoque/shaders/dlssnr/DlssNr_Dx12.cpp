@@ -1561,8 +1561,8 @@ static void DetailMeasureCopy(ID3D12GraphicsCommandList* cmdList, ID3D12Device* 
 // is touched under g_nrMutex only; the menu reads the status under the session's own mutex.
 struct PulseSession
 {
-    // What changes the meaning of a step: the frame's size and format, the cadence as configured and its smoothing. A
-    // change starts the window over, so no step spans it.
+    // What changes the meaning of a step: the frame's size and format, the cadence as configured and its smoothing,
+    // the residual limit. A change starts the window over, so no step spans it.
     struct Shape
     {
         uint32_t width = 0;
@@ -1570,6 +1570,7 @@ struct PulseSession
         uint32_t format = 0;
         uint32_t cadence = 1;
         bool smoothing = false;
+        float residualLimit = 0.0f;
 
         bool operator==(const Shape&) const = default;
     };
@@ -1648,8 +1649,8 @@ static void StopPulseLocked()
 // sequence number in NotePulsePresent, so the pair across it is broken rather than bridged.
 static void UpdatePulse(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, bool enabled, ID3D12Resource* target,
                         ID3D12Resource* input, bool wrote, uint32_t width, uint32_t height, uint32_t format,
-                        uint32_t cadenceRequested, bool cadenceSmoothing, uint32_t cadenceInEffect, bool carried,
-                        uint64_t present, int64_t nowMs)
+                        uint32_t cadenceRequested, bool cadenceSmoothing, float residualLimit, uint32_t cadenceInEffect,
+                        bool carried, uint64_t present, int64_t nowMs)
 {
     if (!enabled || !DlssNr_Pulse_Dx12::Available())
     {
@@ -1699,8 +1700,9 @@ static void UpdatePulse(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device
         }
     }
 
-    const PulseSession::Shape shape { width, height, format, cadenceRequested,
-                                      cadenceRequested > 1 && cadenceSmoothing };
+    const PulseSession::Shape shape {
+        width, height, format, cadenceRequested, cadenceRequested > 1 && cadenceSmoothing, residualLimit
+    };
     if (!g_pulse.shape || !(*g_pulse.shape == shape))
     {
         g_pulse.shape = shape;
@@ -5265,6 +5267,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // Only where the encode compressed anything: on a frame the game already tone mapped the model saw the
         // frame as it is (docs/dlssnr/design/hdr-highlight-recovery.md). The shader gates on passthrough as well.
         resolveParams.HighlightRecovery = isHdrBuffer && cfg.DlssNrHighlightRecovery.value_or_default() ? 1u : 0u;
+        // The residual limit, in stops (docs/dlssnr/design/residual-limit.md), clamped to what its control offers so a
+        // hand-edited ini cannot hand the shader a negative or a NaN. 0 is off.
+        resolveParams.ResidualLimit = DlssNr::ResidualLimitStops(cfg.DlssNrResidualLimit.value_or_default());
 
         // The output stabilizer's two numbers, clamped to what its controls offer, so a hand-edited ini
         // cannot hand the shader a negative strength or a NaN. Read here because the composition report
@@ -5290,6 +5295,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             float transfer;
             float colour;
             float maxRatio;
+            float residualLimit;
             unsigned int highlightRecovery;
             unsigned int passthrough;
             unsigned int debugView;
@@ -5315,13 +5321,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             bool SameShape(const ComposeReport& other) const
             {
                 return transfer == other.transfer && colour == other.colour && maxRatio == other.maxRatio &&
-                       highlightRecovery == other.highlightRecovery && passthrough == other.passthrough &&
-                       debugView == other.debugView && compareMode == other.compareMode && residual == other.residual &&
-                       workW == other.workW && workH == other.workH && whiteSource == other.whiteSource &&
-                       whiteScale == other.whiteScale && whiteTrim == other.whiteTrim &&
-                       scanInverted == other.scanInverted && scanTrim == other.scanTrim &&
-                       scanEnabled == other.scanEnabled && hold == other.hold && stabilizer == other.stabilizer &&
-                       stabilizerTolerance == other.stabilizerTolerance &&
+                       residualLimit == other.residualLimit && highlightRecovery == other.highlightRecovery &&
+                       passthrough == other.passthrough && debugView == other.debugView &&
+                       compareMode == other.compareMode && residual == other.residual && workW == other.workW &&
+                       workH == other.workH && whiteSource == other.whiteSource && whiteScale == other.whiteScale &&
+                       whiteTrim == other.whiteTrim && scanInverted == other.scanInverted &&
+                       scanTrim == other.scanTrim && scanEnabled == other.scanEnabled && hold == other.hold &&
+                       stabilizer == other.stabilizer && stabilizerTolerance == other.stabilizerTolerance &&
                        std::equal(anchors.begin(), anchors.end(), other.anchors.begin(), other.anchors.end(),
                                   [](const auto& a, const auto& b) { return a.scan == b.scan && a.white == b.white; });
             }
@@ -5343,6 +5349,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             resolveParams.TransferStrength,
             resolveParams.ColourStrength,
             resolveParams.MaxRatio,
+            resolveParams.ResidualLimit,
             resolveParams.HighlightRecovery,
             resolveParams.Passthrough,
             resolveParams.DebugView,
@@ -5364,18 +5371,21 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         if (composeReporter.Observe(composeNow, DlssNr::LogRate::Clock::now()))
         {
-            LOG_INFO("DLSS-NR composition: paper white {:.2f}x, detail {:.2f}, colour {:.2f}, guard "
-                     "{:.1f}x, highlight recovery {}, colour transform {}, transfer {}, model {}x{}, debug view {}, "
-                     "compare {}, stabilizer {:.2f} (tolerance {:.2f})",
-                     composeNow.whitePoint, composeNow.transfer, composeNow.colour, composeNow.maxRatio,
-                     composeNow.highlightRecovery != 0 ? "on" : "off",
-                     composeNow.passthrough != 0 ? "off (frame already tone mapped)" : "on (linear HDR)",
-                     composeNow.residual == 1   ? "matched residual"
-                     : composeNow.residual == 2 ? "matched residual + DLSS"
-                     : composeNow.residual == 3 ? "matched residual, sharp"
-                                                : "classic",
-                     composeNow.workW, composeNow.workH, composeNow.debugView, composeNow.compareMode,
-                     composeNow.stabilizer, composeNow.stabilizerTolerance);
+            LOG_INFO(
+                "DLSS-NR composition: paper white {:.2f}x, detail {:.2f}, colour {:.2f}, guard "
+                "{:.1f}x, residual limit {}, highlight recovery {}, colour transform {}, transfer {}, model {}x{}, "
+                "debug view {}, compare {}, stabilizer {:.2f} (tolerance {:.2f})",
+                composeNow.whitePoint, composeNow.transfer, composeNow.colour, composeNow.maxRatio,
+                composeNow.residualLimit > 0.0f ? std::format("{:.2f} stops", composeNow.residualLimit)
+                                                : std::string("off"),
+                composeNow.highlightRecovery != 0 ? "on" : "off",
+                composeNow.passthrough != 0 ? "off (frame already tone mapped)" : "on (linear HDR)",
+                composeNow.residual == 1   ? "matched residual"
+                : composeNow.residual == 2 ? "matched residual + DLSS"
+                : composeNow.residual == 3 ? "matched residual, sharp"
+                                           : "classic",
+                composeNow.workW, composeNow.workH, composeNow.debugView, composeNow.compareMode, composeNow.stabilizer,
+                composeNow.stabilizerTolerance);
         }
 
         Barrier(cmdList, finalOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -5821,9 +5831,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // nothing; on, one small reduction of the target against the untouched copy, after the stabilizer, so it measures
     // what is shown.
     UpdatePulse(cmdList, device, cfg.DlssNrPulseMetric.value_or_default(), target, g_nr.hdrCopy, wrote, width, height,
-                static_cast<uint32_t>(desc.Format), cadenceInputs.requested, cadenceInputs.smoothing, cadence.cadence,
-                carried, observedFrame,
-                std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
+                static_cast<uint32_t>(desc.Format), cadenceInputs.requested, cadenceInputs.smoothing,
+                DlssNr::ResidualLimitStops(cfg.DlssNrResidualLimit.value_or_default()), cadence.cadence, carried,
+                observedFrame, std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
 
     hdrRead.Restore();
 

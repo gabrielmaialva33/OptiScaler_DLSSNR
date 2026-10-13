@@ -403,6 +403,12 @@ class Config
     // docs/dlssnr/design/hdr-highlight-recovery.md.
     CustomOptional<bool> DlssNrHighlightRecovery { false };
 
+    // The residual limit: how far, in stops, the model may move any pixel's light, either way, on the luminance ratio
+    // the composition applies -- a flat bound inside the guard, against blotches and flicker where the model re-decides
+    // a patch by a lot. 0 is off, which is the composition as it was; up to 2. Not applied by the replace curves
+    // (ReversibleMode 2 and 4), which skip the composition. docs/dlssnr/design/residual-limit.md.
+    CustomOptional<float> DlssNrResidualLimit { 0.0f };
+
     // How a model that worked below the frame's size is brought back. 0 classic, 1 matched
     // residual, 3 matched residual with a sharp (Catmull-Rom) enlargement of the edit, 2 matched residual
     // with the edit enlarged by a private DLSS Super Resolution -- the meaning upstream's multi-pass PR

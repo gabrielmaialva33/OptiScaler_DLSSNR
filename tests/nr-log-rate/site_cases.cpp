@@ -43,6 +43,8 @@ int main()
     ManualChange("stabilizer strength", 1, [](auto& s) { s.stabilizerStrength = 0.5f; });
     // A switch that changes the composed picture: logged at once, and the same comparison resets the stabilizer.
     ManualChange("highlight recovery", 1, [](auto& s) { s.highlightRecovery = 1; });
+    // The residual limit too: it bounds the composed picture, so a change is logged at once and resets the stabilizer.
+    ManualChange("residual limit", 1, [](auto& s) { s.residualLimit = 0.5f; });
 
     // The tolerance is normalised out while the stabilizer is off, like the other inactive controls.
     ComposeSite stabilizerOff;

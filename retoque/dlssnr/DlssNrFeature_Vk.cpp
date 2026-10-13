@@ -1146,15 +1146,28 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     // Read by the resolve, which takes a copy of these constants. Linear HDR only, as on D3D12
     // (docs/dlssnr/design/hdr-highlight-recovery.md).
     encode.HighlightRecovery = linearHdr && cfg.DlssNrHighlightRecovery.value_or_default() ? 1u : 0u;
+    // The residual limit, as on D3D12 (docs/dlssnr/design/residual-limit.md); the shared shader reads it in the
+    // resolve.
+    encode.ResidualLimit = DlssNr::ResidualLimitStops(cfg.DlssNrResidualLimit.value_or_default());
 
-    // This path has no composition summary, so the one setting a screenshot cannot show is said when it changes.
-    // Starts at off, so a session that never turns it on logs nothing about it.
+    // This path has no composition summary, so the settings a screenshot cannot show are said when they change. Both
+    // start at off, so a session that never turns them on logs nothing about them.
     static uint32_t saidRecovery = 0u;
+    static float saidResidualLimit = 0.0f;
 
     if (encode.HighlightRecovery != saidRecovery)
     {
         saidRecovery = encode.HighlightRecovery;
         LOG_INFO("DLSS-NR Vulkan: highlight recovery {}", saidRecovery != 0 ? "on" : "off");
+    }
+
+    if (encode.ResidualLimit != saidResidualLimit)
+    {
+        saidResidualLimit = encode.ResidualLimit;
+        if (saidResidualLimit > 0.0f)
+            LOG_INFO("DLSS-NR Vulkan: residual limit {:.2f} stops", saidResidualLimit);
+        else
+            LOG_INFO("DLSS-NR Vulkan: residual limit off");
     }
 
     const VkImageSubresourceRange colourRange = colour->Resource.ImageViewInfo.SubresourceRange;

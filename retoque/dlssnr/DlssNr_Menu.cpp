@@ -1063,6 +1063,30 @@ void RenderMenu(Config* config, float menuResScale)
                    "\nand rolls off at the edge of what the display can show rather than clipping"
                    "\ninto a flat blown patch. 1 is the model's own colour; push past it for punch.");
 
+        // The residual limit (docs/dlssnr/design/residual-limit.md) bounds the composition's ratio. The replace curves
+        // skip the composition, and on D3D12 the driver proxy returns before the resolve, so neither has anything for
+        // it to act on and neither is offered it (DEVELOPMENT.md rule 2).
+        const uint32_t reversibleNow = config->DlssNrReversibleMode.value_or_default();
+        if (reversibleNow != 2 && reversibleNow != 4 && (vulkan || !config->DlssNrUseProxy.value_or_default()))
+        {
+            float residualLimit = DlssNr::ResidualLimitStops(config->DlssNrResidualLimit.value_or_default());
+            if (ImGui::SliderFloat(Localization::Label("Residual limit"), &residualLimit, 0.0f, kDlssNrResidualLimitMax,
+                                   residualLimit > 0.0f ? "%.2f stops" : "off"))
+                config->DlssNrResidualLimit = DlssNr::ResidualLimitStops(residualLimit);
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton(Localization::Label("Reset##residualLimit")))
+                config->DlssNrResidualLimit = 0.0f;
+
+            HelpMarker("The most the model may move any pixel's light, either way, in stops: 0.5 allows"
+                       "\nat most 1.41x brighter or darker, 1 at most 2x. Off at 0, the composition as"
+                       "\nit always was."
+                       "\n\nAimed at blotches and flicker: a patch of wall the model brightens by a stop"
+                       "\none frame and not the next. It bounds the model's real corrections the same"
+                       "\nway, so start high and lower it until the blotches go. It sits inside the"
+                       "\nhighlight guard and can only narrow it.");
+        }
+
         // Experimental. 0 off (soft knee), 1 Neutwo + our composition, 2 Neutwo + pure-inverse replace,
         // 3 hybrid+composed, 4 hybrid+replace (identity midtones + unclipped highlights). Always shown.
         static const char* reversibleNames[] = { Localization::Label("Off (soft knee)"),
