@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Thirty-eight suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
+**Host tier.** Thirty-nine suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit,
@@ -112,7 +112,8 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   production's plan, build, evaluate, retirement and Retry, sliced out of the renderer and run against
   D3D12 fakes that chain every barrier. No GPU, NGX or shader.
 - `nr-gpu-timing` — portable timing validation, plus the duplicate-execution
-  guard at the submission boundary.
+  guard at the submission boundary, and the HDR present conversion's own sample (its decode and encode,
+  outside the Dispatch interval).
 - `nr-gpu-timing-config` — the Config GPU-timing transactions and their INI
   expressions.
 - `nr-invariants` — the `DEVELOPMENT.md` §4 guards against the live tree: config
@@ -139,7 +140,13 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   wilsjo2's v0.8.91 pinned). Also holds its constant block to the cbuffer. No GPU, no model.
 - `nr-present-host` — what the production present host builds and when: a frame too small
   for the model, a resize, the pass switched off, an HDR swapchain declined, and on which list the
-  model is created.
+  model is created. With `[DlssNr] HdrPresent`, the HDR decision table, the D3D12 route's per-window
+  colour record and the bridge's decode and encode around the pass, every resource state tracked.
+- `nr-hdr-math` — the HDR present conversion (`docs/dlssnr/design/hdr-present-conversion.md`): the
+  shader's own maths sliced out of `dlssnr_present_hdr.hlsl` and held to a float64 reference -- every PQ
+  code round-trips, untouched HDR10 and scRGB texels come back bit for bit through FP16 and the
+  composition's white point, an edit lands within one code -- its constants and matrices against the
+  BT.709/BT.2020 primaries, and source guards on the pass class and both hosts. No GPU, no shader.
 - `nr-uimask-rule` — the HUD-protection mask's per-pixel rule, compiled from the header the shader
   itself includes, over synthetic sequences: a glyph over a panning scene is protected after the
   streak and nothing else is; still, grainy scenery beside a swaying silhouette is never protected

@@ -1510,14 +1510,17 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetColorSpace1(DXGI_COLOR_SPACE_TYPE Colo
     {
         const HRESULT result = _fgSwapChain->SetColorSpace1(ColorSpace);
 
-        // The NR host declines an HDR frame (dlssnr/DlssNr_PresentColour.h).
+        // The NR host declines or converts an HDR frame (dlssnr/DlssNr_PresentColour.h).
         if (SUCCEEDED(result) && _nrHost != nullptr)
             _nrHost->NoteColourSpace(ColorSpace);
 
         return result;
     }
 
-    return _real3 != nullptr ? _real3->SetColorSpace1(ColorSpace) : DXGI_ERROR_DEVICE_REMOVED;
+    const HRESULT result = _real3 != nullptr ? _real3->SetColorSpace1(ColorSpace) : DXGI_ERROR_DEVICE_REMOVED;
+    if (SUCCEEDED(result) && _nrHost != nullptr)
+        _nrHost->NoteColourSpace(ColorSpace);
+    return result;
 }
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format,

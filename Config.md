@@ -489,6 +489,15 @@ SynthMotionSource=auto
 ; true or false - Default (auto) is true
 PresentSync=auto
 
+; Present hosts (HookMethod 2, or 0 once it runs at present): an HDR10 (PQ, Rec.2020, ten-bit) or scRGB (FP16, linear)
+; swapchain is converted to linear light for the pass and encoded back afterwards, with the game's own frame as the
+; reference so every pixel the pass leaves alone keeps its exact code. The model is shown a white of 203 nits (BT.2408)
+; times Paper white. Off, such a swapchain is declined and shown as the game rendered it. HLG, studio-range or YCbCr
+; PQ and other colour spaces stay declined either way. D3D12 and the D3D11 bridge; not native Vulkan. Experimental:
+; off by default until measured on a real HDR display (docs/dlssnr/design/hdr-present-conversion.md).
+; true or false - Default (auto) is false
+HdrPresent=auto
+
 ; Where the white point comes from: 0 paper white only, 1 the game's exposure texture,
 ; 2 a buffer found by the exposure scan. Source 2 needs anchoring and validation in the game.
 ; The scan keeps nothing until source 2 is chosen: a game that creates its exposure at start-up

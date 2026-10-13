@@ -91,8 +91,9 @@ for today in ('if (pickedSlot < DlssNr::PresentGuides::kRingSize)', 'auto& clone
               'trackedSlot = pickedSlot;', 'temporalSeq = g_presentGuideRing.GetSlot(pickedSlot).sequence;',
               'g_nrLastEnhancedRecordedSeq = newestRecordedSeq;'):
     assert present.count(today) == 1, f'today\'s read changed: {today}'
-for decision in ('Decide(', 'Decision', 'g_guideIdentity', 'PresentGuideIdentity::'):
-    assert decision not in present, f'RunPresentPass reads the decision: {decision}'
+# Whole words, so another decision in the pass (the HDR present's PresentColourDecision) is not mistaken for this one.
+for decision in (r'\bDecide\(', r'\bDecision\b', r'\bg_guideIdentity\b', r'\bPresentGuideIdentity::'):
+    assert not re.search(decision, present), f'RunPresentPass reads the decision: {decision}'
 
 # At the default HookMethod (1) and with the pass off, RunPresentPass returns before the pick.
 assert 'CustomOptional<uint32_t> DlssNrHookMethod { 1 };' in config

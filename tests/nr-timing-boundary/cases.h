@@ -86,9 +86,19 @@ int main() {
     assert(ImGui::Contains("A model frame of model cadence 2") && !ImGui::Contains("A carried frame")); ++cases;
     published.metadata=a;
     ImGui::Clear(); RenderGpuTiming(&cfg,false);
-    assert(!ImGui::Contains("model cadence")); ++cases;
+    assert(!ImGui::Contains("model cadence") && !ImGui::Contains("HDR conversion")); ++cases;
+    // The HDR present conversion's sample is its own line, beside the evaluation's and not folded into it, and shown
+    // even before any evaluation has been confirmed.
+    published.conversionValid=true; published.conversionSampleId=5; published.conversionMs=0.3;
+    published.conversionDecodeMs=0.1; published.conversionEncodeMs=0.2; published.conversionAgeMs=1500;
+    ImGui::Clear(); RenderGpuTiming(&cfg,false);
+    assert(ImGui::Contains("HDR conversion, outside the dispatch") && ImGui::Contains("Last confirmed")); ++cases;
+    published.valid=false;
+    ImGui::Clear(); RenderGpuTiming(&cfg,false);
+    assert(ImGui::Contains("HDR conversion, outside the dispatch") && ImGui::Contains("No confirmed")); ++cases;
+    published.valid=true; published.conversionValid=false;
     ImGui::toggle=0; ImGui::Clear(); RenderGpuTiming(&cfg,false);
     assert(!cfg.settings.Enabled && ImGui::sliderCalls==0 && !ImGui::Contains("Last confirmed")); ++cases;
-    assert(cases==27);
+    assert(cases==29);
     std::printf("PASS %d timing boundary metadata/UI cases\n",cases);
 }

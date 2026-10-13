@@ -202,6 +202,110 @@ int CadenceCases()
               << " production cadence cases; interval=30 first/31st, off/on phase, interval changes\n";
     return 0;
 }
+// The HDR present conversion's sampler (GpuTiming::Conversion), in a fresh process: its own count of eligible
+// conversions at the evaluation's interval, two brackets published beside the evaluation's sample without touching it,
+// a frame with no encode freed silently, a malformed one discarded, and an Evaluation's slot reused by it and back.
+int ConversionCases()
+{
+    unsigned cases = 0;
+    Device device;
+    std::array<List, 8> lists;
+    for (auto& list : lists)
+        list.device = &device;
+
+    {
+        GpuTiming::Conversion off(&device, &lists[0], false, 1);
+        off.Begin();
+        off.End();
+        off.Finish(true);
+    }
+    assert(heaps == 0 && queries == 0 && tracks == 0);
+    ++cases;
+
+    // A whole conversion: decode bracket, the NR Dispatch's own evaluation between, encode bracket.
+    {
+        GpuTiming::Conversion conversion(&device, &lists[0], true, 1);
+        conversion.Begin();
+        conversion.End();
+        Record(device, lists[0]); // the evaluation inside the Dispatch, on the same list
+        conversion.Begin();
+        conversion.End();
+        conversion.Finish(true);
+    }
+    Execute(lists[0]);
+    completed[0] = 10;
+    Seal(lists[0]);
+    GpuTiming::Poll();
+    {
+        const auto sample = GpuTiming::GetSnapshot();
+        assert(sample.valid && sample.accepted == 1 && sample.conversionValid && sample.conversionSampleId == 1);
+        assert(sample.conversionDecodeMs > 0 && sample.conversionEncodeMs > 0);
+        assert(sample.conversionMs == sample.conversionDecodeMs + sample.conversionEncodeMs);
+        assert(sample.eligible == 1 && sample.sampled == 1); // the evaluation counters count evaluations only
+    }
+    ++cases;
+
+    // The pass did not run: a decode and no encode is not a sample and not a discard.
+    const auto discardedBefore = GpuTiming::GetSnapshot().discarded;
+    {
+        GpuTiming::Conversion conversion(&device, &lists[1], true, 1);
+        conversion.Begin();
+        conversion.End();
+    }
+    Execute(lists[1]);
+    Seal(lists[1]);
+    GpuTiming::Poll();
+    assert(GpuTiming::GetSnapshot().discarded == discardedBefore && GpuTiming::GetSnapshot().conversionSampleId == 1);
+    assert(GpuTiming::GetSnapshot().pending == 0);
+    ++cases;
+
+    // A bracket left open is malformed: discarded, and the published sample stays the last good one.
+    {
+        GpuTiming::Conversion conversion(&device, &lists[2], true, 1);
+        conversion.Begin();
+        conversion.End();
+        conversion.Begin();
+        conversion.Finish(true);
+    }
+    Execute(lists[2]);
+    Seal(lists[2]);
+    GpuTiming::Poll();
+    assert(GpuTiming::GetSnapshot().discarded == discardedBefore + 1 && GpuTiming::GetSnapshot().conversionSampleId == 1);
+    ++cases;
+
+    // Interval 3 on its own count: eligible conversions 4 and 7 of this run record (samples 4 and 5), 5 and 6 do not
+    // stamp at all.
+    const auto queriesBefore = queries;
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        GpuTiming::Conversion conversion(&device, &lists[3], true, 3);
+        conversion.Begin();
+        conversion.End();
+        conversion.Begin();
+        conversion.End();
+        conversion.Finish(true);
+    }
+    assert(queries == queriesBefore + 8); // two conversions sampled, four stamps each
+    Execute(lists[3]);
+    Seal(lists[3]);
+    GpuTiming::Poll();
+    assert(GpuTiming::GetSnapshot().conversionSampleId == 5);
+    ++cases;
+
+    // Freed slots carry nothing over: the next evaluation in a slot a conversion used is an ordinary evaluation.
+    Record(device, lists[4]);
+    Execute(lists[4]);
+    Seal(lists[4]);
+    GpuTiming::Poll();
+    assert(GpuTiming::GetSnapshot().accepted == 2 && GpuTiming::GetSnapshot().conversionSampleId == 5);
+    ++cases;
+
+    GpuTiming::SetEnabled(false);
+    if (cases != 6)
+        return 2;
+    std::cout << "PASS " << cases << " production HDR conversion timing cases\n";
+    return 0;
+}
 } // namespace
 namespace DlssNr::Submission
 {
@@ -222,6 +326,8 @@ int main(int argc, char** argv)
 {
     if (argc == 2 && std::strcmp(argv[1], "--cadence") == 0)
         return CadenceCases();
+    if (argc == 2 && std::strcmp(argv[1], "--conversion") == 0)
+        return ConversionCases();
     unsigned cases = 0;
     std::array<Device, 4> devices;
     std::array<List, 40> lists;

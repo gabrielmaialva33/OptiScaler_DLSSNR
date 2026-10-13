@@ -15,11 +15,14 @@ the live tree rather than pinned to a baseline:
    missing from the ini on its first run.
 2. **Struct equals cbuffer (rule 5).** `DlssNrConstants` in `DlssNr_Common.h` and the `Params`
    cbuffer in `dlssnr.hlsl` are the same ordered list of 4-byte scalars: same types, same names (the
-   HLSL `g` prefix aside). A divergence names the first scalar where they part.
+   HLSL `g` prefix aside). A divergence names the first scalar where they part. The HDR present
+   conversion's `DlssNr_PresentHdr_Dx12::Constants` and the `Params` cbuffer of
+   `dlssnr_present_hdr.hlsl` are held to each other the same way.
 3. **Headers are the committed bytecode (rule 6, the half a host can check).** `DlssNr_Shader.h` and
    `DlssNr_Shader_Vk.h` are byte-identical to what `create_header.py` makes from the `.cso` and
    `.spv` beside them, and each binary starts with its container magic. The optional passes are checked
-   once their bytecode is committed: the guide resample, and peripheral compression's three passes
+   once their bytecode is committed: the guide resample, the HDR present conversion
+   (`DlssNr_PresentHdr_Shader`, whose header without its `.cso` fails), and peripheral compression's three passes
    (`DlssNr_Periphery{Colour,Guides,Unpack}_Shader`), which must arrive all six files together -- any
    one of them without the rest fails. With them committed, `DlssNr_Shader.cso` and
    `DlssNr_Shader_Vk.spv` must not be the two binaries from before `ForceResidual` (their SHA-256 is in

@@ -14,6 +14,7 @@
 #include <dlssnr/DlssNr_DirectRuntime.h>
 #include <dlssnr/DlssNr_NgxInfo.h>
 #include <dlssnr/DlssNr_PresentColour.h>
+#include <dlssnr/DlssNr_SwapchainColour.h>
 #include <dlssnr/DlssNr_Enlarge.h>
 #include <dlssnr/DlssNr_PrivateSr.h>
 #include <dxgi1_4.h>
@@ -59,6 +60,7 @@
 #include "DlssNr_DetailStats_Dx12.h"
 #include <dlssnr/DlssNr_DetailStats.h>
 #include "DlssNr_Pulse_Dx12.h"
+#include "DlssNr_PresentHdr_Dx12.h"
 #include <dlssnr/DlssNr_Pulse.h>
 #include <dlssnr/DlssNr_PresentGuideRing.h>
 #include <dlssnr/DlssNr_PresentGuideIdentity.h>
@@ -3332,8 +3334,15 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const int dlssNrStage = cfg.DlssNrStage.value_or_default();
     const Scaler nrScalerForChain = cfg.DlssNrScalingDownscaler.value_or_default();
     const bool proxyProbe = cfg.DlssNrProxyProbe.value_or_default();
-    const int whitePointSource = cfg.DlssNrWhitePointSource.value_or_default();
-    const float whitePointScale = cfg.DlssNrWhitePointScale.value_or_default();
+    // A present frame an HDR swapchain gave (docs/dlssnr/design/hdr-present-conversion.md section 4.2) has its white
+    // from the host: the display's SDR white times the Paper white slider, from source 0 -- it has no exposure texture,
+    // and an exposure or a scan anchor held from another route is not this frame's. Every other frame: the settings.
+    const bool presentWhite = std::isfinite(frame.PresentWhite) && frame.PresentWhite > 0.0f;
+    const float paperWhite = cfg.DlssNrWhitePointScale.value_or_default();
+    const int whitePointSource = presentWhite ? 0 : cfg.DlssNrWhitePointSource.value_or_default();
+    const float whitePointScale =
+        presentWhite ? frame.PresentWhite * (std::isfinite(paperWhite) && paperWhite > 0.0f ? paperWhite : 1.0f)
+                     : paperWhite;
     const float whitePointTrim = cfg.DlssNrWhitePointTrim.value_or_default();
     const bool scanInverted = cfg.DlssNrScanInverted.value_or_default();
     const float scanTrim = cfg.DlssNrScanTrim.value_or_default();
@@ -5576,11 +5585,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // wrote; otherwise there is no answer to hold. Off and before-upscale were parked at the top.
         if (stabilizerStrength > 0.0f && !beforeUpscale && wrote)
         {
+            // HDR10 at present: the creep's unit is a PQ code, the format the frame goes out in, not the work
+            // texture's.
             const auto outputDesc = target->GetDesc();
-            if (g_nr.stabilizer != nullptr && !g_nr.stabilizer->Fits(device, outputDesc))
+            if (g_nr.stabilizer != nullptr && !g_nr.stabilizer->Fits(device, outputDesc, frame.PresentQuantRel))
                 ParkNrStabilizer(g_nr.stabilizer);
             if (g_nr.stabilizer == nullptr)
-                g_nr.stabilizer = new DlssNr_Stabilizer_Dx12("DLSS-NR stabilizer", device, outputDesc);
+                g_nr.stabilizer =
+                    new DlssNr_Stabilizer_Dx12("DLSS-NR stabilizer", device, outputDesc, frame.PresentQuantRel);
 
             // What else drops its history, beyond what reset the model. Any setting that changes the
             // composed picture -- at strength 1 a still pixel never takes a new answer, so without this a
@@ -6612,6 +6624,157 @@ static bool EnsureBbCopy(ID3D12Device* device, unsigned int width, unsigned int 
     return g_bbCopy != nullptr;
 }
 
+// HDR10 and scRGB at present ([DlssNr] HdrPresent, docs/dlssnr/design/hdr-present-conversion.md section 5.1). The
+// conversion pass, built once for the device this route runs on, and its two textures, made only once a frame is
+// decided HDR -- an SDR game never allocates them -- and retired when the size or format changes, or when the frames
+// go back to SDR.
+//
+// Retired by the present lists' own fence, not parked on the NR recording's usage like the backbuffer copy: a list
+// whose pass declined still decoded into the work texture, and a switch back to SDR comes with no resize and so no GPU
+// idle wait. Every list that used a texture was submitted before it was retired, so it is released once the fence has
+// passed the last value submitted then -- never under the GPU, and without a CPU wait.
+static DlssNr_PresentHdr_Dx12* g_presentHdr = nullptr;
+struct PresentHdrRetired
+{
+    ID3D12Resource* resource = nullptr;
+    UINT64 fenceValue = 0;
+};
+static std::vector<PresentHdrRetired> g_hdrRetired;
+static ID3D12Resource* g_hdrWork = nullptr; // FP16, linear Rec.709 in scRGB units; rests in UNORDERED_ACCESS
+static ID3D12Resource* g_hdrOut = nullptr; // the backbuffer's format, what the encode writes; rests in UNORDERED_ACCESS
+static unsigned int g_hdrWidth = 0;
+static unsigned int g_hdrHeight = 0;
+static DXGI_FORMAT g_hdrFormat = DXGI_FORMAT_UNKNOWN;
+// The size and format the textures last failed to allocate at: not retried every frame.
+static unsigned int g_hdrFailedWidth = 0;
+static unsigned int g_hdrFailedHeight = 0;
+static DXGI_FORMAT g_hdrFailedFormat = DXGI_FORMAT_UNKNOWN;
+
+// Under g_nrMutex. Released once every present list submitted so far has completed (see above).
+static void RetirePresentHdrTexture(ID3D12Resource*& resource)
+{
+    if (resource == nullptr)
+        return;
+
+    g_hdrRetired.push_back({ resource, g_presentFenceValue });
+    resource = nullptr;
+}
+
+// Under g_nrMutex, once per present: the retired textures the GPU is done with. Nothing pending, nothing done.
+static void CollectPresentHdrRetired()
+{
+    if (g_hdrRetired.empty() || g_presentList.fence == nullptr)
+        return;
+
+    const UINT64 completed = g_presentList.fence->GetCompletedValue();
+    for (size_t i = 0; i < g_hdrRetired.size();)
+    {
+        if (g_hdrRetired[i].fenceValue <= completed)
+        {
+            g_hdrRetired[i].resource->Release();
+            g_hdrRetired[i] = g_hdrRetired.back();
+            g_hdrRetired.pop_back();
+        }
+        else
+        {
+            ++i;
+        }
+    }
+}
+
+// Under g_nrMutex. An SDR frame does not keep the textures a game that left HDR no longer uses.
+static void ParkPresentHdrTextures()
+{
+    if (g_hdrWork == nullptr && g_hdrOut == nullptr)
+        return;
+
+    RetirePresentHdrTexture(g_hdrWork);
+    RetirePresentHdrTexture(g_hdrOut);
+    g_hdrWidth = 0;
+    g_hdrHeight = 0;
+    g_hdrFormat = DXGI_FORMAT_UNKNOWN;
+}
+
+// Under g_nrMutex. nullptr once the pass and both textures are ready for this frame; otherwise why not, a literal, and
+// the frame is declined the way an HDR swapchain always was.
+static const char* EnsurePresentHdr(ID3D12Device* device, unsigned int width, unsigned int height, DXGI_FORMAT format)
+{
+    if (!DlssNr_PresentHdr_Dx12::Available())
+        return PresentColourText::kNoShader;
+
+    if (g_presentHdr == nullptr)
+        g_presentHdr = new DlssNr_PresentHdr_Dx12("DLSS-NR present HDR", device);
+
+    if (!g_presentHdr->BuiltFor(device))
+        return PresentColourText::kOtherDevice;
+
+    if (!g_presentHdr->IsInit())
+        return PresentColourText::kNotBuilt;
+
+    // Typed UAV store into the swapchain's format and into FP16, asked of the device, not assumed (section 5.4).
+    if (!g_presentHdr->Supports(format))
+        return PresentColourText::kNoTypedStore;
+
+    if (g_hdrWork != nullptr && g_hdrOut != nullptr && g_hdrWidth == width && g_hdrHeight == height &&
+        g_hdrFormat == format)
+    {
+        return nullptr;
+    }
+
+    if (g_hdrFailedWidth == width && g_hdrFailedHeight == height && g_hdrFailedFormat == format)
+        return PresentColourText::kNoScratch;
+
+    // Retired, not released: the present lists that used them may still be on the GPU.
+    ParkPresentHdrTextures();
+    g_hdrWork = CreateScratch(device, DXGI_FORMAT_R16G16B16A16_FLOAT, width, height);
+    g_hdrOut = CreateScratch(device, format, width, height);
+
+    if (g_hdrWork == nullptr || g_hdrOut == nullptr)
+    {
+        RetirePresentHdrTexture(g_hdrWork);
+        RetirePresentHdrTexture(g_hdrOut);
+        g_hdrFailedWidth = width;
+        g_hdrFailedHeight = height;
+        g_hdrFailedFormat = format;
+        LOG_WARN("DLSS-NR present: the HDR conversion's {}x{} textures could not be created", width, height);
+        return PresentColourText::kNoScratch;
+    }
+
+    g_hdrWidth = width;
+    g_hdrHeight = height;
+    g_hdrFormat = format;
+    LOG_INFO("DLSS-NR present: HDR conversion textures built for {}x{}, swapchain format {}", width, height,
+             (int) format);
+    return nullptr;
+}
+
+// A UAV barrier: the decode's writes to the work texture are done before the pass touches it, whatever it does first.
+static void PresentHdrUavBarrier(ID3D12GraphicsCommandList* list, ID3D12Resource* resource)
+{
+    D3D12_RESOURCE_BARRIER barrier {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barrier.UAV.pResource = resource;
+    list->ResourceBarrier(1, &barrier);
+}
+
+// The colour decision for this present (DlssNr_PresentColour.h), and the menu told about it. With HdrPresent off this
+// is PresentColourRefusal on the inputs it always had: the process-wide colour space, or PQ where ForceHDR and UseHDR10
+// set it themselves without the wrapper seeing it. With it on, the colour space recorded for this swapchain decides.
+static PresentColourDecision DecidePresentColour(IDXGISwapChain3* swapchain, DXGI_FORMAT format, const Config& cfg)
+{
+    const DXGI_COLOR_SPACE_TYPE legacy = cfg.ForceHDR.value_or_default() && cfg.UseHDR10.value_or_default()
+                                             ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+                                             : State::Instance().outputColorSpace.dxgiColorSpace;
+    const bool hdrPresent = cfg.DlssNrHdrPresent.value_or_default();
+    const PresentColourRecord record = SwapchainColour::Lookup(swapchain);
+    const PresentColourDecision switchOn = ResolvePresentColour(format, record, true, legacy);
+
+    if (ReportsHdrStatus(format, switchOn, hdrPresent))
+        NotePresentHdr(switchOn.profile, hdrPresent ? switchOn.reason : nullptr, false);
+
+    return hdrPresent ? switchOn : ResolvePresentColour(format, record, false, legacy);
+}
+
 // One line, on a cadence, that answers the questions a session actually asks: is the pass running,
 // how many frames reach the screen for each one rendered, and why not when it is not.
 //
@@ -6747,18 +6910,21 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         return;
     }
 
-    // An HDR swapchain is declined before anything is built for it (DlssNr_PresentColour.h). The colour
-    // space is the last one a successful SetColorSpace1 set, which the wrapped swapchain records; ForceHDR
-    // sets PQ itself on resize without recording it, so that one is read from the config.
+    // An HDR swapchain is declined before anything is built for it (DlssNr_PresentColour.h), unless HdrPresent is on
+    // and it is HDR10 or scRGB, which is converted (docs/dlssnr/design/hdr-present-conversion.md). DecidePresentColour
+    // has which colour space each answer is read from.
+    PresentColour presentProfile = PresentColour::Sdr;
+    DXGI_FORMAT presentFormat = DXGI_FORMAT_UNKNOWN;
     {
         DXGI_SWAP_CHAIN_DESC1 scDesc {};
-        const DXGI_COLOR_SPACE_TYPE colourSpace = cfg.ForceHDR.value_or_default() && cfg.UseHDR10.value_or_default()
-                                                      ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
-                                                      : State::Instance().outputColorSpace.dxgiColorSpace;
 
         if (SUCCEEDED(swapchain->GetDesc1(&scDesc)))
         {
-            if (const char* refusal = PresentColourRefusal(scDesc.Format, colourSpace))
+            const PresentColourDecision decision = DecidePresentColour(swapchain, scDesc.Format, cfg);
+            presentProfile = decision.profile;
+            presentFormat = scDesc.Format;
+
+            if (const char* refusal = decision.profile == PresentColour::Declined ? decision.reason : nullptr)
             {
                 // What the model last saw is not the frame that follows once it runs again.
                 g_resetOnReturn = true;
@@ -6833,6 +6999,52 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         backbuffer->Release();
         device->Release();
         return;
+    }
+
+    // An HDR frame needs the conversion and its two textures; an SDR one parks them if a game just left HDR. A frame
+    // the conversion cannot take after all is declined as an HDR swapchain always was: the game's own picture, said
+    // once, and nothing else is spent on it. The decision read the swapchain's format; the copy is of this buffer.
+    const bool presentHdr = IsHdrProfile(presentProfile);
+    const char* hdrRefusal = nullptr;
+    CollectPresentHdrRetired();
+    if (presentHdr)
+        hdrRefusal = bbDesc.Format != presentFormat ? PresentColourText::kBufferFormat
+                                                    : EnsurePresentHdr(device, width, height, bbDesc.Format);
+    else
+        ParkPresentHdrTextures();
+
+    if (hdrRefusal != nullptr)
+    {
+        nrLock.unlock();
+        DropPresentList(slot);
+        backbuffer->Release();
+        device->Release();
+        g_resetOnReturn = true;
+        if (fgHook)
+            g_lastFgFlip = g_presentFlip;
+        NotePresentHdr(presentProfile, hdrRefusal, false);
+        ReportSkipOnce(hdrRefusal);
+        ReportRuntimeStatus(false, hdrRefusal);
+        return;
+    }
+
+    if (presentHdr)
+        NotePresentHdr(presentProfile, nullptr, true);
+
+    // Said once per change, so a log answers whether the frames were converted.
+    {
+        static PresentColour s_loggedProfile = PresentColour::Sdr;
+        if (presentProfile != s_loggedProfile)
+        {
+            s_loggedProfile = presentProfile;
+            if (presentHdr)
+                LOG_INFO("DLSS-NR present: HDR conversion on, {} at {}x{}: the pass runs on linear Rec.709 light with "
+                         "an SDR white of {:.0f} nits x Paper white",
+                         presentProfile == PresentColour::Hdr10 ? "HDR10 (PQ, Rec.2020)" : "scRGB (FP16, linear)",
+                         width, height, DlssNr::PresentHdr::kSdrWhiteNits);
+            else
+                LOG_INFO("DLSS-NR present: HDR conversion off, the swapchain is SDR");
+        }
     }
 
     ID3D12Resource* depth = nullptr;
@@ -7008,21 +7220,47 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     Barrier(list, backbuffer, D3D12_RESOURCE_STATE_COPY_SOURCE, bbState);
 
+    // HDR (hdr-present-conversion.md section 4.2): from here the copy is the original codes, never written, and the
+    // pass runs on its decode in the FP16 work texture. g_bbCopy rests in UNORDERED_ACCESS, where the motion estimator
+    // below reads it, so it is a shader resource only around each dispatch. Both dispatches are timed as one
+    // conversion sample (DlssNr_GpuTiming), which is finished before the list is closed or dropped.
+    std::optional<DlssNr::GpuTiming::Conversion> hdrTiming;
+    const uint32_t hdrShaderProfile =
+        presentProfile == PresentColour::Hdr10 ? DlssNr::PresentHdr::kProfileHdr10 : DlssNr::PresentHdr::kProfileScRgb;
+    bool hdrDecoded = false;
+    if (presentHdr)
+    {
+        // Enabled exactly when the Dispatch's own sample is: under the driver proxy the menu says timing is off.
+        const auto timingSettings = cfg.GetDlssNrGpuTimingSettings();
+        hdrTiming.emplace(device, list, timingSettings.Enabled && !cfg.DlssNrUseProxy.value_or_default(),
+                          timingSettings.Interval);
+
+        Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        hdrTiming->Begin();
+        hdrDecoded = g_presentHdr->Decode(list, g_bbCopy, g_hdrWork, hdrShaderProfile);
+        hdrTiming->End();
+        PresentHdrUavBarrier(list, g_hdrWork);
+        Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
     // What every present host says about a present frame, in one place. A capture from the game's own
     // upscaler has already filled the guide description above; this fills the rest and does not
     // touch it.
     {
-        const DlssNrFrameInfo defaults = PresentFrameDefaults(frame.Reset);
+        const DlssNrFrameInfo defaults = PresentFrameDefaults(frame.Reset, presentProfile);
         frame.PresentSource = defaults.PresentSource;
         frame.ColourIsLinearHdr = defaults.ColourIsLinearHdr;
         frame.ExposureTexture = defaults.ExposureTexture;
         frame.PreExposure = defaults.PreExposure;
         frame.ExtentIsStable = defaults.ExtentIsStable;
         frame.OutputState = defaults.OutputState;
+        frame.PresentWhite = defaults.PresentWhite;
+        frame.PresentQuantRel = defaults.PresentQuantRel;
     }
 
     // [DlssNr] SynthMotion: with no game guides, motion estimated from this frame and the last in place
     // of zero motion. Read from the copy, before the pass edits it in place; depth stays the zero guide.
+    // On an HDR frame the copy is the original codes, which is what it reads (hdr-present-conversion.md, question 5).
     if (!temporalValid && cfg.DlssNrSynthMotion.value_or_default())
     {
         if (g_presentMotion == nullptr)
@@ -7046,8 +7284,13 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     // Through the shared entry rather than straight into Dispatch. Two doors to the same pass is how
     // the two present transports drifted: ExtentIsStable and the reason string each existed on one
     // side only, on paths facing the identical situation.
+    // On an HDR frame the pass runs on the decode, and only if the decode was recorded.
     const char* reason = "";
-    const bool recorded = EvaluateAtPresent(list, g_bbCopy, depth, motion, frame, queue, &reason);
+    bool recorded = false;
+    if (presentHdr && !hdrDecoded)
+        reason = "the HDR conversion could not record its decode";
+    else
+        recorded = EvaluateAtPresent(list, presentHdr ? g_hdrWork : g_bbCopy, depth, motion, frame, queue, &reason);
     if (recorded)
         ++g_passesRecorded;
 
@@ -7068,6 +7311,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
             g_presentGuideClones[trackedSlot].presentReadUsage = savedPresentReadUsage;
             g_presentGuideClones[trackedSlot].readTracked = savedReadTracked;
         }
+        hdrTiming.reset(); // resolves on the list while it is still open
         DropPresentList(slot);
         SettlePresentMotion(false);
         backbuffer->Release();
@@ -7085,11 +7329,30 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         }
     }
 
-    Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    // HDR: the work texture back into the swapchain's format, with the original as the reference, and that is what
+    // goes back. A frame the pass did not run on was never edited, so the copy -- the original codes -- goes back as it
+    // does on SDR, and a failed encode does the same rather than show what g_hdrOut held before.
+    ID3D12Resource* writeBack = g_bbCopy;
+    if (presentHdr && recorded)
+    {
+        Barrier(list, g_hdrWork, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        hdrTiming->Begin();
+        const bool encoded = g_presentHdr->Encode(list, g_bbCopy, g_hdrWork, g_hdrOut, hdrShaderProfile);
+        hdrTiming->End();
+        hdrTiming->Finish(encoded);
+        Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Barrier(list, g_hdrWork, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (encoded)
+            writeBack = g_hdrOut;
+    }
+    hdrTiming.reset();
+
+    Barrier(list, writeBack, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
     Barrier(list, backbuffer, bbState, D3D12_RESOURCE_STATE_COPY_DEST);
-    list->CopyResource(backbuffer, g_bbCopy);
+    list->CopyResource(backbuffer, writeBack);
     Barrier(list, backbuffer, D3D12_RESOURCE_STATE_COPY_DEST, bbState);
-    Barrier(list, g_bbCopy, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Barrier(list, writeBack, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     const bool executed = SubmitPresentList(queue, slot);
     SettlePresentMotion(executed);
@@ -7964,7 +8227,7 @@ void AbandonCapturedGuides()
     g_bridgeRead = {};
 }
 
-DlssNrFrameInfo PresentFrameDefaults(bool reset)
+DlssNrFrameInfo PresentFrameDefaults(bool reset, PresentColour colour)
 {
     DlssNrFrameInfo frame {};
 
@@ -7995,6 +8258,17 @@ DlssNrFrameInfo PresentFrameDefaults(bool reset)
     // History has nothing to carry over on the first frame, after a resize, and after any gap the
     // host could not bridge. The caller knows which of those happened; this side cannot.
     frame.Reset = reset;
+
+    // An HDR swapchain's frame, which its host decoded into linear Rec.709 in scRGB units before this
+    // (docs/dlssnr/design/hdr-present-conversion.md): the linear-HDR path the pass was built for, the display's
+    // SDR white as the white point's base, and on HDR10 a PQ code as the output stabilizer's unit. Still no
+    // exposure texture: the white is arithmetic, not a reading.
+    if (IsHdrProfile(colour))
+    {
+        frame.ColourIsLinearHdr = true;
+        frame.PresentWhite = DlssNr::PresentHdr::kSdrWhiteScRgb;
+        frame.PresentQuantRel = colour == PresentColour::Hdr10 ? DlssNr::PresentHdr::kPqQuantRel : 0.0f;
+    }
 
     return frame;
 }
@@ -8637,6 +8911,39 @@ const char* CadenceStatus() { return g_cadenceStatus.load(); }
 bool CadenceAvailable() { return DlssNr_Cadence_Dx12::Available(); }
 bool BufferIsLinearHdr() { return g_lastLinearHdr.load(); }
 
+// HDR at present, for the menu. Written by the present hosts on their threads, read by the menu on its own.
+static std::mutex g_presentHdrStatusMutex;
+static std::chrono::steady_clock::time_point g_presentHdrAt {};
+static PresentColour g_presentHdrProfile = PresentColour::Declined;
+static const char* g_presentHdrReason = nullptr;
+static bool g_presentHdrConverted = false;
+
+void NotePresentHdr(PresentColour profile, const char* reason, bool converted)
+{
+    std::lock_guard<std::mutex> lock(g_presentHdrStatusMutex);
+    g_presentHdrAt = std::chrono::steady_clock::now();
+    g_presentHdrProfile = profile;
+    g_presentHdrReason = reason;
+    g_presentHdrConverted = converted;
+}
+
+PresentHdrStatus GetPresentHdrStatus()
+{
+    PresentHdrStatus status;
+    status.available = DlssNr_PresentHdr_Dx12::Available();
+
+    std::lock_guard<std::mutex> lock(g_presentHdrStatusMutex);
+    if (g_presentHdrAt.time_since_epoch().count() == 0)
+        return status;
+
+    const auto age = std::chrono::steady_clock::now() - g_presentHdrAt;
+    status.seen = age < std::chrono::seconds(2);
+    status.converted = status.seen && g_presentHdrConverted && age < std::chrono::seconds(1);
+    status.profile = g_presentHdrProfile;
+    status.reason = g_presentHdrReason;
+    return status;
+}
+
 PeripheryState PeripheryStatus()
 {
     std::lock_guard<std::mutex> lock(g_peripheryStatusMutex);
@@ -9019,5 +9326,27 @@ void Shutdown()
         g_bbCopy->Release();
         g_bbCopy = nullptr;
     }
+
+    // The HDR conversion's textures, retired ones included, and its pass, with the backbuffer copy they were made
+    // beside.
+    if (g_hdrWork != nullptr)
+    {
+        g_hdrWork->Release();
+        g_hdrWork = nullptr;
+    }
+    if (g_hdrOut != nullptr)
+    {
+        g_hdrOut->Release();
+        g_hdrOut = nullptr;
+    }
+    for (const auto& retired : g_hdrRetired)
+        retired.resource->Release();
+    g_hdrRetired.clear();
+    delete g_presentHdr;
+    g_presentHdr = nullptr;
+    g_hdrWidth = g_hdrHeight = 0;
+    g_hdrFormat = DXGI_FORMAT_UNKNOWN;
+    g_hdrFailedWidth = g_hdrFailedHeight = 0;
+    g_hdrFailedFormat = DXGI_FORMAT_UNKNOWN;
 }
 } // namespace DlssNr

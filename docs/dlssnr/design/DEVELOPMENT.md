@@ -65,6 +65,11 @@ control, no missing one.
 | 2 scan | ≥1 anchor, none selected | **Trim (x the scan)** + Reset only (Paper white hidden; Anchor captures the trimmed effective white) | Anchor here; table rows (× delete, `>` = active); readout |
 | 2 scan | ≥1 anchor, row selected | **Paper white (editing point N)** + Trim + Reset | as above; selected row shows `[editing]` |
 | 2 scan | exactly 1 anchor | + **"the number runs the other way"** checkbox | (checkbox hidden at 0 or ≥2 anchors) |
+| any | present frames of an HDR10 or scRGB swapchain being converted (`HdrPresent` on, `GetPresentHdrStatus().converted`) | **Paper white (x the display's SDR white)** + Reset only -- the same stored value as Paper white, labelled for what it multiplies; Source combo, Trim, scan rows, highlight guard and recovery hidden | **HDR output (HDR10 and scRGB)** checkbox above it; green readout "HDR10, SDR white 203 nits x 1.00" |
+| any | a present host sees a ten-bit or FP16 swapchain the switch acts on, not converting (switch off, or declined) | the row of the source above, unchanged | **HDR output** checkbox; readout "Off: this HDR10 swapchain is shown as the game rendered it." or the decline reason (amber). No checkbox at all on an SDR swapchain, in a build without the conversion's shader, or two seconds after the last such frame |
+
+The two HDR rows sit above the source rows (docs/dlssnr/design/hdr-present-conversion.md section 5.5); the
+checkbox is `RenderPresentHdr` in `DlssNr_Menu.cpp`.
 
 Invariant checks against this table: Trim only with ≥1 anchor (rule 2). Inverted checkbox only at
 exactly 1 anchor (direction is in the data at ≥2). Paper white shows only to set the FIRST point or

@@ -7,6 +7,7 @@
 #include "DlssNr_Chain.h"
 #include "DlssNr_Enlarge.h"
 #include "DlssNr_DetailStats.h"
+#include "DlssNr_PresentColour.h"
 #include <memory>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
@@ -75,7 +76,12 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 //
 // A caller that captured the game's real depth and motion overwrites what it knows and keeps the
 // rest.
-DlssNrFrameInfo PresentFrameDefaults(bool reset);
+//
+// colour is the host's decision for the swapchain (DlssNr_PresentColour.h). HDR10 and scRGB describe the frame the
+// host decoded into linear Rec.709 in scRGB units (docs/dlssnr/design/hdr-present-conversion.md): linear HDR, the
+// display's SDR white as the white point's base (PresentWhite), and on HDR10 a PQ code as the output stabilizer's unit
+// (PresentQuantRel). Sdr, the default, is the description every present frame always had.
+DlssNrFrameInfo PresentFrameDefaults(bool reset, PresentColour colour = PresentColour::Sdr);
 
 // The game's own depth and motion, when an upscaler handed them over this frame cycle.
 //
@@ -370,6 +376,23 @@ bool CadenceAvailable();
 // until something has run. For the menu: highlight recovery acts only there
 // (docs/dlssnr/design/hdr-highlight-recovery.md).
 bool BufferIsLinearHdr();
+
+// HDR10 and scRGB at present ([DlssNr] HdrPresent, docs/dlssnr/design/hdr-present-conversion.md), for the menu: its
+// switch exists only while a present host is looking at an HDR swapchain, in a build that carries the conversion.
+struct PresentHdrStatus
+{
+    bool available = false; // this build carries the conversion's shader
+    bool seen = false;      // in the last two seconds a present host saw a ten-bit or FP16 swapchain the switch acts on
+    bool converted = false; // ... and in the last second it was converting that swapchain's frames
+    PresentColour profile = PresentColour::Declined; // Hdr10 or ScRgb when the conversion takes the swapchain
+    const char* reason = nullptr;                    // why it is not converting, a literal; null when it is, or is off
+};
+PresentHdrStatus GetPresentHdrStatus();
+
+// What a present host decided about an HDR swapchain's frame, for the status above. profile: what the conversion
+// makes of it with the switch on (Hdr10, ScRgb, or Declined). reason: why this frame was not converted, or null.
+// converted: the conversion was armed for it.
+void NotePresentHdr(PresentColour profile, const char* reason, bool converted);
 // What peripheral compression did on the last D3D12 dispatch (docs/dlssnr/design/peripheral-compression.md), for the
 // menu's status line. reason is a string literal: "active", or why not.
 struct PeripheryState

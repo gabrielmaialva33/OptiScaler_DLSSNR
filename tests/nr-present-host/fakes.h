@@ -5,13 +5,18 @@
 // the host depends on -- no model below kDlssNrMinExtent -- and records where every creation
 // happened: on an empty list of the host's own, or on the frame's list behind other work.
 #pragma once
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <chrono>
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -41,7 +46,9 @@ inline size_t LogCount(const char* needle)
 enum DXGI_FORMAT
 {
     DXGI_FORMAT_UNKNOWN = 0,
+    DXGI_FORMAT_R16G16B16A16_TYPELESS = 9,
     DXGI_FORMAT_R16G16B16A16_FLOAT = 10,
+    DXGI_FORMAT_R10G10B10A2_TYPELESS = 23,
     DXGI_FORMAT_R10G10B10A2_UNORM = 24,
     DXGI_FORMAT_R8G8B8A8_UNORM = 28,
     DXGI_FORMAT_R8G8B8A8_UNORM_SRGB = 29,
@@ -49,6 +56,7 @@ enum DXGI_FORMAT
     DXGI_FORMAT_B8G8R8X8_UNORM = 88,
     DXGI_FORMAT_B8G8R8A8_UNORM_SRGB = 91,
     DXGI_FORMAT_B8G8R8X8_UNORM_SRGB = 93,
+    DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM = 89,
 };
 // dxgicommon.h's values, for the ones DlssNr_PresentColour.h names.
 enum DXGI_COLOR_SPACE_TYPE
@@ -61,6 +69,7 @@ enum DXGI_COLOR_SPACE_TYPE
     DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020 = 14,
     DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020 = 16,
     DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020 = 17,
+    DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020 = 18,
     DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020 = 19,
     DXGI_COLOR_SPACE_RGB_STUDIO_G24_NONE_P709 = 20,
 };
@@ -74,7 +83,8 @@ enum D3D12_RESOURCE_STATES
 };
 enum D3D12_RESOURCE_BARRIER_TYPE
 {
-    D3D12_RESOURCE_BARRIER_TYPE_TRANSITION = 0
+    D3D12_RESOURCE_BARRIER_TYPE_TRANSITION = 0,
+    D3D12_RESOURCE_BARRIER_TYPE_UAV = 2,
 };
 enum D3D12_COMMAND_LIST_TYPE
 {
@@ -92,6 +102,8 @@ struct D3D12_RESOURCE_DESC
 struct ID3D12Resource
 {
     D3D12_RESOURCE_DESC desc {};
+    // Where the resource is, as the barriers recorded so far left it. Every transition must start from here.
+    D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     int refs = 1;
     D3D12_RESOURCE_DESC GetDesc() const { return desc; }
     void Release()
@@ -111,6 +123,10 @@ struct D3D12_RESOURCE_BARRIER
         UINT Subresource {};
         D3D12_RESOURCE_STATES StateBefore {}, StateAfter {};
     } Transition;
+    struct
+    {
+        ID3D12Resource* pResource {};
+    } UAV;
 };
 
 struct ID3D12CommandAllocator
@@ -131,11 +147,25 @@ struct ID3D12GraphicsCommandList : ID3D12CommandList
 {
     int refs = 1;
     HRESULT closeResult = S_OK;
+    unsigned uavBarriers = 0;
     void ResourceBarrier(UINT count, const D3D12_RESOURCE_BARRIER* barriers)
     {
         assert(!closed && "barrier on a closed list");
         for (UINT i = 0; i < count; ++i)
+        {
+            if (barriers[i].Type == D3D12_RESOURCE_BARRIER_TYPE_UAV)
+            {
+                assert(barriers[i].UAV.pResource != nullptr && barriers[i].UAV.pResource->state ==
+                                                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                ++uavBarriers;
+                continue;
+            }
+            auto* resource = barriers[i].Transition.pResource;
             assert(barriers[i].Transition.StateBefore != barriers[i].Transition.StateAfter);
+            assert(resource != nullptr && resource->state == barriers[i].Transition.StateBefore &&
+                   "a transition from a state the resource is not in");
+            resource->state = barriers[i].Transition.StateAfter;
+        }
         recorded += count;
     }
     HRESULT Close()
@@ -203,12 +233,13 @@ class FT_Dx12
             --g_transferBuffersLive;
         }
     }
-    bool CreateBufferResource(ID3D12Device*, ID3D12Resource* source, D3D12_RESOURCE_STATES)
+    bool CreateBufferResource(ID3D12Device*, ID3D12Resource* source, D3D12_RESOURCE_STATES state)
     {
         assert(_buffer == nullptr);
         _buffer = new ID3D12Resource();
         _buffer->desc = source->GetDesc();
         _buffer->desc.Format = _format;
+        _buffer->state = state;
         ++g_transferBuffersLive;
         ++g_transferBuffersMade;
         return true;
@@ -236,6 +267,14 @@ class Config
     FakeFlag DlssNrEnabled { true };
     FakeFlag DlssNrZeroGuideReset { false };
     FakeFlag DlssNrSynthMotion { false };
+    FakeFlag DlssNrHdrPresent { false };
+    FakeFlag DlssNrUseProxy { false };
+    struct DlssNrGpuTimingSettings
+    {
+        bool Enabled = false;
+        uint32_t Interval = 30;
+    };
+    DlssNrGpuTimingSettings GetDlssNrGpuTimingSettings() const { return {}; }
     static Config* Instance()
     {
         static Config config;
@@ -258,6 +297,8 @@ struct DlssNrFrameInfo
     bool ExtentIsStable = false;
     bool AllowSupersampling = true;
     int OutputState = 0;
+    float PresentWhite = 0.0f;
+    float PresentQuantRel = 0.0f;
 };
 
 namespace DlssNr
@@ -327,17 +368,8 @@ inline uint32_t g_modelWidth = 0, g_modelHeight = 0;
 inline unsigned g_passesRun = 0;
 inline bool g_refuseModel = false;   // NGX refusing the feature: the pass declines every frame
 inline bool g_lastPassReset = false; // the Reset the pass was last handed, on a frame it ran
-
-inline DlssNrFrameInfo PresentFrameDefaults(bool reset)
-{
-    DlssNrFrameInfo frame {};
-    frame.PresentSource = true;
-    frame.ColourIsLinearHdr = false;
-    frame.ExtentIsStable = true;
-    frame.OutputState = (int) D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    frame.Reset = reset;
-    return frame;
-}
+inline DlssNrFrameInfo g_lastPassFrame {}; // the whole description, on a frame it ran
+inline ID3D12Resource* g_lastPassColour = nullptr;
 
 inline bool CapturedPresentGuides(ID3D12GraphicsCommandList*, ID3D12Resource**, ID3D12Resource**, DlssNrFrameInfo*,
                                   ID3D12CommandQueue* = nullptr, const void* = nullptr, unsigned int = 0,
@@ -384,9 +416,12 @@ inline bool EvaluateAtPresent(ID3D12GraphicsCommandList* list, ID3D12Resource* c
         g_modelWidth = (uint32_t) desc.Width;
         g_modelHeight = desc.Height;
     }
+    assert(colour->state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS && "the pass is told its colour arrives as a UAV");
     ++list->recorded;
     ++g_passesRun;
     g_lastPassReset = frame.Reset;
+    g_lastPassFrame = frame;
+    g_lastPassColour = colour;
     *outReason = ran;
     return true;
 }

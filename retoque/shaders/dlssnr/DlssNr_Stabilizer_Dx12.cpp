@@ -81,9 +81,10 @@ ID3D12Resource* DlssNr_Stabilizer_Dx12::CreateHistory(ID3D12Device* device, DXGI
 }
 
 DlssNr_Stabilizer_Dx12::DlssNr_Stabilizer_Dx12(std::string InName, ID3D12Device* InDevice,
-                                               const D3D12_RESOURCE_DESC& InOutput)
+                                               const D3D12_RESOURCE_DESC& InOutput, float InFinalQuantRel)
     : Shader_Dx12(InName, InDevice), _width(InOutput.Width), _height(InOutput.Height), _format(InOutput.Format),
-      _mipLevels(InOutput.MipLevels), _arraySize(InOutput.DepthOrArraySize), _sampleCount(InOutput.SampleDesc.Count)
+      _mipLevels(InOutput.MipLevels), _arraySize(InOutput.DepthOrArraySize), _sampleCount(InOutput.SampleDesc.Count),
+      _finalQuantRel(std::isfinite(InFinalQuantRel) && InFinalQuantRel > 0.0f ? InFinalQuantRel : 0.0f)
 {
     if (InDevice == nullptr)
     {
@@ -172,6 +173,14 @@ DlssNr_Stabilizer_Dx12::DlssNr_Stabilizer_Dx12(std::string InName, ID3D12Device*
 
     OutputUnit(_format, _quantAbs, _quantRel);
 
+    // The frame goes out in another format than this output's (an HDR10 swapchain behind the FP16 work texture): its
+    // unit is the one a creep step must not fall below, or the encode rounds the step away on screen.
+    if (_finalQuantRel > 0.0f)
+    {
+        _quantAbs = 0.0f;
+        _quantRel[0] = _quantRel[1] = _quantRel[2] = _finalQuantRel;
+    }
+
     LOG_INFO("DLSS-NR stabilizer: history built for {}x{}, format {}", _width, _height, (int) _format);
     _init = true;
 }
@@ -205,13 +214,15 @@ DlssNr_Stabilizer_Dx12::~DlssNr_Stabilizer_Dx12()
     }
 }
 
-bool DlssNr_Stabilizer_Dx12::Fits(ID3D12Device* InDevice, const D3D12_RESOURCE_DESC& InOutput) const
+bool DlssNr_Stabilizer_Dx12::Fits(ID3D12Device* InDevice, const D3D12_RESOURCE_DESC& InOutput,
+                                  float InFinalQuantRel) const
 {
     // A failed object still fits the output it failed on, so it is not rebuilt, and logged again, every
     // frame; it reports its reason once, from the constructor, and then does nothing.
+    const float finalQuantRel = std::isfinite(InFinalQuantRel) && InFinalQuantRel > 0.0f ? InFinalQuantRel : 0.0f;
     return InDevice == _device && InOutput.Width == _width && InOutput.Height == _height &&
            InOutput.Format == _format && InOutput.MipLevels == _mipLevels && InOutput.DepthOrArraySize == _arraySize &&
-           InOutput.SampleDesc.Count == _sampleCount;
+           InOutput.SampleDesc.Count == _sampleCount && finalQuantRel == _finalQuantRel;
 }
 
 bool DlssNr_Stabilizer_Dx12::Dispatch(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InInput,

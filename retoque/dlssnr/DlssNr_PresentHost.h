@@ -8,6 +8,7 @@
 #include <memory>
 
 class FT_Dx12;
+class DlssNr_PresentHdr_Dx12;
 
 namespace DlssNr
 {
@@ -58,10 +59,24 @@ class PresentHost
     // Throw everything away. The caller must already have proved the GPU is done with it.
     void Release();
 
-    // The colour space the swapchain was last set to, from a SetColorSpace1 that succeeded. An HDR one
-    // declines the pass until it changes back (DlssNr_PresentColour.h); a host never told keeps DXGI's
-    // default, sRGB.
-    void NoteColourSpace(DXGI_COLOR_SPACE_TYPE colourSpace) { _colourSpace = colourSpace; }
+    // The colour space the swapchain was last set to, from a SetColorSpace1 that succeeded. With [DlssNr]
+    // HdrPresent off an HDR one declines the pass until it changes back (DlssNr_PresentColour.h); with it on,
+    // HDR10 and scRGB are converted (docs/dlssnr/design/hdr-present-conversion.md section 5.2). A host never
+    // told keeps DXGI's default: sRGB, or scRGB for FP16 when converting.
+    //
+    // The first frame Record sees after a note pins the format the colour space was set for, and a later frame
+    // of another format leaves the colour space unknown -- declined with HdrPresent on -- until the next note.
+    // The bridge's resizes are not seen here, only their frames: two format changes with no frame between them
+    // (A to B and back to A) are not caught. One resize into another format before the first frame never converts
+    // with the wrong colour space: each one converted is tied to its format (PQ to ten bits, scRGB to FP16), so the
+    // pairing it leaves declines, and eight bits are SDR whatever was noted.
+    void NoteColourSpace(DXGI_COLOR_SPACE_TYPE colourSpace)
+    {
+        _colourSpace = colourSpace;
+        _colourSpaceSet = true;
+        _colourFormat = DXGI_FORMAT_UNKNOWN;
+        _colourValid = true;
+    }
 
     // Whether the last frame the model ran on had synthesized motion rather than zero motion.
     bool MotionSynthesized() const;
@@ -112,6 +127,11 @@ class PresentHost
     // Back to whatever the caller's frame is in, so the caller's transfer is the copy it already did.
     std::unique_ptr<FT_Dx12> _fromWorking;
 
+    // HDR10 and scRGB ([DlssNr] HdrPresent): the decode and encode that take the two conversions' place on an
+    // HDR frame, into and out of the same two buffers, with the caller's source as the encode's reference.
+    // Built on the first HDR frame, kept for the host's life -- it depends on no size -- and freed with it.
+    std::unique_ptr<DlssNr_PresentHdr_Dx12> _hdr;
+
     D3D12_RESOURCE_STATES _workingState = D3D12_RESOURCE_STATE_COMMON;
     D3D12_RESOURCE_STATES _outputState = D3D12_RESOURCE_STATE_COMMON;
 
@@ -128,6 +148,9 @@ class PresentHost
     uint32_t _height = 0;
     unsigned int _sourceFormat = 0;
     DXGI_COLOR_SPACE_TYPE _colourSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    bool _colourSpaceSet = false;                    // a note arrived at all
+    DXGI_FORMAT _colourFormat = DXGI_FORMAT_UNKNOWN; // the format it was for, pinned by the next frame
+    bool _colourValid = true;                        // no frame of another format since
 
     bool _recorded = false;
     bool _recordedPass = false;

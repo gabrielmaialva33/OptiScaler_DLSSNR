@@ -35,6 +35,8 @@ struct Slot
     bool successful = false;
     bool reported = false;
     const char* rejected = nullptr;
+    // A Conversion's slot: models counts its closed brackets and inModel says one is open.
+    bool conversion = false;
 };
 
 std::mutex mutex;
@@ -44,6 +46,10 @@ std::array<Slot, Detail::SlotCount> slots {};
 Snapshot snapshot {};
 Clock::time_point acceptedAt {};
 Clock::time_point latestRecordedAt {};
+// Conversions, counted apart from evaluations so the evaluation counters keep their meaning.
+uint64_t conversionEligible = 0;
+uint64_t conversionSampled = 0;
+Clock::time_point conversionRecordedAt {};
 Clock::time_point lastSummary {};
 std::array<Clock::time_point, 24> lastDiscardLog {};
 
@@ -142,6 +148,63 @@ bool Allocate(Slot& slot, ID3D12Device* device)
     return true;
 }
 
+bool AnySampled() { return snapshot.sampled != 0 || conversionSampled != 0; }
+
+// A confirmed Conversion slot: two brackets, decode and encode, published beside the evaluation's sample.
+void CollectConversion(Slot& slot, const Detail::Certificate& certificate)
+{
+    if (!slot.successful || slot.malformed || slot.inModel || slot.models != 2 || slot.queryCount != 4)
+    {
+        Drop("incomplete-conversion", &slot);
+        return;
+    }
+    void* mapped = nullptr;
+    const D3D12_RANGE readRange { 0, slot.queryCount * sizeof(uint64_t) };
+    const auto result = slot.readback->Map(0, &readRange, &mapped);
+    if (FAILED(result) || !mapped)
+    {
+        if (SUCCEEDED(result))
+        {
+            const D3D12_RANGE written { 0, 0 };
+            slot.readback->Unmap(0, &written);
+        }
+        Drop("readback-map-failed", &slot);
+        return;
+    }
+    std::array<uint64_t, Detail::MaxQueries> values {};
+    std::memcpy(values.data(), mapped, readRange.End);
+    const D3D12_RANGE written { 0, 0 };
+    slot.readback->Unmap(0, &written);
+    double brackets[2] {};
+    if (!Detail::DecodeBrackets(values.data(), slot.queryCount, certificate.frequency, brackets, 2))
+    {
+        Drop("invalid-timestamps", &slot);
+        return;
+    }
+    if (!snapshot.conversionValid || slot.id > snapshot.conversionSampleId)
+    {
+        snapshot.conversionValid = true;
+        snapshot.conversionSampleId = slot.id;
+        snapshot.conversionDecodeMs = brackets[0];
+        snapshot.conversionEncodeMs = brackets[1];
+        snapshot.conversionMs = brackets[0] + brackets[1];
+        conversionRecordedAt = slot.recordedAt;
+    }
+    slot.reported = true;
+    try
+    {
+        LOG_INFO("DLSS-NR gpu timing confirmed: run={} conversion_sample={} hdr_conversion_ms={:.6f} decode_ms={:.6f} "
+                 "encode_ms={:.6f} queue={} fence={} frequency_hz={} interval={} unit=eligible-conversions "
+                 "proof=sealed-single-execution-fence",
+                 snapshot.runId, slot.id, brackets[0] + brackets[1], brackets[0], brackets[1], certificate.queue,
+                 certificate.fence, certificate.frequency, slot.interval);
+    }
+    catch (...)
+    {
+        // Diagnostics must not interrupt the rendering path on allocation failure.
+    }
+}
+
 void PollLocked()
 {
     snapshot.pending = 0;
@@ -168,6 +231,8 @@ void PollLocked()
             ++snapshot.retained;
         if (!certificate.accepted)
             Drop(certificate.reason, &slot);
+        else if (!slot.reported && slot.conversion)
+            CollectConversion(slot, certificate);
         else if (!slot.reported)
         {
             if (!slot.successful || slot.malformed || slot.inModel || slot.models != slot.actualPasses)
@@ -246,6 +311,7 @@ void PollLocked()
         {
             slot.usage = {};
             slot.occupied = false;
+            slot.conversion = false;
             if (!snapshot.enabled)
                 ReleaseSafe(slot);
             --snapshot.pending;
@@ -288,7 +354,7 @@ void Poll()
     if (!everEnabled.load(std::memory_order_relaxed))
         return;
     std::lock_guard lock(mutex);
-    if (snapshot.sampled)
+    if (AnySampled())
         PollLocked();
 }
 
@@ -300,7 +366,7 @@ void SetEnabled(bool enabled)
         everEnabled.store(true, std::memory_order_relaxed);
     std::lock_guard lock(mutex);
     snapshot.enabled = enabled;
-    if (snapshot.sampled)
+    if (AnySampled())
         PollLocked();
     if (!enabled)
         for (auto& slot : slots)
@@ -319,6 +385,9 @@ Snapshot GetSnapshot()
         result.collectedAgeMs =
             std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - acceptedAt).count();
     }
+    if (result.conversionValid)
+        result.conversionAgeMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - conversionRecordedAt).count();
     return result;
 }
 
@@ -331,7 +400,7 @@ Evaluation::Evaluation(ID3D12Device* device, ID3D12GraphicsCommandList* commandL
         everEnabled.store(true, std::memory_order_relaxed);
     std::lock_guard lock(mutex);
     snapshot.enabled = enabled;
-    if (snapshot.sampled)
+    if (AnySampled())
         PollLocked();
     if (!enabled)
     {
@@ -477,4 +546,124 @@ void Evaluation::Finish(uint32_t actualPasses, bool success)
 }
 
 Evaluation::~Evaluation() { Finish(finalPasses, finalSuccess); }
+
+Conversion::Conversion(ID3D12Device* device, ID3D12GraphicsCommandList* commandList, bool enabled, uint32_t interval)
+{
+    if (!enabled && !everEnabled.load(std::memory_order_relaxed))
+        return;
+    if (enabled)
+        everEnabled.store(true, std::memory_order_relaxed);
+    std::lock_guard lock(mutex);
+    snapshot.enabled = enabled;
+    if (AnySampled())
+        PollLocked();
+    if (!enabled)
+    {
+        for (auto& candidate : slots)
+            if (!candidate.occupied)
+                ReleaseSafe(candidate);
+        return;
+    }
+    if (!snapshot.runId)
+        snapshot.runId = static_cast<uint64_t>(Clock::now().time_since_epoch().count()) ^ GetCurrentProcessId();
+    interval = std::clamp(interval, 1u, 10000u);
+    ++conversionEligible;
+    if ((conversionEligible - 1) % interval != 0)
+        return;
+    if (!device || !commandList || commandList->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
+    {
+        Drop("unsupported-command-list");
+        return;
+    }
+    Slot* available = nullptr;
+    for (auto& candidate : slots)
+        if (!candidate.occupied)
+        {
+            available = &candidate;
+            break;
+        }
+    if (!available)
+    {
+        Drop("pool-full");
+        return;
+    }
+    ID3D12Device* recordingDevice = nullptr;
+    if (FAILED(commandList->GetDevice(IID_PPV_ARGS(&recordingDevice))) || !recordingDevice)
+    {
+        Drop("recording-device-unavailable");
+        return;
+    }
+    const bool allocated = Allocate(*available, recordingDevice);
+    recordingDevice->Release();
+    if (!allocated)
+    {
+        Drop("query-allocation-failed");
+        return;
+    }
+    if (!Submission::Track(commandList, available->usage))
+    {
+        Drop(Submission::LastRefusal());
+        available->usage = {}; // Track may fail after filling an epoch; no query was recorded.
+        return;
+    }
+    available->recordedAt = Clock::now();
+    available->metadata = {};
+    available->id = ++conversionSampled;
+    available->interval = interval;
+    available->queryCount = available->models = available->actualPasses = 0;
+    available->occupied = available->recording = available->conversion = true;
+    available->inModel = available->malformed = available->successful = available->reported = false;
+    available->rejected = nullptr;
+    ++snapshot.pending;
+    slot = available;
+    list = commandList;
+}
+
+void Conversion::Begin()
+{
+    if (!slot)
+        return;
+    auto& current = *static_cast<Slot*>(slot);
+    if (current.inModel || current.models >= 2)
+    {
+        current.malformed = true;
+        return;
+    }
+    current.inModel = true;
+    Stamp(current, list);
+}
+
+void Conversion::End()
+{
+    if (!slot)
+        return;
+    auto& current = *static_cast<Slot*>(slot);
+    if (!current.inModel)
+    {
+        current.malformed = true;
+        return;
+    }
+    Stamp(current, list);
+    current.inModel = false;
+    ++current.models;
+}
+
+void Conversion::Finish(bool success)
+{
+    if (!slot)
+        return;
+    auto& current = *static_cast<Slot*>(slot);
+    // Every resolved timestamp has an EndQuery; a slot that stamped nothing resolves nothing.
+    if (current.queryCount > 0)
+        list->ResolveQueryData(current.heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, current.queryCount, current.readback, 0);
+    std::lock_guard lock(mutex);
+    current.successful = success;
+    current.recording = false;
+    if (!success)
+        current.reported = true; // Not a sample and not a discard: freed once its recording is proven done.
+    slot = nullptr;
+    list = nullptr;
+}
+
+Conversion::~Conversion() { Finish(false); }
 } // namespace DlssNr::GpuTiming
