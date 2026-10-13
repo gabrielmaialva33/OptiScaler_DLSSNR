@@ -6,7 +6,7 @@
 # refuses anything not on it.
 #
 # What is deliberately NOT here: nvngx_dlssnr.dll. That is NVIDIA's, it is not ours to redistribute,
-# and the user supplies their own copy per game folder. Only the ~108 KB forwarder ships.
+# and the user supplies their own copy per game folder. Only the ~115 KB forwarder ships.
 
 param(
     [string]$Version = "v0.1.0-dlssnr",

@@ -138,7 +138,7 @@ zlib). `Licenses/RTXRemix_ATTRIBUTION.txt` carries both texts and says which par
 ## Why a forwarder DLL exists
 
 The model's snippet resolves the module that owns its caller's return address and refuses any whose
-path does not contain `nvngx.dll`. The forwarder (`nvngx.dll_dlssnr.dll`, ~13 KB) exists only to
+path does not contain `nvngx.dll`. The forwarder (`nvngx.dll_dlssnr.dll`, ~115 KB) exists only to
 satisfy that check; every NGX call to the model originates from it. It contains no NVIDIA code, is
 part of the solution, and builds with everything else.
 

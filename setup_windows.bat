@@ -430,7 +430,7 @@ if exist "nvngx_dlssnr.dll" (
 echo.
 echo   Two similarly named files matter here, one character apart:
 echo.
-echo     nvngx.dll_dlssnr.dll   ships in this package  ^(about 13 KB^)
+echo     nvngx.dll_dlssnr.dll   ships in this package  ^(about 115 KB^)
 echo     nvngx_dlssnr.dll       you supply it          ^(about 165 MB^)
 echo.
 echo   To check you have the right file: Properties ^> Details should

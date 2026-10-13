@@ -76,7 +76,7 @@ repo), which adds Linux/Proton overlay patches on top.
 ## Build
 
 Windows-only C++ (`stdcpplatest`, MSVC), built from `OptiScaler.sln`. Two projects: `OptiScaler` (the
-DLL) and `dlssnr_forwarder` (a ~13 KB shim, see below). Real target is `x64`; Win32 configurations
+DLL) and `dlssnr_forwarder` (a ~115 KB shim, see below). Real target is `x64`; Win32 configurations
 exist in the solution but CI and every script build only x64. Configurations: `Debug`, `Release`,
 `ReleaseDebug`.
 

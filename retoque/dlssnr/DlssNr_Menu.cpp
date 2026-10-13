@@ -487,7 +487,7 @@ void RenderMenu(Config* config, float menuResScale)
         HelpMarker("Synthesises detail in the upscaler's output, before frame generation sees it."
                    "\n\nNeeds two similarly named files beside OptiScaler, one character apart:"
                    "\n  nvngx_dlssnr.dll       NVIDIA's model (~165 MB) -- you supply it"
-                   "\n  nvngx.dll_dlssnr.dll   the forwarder (~13 KB) -- ships in this package"
+                   "\n  nvngx.dll_dlssnr.dll   the forwarder (~115 KB) -- ships in this package"
                    "\nUndocumented and driven directly, so none of this is officially supported.");
 
         // The toggle can be bound to a key, and nobody would think to look for it under Keybinds
