@@ -10,6 +10,7 @@
 #include <dlssnr/DlssNr_Enlarge.h>
 #include <dlssnr/DlssNr_Exposure.h>
 #include <dlssnr/DlssNr_ModelLog.h>
+#include <dlssnr/DlssNr_Session.h>
 #include <dlssnr/DlssNr_RenderSize.h>
 #include <dlssnr/DlssNr_WorkingScale.h>
 
@@ -182,6 +183,7 @@ void Fail(const char* why)
     g_vk.failed = true;
     g_vk.reason = why;
     LOG_ERROR("DLSS-NR Vulkan unavailable: {}", why);
+    SessionGuardOff(); // not running any more
 }
 
 // Whether the forwarder has caught a fault inside the model; if so, says where once and fails the
@@ -611,6 +613,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     if (!cfg.DlssNrEnabled.value_or_default())
     {
         g_vkResetOnReturn = true;
+        SessionGuardOff();
         return;
     }
 
@@ -1393,6 +1396,8 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         Fail("the model refused to evaluate");
         return;
     }
+
+    SessionGuardEvaluated();
 
     // -----------------------------------------------------------------------------------------
     // Resolve: proxy + the model's answer + the untouched copy -> the frame

@@ -10,6 +10,7 @@
 #include <dlssnr/DlssNr_Consumers.h>
 #include <dlssnr/DlssNr_Submission.h>
 #include <dlssnr/DlssNr_ModelLog.h>
+#include <dlssnr/DlssNr_Session.h>
 #include <dlssnr/DlssNr_DirectRuntime.h>
 #include <dlssnr/DlssNr_NgxInfo.h>
 #include <dlssnr/DlssNr_PresentColour.h>
@@ -878,6 +879,7 @@ bool NoteModelFault()
 
     g_nr.failed = true;
     g_nr.reason = "the model faulted inside its own code; off for this session";
+    DlssNr::SessionGuardOff(); // NR is not running any more, so what follows is not an NR crash
 
     if (!reported)
     {
@@ -4859,7 +4861,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 (unsigned) result, workWidth, workHeight,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - firstCpuStart).count());
         if (result == 1)
+        {
             chain.Success();
+            DlssNr::SessionGuardEvaluated();
+        }
         if (chainEnabled && result == 1)
         {
             for (unsigned i = 1; i < passSnapshot.Count; ++i)
@@ -6294,6 +6299,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     if (!cfg.DlssNrEnabled.value_or_default())
     {
         g_resetOnReturn = true;
+        DlssNr::SessionGuardOff();
         return;
     }
 
@@ -7615,6 +7621,7 @@ bool EvaluateAtPresent(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colou
     if (!Config::Instance()->DlssNrEnabled.value_or_default())
     {
         g_resetOnReturn = true;
+        DlssNr::SessionGuardOff();
         return answer(false, "the pass is disabled");
     }
 
@@ -7670,7 +7677,10 @@ ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX
     const bool enabled = cfg.DlssNrEnabled.value_or_default();
 
     if (!enabled)
+    {
         g_resetOnReturn = true;
+        DlssNr::SessionGuardOff();
+    }
 
     if (!enabled || stage != 1)
         return;

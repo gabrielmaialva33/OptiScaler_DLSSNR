@@ -141,7 +141,7 @@ file left as it is. Four-point round trip: `Config.h`, read and save in `Config.
 - Default-identical when NR is off: with `Enabled` false at start, `Begin()` reads and writes nothing and no
   notice exists. A runtime turn-on starts the marker at the first success, without a verdict for older markers.
 - No control for a thing that does not exist: the notice and the button exist only while a verdict does.
-- The per-frame cost is one atomic load when no marker is owned, and one clock read plus a comparison when one is.
+- The per-frame cost is one atomic load when no marker is owned, and one uncontended lock, a clock read and a comparison when one is.
 - Decision logic is `retoque/dlssnr/DlssNr_SessionGuard.h`, header-only, no Windows types, tested by
   `tests/nr-session-guard/` against a fake environment. The Windows layer (`DlssNr_SessionGuard.cpp`) is file
   I/O, `OpenProcess`/`GetProcessTimes` and the config write, and is not exercised on the host.

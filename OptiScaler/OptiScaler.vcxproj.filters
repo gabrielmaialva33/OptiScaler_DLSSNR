@@ -1828,6 +1828,12 @@
     <ClInclude Include="..\retoque\dlssnr\DlssNr_NgxInfo.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_Session.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_SessionGuard.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\retoque\dlssnr\DlssNr_DirectRuntime.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1871,6 +1877,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\retoque\dlssnr\DlssNr_NgxInfo.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_Session.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\retoque\dlssnr\DlssNr_DirectRuntime.cpp">

@@ -9,6 +9,7 @@
 #include "DlssNr_GpuTiming.h"
 #include "DlssNr_ModelLog.h"
 #include "DlssNr_PresentSync.h"
+#include "DlssNr_Session.h"
 #include "DlssNr_WorkingScale.h"
 
 #include <Config.h>
@@ -489,6 +490,25 @@ void RenderMenu(Config* config, float menuResScale)
                    "\n  nvngx_dlssnr.dll       NVIDIA's model (~165 MB) -- you supply it"
                    "\n  nvngx.dll_dlssnr.dll   the forwarder (~115 KB) -- ships in this package"
                    "\nUndocumented and driven directly, so none of this is officially supported.");
+
+        // The session guard's word, only while it has one (docs/dlssnr/design/session-guard.md). Off is for this
+        // session: the ini keeps what the user chose, and the button is the one-click way back.
+        if (const auto guard = SessionGuardNotice(); guard.action != SessionGuard::Action::None)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+            if (guard.action == SessionGuard::Action::Disable)
+                ImGui::TextWrapped(
+                    "%s", Localization::Tr("Neural Rendering is off for this session. Your settings are unchanged."));
+            ImGui::TextWrapped("%s", Localization::Tr(SessionGuardReasonText(guard.reason)));
+            ImGui::PopStyleColor();
+
+            if (guard.action == SessionGuard::Action::Disable &&
+                ImGui::SmallButton(Localization::Label("Enable anyway")))
+            {
+                SessionGuardEnableAnyway();
+                enabled = true;
+            }
+        }
 
         // The toggle can be bound to a key, and nobody would think to look for it under Keybinds
         // unless told. Dimmed, because it is a note rather than a setting.

@@ -422,3 +422,10 @@ Measure detail: the scene moved, too few still frames (turn on Hold frame).	Medi
 Quirks	Ajustes do jogo
 Open Wiki	Abrir Wiki
 Click to open the OptiScaler Wiki page\nin your default browser\n\nCompatibility list with known game issues\nand workarounds, FG options explained\nand other useful info	Clique para abrir a página da Wiki do OptiScaler\nno seu navegador padrão\n\nLista de compatibilidade com problemas conhecidos\ne soluções, opções de FG explicadas\ne outras informações úteis
+# 2026-10-13: the session guard (docs/dlssnr/design/session-guard.md).
+Enable anyway	Ativar mesmo assim
+Neural Rendering is off for this session. Your settings are unchanged.	O Neural Rendering está desligado nesta sessão. Suas configurações não foram alteradas.
+The last session ended without closing, soon after the model started.	A última sessão terminou sem fechar, logo depois de o modelo iniciar.
+The last two sessions ended without closing.	As duas últimas sessões terminaram sem fechar.
+An earlier session ended without closing, and this has not been confirmed since.	Uma sessão anterior terminou sem fechar, e isso não foi confirmado desde então.
+The last session ended without closing. If it was a crash, this one may too.	A última sessão terminou sem fechar. Se foi uma falha, esta também pode falhar.

@@ -945,6 +945,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="..\retoque\dlssnr\DlssNr_Consumers.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_ModelLog.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_NgxInfo.cpp" />
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_Session.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_DirectRuntime.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_ZeroGuides.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_WorkingScale.cpp" />
@@ -997,6 +998,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="..\retoque\dlssnr\DlssNr_Consumers.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_ModelLog.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_NgxInfo.h" />
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_Session.h" />
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_SessionGuard.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_DirectRuntime.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_PeScan.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_PresentColour.h" />
