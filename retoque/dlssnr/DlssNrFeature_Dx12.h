@@ -86,8 +86,13 @@ DlssNrFrameInfo PresentFrameDefaults(bool reset);
 //
 // The resources belong to the capture and outlive the call only until the next one. A caller uses
 // them inside the recording it is building and does not store them.
+//
+// presenter (one identity per presenting swapchain) and the extent of the frame being presented feed the identity
+// check of present-real-guides.md, which is log only for now and changes nothing returned here. A caller that names
+// no presenter is not counted.
 bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** depth, ID3D12Resource** motion,
-                           DlssNrFrameInfo* frame, ID3D12CommandQueue* queue = nullptr);
+                           DlssNrFrameInfo* frame, ID3D12CommandQueue* queue = nullptr, const void* presenter = nullptr,
+                           unsigned int presentWidth = 0, unsigned int presentHeight = 0);
 void AbandonCapturedGuides();
 
 // The pass, over a frame no upscaler was asked for.

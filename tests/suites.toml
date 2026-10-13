@@ -208,6 +208,11 @@ tier = "host"
 timeout = 120
 summary = "Present-time guide snapshot ring selection, completion tracking, and cross-queue deadlock avoidance."
 
+[nr-present-guide-identity]
+tier = "host"
+timeout = 120
+summary = "Present-guide identity, step 0 (log only): every rule of the decision header alone and in order, narrowing only, null swapchain stamps, ring scenarios, the window and its line, the glue sliced from the renderer, and guards that both consumers still read today's slot."
+
 [repo-privacy]
 tier = "host"
 timeout = 60

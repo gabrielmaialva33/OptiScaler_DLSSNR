@@ -68,6 +68,7 @@ experiment.
 | `DlssNr_NgxInfo.h/.cpp` | the `DLSS-NR NGX:` line at the first build (loader, its build, whether it routes feature 18 itself, the model) and the 616.64 pairing check; `../../docs/dlssnr/design/ngx-driver-616.md` |
 | `DlssNr_PeScan.h` | header-only byte scans both of those act on: the model's caller-path import slots, the loader's feature-18 table; tested by `tests/nr-model-loader` |
 | `DlssNr_PresentColour.h` | which presented frames the present hosts decline: HDR10/PQ, scRGB and other non-sRGB swapchains, until the hosts convert them; `../../docs/dlssnr/design/nr-present-hook.md` |
+| `DlssNr_PresentGuideIdentity.h` | whether a capture in the present guide ring (`DlssNr_PresentGuideRing.h`) is the frame being presented: the stamp, the eight rules, the presenting-swapchain registry, and step 0's per-window record. Log only for now; `../../docs/dlssnr/design/present-real-guides.md`, tested by `tests/nr-present-guide-identity` |
 | `DlssNr_Enlarge.h` | Transfer 2's rules as pure functions: what the resolve is sent and why, the Vulkan 2 -> 1 mapping, the menu's index table, when the private SR's history resets; `../../docs/dlssnr/design/dlss-enlargement.md`, tested by `tests/nr-enlarge` |
 | `DlssNr_PrivateSr.h/.cpp` | Transfer 2's private DLSS Super Resolution, the NGX half: its own parameter table and handle through `NVNGXProxy`, created and evaluated with wilsjo2's parameters |
 | `shaders/dlssnr/DlssNr_Dx12.h/.cpp` | the pass: forwarder loading, feature lifetime, the evaluate path, encode/resolve orchestration, capture |
