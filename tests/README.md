@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Twenty-nine suites. All but `nr-invariants` build real production code with local fakes under
+**Host tier.** Thirty-two suites. All but `nr-invariants` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit,
@@ -46,6 +46,8 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-detail-measure` — the "Measure detail" CPU tile reduction and statistical aggregation (detail added,
   Laplacian raw, flicker beyond native, OkLab chroma/warmth, and shadow darkening/crush), delta comparisons
   and textual metric generation.
+- `nr-present-sync` — what `[DlssNr] PresentSync=auto` means: the D3D12 present pass waits for its write-back
+  only when frame generation could be involved (`DlssNr_PresentSync.h`). The wait itself is not exercised.
 - `nr-present-guides` — selection and completion tracking for the present-time guide snapshot ring
   (`DlssNr_PresentGuideRing.h`), preventing cross-queue GPU waits and DLSS-G deadlocks.
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,

@@ -49,6 +49,8 @@
 #include "DlssNr_GuideMatch_Dx12.h"
 #include "DlssNr_Cadence_Dx12.h"
 #include <dlssnr/DlssNr_Cadence.h>
+#include <dlssnr/DlssNr_PresentSync.h>
+#include <proxies/KernelBase_Proxy.h>
 #include <framegen/IFGFeature_Dx12.h>
 #include "DlssNr_Periphery.h"
 #include "DlssNr_Periphery_Dx12.h"
@@ -6703,7 +6705,21 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         g_presentGuideClones[trackedSlot].readTracked = savedReadTracked;
     }
 
-    if (cfg.DlssNrPresentSync.value_or_default() && g_presentList.fenceValue[slot] != 0 &&
+    // Through the unhooked GetModuleHandleW: OptiScaler's own hook answers nvngx_dlssg.dll with itself.
+    static bool dlssgLoaded = false;
+    if (!dlssgLoaded)
+        dlssgLoaded = KernelBaseProxy::GetModuleHandleW_()(L"sl.dlss_g.dll") != nullptr ||
+                      KernelBaseProxy::GetModuleHandleW_()(L"nvngx_dlssg.dll") != nullptr;
+    const auto& state = State::Instance();
+    DlssNr::PresentSyncInputs syncInputs;
+    syncInputs.fgHook = fgHook;
+    syncInputs.fgOutput = state.activeFgOutput != FGOutput::NoFG;
+    syncInputs.dlssgSeen = state.dlssgDetectedInterpolationCount > 0 || state.dlssgLastSetMode != sl::DLSSGMode::eOff;
+    syncInputs.dlssgLoaded = dlssgLoaded;
+    const bool presentSync = DlssNr::PresentSyncWanted(cfg.DlssNrPresentSync, syncInputs);
+    DlssNr::g_presentSyncWaits.store(presentSync, std::memory_order_relaxed);
+
+    if (presentSync && g_presentList.fenceValue[slot] != 0 &&
         g_presentList.fence->GetCompletedValue() < g_presentList.fenceValue[slot])
     {
         const auto waitStart = std::chrono::steady_clock::now();

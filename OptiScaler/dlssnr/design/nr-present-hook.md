@@ -843,3 +843,19 @@ this very section removed a "green light", a guarantee about HUD protection and 
 all three of which were certainty this evidence does not support. The donor has *a* fix for the
 feedback loop, running on his tree, not verified on ours. Everything downstream of that is still
 design.
+
+# Update, 2026-10-13: `PresentSync=auto` waits only when frame generation could be involved
+
+The wait was default on everywhere. It is needed where an interposer paces the client queue, which is what the
+2026-09-13 section above describes, and nowhere else: without frame generation the write-back and the flip are on
+the same queue, whose order already puts the finished picture on screen, and the CPU wait only holds the present
+thread until the GPU drains. Measured in PCSX2 (present pass, frame generation off, emulation unlimited, one run
+each): the pass ran on 106 frames a second with the wait and 127 without.
+
+`[DlssNr] PresentSync` no longer has a default value. Unset (auto), `DlssNr::PresentSyncWanted`
+(`DlssNr_PresentSync.h`) keeps the wait when the pass came from a frame generation present hook, when OptiScaler's own
+FG output is selected, when DLSS-G options or frame counts were seen, or when Streamline's DLSS-G plugin or
+`nvngx_dlssg.dll` is loaded; the last one covers a game whose Streamline calls OptiScaler never saw. An explicit
+`true` or `false` wins, and both now survive a save, which they could not while `true` was the default. The menu's
+box shows what is in effect. `tests/nr-present-sync` holds the rule.
+

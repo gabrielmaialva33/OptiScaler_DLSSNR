@@ -8,6 +8,7 @@
 #include "DlssNr_ExposureScan.h"
 #include "DlssNr_GpuTiming.h"
 #include "DlssNr_ModelLog.h"
+#include "DlssNr_PresentSync.h"
 #include "DlssNr_WorkingScale.h"
 
 #include <Config.h>
@@ -650,13 +651,16 @@ void RenderMenu(Config* config, float menuResScale)
 
             if (hookMethod != 1)
             {
-                bool presentSync = config->DlssNrPresentSync.value_or_default();
+                bool presentSync =
+                    config->DlssNrPresentSync.value_or(DlssNr::g_presentSyncWaits.load(std::memory_order_relaxed));
                 if (ImGui::Checkbox(Localization::Label("Present sync"), &presentSync))
                     config->DlssNrPresentSync = presentSync;
 
-                HelpMarker("Waits on a fence after the backbuffer write-back completes before returning "
-                           "to the swapchain flip. Prevents frame generation pacing stalls and race "
-                           "conditions on presentation.");
+                HelpMarker("Waits for the backbuffer write-back to finish before the flip. Frame "
+                           "generation needs it: without it a paced flip can show an unfinished picture. "
+                           "Left on auto it waits only when frame generation could be involved, because "
+                           "otherwise the wait just holds the game back. Ticking or unticking this box "
+                           "forces it either way.");
             }
 
             if (!vkOnly)

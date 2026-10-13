@@ -43,6 +43,11 @@ tier = "host"
 timeout = 300
 summary = "What the present host builds and when: tiny frames, resizes, the pass switched off, HDR swapchains declined."
 
+[nr-present-sync]
+tier = "host"
+timeout = 60
+summary = "PresentSync=auto: the D3D12 present pass waits for its write-back only when frame generation could be involved."
+
 [nr-uimask-rule]
 tier = "host"
 timeout = 300

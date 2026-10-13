@@ -332,7 +332,7 @@ class Config
     // missing). auto means ffx for now. Read when the estimator is built.
     CustomOptional<std::string> DlssNrSynthMotionSource { std::string("auto") };
     // Present hook: wait for GPU completion before flip. Default true.
-    CustomOptional<bool> DlssNrPresentSync { true };
+    CustomOptional<bool, NoDefault> DlssNrPresentSync; // unset: auto, see DlssNr_PresentSync.h
     CustomOptional<uint32_t> DlssNrPreset { 0 };
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.
