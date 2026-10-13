@@ -578,7 +578,7 @@ CadenceWithFrameGen=auto
 ; shown only: the stored edit and the model's own history stay as the model made them. The previous answer stays on
 ; screen, fading, for up to N-1 frames longer, which can trail a little where things move fast. Only acts with
 ; Cadence above 1; costs two working-size textures and three small passes a frame while it does.
-; true or false - Default (auto) is true
+; true or false - Default (auto) is false
 CadenceSmoothing=auto
 
 ; The pulse metric (docs/dlssnr/design/pulse-metric.md). Measures the light step per frame: how far the picture's

@@ -1,13 +1,8 @@
 # Cadence smoothing: the spread and the light limiter
 
-Status: implemented on D3D12 behind `[DlssNr] CadenceSmoothing` (default **on**; it acts only when `Cadence` is
-above 1, and the cadence itself is off by default). **Not yet run in a game.** It needs `dlssnr_cadence.hlsl`
-recompiled: the C++ dispatches four new shader modes and binds an eleventh input, and the committed
-`DlssNr_Cadence_Shader.h` predates them. That binary runs none of the new modes, so on its own every smoothed carried
-frame would go unwritten and show the last model frame's answer, unmoved. A build that still carries it recognises it by
-its DXBC container digest (`DlssNr_Cadence_Dx12::SmoothingAvailable`) and runs the cadence without smoothing, with a line
-in place of the control; `nr-invariants` warns while that binary is committed, and `nr-cadence` checks the digest the
-pass carries is that binary's. Native Vulkan has no cadence and no smoothing.
+Status: implemented on D3D12 behind `[DlssNr] CadenceSmoothing` (default **off** until measured; it acts only when
+`Cadence` is above 1, and the cadence itself is off by default). **Not yet run in a game.** The cadence shader was
+rebuilt with its four new modes on 2026-10-13. Native Vulkan has no cadence and no smoothing.
 
 ## The problem
 
@@ -112,7 +107,7 @@ global change on frames where the scene is still.
 
 ## Controls: one switch
 
-`CadenceSmoothing` (bool, default true): the checkbox "Smooth the model's frames" under the cadence combo, shown only
+`CadenceSmoothing` (bool, default false): the checkbox "Smooth the model's frames" under the cadence combo, shown only
 above a cadence of 1 (invariant 2). One quantity, one control (invariant 3): the switch says whether a new answer's
 light arrives gradually on the cadence's frames, and both parts serve that.
 
@@ -124,20 +119,16 @@ The numbers are fixed, as the carry's are (BeliyG3 fixed everything but N):
   janblade's `SpreadFor` refuses a spread longer than the interval for that reason (330db46c).
 - **1.5 stops/s, 0.15 stop, 1 stop.** See above. A key for the rate is cheap to add if the pulse metric shows a need.
 
-## Defaults, and why on
+## Defaults, and why off for now
 
 - **Cadence = 1 is bit-identical.** The decision is the `Off` refusal before anything about smoothing is read, the
   cadence object is never built (`ReleasesSurfaces(Off)`), nothing is dispatched, and the composition is untouched.
-- **Cadence > 1: on -- a deliberate, scoped exception to invariant 1.** That invariant asks a new switch to leave the
-  prior behaviour byte-identical at its default, and this one does not for anyone who has turned the cadence on. The
-  exception is taken because the cadence is itself an unmeasured opt-in, off in the shipped configuration (which stays
-  byte-identical), whose users are already trading stability for frame rate. The cadence already shows old answers on
-  new frames and says so; the pulse is its named artefact; both other forks that carry edits ship this on by default (Skynizz's crossfade and soft refresh
-  are on, his anti pop-in is on at 0.75 stop/s; janblade's spread is automatic at every 3rd frame). A user who turns the
-  cadence on gets the variant two independent implementations converged on, the pulse metric reads both, and the
-  checkbox turns it off. What would flip the default: the pulse metric not showing the model/carried ratio falling in
-  this fork, or reports of the double detail described below. Flipping it is one line in `Config.h` and the ini's
-  "Default (auto) is" text.
+- **Cadence > 1: off until the pulse metric has read it in this fork** (invariant 1). Both other forks that carry edits
+  ship their version on (Skynizz's crossfade and soft refresh are on, his anti pop-in is on at 0.75 stop/s; janblade's
+  spread is automatic at every 3rd frame), and an earlier draft of this note took that as reason to make it the default
+  under a running cadence. It stays off because nothing here has measured it yet. What would turn it on: the pulse
+  metric showing the model/carried ratio falling toward 1 (in-game steps 1-3 of `pulse-metric.md`) with no report of
+  the double detail described below. Turning it on is one line in `Config.h` and the ini's "Default (auto) is" text.
 
 ## Where it lives
 
@@ -214,14 +205,13 @@ forces a model frame. The pulse metric starts a new window on a toggle.
   jump of the frame's own light at once; a cadence changed mid-walk keeps the walk's length;
 - source guards: the surfaces are built only with the switch, the fade before the record and the show after it, the
   limiter's grid one size on both sides, the group-wide modes on whole groups only, the interface out of the light and
-  the gain, and the digest that recognises the old bytecode equal to that binary's.
+  the gain.
 
-`tests/nr-menu`: the checkbox only above a cadence of 1, never on native Vulkan, under the proxy or without the shader,
-and replaced by a line when the shader predates smoothing.
+`tests/nr-menu`: the checkbox only above a cadence of 1, never on native Vulkan, under the proxy or without the shader.
 
 ## In game
 
-After the bytecode is regenerated, on Crimson Desert with `PulseMetric=true`:
+On Crimson Desert with `PulseMetric=true`:
 
 1. Cadence 3, smoothing off, a still view: the pulse metric's model/carried ratio well above 1 (`pulse-metric.md`).
 2. Same with smoothing on: the ratio towards 1, and the model frames' step towards a third of step 1's.

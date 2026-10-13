@@ -5,8 +5,8 @@ no implementation and the menu does not offer it there. The carry is a subset po
 `optimizer-fps-dlss5` (MIT, `Licenses/OptimizerFps_LICENSE.txt`); what was taken and what was left is
 listed below.
 
-Since 2026-10-13 a running cadence is smoothed by default (`[DlssNr] CadenceSmoothing`): each new answer is walked in
-from the carried one over the interval, and the light of what the cadence shows is rate-limited. That is the one place
+Since 2026-10-13 a running cadence can be smoothed (`[DlssNr] CadenceSmoothing`, off until measured): each new answer
+is walked in from the carried one over the interval, and the light of what the cadence shows is rate-limited. That is the one place
 two answers are mixed in a pixel; `cadence-smoothing.md` is the design and its candid account against the README's
 dead end. Everything below describes the cadence with smoothing off, which is still what the carry does underneath.
 
