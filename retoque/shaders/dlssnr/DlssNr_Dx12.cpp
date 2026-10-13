@@ -597,7 +597,7 @@ DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSn
         "stage={} render={}x{} compose={}x{} model={}x{} scale={} passes={} individual={} "
         "apply={} hold={} white_source={} white_scale={} white_trim={} scan_trim={} scan_inverted={} "
         "detail={} colour={} max_ratio={} transfer={} reversible={} debug={} compare={} split={} zoom={} swap={} "
-        "downscaler={} exposure_scan={} auto_capture={} linear_hdr={} compose_format={}",
+        "downscaler={} exposure_scan={} linear_hdr={} compose_format={}",
         stage, renderWidth, renderHeight, width, height, workWidth, workHeight, workScale, passes.Count,
         passes.Individual, cfg.DlssNrApplyModel.value_or_default(), cfg.DlssNrHoldFrame.value_or_default(),
         cfg.DlssNrWhitePointSource.value_or_default(), cfg.DlssNrWhitePointScale.value_or_default(),
@@ -608,7 +608,7 @@ DlssNr::GpuTiming::Metadata TimingMetadata(const Config& cfg, const DlssNrPassSn
         cfg.DlssNrDebugView.value_or_default(), cfg.DlssNrCompare.value_or_default(),
         cfg.DlssNrCompareSplit.value_or_default(), cfg.DlssNrCompareZoom.value_or_default(),
         cfg.DlssNrCompareSwap.value_or_default(), static_cast<unsigned>(cfg.DlssNrScalingDownscaler.value_or_default()),
-        cfg.DlssNrScanExposure.value_or_default(), cfg.DlssNrAutoCapture.value_or_default(), linearHdr, format);
+        cfg.DlssNrScanExposure.value_or_default(), linearHdr, format);
     // What the resolve is actually sent and whether Transfer 2's private DLSS ran (its reason token otherwise):
     // that DLSS lands in outside_model_ms, so a sample from its warm-up is not a sample of it.
     contract += std::format(" effective_transfer={} enlarge={}", effectiveTransfer, enlarge ? enlarge : "unknown");
@@ -673,12 +673,6 @@ uint64_t g_timingEvaluations = 0;
 
 // Writes matched before/after frames on request, so comparisons stop depending on video.
 capture::FrameCapture g_capture;
-
-// One capture happens on its own each session, so there is always a fresh sample without anyone having
-// to remember to ask. Started after the scene has had a moment to settle: the first frames after a
-// feature is built carry its reset, and are not representative of anything.
-constexpr unsigned long long kAutoCaptureAfterFrames = 180;
-bool g_autoCaptureDone = false;
 
 // Cleared once per run, so a session's captures are its own and nothing accumulates across launches.
 void ClearCaptureDirectory()

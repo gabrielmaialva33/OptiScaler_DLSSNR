@@ -652,16 +652,6 @@ class Config
         this->*member = value;
     }
 
-    // Which depth convention the model is told the guide uses.
-    //
-    //   0  what the game's own DLSS feature was created with, which is what it means for the upscaler
-    //   1  force normal
-    //   2  force inverted
-    //
-    // Writes one set of matched before/after frames per session, without anyone having to ask. The
-    // folder is cleared at the start of each run, so it holds one session's worth and never grows.
-    CustomOptional<bool> DlssNrAutoCapture { true };
-
     // Multiplies the (auto or manual) white point before the encode: what the model considers "white".
     // Higher means highlights sit lower on the curve and the model treats them as less extreme.
     CustomOptional<float> DlssNrWhitePointScale { 1.0f };

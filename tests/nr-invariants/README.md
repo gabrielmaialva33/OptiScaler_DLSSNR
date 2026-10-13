@@ -26,8 +26,10 @@ the live tree rather than pinned to a baseline:
    `run.py`): the periphery would run and the resolve would silently fall back to Classic at 100.
 4. **Retired identifiers.** A preprocessor gate on `DLSS_NEURAL_RENDERING` (the macro nothing defined,
    which silently dropped the present-time pass from every build), a read or save of the retired
-   `Dx11BridgeHost` key, and a forwarder write of `DLSSNR.GlobalToneStrength` (a name the model never
-   reads) all fail.
+   `Dx11BridgeHost` key, any trace of the retired `AutoCapture` setting (its key, its `Config` member, or
+   the two renderer names that were declared for it and never read; removed 2026-10-13 because it did
+   nothing), either retired key in the shipped `OptiScaler.ini`, and a forwarder write of
+   `DLSSNR.GlobalToneStrength` (a name the model never reads) all fail.
 
 Each check was shown to fail on a real or injected defect before this was registered: the tree at
 `2d868b87` fails check 1 on the three missing keys, and a renamed cbuffer field, a changed header

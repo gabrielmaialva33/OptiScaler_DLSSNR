@@ -456,7 +456,6 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrScanAnchors.set_from_config(readString("DlssNr", "ScanAnchors"));
             DlssNrScanInverted.set_from_config(readBool("DlssNr", "ScanInverted"));
             DlssNrWhitePointTrim.set_from_config(readFloat("DlssNr", "WhitePointTrim"));
-            DlssNrAutoCapture.set_from_config(readBool("DlssNr", "AutoCapture"));
             DlssNrWhitePointScale.set_from_config(readFloat("DlssNr", "WhitePointScale"));
             DlssNrKernelProfile.set_from_config(readBool("DlssNr", "KernelProfile"));
             {
@@ -1429,7 +1428,6 @@ bool Config::SaveIni()
         ini.SetValue("DlssNr", "ScalingDownscaler", GetIntValue(Instance()->DlssNrScalingDownscaler).c_str());
 
         ini.SetValue("DlssNr", "Stage", GetIntValue(Instance()->DlssNrStage.value_for_config()).c_str());
-        ini.SetValue("DlssNr", "AutoCapture", GetBoolValue(Instance()->DlssNrAutoCapture.value_for_config()).c_str());
 
         // These were read every launch but never written, so nothing set through the menu survived a
         // restart -- the white-point source, both trims, the anchor, the pass count and the rest all

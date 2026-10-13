@@ -9,7 +9,7 @@ config_h = (root / 'OptiScaler/Config.h').read_text(encoding='utf-8-sig')
 config_cpp = (root / 'OptiScaler/Config.cpp').read_text()
 optional = config_h[config_h.index('enum HasDefaultValue'):config_h.index('constexpr inline int UnboundKey')]
 methods = config_cpp[config_cpp.index('DlssNrResolvedPassSettings Config::DlssNrMasterSettingsUnlocked'):config_cpp.index('bool Config::Reload(')]
-api = config_h[config_h.index('    DlssNrPassSnapshot GetDlssNrPassSnapshot'):config_h.index('    // Which depth convention')]
+api = config_h[config_h.index('    DlssNrPassSnapshot GetDlssNrPassSnapshot'):config_h.index('    // Multiplies the (auto or manual) white point')]
 fields = '\n'.join(line for line in config_h.splitlines() if any(f' {name} ' in line for name in
     ('DlssNrIntensity', 'DlssNrLocalStructure', 'DlssNrLocalTone', 'DlssNrSkinStructure', 'DlssNrStyle',
      'DlssNrPreset', 'DlssNrAutoMask', 'DlssNrPasses', 'DlssNrIndividualPassSettings')) and 'CustomOptional<' in line)
