@@ -60,14 +60,21 @@ class DlssNr_Stabilizer_Dx12 : public Shader_Dx12
     float _quantAbs = 0.0f;
     float _quantRel[3] = {};
 
+    // The relative unit of the format the frame finally goes out in, when the caller gave one (HDR10 at present: a PQ
+    // code, while the output here is the FP16 work texture); 0 means the output's own format decides. Part of what
+    // Fits compares, so a frame whose final format changes gets an object built for it.
+    float _finalQuantRel = 0.0f;
+
     ID3D12Resource* CreateHistory(ID3D12Device* device, DXGI_FORMAT format, const wchar_t* name);
 
   public:
-    DlssNr_Stabilizer_Dx12(std::string InName, ID3D12Device* InDevice, const D3D12_RESOURCE_DESC& InOutput);
+    // InFinalQuantRel: see _finalQuantRel. 0, the default, is the stabilizer as it always was.
+    DlssNr_Stabilizer_Dx12(std::string InName, ID3D12Device* InDevice, const D3D12_RESOURCE_DESC& InOutput,
+                           float InFinalQuantRel = 0.0f);
     ~DlssNr_Stabilizer_Dx12();
 
     // Whether this object was built for this output on this device.
-    bool Fits(ID3D12Device* InDevice, const D3D12_RESOURCE_DESC& InOutput) const;
+    bool Fits(ID3D12Device* InDevice, const D3D12_RESOURCE_DESC& InOutput, float InFinalQuantRel = 0.0f) const;
 
     // Drop the history: the next dispatch shows the model's answer as it is and starts the anchor over.
     void Invalidate() { _valid = false; }
