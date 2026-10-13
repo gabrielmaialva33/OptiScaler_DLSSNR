@@ -15,6 +15,7 @@ log of the attempt to drop it is [../history/FORWARDER_INVESTIGATION.md](../hist
 ## Performance and cost
 
 - [model-cadence.md](design/model-cadence.md): run the model every Nth frame and carry its edit along the motion vectors in between.
+- [cadence-smoothing.md](design/cadence-smoothing.md): walk each new answer in over the interval and rate-limit the shown light, against the cadence's pulse.
 - [vit-skip.md](design/vit-skip.md): kernel-variant profiling of the model and a proposal to skip its ViT bottleneck on alternating frames.
 - [dispatch-cpu-overhead.md](design/dispatch-cpu-overhead.md): persistent mapping of the upload buffers and CBV setup for the composition pass.
 - [descriptor-reuse.md](design/descriptor-reuse.md): keeping each ring slot's SRV/UAV descriptors until their key changes.

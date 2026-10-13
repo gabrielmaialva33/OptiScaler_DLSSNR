@@ -215,6 +215,24 @@ if len(failures) == before:
     print(f'PASS: {", ".join(header for _, header, _, _ in targets)} are byte-identical to '
           'create_header.py over the committed .cso and .spv')
 
+# Bytecode known to predate a source change. Whether a binary is the compile of its .hlsl needs dxc; what a host can
+# do is recognise binaries committed before a change that the C++ already relies on. A warning, not a failure: the
+# source and its bytecode are committed by different hands (the shader rebuild runs where the compiler prefix is
+# free), and the tree must stay testable in between. Drop an entry once its bytecode has been rebuilt.
+import hashlib
+PREDATES = [
+    # Cadence smoothing (cadence-smoothing.md): modes 5-8, t10 and the cbuffer's tail. This binary runs none of them,
+    # so a smoothed carried frame shows the last model frame's answer unmoved (the apply never writes), and smoothing
+    # is on by default whenever the cadence runs.
+    ('DlssNr_Cadence_Shader.cso', 'e3e2076bef61705e7b8cf123ff43d02c9a6f079327d02f9d3659e3aa8fe20217',
+     'dlssnr_cadence.hlsl', 'gMode == 5', 'cadence smoothing'),
+]
+for binary, digest, source, marker, what in PREDATES:
+    path = precompile / binary
+    if path.exists() and marker in (precompile / source).read_text() and \
+            hashlib.sha256(path.read_bytes()).hexdigest() == digest:
+        print(f'WARN: {binary} predates {what} in {source}: rebuild it before shipping a build (DEVELOPMENT.md rule 6)')
+
 # The synthesized-motion estimator (shaders/synth_motion): every committed .cso there, FidelityFX-derived
 # and NVOFA alike, named <stem>.cso -> <stem>_Shader.h, array <stem>_cso, as its build.sh writes them.
 before = len(failures)

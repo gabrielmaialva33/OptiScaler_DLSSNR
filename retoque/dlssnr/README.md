@@ -75,7 +75,7 @@ experiment.
 | `shaders/dlssnr/precompile/dlssnr.hlsl` | **the live shader**: encode (scale and sRGB-encode with a soft knee), area downsample, resolve (RenoDX's two-branch composition, OkLab hue correction, AP1 clamp, the guard) |
 | `shaders/dlssnr/precompile/DlssNr_Shader.h`, `DlssNr_Shader_Vk.h` | that shader compiled, as bytes (D3D12 and Vulkan). The other passes' bytecode sits beside it, one `DlssNr_<Pass>_Shader.h` each: `Cadence`, `DetailStats`, `Guides`, `PeripheryColour`, `PeripheryGuides`, `PeripheryUnpack`, `Pulse`, `Stabilizer`, `UiMask` (the optional ones are made from their `.hlsl` by the command at the top of each) |
 | `shaders/dlssnr/DlssNr_Stabilizer_Dx12.h/.cpp`, `precompile/dlssnr_stabilizer.hlsl` | the output stabilizer, off by default; `../../docs/dlssnr/design/output-stabilizer.md` |
-| `DlssNr_Cadence.h`, `shaders/dlssnr/DlssNr_Cadence_Dx12.h/.cpp`, `precompile/dlssnr_cadence.hlsl`, `precompile/dlssnr_cadence_rule.h` | model cadence, off by default: the model every Nth frame, its edit carried along the motion in between; the bytecode header is optional (`__has_include`); `../../docs/dlssnr/design/model-cadence.md` |
+| `DlssNr_Cadence.h`, `shaders/dlssnr/DlssNr_Cadence_Dx12.h/.cpp`, `precompile/dlssnr_cadence.hlsl`, `precompile/dlssnr_cadence_rule.h` | model cadence, off by default: the model every Nth frame, its edit carried along the motion in between, and its smoothing (each new answer walked in over the interval, the shown light rate-limited); the bytecode header is optional (`__has_include`); `../../docs/dlssnr/design/model-cadence.md`, `../../docs/dlssnr/design/cadence-smoothing.md` |
 | `DlssNr_DetailStats.h`, `shaders/dlssnr/DlssNr_DetailStats_Dx12.h/.cpp`, `precompile/dlssnr_detail_stats.hlsl` | in-game detail and temporal stability metrics ("Measure detail") across 60 evaluations on a still scene; the bytecode header is optional (`__has_include`); `../../docs/dlssnr/design/detail-measure.md` |
 | `DlssNr_Pulse.h`, `shaders/dlssnr/DlssNr_Pulse_Dx12.h/.cpp`, `precompile/dlssnr_pulse.hlsl` | the pulse metric (`[DlssNr] PulseMetric`, off by default): the light step per frame, model frames against carried ones, from one small reduction a frame; the bytecode header is optional (`__has_include`); `../../docs/dlssnr/design/pulse-metric.md` |
 | `shaders/dlssnr/DlssNr_GuideMatch.h`, `DlssNr_GuideMatch_Dx12.h/.cpp`, `precompile/dlssnr_guides.hlsl` | below the frame's size: depth and motion point-resampled to the model's working size, and the motion-vector scale for the texture handed over; the bytecode header is optional (`__has_include`); `../../docs/dlssnr/design/reduced-scale-guides.md` |
@@ -187,8 +187,11 @@ part of the solution, and builds with everything else.
   by the model's *input* and reprojects nothing, so a pixel whose input changed shows the current answer
   that frame, and only pixels the game left alone keep what was shown.
   Model cadence (`../../docs/dlssnr/design/model-cadence.md`) is not that either, and does hit this dead end in motion: it
-  is an FPS option that moves the last answer onto the frames between model calls, blends no two answers,
-  and is off by default because it costs stability in motion.
+  is an FPS option that moves the last answer onto the frames between model calls, stores and carries no blend of
+  two answers, and is off by default because it costs stability in motion. Its smoothing
+  (`../../docs/dlssnr/design/cadence-smoothing.md`, on whenever the cadence runs) is the one place two answers meet in
+  a pixel: what is shown walks from one answer to the next over the interval, finite and never fed back, gated by the
+  carry's acceptance -- the experiment `model-cadence.md` deferred, measured with the pulse metric.
 - **The model's own UI correction went with it.** It only ever acted on a UI layer the game tagged
   through Streamline, which almost no title does, and it could not be shown to change anything when
   one did. Removing it removed the Streamline tag hook as well, so the module no longer touches that

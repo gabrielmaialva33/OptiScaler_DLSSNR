@@ -83,7 +83,10 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   in presents the pass ran at, the held reset, forced model frames, every refusal with its reason, off
   allocating nothing) and the production per-pixel rules -- the header the shader includes -- over
   synthetic sequences: a still scene carried exactly, integer and sub-pixel pans, an occluder
-  restarting the chain, no match no fill, UI protection. Source guards on the pass. No GPU, no shader.
+  restarting the chain, no match no fill, UI protection. Smoothing (`docs/dlssnr/design/cadence-smoothing.md`):
+  the walk's weights and per-frame decisions, weight 0 equal to the carry to the bit, a drift arriving in equal
+  steps and moved with the surface, disocclusions and the interface taking the answer at once, the light
+  limiter's rule, space and rate. Source guards on the pass. No GPU, no shader.
 - `nr-dispatch` — composition constants, descriptor slots and partial initialization cleanup.
 - `nr-enlarge` — Transfer 2, the model's edit enlarged by a private DLSS Super Resolution: the
   decision table (what the resolve is sent and why, supersampling and Vulkan included), the carrier

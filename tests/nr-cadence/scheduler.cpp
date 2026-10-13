@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -538,6 +539,133 @@ void StaleHistory_ResetsWhenHistoryIsOlderThanMotion()
 
     ++g_cases;
 }
+
+// Smoothing (docs/dlssnr/design/cadence-smoothing.md): the spread's weights and the limiter's step, as numbers.
+void Smoothing_WeightsAndStep()
+{
+    for (uint32_t n = 1; n <= kMaxCadence; ++n)
+        assert(SpreadFor(n) == n);
+    // Over three frames: two thirds of the previous answer on the model frame, one third on the next, none after.
+    assert(FadeWeight(0, 3) == 1.0f - 1.0f / 3.0f && FadeWeight(1, 3) == 1.0f - 2.0f / 3.0f &&
+           FadeWeight(2, 3) == 0.0f);
+    assert(FadeWeight(0, 2) == 0.5f && FadeWeight(1, 2) == 0.0f);
+    assert(FadeWeight(0, 4) == 0.75f && FadeWeight(1, 4) == 0.5f && FadeWeight(2, 4) == 0.25f &&
+           FadeWeight(3, 4) == 0.0f);
+    assert(FadeWeight(0, 1) == 0.0f && FadeWeight(0, 0) == 0.0f && FadeWeight(7, 4) == 0.0f);
+    // Equal steps: the new answer's share rises by 1/S a frame and is whole on frame S-1.
+    for (uint32_t n = 2; n <= kMaxCadence; ++n)
+        for (uint32_t k = 0; k + 1 < n; ++k)
+        {
+            const float step = FadeWeight(k, n) - FadeWeight(k + 1, n);
+            assert(step > 0.999f / float(n) && step < 1.001f / float(n));
+        }
+
+    // 1.5 stops a second: a 60 fps frame may move the edit's light by 0.025 stop; a hitch no more than a 15 fps frame,
+    // a frame of nothing (or a clock that went backwards, or NaN) no less than a 500 fps one.
+    assert(LimitStep(1.0f / 60.0f) > 0.0249f && LimitStep(1.0f / 60.0f) < 0.0251f);
+    assert(LimitStep(1.0f) == kLightRate * kLightMaxSeconds && LimitStep(0.25f) == LimitStep(1.0f));
+    assert(LimitStep(0.0f) == kLightRate * kLightMinSeconds && LimitStep(-1.0f) == LimitStep(0.0f));
+    assert(LimitStep(std::numeric_limits<float>::quiet_NaN()) == LimitStep(0.0f));
+    ++g_cases;
+}
+
+// What the scheduler asks of smoothing frame by frame, driven as Dispatch drives it: the fade only on a scheduled
+// model frame (never a forced one), its walk on the carried frames after a model frame that faded, the limiter on
+// every frame of a running cadence and on none other, and a reset of it after anything that was not one.
+void Smoothing_FadesScheduledFramesAndLimitsTheCadenceOnly()
+{
+    Scheduler sched;
+    uint64_t present = 0;
+    int64_t ms = 0;
+    Inputs in = Running(3);
+    in.smoothing = true;
+    auto decide = [&](const Inputs& inputs, bool reset = false)
+    { return sched.Decide(inputs, Shape(), ++present, ms += 16, reset); };
+
+    // The first frame is forced (nothing stored): the model's answer as it is, no limiter.
+    Decision d = decide(in);
+    assert(d.runModel && d.reason == Reason::NoEdit && !d.fade && d.fadeWeight == 0.0f && !d.limit);
+    sched.Recorded(false);
+    assert(!sched.Faded() && !sched.Limited());
+
+    // Carried frames after a model frame that did not fade: no walk, the limiter on, starting over on the first.
+    d = decide(in);
+    assert(!d.runModel && d.fadeWeight == 0.0f && d.limit && d.limitReset);
+    sched.Carried(true);
+    d = decide(in);
+    assert(!d.runModel && d.fadeWeight == 0.0f && d.limit && !d.limitReset);
+    sched.Carried(true);
+
+    // The scheduled model frame fades in, two thirds of the carried answer still shown, the limiter continuing.
+    d = decide(in);
+    assert(d.runModel && d.reason == Reason::Scheduled && d.handChain && d.fade && d.limit && !d.limitReset);
+    assert(d.fadeWeight == FadeWeight(0, 3));
+    sched.Recorded(true);
+    assert(sched.Faded() && sched.Limited());
+
+    // Its walk: a third on the next frame, nothing on the last.
+    d = decide(in);
+    assert(!d.runModel && d.fadeWeight == FadeWeight(1, 3) && d.limit && !d.limitReset);
+    sched.Carried(true);
+    d = decide(in);
+    assert(!d.runModel && d.fadeWeight == 0.0f && d.limit);
+    sched.Carried(true);
+
+    // A reset forces the next model frame: no fade, no limit, and the fade stored before is gone.
+    d = decide(in, true);
+    assert(d.runModel && d.reason == Reason::Reset && !d.fade && !d.limit && d.fadeWeight == 0.0f);
+    sched.Recorded(false);
+    d = decide(in);
+    assert(!d.runModel && d.fadeWeight == 0.0f && d.limit && d.limitReset);
+    sched.Carried(true);
+    d = decide(in);
+    sched.Carried(true);
+    d = decide(in);
+    assert(d.fade);
+    // The fade could not be shown (Fade or Show failed): recorded without it, so the walk does not happen.
+    sched.Recorded(false);
+    d = decide(in);
+    assert(!d.runModel && d.fadeWeight == 0.0f && d.limit && d.limitReset);
+    sched.Carried(true);
+
+    // A refusal runs the model as it is and forgets both.
+    Inputs refused = in;
+    refused.hold = true;
+    d = decide(refused);
+    assert(d.runModel && d.reason == Reason::FrameHold && !d.fade && !d.limit && d.fadeWeight == 0.0f);
+    assert(!sched.Faded() && !sched.Limited());
+
+    // Smoothing off: nothing, ever.
+    Scheduler plain;
+    present = 0;
+    Inputs off = Running(3);
+    for (int i = 0; i < 12; ++i)
+    {
+        const Decision e = plain.Decide(off, Shape(), ++present, ms += 16, false);
+        assert(!e.fade && e.fadeWeight == 0.0f && !e.limit && !e.limitReset);
+        if (e.runModel)
+            plain.Recorded(e.fade);
+        else
+            plain.Carried(e.limit);
+    }
+    assert(!plain.Faded() && !plain.Limited());
+
+    // Cadence 2: the model frame shows half of each answer, the carried frame the new one whole.
+    Scheduler two;
+    present = 0;
+    Inputs in2 = Running(2);
+    in2.smoothing = true;
+    two.Decide(in2, Shape(), ++present, ms += 16, false);
+    two.Recorded(false);
+    two.Decide(in2, Shape(), ++present, ms += 16, false);
+    two.Carried(true);
+    d = two.Decide(in2, Shape(), ++present, ms += 16, false);
+    assert(d.fade && d.fadeWeight == 0.5f);
+    two.Recorded(true);
+    d = two.Decide(in2, Shape(), ++present, ms += 16, false);
+    assert(!d.runModel && d.fadeWeight == 0.0f && d.limit && !d.limitReset);
+    ++g_cases;
+}
 } // namespace
 
 int main()
@@ -561,10 +689,12 @@ int main()
     Status_TextsAreDistinctAndCadenceSpecific();
     TapScale_FollowsTheWorkingSize();
     StaleHistory_ResetsWhenHistoryIsOlderThanMotion();
-    if (g_cases != 19)
+    Smoothing_WeightsAndStep();
+    Smoothing_FadesScheduledFramesAndLimitsTheCadenceOnly();
+    if (g_cases != 21)
         return 2; // a runner that exercises nothing must fail loudly
     std::printf("PASS %d scheduler cases: off allocates nothing, age in presents the pass ran at, held reset, forced "
-                "model frames, every refusal with its reason\n",
+                "model frames, every refusal with its reason, smoothing's weights, step and per-frame decisions\n",
                 g_cases);
     return 0;
 }

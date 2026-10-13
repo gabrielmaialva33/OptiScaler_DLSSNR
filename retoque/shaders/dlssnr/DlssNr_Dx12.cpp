@@ -1561,14 +1561,15 @@ static void DetailMeasureCopy(ID3D12GraphicsCommandList* cmdList, ID3D12Device* 
 // is touched under g_nrMutex only; the menu reads the status under the session's own mutex.
 struct PulseSession
 {
-    // What changes the meaning of a step: the frame's size and format, the cadence as configured. A change starts the
-    // window over, so no step spans it.
+    // What changes the meaning of a step: the frame's size and format, the cadence as configured and its smoothing. A
+    // change starts the window over, so no step spans it.
     struct Shape
     {
         uint32_t width = 0;
         uint32_t height = 0;
         uint32_t format = 0;
         uint32_t cadence = 1;
+        bool smoothing = false;
 
         bool operator==(const Shape&) const = default;
     };
@@ -1647,8 +1648,8 @@ static void StopPulseLocked()
 // sequence number in NotePulsePresent, so the pair across it is broken rather than bridged.
 static void UpdatePulse(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, bool enabled, ID3D12Resource* target,
                         ID3D12Resource* input, bool wrote, uint32_t width, uint32_t height, uint32_t format,
-                        uint32_t cadenceRequested, uint32_t cadenceInEffect, bool carried, uint64_t present,
-                        int64_t nowMs)
+                        uint32_t cadenceRequested, bool cadenceSmoothing, uint32_t cadenceInEffect, bool carried,
+                        uint64_t present, int64_t nowMs)
 {
     if (!enabled || !DlssNr_Pulse_Dx12::Available())
     {
@@ -1698,7 +1699,8 @@ static void UpdatePulse(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device
         }
     }
 
-    const PulseSession::Shape shape { width, height, format, cadenceRequested };
+    const PulseSession::Shape shape { width, height, format, cadenceRequested,
+                                      cadenceRequested > 1 && cadenceSmoothing };
     if (!g_pulse.shape || !(*g_pulse.shape == shape))
     {
         g_pulse.shape = shape;
@@ -4221,6 +4223,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     cadenceInputs.capture = g_capture.isActive();
     cadenceInputs.reversibleReplace = isHdrBuffer && (cfg.DlssNrReversibleMode.value_or_default() == 2 ||
                                                       cfg.DlssNrReversibleMode.value_or_default() == 4);
+    // The spread and the light limiter (docs/dlssnr/design/cadence-smoothing.md). Part of what the surfaces are built
+    // for and of the settings the scheduler watches, so a toggle rebuilds them and drops the stored edit together.
+    cadenceInputs.smoothing = cfg.DlssNrCadenceSmoothing.value_or_default();
 
     // The carry works at the model's working size, on the proxy the model is shown; without the reduced
     // proxy's surface there is no such picture to carry onto.
@@ -4235,13 +4240,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
     else if (Cadence::BuildsSurfaces(cadenceRefusal))
     {
-        if (g_nr.cadence != nullptr && !g_nr.cadence->Fits(device, workWidth, workHeight))
+        if (g_nr.cadence != nullptr && !g_nr.cadence->Fits(device, workWidth, workHeight, cadenceInputs.smoothing))
             ParkNrCadence(g_nr.cadence);
         if (g_nr.cadence == nullptr)
-            g_nr.cadence = new DlssNr_Cadence_Dx12("DLSS-NR cadence", device, workWidth, workHeight);
+            g_nr.cadence =
+                new DlssNr_Cadence_Dx12("DLSS-NR cadence", device, workWidth, workHeight, cadenceInputs.smoothing);
     }
     cadenceInputs.surfaces = proxyAtWorkSize && g_nr.cadence != nullptr && g_nr.cadence->IsInit() &&
-                             g_nr.cadence->Fits(device, workWidth, workHeight);
+                             g_nr.cadence->Fits(device, workWidth, workHeight, cadenceInputs.smoothing);
 
     // Everything whose change makes the stored edit describe another picture: what the model reads, and the
     // proxy it reads it from. Composition sliders stay out -- the edit is taken before composition.
@@ -4269,6 +4275,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     cadenceSettings = Cadence::Mix(cadenceSettings, frame.MotionVectorsLowResolution ? 1u : 0u);
     cadenceSettings = Cadence::Mix(cadenceSettings, frame.MvScaleX);
     cadenceSettings = Cadence::Mix(cadenceSettings, frame.MvScaleY);
+    // Not something the model reads: a toggle builds the surfaces anew (Fits), and their stored edit goes with them.
+    cadenceSettings = Cadence::Mix(cadenceSettings, cadenceInputs.smoothing ? 1u : 0u);
 
     const Cadence::Signature cadenceSignature {
         width,
@@ -4291,6 +4299,18 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count(), cadenceResetPending);
     const bool carried = !cadence.runModel;
     PublishCadence(cadence);
+
+    // What smoothing does on this frame, for the carry, the fade and the light limiter: the walk's share, and the
+    // limiter's step for the time since the pass last ran (cadence-smoothing.md). A gap is clamped by LimitStep, and
+    // a long one forced a model frame anyway, after which the limiter starts over.
+    static auto cadenceLastRun = now;
+    DlssNr_Cadence_Dx12::Smooth cadenceSmooth {};
+    cadenceSmooth.fadeWeight = cadence.fadeWeight;
+    cadenceSmooth.limit = cadence.limit;
+    cadenceSmooth.limitReset = cadence.limitReset;
+    cadenceSmooth.limitStep = Cadence::LimitStep(std::chrono::duration<float>(now - cadenceLastRun).count());
+    cadenceSmooth.passthrough = !isHdrBuffer;
+    cadenceLastRun = now;
 
     // A model frame not handed the chain while its history is older than one frame: the game's vectors would
     // misalign that history by every frame since, so it starts over (optimizer-fps-dlss5 fe67a80).
@@ -5007,10 +5027,12 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // texture has the shape the guide match already hands over. A forced model frame keeps the game's vectors.
     float modelMvScaleX = guideMvScaleXToWork;
     float modelMvScaleY = guideMvScaleYToWork;
+    bool cadenceChainHanded = false; // the chain was handed: a smoothed model frame can fade in along it
     if (cadence.handChain && g_nr.cadence != nullptr)
     {
         if (ID3D12Resource* chainMotion = g_nr.cadence->ModelMotion(cmdList, cadenceFrame))
         {
+            cadenceChainHanded = true;
             motionForModel = chainMotion;
             modelMotionWidth = workWidth;
             modelMotionHeight = workHeight;
@@ -5034,9 +5056,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // A carried frame: no model call and no extra pass. The proxy plus the last edit, moved along the chain,
         // is written where the model writes its answer, and the resolve below composes it as one. The pending
         // reset, if any, is held -- there is none here, since one forces a model frame -- and the menu keeps
-        // showing what the last model frame completed.
-        const bool carriedOk = g_nr.cadence != nullptr &&
-                               g_nr.cadence->Carry(cmdList, cadenceFrame, cadence.chainStart, uiAlpha, g_nr.output);
+        // showing what the last model frame completed. With smoothing, the walk's share of the last fade comes with
+        // it, and the light limiter holds what is shown.
+        const bool carriedOk = g_nr.cadence != nullptr && g_nr.cadence->Carry(cmdList, cadenceFrame, cadence.chainStart,
+                                                                              uiAlpha, cadenceSmooth, g_nr.output);
         result = carriedOk ? 1 : 0; // 1 is NVSDK_NGX_Result_Success: the resolve composes it like an answer
         g_activePasses = g_nr.cadencePasses;
     }
@@ -5155,8 +5178,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (!carried)
         g_nr.reset = false;
 
-    // Whether this model frame's edit was stored for the frames that carry it.
+    // Whether this model frame's edit was stored for the frames that carry it, and whether it was shown faded in from
+    // the carried edit, under the light limiter (cadence-smoothing.md).
     bool cadenceRecorded = false;
+    bool cadenceFaded = false;
 
     // Supersampling probe: report the model working ABOVE native so a test log tells us whether NGX even
     // accepts a super-native evaluate and what it returns. Once per working-size change, or on any error.
@@ -5360,8 +5385,24 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // frames that carry it -- only when every requested pass completed, so a carried frame never shows a
         // partial chain's answer, and only when the scheduler asks, so a refused or switched-off cadence, or a
         // second call in one present, records nothing.
+        //
+        // With smoothing, a scheduled model frame first stores the carried answer minus its own -- reading the stored
+        // edit the record is about to replace -- and keeps its answer with the walk's first share of the carried one;
+        // after the record, that shown answer goes, under the light limiter, where the resolve reads. The record and
+        // the model's own history keep the model's answer as it is: smoothing is what is shown, never what is kept.
+        const bool cadenceFading = cadence.fade && cadenceChainHanded && cadence.record && !carried &&
+                                   chain.completed == passSnapshot.Count && g_nr.cadence != nullptr &&
+                                   g_nr.cadence->Fade(cmdList, cadenceFrame, uiAlpha, finalOutput, cadenceSmooth);
         if (cadence.record && !carried && chain.completed == passSnapshot.Count && g_nr.cadence != nullptr)
             cadenceRecorded = g_nr.cadence->Record(cmdList, cadenceFrame, finalOutput);
+        if (cadenceFading && cadenceRecorded)
+        {
+            Barrier(cmdList, finalOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cadenceFaded = g_nr.cadence->ShowFaded(cmdList, cadenceFrame, cadenceSmooth, finalOutput);
+            Barrier(cmdList, finalOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
 
         // Supersampling down-leg. Average the Nx model answer back to native with the chosen filter, so
         // the resolve composites a native answer against the native proxy 1:1 -- a real area resample,
@@ -5780,7 +5821,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // nothing; on, one small reduction of the target against the untouched copy, after the stabilizer, so it measures
     // what is shown.
     UpdatePulse(cmdList, device, cfg.DlssNrPulseMetric.value_or_default(), target, g_nr.hdrCopy, wrote, width, height,
-                static_cast<uint32_t>(desc.Format), cadenceInputs.requested, cadence.cadence, carried, observedFrame,
+                static_cast<uint32_t>(desc.Format), cadenceInputs.requested, cadenceInputs.smoothing, cadence.cadence,
+                carried, observedFrame,
                 std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
 
     hdrRead.Restore();
@@ -5796,9 +5838,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // What the cadence learns from this frame: a stored edit restarts its count, a carried frame advances it,
     // and anything else -- a failed or partial model frame, a failed carry -- leaves nothing usable to carry.
     if (carried && result == 1)
-        g_cadence.Carried();
+        g_cadence.Carried(cadence.limit && g_nr.cadence != nullptr && g_nr.cadence->Smoothing());
     else if (!carried && cadenceRecorded)
-        g_cadence.Recorded();
+        g_cadence.Recorded(cadenceFaded);
     else
         g_cadence.Drop(carried, !carried && result == 1);
 

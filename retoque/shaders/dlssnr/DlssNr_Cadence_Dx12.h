@@ -11,15 +11,20 @@
 //
 // Its bytecode may be absent: DlssNr_Cadence_Dx12.cpp includes the precompiled header only if it exists, and
 // without it Available() is false, nothing is built, and the model runs every frame.
+//
+// With smoothing ([DlssNr] CadenceSmoothing, docs/dlssnr/design/cadence-smoothing.md) it also keeps the fade, the shown
+// answer and the light limiter's grid and state; whether it has them is part of what it was built for, so a toggle
+// builds a new object (and the scheduler, which folds the switch into the settings it watches, drops the stored edit
+// with it).
 
 #include <d3d12.h>
 #include <d3dx/d3dx12.h>
 #include <shaders/Shader_Dx12.h>
 #include <shaders/Shader_Dx12Utils.h>
 
-// Up to three dispatches a frame (model motion, record, coarse), reused round-robin with no fence: sixteen
-// frames of coverage, as the stabilizer keeps for one.
-#define DLSSNR_CADENCE_NUM_OF_HEAPS 48
+// Up to seven dispatches a frame (a smoothed model frame: model motion, fade, record, coarse, light, limit, apply),
+// reused round-robin with no fence: sixteen frames of coverage, as the stabilizer keeps for one.
+#define DLSSNR_CADENCE_NUM_OF_HEAPS 112
 
 class DlssNr_Cadence_Dx12 : public Shader_Dx12
 {
@@ -46,6 +51,16 @@ class DlssNr_Cadence_Dx12 : public Shader_Dx12
         float mvToWorkX = 1.0f; // the game's vectors into working pixels
         float mvToWorkY = 1.0f;
         float scale = 1.0f; // DlssNr::Cadence::TapScale
+    };
+
+    // What smoothing does on one frame (DlssNr::Cadence::Decision). Inert when the object has no smoothing surfaces.
+    struct Smooth
+    {
+        float fadeWeight = 0.0f;  // the share of the previous answer still shown
+        bool limit = false;       // run the light limiter
+        bool limitReset = false;  // ... with nothing before this frame to hold it to
+        float limitStep = 0.0f;   // DlssNr::Cadence::LimitStep
+        bool passthrough = false; // the frame is already tone mapped: its values are its light
     };
 
   private:
@@ -75,10 +90,15 @@ class DlssNr_Cadence_Dx12 : public Shader_Dx12
         float Scale = 1.0f;
         float DepthStepX = 1.0f;
         float DepthStepY = 1.0f;
-        uint32_t Pad0 = 0;
+        float FadeWeight = 0.0f;
+        uint32_t Passthrough = 0;
+        uint32_t LimitValid = 0;
+        float LimitStep = 0.0f;
+        float LimitInputTol = 0.0f;
+        float LimitMaxGain = 0.0f;
     };
 
-    static constexpr uint32_t kSrvCount = 10;
+    static constexpr uint32_t kSrvCount = 11;
     static constexpr uint32_t kUavCount = 3;
 
     FrameDescriptorHeap _frameHeaps[DLSSNR_CADENCE_NUM_OF_HEAPS];
@@ -94,13 +114,21 @@ class DlssNr_Cadence_Dx12 : public Shader_Dx12
     ID3D12Resource* _chain[2] = {};         // R32G32F: displacement back to the model frame, working pixels
     int _current = 0;                       // which chain holds the last carried frame's
 
+    // Smoothing only. The light state rests in UNORDERED_ACCESS: four R32F texels, read and written as a UAV.
+    bool _smoothing = false;
+    ID3D12Resource* _fade = nullptr;       // RGBA16F: the model frame's carried answer minus its own
+    ID3D12Resource* _shown = nullptr;      // RGBA16F: what this frame shows, before the light limit
+    ID3D12Resource* _lightGrid = nullptr;  // R32G32F, kLightGrid square: summed light of the shown answer, the proxy
+    ID3D12Resource* _lightState = nullptr; // R32F 4x1: shown light, frame light, valid, gain (stops)
+
     UINT _width = 0;
     UINT _height = 0;
     UINT _lowWidth = 0;
     UINT _lowHeight = 0;
 
     ID3D12Resource* CreateTexture(ID3D12Device* device, DXGI_FORMAT format, UINT width, UINT height,
-                                  const wchar_t* name);
+                                  const wchar_t* name,
+                                  D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     // One dispatch. srvs/uavs are slot-indexed; a null entry gets a null descriptor of the slot's type.
     bool Run(ID3D12GraphicsCommandList* cmdList, const Constants& constants, ID3D12Resource* const (&srvs)[kSrvCount],
@@ -108,28 +136,46 @@ class DlssNr_Cadence_Dx12 : public Shader_Dx12
 
     Constants Base(uint32_t mode, const Frame& frame) const;
 
+    // The light limiter over _shown, then _shown times its gain into InOut (UNORDERED_ACCESS, left so).
+    bool Show(ID3D12GraphicsCommandList* InCmdList, const Frame& InFrame, const Smooth& InSmooth,
+              ID3D12Resource* InOut);
+
   public:
     // Whether this build carries the pass's bytecode at all.
     static bool Available();
 
-    DlssNr_Cadence_Dx12(std::string InName, ID3D12Device* InDevice, UINT InWidth, UINT InHeight);
+    DlssNr_Cadence_Dx12(std::string InName, ID3D12Device* InDevice, UINT InWidth, UINT InHeight, bool InSmoothing);
     ~DlssNr_Cadence_Dx12();
 
-    // Whether this object was built for this working size on this device. A failed object still fits, so it is
-    // not rebuilt, and logged again, every frame.
-    bool Fits(ID3D12Device* InDevice, UINT InWidth, UINT InHeight) const
+    // Whether this object was built for this working size, with or without smoothing, on this device. A failed object
+    // still fits, so it is not rebuilt, and logged again, every frame.
+    bool Fits(ID3D12Device* InDevice, UINT InWidth, UINT InHeight, bool InSmoothing) const
     {
-        return InDevice == _device && InWidth == _width && InHeight == _height;
+        return InDevice == _device && InWidth == _width && InHeight == _height && InSmoothing == _smoothing;
     }
+
+    bool Smoothing() const { return _smoothing; }
 
     // A model frame: keep the model's final answer minus its proxy, the proxy, the depth and the coarse edit.
     // InAnswer is the answer at the working size, readable.
     bool Record(ID3D12GraphicsCommandList* InCmdList, const Frame& InFrame, ID3D12Resource* InAnswer);
 
     // A carried frame: one link of the chain, then the proxy plus the moved edit into InOut -- the surface the
-    // model writes, in its format, which arrives in UNORDERED_ACCESS and is left there. InUiAlpha may be null.
+    // model writes, in its format, which arrives in UNORDERED_ACCESS and is left there. InUiAlpha may be null. With
+    // smoothing, the walk's share of the stored fade is added, and under the limiter the answer goes through Show.
     bool Carry(ID3D12GraphicsCommandList* InCmdList, const Frame& InFrame, bool InChainStart, ID3D12Resource* InUiAlpha,
-               ID3D12Resource* InOut);
+               const Smooth& InSmooth, ID3D12Resource* InOut);
+
+    // The model frame of a smoothed cadence, after ModelMotion and the model, before Record overwrites the edit it
+    // reads: the carried answer minus the model's is stored, and the model's answer with InSmooth.fadeWeight of the
+    // way back to the carried one is kept as the shown answer. InAnswer is readable.
+    bool Fade(ID3D12GraphicsCommandList* InCmdList, const Frame& InFrame, ID3D12Resource* InUiAlpha,
+              ID3D12Resource* InAnswer, const Smooth& InSmooth);
+
+    // After Fade and Record: the shown answer, held to the light limit, into InOut -- the surface the resolve reads,
+    // at the working size, in UNORDERED_ACCESS, left so.
+    bool ShowFaded(ID3D12GraphicsCommandList* InCmdList, const Frame& InFrame, const Smooth& InSmooth,
+                   ID3D12Resource* InOut);
 
     // The model frame after carried ones: the chain summed back to the last model frame, as the model's motion
     // vectors (working pixels, scale 1, off the picture where broken). Readable, valid until the next call;
