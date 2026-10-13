@@ -1,193 +1,212 @@
-<div align="center">
+# Retoque
 
-  ![Logo](https://github.com/user-attachments/assets/c7dad5da-0b29-4710-8a57-b58e4e407abd)
+**DLSS 5 Neural Rendering for any game, on Linux and Windows. Built on OptiScaler.**
 
-</div>
-<hr />
-<br />
-<div align="center">
-  <a href="https://github.com/sponsors/cdozdil?frequency=one-time"><img src="images/gh-sponsor-red.png" /></a>
-  <a href="https://buymeacoffee.com/nitec"><img src="images/bmac.png" /></a>
-</div>
-<br />
+Retoque runs NVIDIA's DLSS 5 Neural Rendering model over a game's picture. It is a fork of
+[OptiScaler](https://github.com/optiscaler/OptiScaler), by way of
+[Dagherbou's DLSS-NR fork](https://github.com/Dagherbou/OptiScaler_DLSSNR), and like OptiScaler it loads
+as a proxy DLL between the game and the graphics API, so the game needs no patch and no cooperation.
+Everything OptiScaler does (swapping upscalers, frame generation, spoofing) is still here; see
+[OptiScaler's README](https://github.com/optiscaler/OptiScaler#readme) for that side.
 
-## Table of Contents
+> Retoque does **not** include the Neural Rendering model. You supply `nvngx_dlssnr.dll` yourself (see
+> [Requirements](#requirements)).
 
-**1.** [**About**](#about)  
-**2.** [**How it works?**](#how-it-works)  
-**3.** [**Supported APIs and Upscalers**](#which-apis-and-upscalers-are-supported)  
-**4.** [**Installation**](#installation)  
-**5.** [**Known Issues**](#known-issues)  
-**6.** [**Compilation and Credits**](#compilation)  
-**7.** [**Wiki**](https://github.com/optiscaler/OptiScaler/wiki)
+## What it does
 
-<br />
-<div align="center">
-  <a href="https://discord.gg/wEyd9w4hG5"><img src="https://img.shields.io/badge/OptiScaler-blue?style=for-the-badge&logo=discord&logoColor=white&logoSize=auto&color=5865F2" alt="Discord invite"></a>
-  <a href="https://github.com/optiscaler/OptiScaler/releases/latest"><img src="https://img.shields.io/badge/Download-Stable-green?style=for-the-badge&logo=github&logoSize=auto" alt="Stable release"></a>
-  <a href="https://github.com/optiscaler/OptiScaler/releases/tag/nightly"><img src="https://img.shields.io/badge/Download-Nightly-purple?style=for-the-badge&logo=github&logoSize=auto" alt="Nightly release"></a>
-  <a href="https://github.com/optiscaler/OptiScaler/wiki"><img src="https://img.shields.io/badge/Documentation-blue?style=for-the-badge&logo=gitbook&logoColor=white&logoSize=auto" alt="Wiki"></a>
-</div>
-<div align="center">
-  <a href="https://github.com/optiscaler/OptiScaler/releases"><img src="https://img.shields.io/github/downloads/optiscaler/optiscaler/total?style=for-the-badge&logo=gitextensions&logoSize=auto&label=Total" alt="Total DL"></a>
-  <a href="https://github.com/optiscaler/OptiScaler/releases/latest"><img src="https://img.shields.io/github/downloads/optiscaler/optiscaler/latest/total?style=for-the-badge&logo=gitextensions&logoSize=auto&label=Stable&color=green&logoColor=white" alt="Stable DL"></a>
-  <a href="https://github.com/optiscaler/OptiScaler/releases/tag/nightly"><img src="https://img.shields.io/github/downloads/optiscaler/OptiScaler/nightly/total?style=for-the-badge&logo=gitextensions&logoColor=white&logoSize=auto&label=Nightly&color=purple" alt="Nightly DL"></a>
-  <a href="https://github.com/optiscaler/OptiScaler/stargazers"><img src="https://img.shields.io/github/stars/optiscaler/optiscaler?style=for-the-badge&logo=githubsponsors&logoColor=white&label=S.T.A.R.S." alt="Stars"></a>
-</div>
+The model runs on whichever route the game allows:
 
+- **After the game's upscaler, on D3D12.** The usual route: the model works on the upscaler's output,
+  before the game draws its HUD and before frame generation. FSR 2/3 and XeSS games work too, because
+  OptiScaler normalises their calls into the same path.
+- **On Vulkan.** Native Vulkan games; DOOM Eternal is the reference.
+- **On D3D11 games, through a D3D11-to-D3D12 bridge.** Divinity: Original Sin 2 and The Witcher 3 (DX11
+  renderer) run this way, with no upscaler in the game at all.
+- **At present time, for games with no upscaler.** The pass runs on the finished backbuffer, which
+  covers emulators such as PCSX2. With no depth or motion from the game it can estimate motion from the
+  frames themselves (`SynthMotion`, experimental).
 
-## About
+Also in the tree:
 
-**OptiScaler** is a tool that lets you replace upscalers in games that ***already support DLSS2+ / FSR2+ / XeSS*** ($`^1`$), as well as manage ***frame generation*** in already mentioned games _(either by replacing existing FG options or enabling it in DX12 games through experimental ***OptiFG***)_. It also offers extensive customization options for all users, including those with Nvidia GPUs using DLSS.
+- **Linux / Proton fixes:** Vulkan hook skipping, overlay routing, and the vkd3d-proton / DLSS-G
+  interlock.
+- **Frame generation:** the pass runs before frame generation sees the frame, and frame generation can
+  be synthesized for games that supply no motion vectors.
+- **Colour:** RenoDX-style colour composition, a white point taken from the game's exposure, and
+  optional highlight recovery. HDR10/PQ and scRGB swapchains are declined at present time for now (the
+  game's picture is shown untouched) until that conversion exists.
+- **Controls:** working scale, peripheral compression, output stabilizer, model cadence, side-by-side
+  and wipe comparison, all from an in-game menu.
+- **Measurement:** fence-confirmed GPU timing, per-kernel profiling and an in-game "Measure detail"
+  tool.
+- **A host test suite** that runs without a GPU (see [Tests](#tests)).
 
-> [!CAUTION]
-> * We've been informed about some **FAKE websites** presenting themselves as OptiScaler team, so we would like to strongly highlight that we **DO NOT HAVE an official website!**  
-> * We **DON'T have an official manager app**, so please be careful when downloading or using them! And please don't bother us to provide support for something which isn't even ours!
-> * Only **LEGIT places** are this Github, our Discord server and Nitec's NexusMods page.  
-> * OptiScaler is **FREE**, any kind of monetary requirements are scams!  
+At strength zero the frame is bit-identical to what the game produced, and with Neural Rendering off
+the module does nothing.
 
-> [!TIP]
-> _For example, if a game has DLSS only, OptiScaler can be used to replace DLSS with XeSS or FSR 3.1 (also works for FSR2-only games, like The Outer Worlds Spacer's Choice, albeit requires manually providing nvngx_dlss.dll)._
+## Status
 
-**Key aspects of OptiScaler:**
-- Enables usage of XeSS, FSR2, FSR3, **FSR4**$`^2`$ (_officially, RDNA4 and RDNA3 dGPUs only_) and DLSS in (temporal) upscaler-enabled games
-- Allows users to fine-tune their upscaling experience with a wide range of tweaks and enhancements (RCAS & MAS, Output Scaling, DLSS Presets, Ratio & DRS Overrides etc.)
-- Since v0.7.0+, added ***experimental DX12*** frame generation support with possible HUDfix solution ([**OptiFG**](#optifg--hudfix-experimental-hud-ghosting-fix))
-- Supports [**Fakenvapi**](#installation) integration - enables Reflex hooking and injecting _Anti-Lag 2_ (RDNA1+ only), _LatencyFlex_ (LFX) or _XeLL_ - _bundled since 0.9_  
-- Since v0.7.7, added support for **Nukem's** FSR3-FG mod [**dlssg-to-fsr3**](#installation), only supports games with ***native DLSS-FG*** - _bundled since 0.9_
-- Since v0.7.8, added **ASI plugin loading** support (_disabled_ by default (`LoadAsiPlugins=` in INI), loads from customisable folder, default `plugins`)
-- New project - [**OptiPatcher**](https://github.com/optiscaler/OptiPatcher) - an ASI Plugin for OptiScaler for enabling DLSS and DLSSG inputs without spoofing in ***supported games***.
-- Since v0.7.8, OptiScaler is now automatically applying certain game patches for a better out-of-the-box experience
-- Since v0.9.0, separated FG Inputs and Outputs, added XeFG and FSR4-FG support, as well as bundled Fakenvapi and Nukem's FSR3-FG mod
-- For a detailed list of all features, check [Features](Features.md)
+Experimental, and unsupported by NVIDIA. Measured working on Linux (Proton, RTX 4090):
 
+| Game | Route |
+|---|---|
+| Crimson Desert | after the upscaler (D3D12), with DLSS-G |
+| Divinity: Original Sin 2 | D3D11 bridge, with synthesized frame generation |
+| The Witcher 3 (DirectX 11) | D3D11 bridge |
+| DOOM Eternal | Vulkan, plus the menu overlay |
+| PCSX2 | D3D12 present pass |
 
-> [!IMPORTANT]
-> _**Always check the [Wiki Compatibility list](https://github.com/optiscaler/OptiScaler/wiki) for known game issues and workarounds.**_  
-> Also please check the  [***OptiScaler known issues***](#known-issues) at the end regarding **RTSS** compatibility.  
-> A separate [***FSR4 Compatibility list***](https://github.com/optiscaler/OptiScaler/wiki/FSR4-Compatibility-List) is available for community-sourced tested games.  
-> ***[3]** For **not bundled** items, please check [Installation](#installation).*  
+Builds are also run on native Windows with an RTX 3060. Proton is not a D3D12 validator (it accepts
+calls that Windows rejects), so Windows reports are especially welcome.
 
-> [!NOTE]
-> ### Upscaler notes
-> <details>
->  <summary><b>Click for [1], [2] </b></summary>  
->  
-> **[1]** For **Unreal Engine** games, only UE XeSS -> Opti XeSS/FSR4 work  
->  
-> *Regarding **XeSS** inputs, since **Unreal Engine plugin** does not provide depth, replacing in-game XeSS breaks other upscalers (e.g. Redout 2 as a XeSS-only game), but you can still apply RCAS sharpening to XeSS to reduce blurry visuals.* 
->
-> *Regarding **FSR inputs**, FSR 3.1 is the first version with a fully standardised, forward-looking API and should be fully supported. Since FSR2 and FSR3 support custom interfaces, game support will depend on the developers' implementation. With Unreal Engine games, you might need [ini tweaks](https://github.com/optiscaler/OptiScaler/wiki/Unreal-Engine-Tweaks) for FSR inputs.*  
->
-> **[2]** *Regarding **FSR4**, please check [FSR4 Compatibility list](https://github.com/optiscaler/OptiScaler/wiki/FSR4-Compatibility-List) for known supported games and general info.*
-> 
-> </details>
+## Requirements
 
+- An **NVIDIA RTX GPU**. The cost depends a lot on the architecture: `WorkingScale=auto` runs the model
+  at full scale on RTX 40 and later, and at half scale on RTX 20 and 30.
+- **`nvngx_dlssnr.dll`**, the Neural Rendering model, which you supply. The 310.8.2.0 build in common
+  use is a community patch of NVIDIA's 310.8.0.0 (NVIDIA's own build is known to fault). Retoque does
+  not redistribute either one.
+- **`nvngx.dll_dlssnr.dll`**, a small forwarder DLL built by this project. The model refuses callers whose
+  module path lacks `nvngx.dll`, so its calls go through this file. It contains no NVIDIA code.
+- A recent NVIDIA driver. Development runs on the Linux 615.78 driver; there is no tested minimum yet.
+  On Proton, copy `/usr/lib/nvidia/wine/_nvngx.dll` into the game folder and refresh it when the driver
+  updates.
 
-## Official Discord Server: [OptiScaler](https://discord.gg/wEyd9w4hG5)
+## Install on Linux (Proton)
 
-*This project is based on [PotatoOfDoom](https://github.com/PotatoOfDoom)'s excellent [CyberFSR2](https://github.com/PotatoOfDoom/CyberFSR2).*
+1. Copy `OptiScaler.dll`, `OptiScaler.ini`, `nvngx.dll_dlssnr.dll` and your `nvngx_dlssnr.dll` into the
+   folder that holds the game's executable.
+2. Rename `OptiScaler.dll` to a name the game loads early: `dxgi.dll`, `winmm.dll`, `version.dll`,
+   `dbghelp.dll`, `d3d12.dll`, `wininet.dll` or `winhttp.dll` (or `OptiScaler.asi`). `setup_linux.sh`
+   asks and renames it for you.
+3. Steam launch options, for a `dxgi.dll` proxy: `WINEDLLOVERRIDES="dxgi=n,b" %command%`
+4. In `OptiScaler.ini`, change the existing keys in place. Do not add a second copy of a key: the
+   parser keeps the last one.
+   ```ini
+   [DlssNr]
+   Enabled=true
+   ToggleKey=0x76    ; F7 switches the pass on and off (no key by default)
+   ```
+   The in-game menu opens with **Insert** (`[Menu] ShortcutKey`).
+5. Native Vulkan games under Proton can hit fence timeouts when the Vulkan overlay runs next to DLSS-G.
+   Set `[Vulkan] SkipHooks=true` for those.
 
-## How it works?
-* OptiScaler acts as a middleware, it intercepts upscaler calls from the game (_**Inputs**_) and redirects them to the chosen upscaling backend (_**Output**_), allowing user to replace one technology with another one. **Inputs -> OptiScaler -> Outputs**  
-* _Or put more bluntly, **Input** is the upscaler used in game settings, and **Output** the one selected in Opti Overlay._
-* _Same goes for FG options which are separated into **FG Input** and **FG Output**._
+Keep **one** proxy name per game folder: two copies loaded together fight over the same hooks and the
+game dies at startup. The log line `CheckWorkingMode OptiScaler working as <name>` says which one
+loaded. If the game's prefix has no `nvapi64.dll` (Divinity is one), point `[Libraries] NvapiPath` at
+Proton's own `files/lib/wine/nvapi/x86_64-windows/nvapi64.dll`.
 
-> [!NOTE]
-> * Pressing **`Insert`** should open the Optiscaler **Overlay** in-game with all of the options (_`ShortcutKey=` can be changed in the INI file, or under **Keybinds** in the overlay_). 
-> * Pressing **`Page Up`** shows the performance stats overlay in the top left, and can be cycled between different modes with **`Page Down`** (_keybinds customisable in the overlay_).  
-> * If Opti overlay is instantly disappearing after trying Insert a few times, maybe try **`Alt + Insert`** ([reported workaround](https://github.com/optiscaler/OptiScaler/issues/484) for alternate keyboard layouts).
+## Install on Windows
 
-![inputs_and_outputs](https://github.com/user-attachments/assets/7ff37fd7-515f-488d-99ff-faa586e206fc)
+The same files and the same ini changes, without `WINEDLLOVERRIDES`: copy them beside the game's
+executable and rename `OptiScaler.dll` to the proxy name. `setup_windows.bat` does the rename.
 
-## Which APIs and Upscalers are Supported?
-Currently **OptiScaler** can be used with DirectX 11, DirectX 12 and Vulkan, but each API has different sets of supported upscalers.  
-[**OptiFG**](#optifg--hudfix-experimental-hud-ghosting-fix) currently **only supports DX12** and is explained in a separate paragraph.
+## Key settings
 
-#### For DirectX 12
-- XeSS (Default)
-- FSR 2.1.2, 2.2.1
-- FSR 3.X (and FSR 2.3.X)
-- FSR 4.X (via FSR 3.X/4, _officially RDNA4 and RDNA3 dGPUs only_)
-- DLSS
+Every key lives under `[DlssNr]` in `OptiScaler.ini` and ships as `auto`; the table says what `auto`
+means. [`Config.md`](Config.md) and the comments in the ini are the full reference.
 
-#### For DirectX 11
-- FSR 2.2.1 (Default, native DX11)
-- FSR 3.1.2 (unofficial port to native DX11)
-- DLSS (native DX11)
-- XeSS 2.X (native DX11, _Intel ARC only_)
-- XeSS, FSR 2.1.2, 2.2.1, FSR 3.X w/Dx12 (_via D3D11on12_)$`^1`$
-- FSR 4.X (via FSR 3.X/4 w/Dx12 interop, _officially RDNA4 and RDNA3 dGPUs only_)
+| Key | `auto` means | What it does |
+|---|---|---|
+| `Enabled` | false | Turns the module on. |
+| `ToggleKey` | no key | Hotkey that switches the pass on and off. |
+| `HookMethod` | 1 | Where the pass runs: 0 auto, 1 on the upscaler's output, 2 at present. |
+| `TransferStrength` | 1.0 | How far the frame moves toward the model's picture; 0 gives the game's frame back exactly. |
+| `WorkingScale` | 1.0 on RTX 40+, 0.5 on RTX 20/30 | The fraction of the frame the model works at. |
+| `WhitePointSource` | 1 | Where the white point comes from: 0 paper white, 1 the game's exposure, 2 an exposure scan. |
+| `ModelLoader` | forwarder | `forwarder`, or `direct` (OptiScaler calls the model itself). |
+| `HighlightRecovery` | false | Keeps bright highlights closer to the game's frame (from RTX Remix). |
+| `Cadence` | 1 | Run the model on one frame in N and carry its result in between (1 is every frame). |
+| `StabilizerStrength` | 0 | Holds still pixels steady (0 is off). |
+| `GpuTiming` | false | Fence-confirmed GPU timing for the pass. |
+| `Compare` | 0 | 1 side by side, 2 wipe (0 is off). |
 
-> [!NOTE]
-> <details>
->  <summary><b>Expand for [1]</b></summary>
->
-> _**[1]** These implementations use a background DirectX12 device to be able to use DX12-only upscalers. There's a performance penalty up to 10-ish % for this method, but allows many more upscaler options. Also native DX11 implementation of FSR 2.2.1 is a backport from Unity renderer and has its own problems of which some were fixed by OptiScaler._
-> </details>
+## Build from source
 
-#### For Vulkan
-- FSR 4.X (via FSR 3.X/4 w/Dx12 interop, _officially RDNA4 and RDNA3 dGPUs only_)
-- FSR2 2.1.2 (Default), 2.2.1
-- FSR3 3.1 (and FSR2 2.3.2)
-- DLSS
-- XeSS 2.x
+Windows-only C++ (MSVC, `OptiScaler.sln`, x64). On Linux, `./build-local.sh` builds with MSVC under
+Wine (it runs [`tools/build-local.sh`](tools/README.md)). The Build section of [`CLAUDE.md`](CLAUDE.md#build)
+has the details: the Wine stall recovery, formatting with clang-format 22, CI.
 
-#### OptiFG + HUDfix (experimental HUD ghosting fix) 
-**OptiFG** was added with **v0.7** and is **only supported in DX12**. 
-It's an **experimental** way of adding FG to games without native Frame Generation, or can also be used as a last case scenario if the native FG is not working properly.  
-* Currently supports FSR3-FG (requires HUDfix to avoid HUD ghosting), XeFG and FSR4-FG (ML model deals with the HUD, so may or may not require HUDfix).
+Do not run `git submodule update --init --recursive` blindly: `external/FidelityFX-SDK` is very large and
+is deliberately left unchecked-out.
 
-For more information on OptiFG and how to use it, please check the Wiki page - [OptiFG](https://github.com/optiscaler/OptiScaler/wiki/OptiFG).
+## Tests
 
+```bash
+python3 tests/run_all.py            # host tier: Python and g++/clang++, about a minute
+python3 tests/run_all.py --list     # suites, tiers, and what can run here
+python3 tests/run_all.py --tier all # adds the Wine suites
+```
 
-## Installation
-> [!CAUTION]
-> _**Warning**: **Do not use this mod with online games.** It may trigger anti-cheat software and cause bans!_
+The host tier checks decision logic, configuration round-trips, bridge lifetime and more against fakes,
+under sanitizers. It says nothing about image quality or performance. The Wine tier builds real DLLs and
+drives real D3D12 and Vulkan. See [`tests/README.md`](tests/README.md).
 
-> [!IMPORTANT]
-> **For installation steps, please check the [**Wiki**](https://github.com/optiscaler/OptiScaler/wiki)**  
+## Layout and documentation
 
-## Configuration
-Please check [this](Config.md) document for configuration parameters and explanations. If your GPU is not an Nvidia one, check [GPU spoofing options](Spoofing.md) *(Will be updated)*
+- [`retoque/`](retoque/dlssnr/README.md): the Neural Rendering module (`dlssnr/`) and its shaders
+  (`shaders/dlssnr/`). Start with [`retoque/dlssnr/README.md`](retoque/dlssnr/README.md).
+- [`docs/`](docs/README.md): design notes ([index by topic](docs/dlssnr/README.md)), Linux/Proton notes,
+  guides and history. The rules every change follows are in
+  [`docs/dlssnr/design/DEVELOPMENT.md`](docs/dlssnr/design/DEVELOPMENT.md).
+- [`tools/`](tools/README.md): build, deploy, release and log-summary scripts.
+- [`tests/`](tests/README.md): the test suites.
+- `OptiScaler/`: OptiScaler's tree, kept at upstream's paths so upstream merges stay easy.
+- [`Config.md`](Config.md): every INI key.
 
-## Known Issues
+## Credits
 
-> [!NOTE]
-> **For a list of known issues, please check the [**Wiki**](https://github.com/optiscaler/OptiScaler/wiki)**.
-> 
-> Also worth checking the [Compatibility List](https://github.com/optiscaler/OptiScaler/wiki/Compatibility-List) for possible game issues and their fixes.
+Retoque stands on other people's work. Full licence texts are in [`Licenses/`](Licenses/).
 
-## Compilation
+- **[OptiScaler](https://github.com/optiscaler/OptiScaler)**, created by
+  [cdozdil](https://github.com/cdozdil), and its contributors. GPL-3.0.
+- **[Dagherbou's OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR)**, the DLSS-NR fork
+  this module started from.
+- **[RenoDX](https://github.com/clshortfuse/renodx)** (clshortfuse): the colour composition. clshortfuse
+  also made the patched 310.8.2.0 model build.
+- **[NVIDIA RTX Remix](https://github.com/NVIDIAGameWorks/dxvk-remix)**: the highlight recovery step.
+- **[optimizer-fps-dlss5](https://github.com/BeliyG3/optimizer-fps-dlss5)** (BeliyG3, MIT): the peripheral
+  compression mapping and the model cadence carry.
+- **[DLSS5-Feeder](https://github.com/jlrouzies-fr/DLSS5-Feeder)** (jlrouzies-fr, MIT): the output
+  stabilizer's gate and the reduced-scale guide fixes.
+- **[dlss5-bridge](https://github.com/NIGos/dlss5-bridge)** (NIGos, MIT): the NGX loader's feature-18
+  route.
+- **[OptiScaler-DLSSNR-PreSR-Multipass](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass)**
+  (wilsjo2, GPL-3.0): the direct model loader, DLSS enlargement and the peripheral compression
+  integration.
+- **[OptiScaler-F5-DLSSNR-Multipass](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass)**
+  (janblade, GPL-3.0): "Measure detail", per-thread scopes, and the model cadence and ViT-skip ideas.
+- **[scottmudge's OptiScaler_DLSSNR](https://github.com/scottmudge/OptiScaler_DLSSNR)**: the present hook
+  and descriptor reuse, rewritten here.
+- **[Skynizz](https://github.com/Skynizz/optiscaler-dlss5)**, **hhkbble** and **sqmq13**: the exposure
+  latch, the residual transfer and signed-value fixes, adapted.
+- **[KleberMotta](https://github.com/KleberMotta/OptiScaler-DLSS5-MFG-RTX40)**,
+  [ImDreamt](https://github.com/ImDreamt/MFGAdaUnlock-RenoDx),
+  [mavismmg](https://github.com/mavismmg/MFGAdaUnlock-RenoDx) and
+  [dashdogy](https://github.com/dashdogy/RTX40MFG-Unlock): the DLSS-G snippet rule.
+- **[AMD FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK)** (MIT parts): the
+  optical flow behind `SynthMotion`.
+- **[dxvk-nvapi](https://github.com/jp7677/dxvk-nvapi)** (jp7677): the NVIDIA Optical Flow headers (MIT).
+- **y4my4my4m**, **RizziU** and **jackra1n**: Linux/Proton fixes from their OptiScaler pull requests
+  ([#1138](https://github.com/optiscaler/OptiScaler/pull/1138),
+  [#1131](https://github.com/optiscaler/OptiScaler/pull/1131),
+  [#1163](https://github.com/optiscaler/OptiScaler/pull/1163)).
 
-### Requirements
-* Visual Studio 2022
+## Trademarks
 
-### Instructions
-* Clone this repo with **all of its submodules**.
-* Open the OptiScaler.sln with Visual Studio 2022.
-* Build the project
+DLSS, NVIDIA and RTX are trademarks of NVIDIA Corporation. Retoque is an independent project, not
+affiliated with, endorsed by or supported by NVIDIA. Other names belong to their owners.
 
-## Thanks
-* @PotatoOfDoom for CyberFSR2
-* @Artur for DLSS Enabler and helping me implement NVNGX api correctly
-* @LukeFZ & @Nukem for their great mods and sharing their knowledge 
-* @FakeMichau for continous support, testing and feature creep
-* @QM for continous testing efforts and helping me to reach games
-* @TheRazerMD for continous testing and support
-* @Cryio, @krispy, @krisshietala, @Lordubuntu, @scz, @Veeqo for their hard work on (now outdated) [compatibility matrix](https://docs.google.com/spreadsheets/d/1qsvM0uRW-RgAYsOVprDWK2sjCqHnd_1teYAx00_TwUY)
-* And the whole DLSS2FSR community for all their support
+## License
 
-## Credit
-This project uses [FreeType](https://gitlab.freedesktop.org/freetype/freetype) licensed under the [FTL](https://gitlab.freedesktop.org/freetype/freetype/-/blob/master/docs/FTL.TXT)
+GPL-3.0, inherited from OptiScaler: see [`LICENSE`](LICENSE). Third-party parts keep their own licences,
+listed in [`Licenses/`](Licenses/). `Licenses/RenoDX_ATTRIBUTION.txt` must ship with any build you
+distribute.
 
-## Sponsors
-<table>
- <tbody>
-  <tr>
-   <td align="center"><img alt="[SignPath]" src="https://avatars.githubusercontent.com/u/34448643" height="30"/></td>
-   <td>Free code signing on Windows provided by <a href="https://signpath.io/">SignPath.io</a>, certificate by <a href="https://signpath.org/">SignPath Foundation</a></td>
-  </tr>
- </tbody>
-</table>
+## Em português
 
+O Retoque aplica o modelo DLSS 5 Neural Rendering da NVIDIA na imagem de qualquer jogo, no Linux (Proton)
+e no Windows, usando o OptiScaler como base. Ele roda depois do upscaler do jogo (D3D12), em Vulkan, em
+jogos D3D11 por uma ponte D3D11-para-D3D12 e, na hora do present, em jogos sem upscaler (como
+emuladores). O arquivo do modelo (`nvngx_dlssnr.dll`) **não** vem junto: você precisa fornecê-lo. É um
+projeto experimental, sem vínculo com a NVIDIA, sob GPL-3.0.
