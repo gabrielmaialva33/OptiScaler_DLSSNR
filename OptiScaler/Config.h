@@ -302,7 +302,7 @@ class Config
     CustomOptional<bool> DlssNrEnabled { false };
     // Session guard: after a session that ended without closing while NR ran, keep NR off for the next
     // launch (this session only, the ini is not rewritten) and say why. See dlssnr/DlssNr_Session.h.
-    CustomOptional<bool> DlssNrSessionGuard { true };
+    CustomOptional<bool> DlssNrSessionGuard { false };
     // Optional NR after native Ray Reconstruction (DX12).
     CustomOptional<bool> DlssNrApplyAfterRR { false };
     CustomOptional<unsigned int> DlssNrRRPasses { 1 };

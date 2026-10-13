@@ -1,7 +1,28 @@
 # Session guard — do not crash the next launch the same way
 
-Status: design, then implement (design-doc-first per DEVELOPMENT.md). D3D12 and native Vulkan share it: the
-guard sits at the two places an NR evaluate succeeds, not inside either route.
+Status: implemented, and **off by default since the first in-game run** (2026-10-13, see "Measured"): the exit
+signal it relies on does not arrive under Proton for the titles tried. D3D12 and native Vulkan share it: the guard
+sits at the two places an NR evaluate succeeds, not inside either route.
+
+## Measured (2026-10-13, build f56379c9, Proton)
+
+Two ordinary quits from the game's own menu, and both left the marker behind with `active=1`:
+
+| Title | NR before the quit | Marker after | Next launch would have |
+|---|---|---|---|
+| DOOM Eternal (Vulkan) | about 90 s | present | **disabled NR** (early end, under 120 s) |
+| Crimson Desert (D3D12, DLSS-G) | about 4 min | present | shown the "middle end" notice |
+
+So these exits never ran `DLL_PROCESS_DETACH` (or never reached `SessionGuardOffAtExit` in it): the table below
+assumed a menu quit goes through `ExitProcess`, and for these two engines under Proton it does not. Whether the
+engine calls `TerminateProcess` on itself or Proton ends the process is not settled; either way every short session
+reads as a crash, which is the false positive the policy was built to avoid. (The log is no help here: upstream
+writes its `DLL_PROCESS_DETACH` line only on an explicit `FreeLibrary`, so its absence proves nothing.)
+
+The key now defaults to false. A next version needs a clean signal these exits do produce. The candidate is a hook on
+`TerminateProcess`/`NtTerminateProcess` for the current process, which a self-terminating engine calls and an outside
+kill (Steam "Stop", a killed hang) does not; a crash handler that terminates itself would be read as clean, so that
+version must also see unhandled exceptions. Not built.
 
 ## The problem
 
@@ -132,7 +153,7 @@ what the user had; the menu checkbox simply shows it off. Never rewrites the ini
 
 ## Config
 
-`[DlssNr] SessionGuard` (bool, default true): false turns the whole thing off: no read, no write, no notice, the
+`[DlssNr] SessionGuard` (bool, default false since the measurement above): false turns the whole thing off: no read, no write, no notice, the
 file left as it is. Four-point round trip: `Config.h`, read and save in `Config.cpp`, `OptiScaler.ini`, and the
 `Config.md` entry.
 

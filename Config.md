@@ -390,7 +390,10 @@ there.
 [DlssNr]
 ; Keep NR off for one session after a session that ended without closing while NR ran (crash, killed
 ; hang). A marker file retoque_nr_session.state beside the log records it; the ini is never rewritten.
-; true or false - Default (auto) is true
+; Off by default: under Proton, DOOM Eternal and Crimson Desert left the marker behind after ordinary quits
+; (their exits never reach DLL_PROCESS_DETACH), so every short session read as a crash. Opt-in until a
+; better exit signal exists (docs/dlssnr/design/session-guard.md, "Measured").
+; true or false - Default (auto) is false
 SessionGuard=auto
 
 ; Apply the model's edit. Off shows the clean upscaler frame while the NR pass keeps running,
