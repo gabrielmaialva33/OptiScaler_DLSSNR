@@ -56,9 +56,9 @@ inline void NoteDx11Evaluate(::Upscaler upscaler)
         LOG_WARN("DLSS-NR: {}", Dx11Route::ReportText(report));
 }
 
-// The panel's line, untranslated: the report for the route the last D3D11 evaluate took while evaluates are still
-// arriving, nullptr when there is nothing to say.
-inline const char* Dx11RouteNotice()
+// What the panel reports: the report for the route the last D3D11 evaluate took, while evaluates are still arriving.
+// Its text is Dx11Route::ReportText, untranslated.
+inline Dx11Route::Report Dx11RouteReport()
 {
     const Config& cfg = *Config::Instance();
 
@@ -67,7 +67,6 @@ inline const char* Dx11RouteNotice()
     const auto route = Dx11Route::Seen(Dx11RouteDetail::g_lastRoute.load(std::memory_order_relaxed),
                                        std::chrono::steady_clock::now() - at);
 
-    return Dx11Route::ReportText(
-        Dx11Route::Decide({ cfg.DlssNrEnabled.value_or_default(), route, cfg.DlssNrHookMethod.value_or_default() }));
+    return Dx11Route::Decide({ cfg.DlssNrEnabled.value_or_default(), route, cfg.DlssNrHookMethod.value_or_default() });
 }
 } // namespace DlssNr

@@ -253,8 +253,9 @@ A driver around the existing bridge, not a second bridge. The pieces are already
   feature's own `GetUpscalerType()` (so a backend switched in the menu is seen at its next evaluate). With NR off it
   returns before it stores or logs. Otherwise it keeps the route and its time for the panel and logs each report at
   warning level once per process (`LogOnce`), not once per frame and not again when the route comes back.
-- The panel's line is DEVELOPMENT.md §2.2. It replaces "Waiting for the upscaler to run.", which on this route was
-  waiting for something that was not coming.
+- The panel's line is DEVELOPMENT.md §2.2, from `Dx11RouteReport()`. It replaces "Waiting for the upscaler to
+  run.", which on this route was waiting for something that was not coming, and in the after-upscaler case it also
+  hides the hook status line under Source, whose "upscaled: active on the upscaler's output" said the opposite.
 - `tests/nr-dx11-route` covers the decision, the once-only log, the panel's window, the production layer against a
   `Config.h` stub, the call site's position, and the pt-BR entries.
 

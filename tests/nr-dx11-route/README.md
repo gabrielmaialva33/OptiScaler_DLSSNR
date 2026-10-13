@@ -28,8 +28,8 @@ ASan/UBSan and `-Werror`. The second is compiled against `stubs/Config.h`, which
   without a second log line, gone with NR off and once evaluates stop.
 - **Source guards.** `NVNGX_DLSS_Dx11.cpp` names `DlssNr` twice (the include and one one-line call); the evaluate
   is noted after it ran, with the feature's own type. The layer returns with NR off before storing or logging. The stub's `Upscaler` enum equals `OptiTypes.h`'s and its keys' defaults equal
-  `Config.h`'s. The panel asks for the line only with NR on, translates it, and drops "Waiting for the upscaler to
-  run." when it shows. Each report text has a pt-BR entry (`nr-localization` cannot see these: they reach `Tr`
+  `Config.h`'s. The panel asks for the line only with NR on, translates it, drops "Waiting for the upscaler to
+  run." when it shows, and hides the "upscaled: active" hook status for the after-upscaler report. Each report text has a pt-BR entry (`nr-localization` cannot see these: they reach `Tr`
   through a variable).
 
 ## What this does not cover

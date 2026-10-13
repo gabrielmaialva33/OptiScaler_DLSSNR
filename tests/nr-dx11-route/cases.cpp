@@ -29,8 +29,6 @@ void Require(bool condition, const char* what)
 
 bool Contains(const char* text, const char* part) { return text != nullptr && std::strstr(text, part) != nullptr; }
 
-bool Same(const char* a, const char* b) { return a == b || (a != nullptr && b != nullptr && std::strcmp(a, b) == 0); }
-
 using DlssNr::Dx11Route::Decide;
 using DlssNr::Dx11Route::Inputs;
 using DlssNr::Dx11Route::Kind;
@@ -163,11 +161,11 @@ void ProductionReport()
     Require(lines() == 0, "NR off: no line at all");
     Require(Detail::g_lastAt.load() == 0 && Detail::g_lastRoute.load() == Kind::Other,
             "NR off: the evaluate note stores nothing");
-    Require(DlssNr::Dx11RouteNotice() == nullptr, "NR off: no panel line");
+    Require(DlssNr::Dx11RouteReport() == Report::None, "NR off: no panel line");
 
     // --- NR on, native DLSS evaluates, HookMethod 1 (the default).
     cfg.DlssNrEnabled = true;
-    Require(DlssNr::Dx11RouteNotice() == nullptr, "no panel line before any D3D11 evaluate");
+    Require(DlssNr::Dx11RouteReport() == Report::None, "no panel line before any D3D11 evaluate");
 
     for (int frame = 0; frame < 600; ++frame)
         DlssNr::NoteDx11Evaluate(Upscaler::DLSS);
@@ -175,11 +173,11 @@ void ProductionReport()
     Require(lines() == 1, "600 native evaluates log one line");
     Require(LastLine() == std::string("WARN DLSS-NR: ") + ReportText(Report::NoPass),
             "the line is the after-upscaler report, at warning level");
-    Require(Same(DlssNr::Dx11RouteNotice(), ReportText(Report::NoPass)), "the panel shows the same report");
+    Require(DlssNr::Dx11RouteReport() == Report::NoPass, "the panel shows the same report");
 
     // HookMethod is read live by the panel; the log says the HookMethod 2 report at the next evaluate.
     cfg.DlssNrHookMethod = 2u;
-    Require(Same(DlssNr::Dx11RouteNotice(), ReportText(Report::NoGuides)), "the panel follows HookMethod at once");
+    Require(DlssNr::Dx11RouteReport() == Report::NoGuides, "the panel follows HookMethod at once");
     for (int frame = 0; frame < 10; ++frame)
         DlssNr::NoteDx11Evaluate(Upscaler::DLSS);
     Require(lines() == 2 && LastLine() == std::string("WARN DLSS-NR: ") + ReportText(Report::NoGuides),
@@ -188,23 +186,23 @@ void ProductionReport()
 
     // Switched to dlss_12 in the menu: the line goes at the next evaluate, and nothing is logged.
     DlssNr::NoteDx11Evaluate(Upscaler::DLSS_on12);
-    Require(DlssNr::Dx11RouteNotice() == nullptr && lines() == 2, "dlss_12: no panel line, no log line");
+    Require(DlssNr::Dx11RouteReport() == Report::None && lines() == 2, "dlss_12: no panel line, no log line");
 
     // Ray reconstruction and the other upscalers are not judged here.
     for (Upscaler upscaler : { Upscaler::DLSSD, Upscaler::FSR22, Upscaler::XeSS, Upscaler::FFX_on12 })
     {
         DlssNr::NoteDx11Evaluate(upscaler);
-        Require(DlssNr::Dx11RouteNotice() == nullptr, "routes other than native DLSS get no panel line");
+        Require(DlssNr::Dx11RouteReport() == Report::None, "routes other than native DLSS get no panel line");
     }
 
     // Back to native: the panel line returns, the log stays quiet.
     DlssNr::NoteDx11Evaluate(Upscaler::DLSS);
-    Require(Same(DlssNr::Dx11RouteNotice(), ReportText(Report::NoPass)) && lines() == 2,
+    Require(DlssNr::Dx11RouteReport() == Report::NoPass && lines() == 2,
             "back on native DLSS: panel line again, no second log line");
 
     // NR switched off in the menu: the line goes at once, with the record still fresh.
     cfg.DlssNrEnabled = false;
-    Require(DlssNr::Dx11RouteNotice() == nullptr, "NR off: no panel line, even with a fresh native record");
+    Require(DlssNr::Dx11RouteReport() == Report::None, "NR off: no panel line, even with a fresh native record");
     cfg.DlssNrEnabled = true;
 
     // A game that stopped evaluating (feature released, a loading screen): the line ages out.
@@ -212,7 +210,7 @@ void ProductionReport()
         (std::chrono::steady_clock::now() - DlssNr::Dx11Route::kSeenFor - std::chrono::milliseconds(50))
             .time_since_epoch()
             .count());
-    Require(DlssNr::Dx11RouteNotice() == nullptr, "no D3D11 evaluate for longer than the window: no panel line");
+    Require(DlssNr::Dx11RouteReport() == Report::None, "no D3D11 evaluate for longer than the window: no panel line");
 
     Require(lines() == 2, "two lines in the whole session, one per report");
     ResetConfig();

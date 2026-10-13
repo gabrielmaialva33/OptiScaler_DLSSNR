@@ -86,7 +86,9 @@ D3D11 super-resolution evaluate, if one arrived in the last second; a game that 
 | on | native `dlss` | 2 | **the game's depth and motion never reach the pass; `dlss_12` hands them over** | replaced by the route line |
 
 Invariant checks against this table: the line exists only when NR is on and the route leaves the pass inert
-(rule 2; it is a statement, not a control). With the pass running (a present host built at HookMethod 2), "Running"
+(rule 2; it is a statement, not a control). In the HookMethod 0/1 row the hook status line under Source is hidden
+as well: it reads "upscaled: active on the upscaler's output" (or Auto's "upscaled") whatever the route, and would
+say the opposite of the line above. With the pass running (a present host built at HookMethod 2), "Running"
 stays and the line follows it; the two do not contradict, because the line says what is missing, not that nothing
 runs. The log says each row once per process (`DlssNr_Dx11Route.h`, `LogOnce`).
 

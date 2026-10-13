@@ -48,7 +48,9 @@ require(dx11.count('NoteDx11Evaluate') == 1, 'NoteDx11Evaluate is called once, i
 # --- The production layer: inert with NR off ------------------------------------------------------------------
 
 layer = read('retoque/dlssnr/DlssNr_Dx11Upscaler.h')
-note = layer[layer.find('inline void NoteDx11Evaluate('):layer.find('inline const char* Dx11RouteNotice(')]
+for marker in ('inline void NoteDx11Evaluate(', 'inline Dx11Route::Report Dx11RouteReport('):
+    require(marker in layer, f'DlssNr_Dx11Upscaler.h no longer has {marker!r}; update this runner')
+note = layer[layer.find('inline void NoteDx11Evaluate('):layer.find('inline Dx11Route::Report Dx11RouteReport(')]
 gate = note.find('if (!cfg.DlssNrEnabled.value_or_default())\n        return;')
 require(0 <= gate < note.find('g_lastRoute.store') and gate < note.find('LOG_'),
         'NoteDx11Evaluate must return with NR off before it stores or logs anything')
@@ -85,9 +87,13 @@ for declaration, stubbed in (('CustomOptional<bool> DlssNrEnabled { false };', '
 # --- The panel ---------------------------------------------------------------------------------------------------
 
 menu = read('retoque/dlssnr/DlssNr_Menu.cpp')
-require('const char* routeNotice = enabled ? DlssNr::Dx11RouteNotice() : nullptr;' in menu,
+require('const auto routeReport = enabled ? DlssNr::Dx11RouteReport() : DlssNr::Dx11Route::Report::None;' in menu
+        and 'const char* routeNotice = DlssNr::Dx11Route::ReportText(routeReport);' in menu,
         'the NR panel does not ask for the route line, or asks with NR off')
 require('Localization::Tr(routeNotice)' in menu, 'the route line is not translated')
+require(re.search(r'if \(!vkOnly && routeReport != DlssNr::Dx11Route::Report::NoPass\)\s*\{\s*'
+                  r'const char\* status = DlssNr::HookStatus\(\);', menu),
+        'the "upscaled: active" hook status must not contradict the after-upscaler route line')
 require(re.search(r'else if \(enabled && routeNotice == nullptr\)\s*ImGui::TextUnformatted\(Localization::Tr\('
                   r'"Waiting for the upscaler to run\."\)\);', menu),
         '"Waiting for the upscaler to run." must give way to the route line')

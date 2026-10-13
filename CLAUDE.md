@@ -484,9 +484,10 @@ rebuild, no temporal accumulator).
   and the runtime status line could not appear. The guards were removed on 2026-09-19; check a build
   with `grep -a -c 'could not reach the swapchain' OptiScaler.dll` (1 = present pass linked in).
 - **Call sites outside the module** are deliberately one-liners: `inputs/NVNGX_DLSS_Dx12.cpp` and
-  `NVNGX_DLSS_Vk.cpp` (evaluate after upscale), `upscalers/IFeature_Dx11wDx12.cpp` and
-  `IFeature_VkwDx12.cpp` (bridges), `menu/menu_common.cpp` (panel, timing row, toggle key, compare
-  tags, scan meter), `hooks/Vulkan_Hooks.cpp` (device extensions), `hooks/D3D12_Hooks.cpp` and
+  `NVNGX_DLSS_Vk.cpp` (evaluate after upscale), `inputs/NVNGX_DLSS_Dx11.cpp` (the report that native
+  D3D11 DLSS leaves the pass inert), `upscalers/IFeature_Dx11wDx12.cpp` and `IFeature_VkwDx12.cpp`
+  (bridges), `menu/menu_common.cpp` (panel, timing row, toggle key, compare tags, scan meter),
+  `hooks/Vulkan_Hooks.cpp` (device extensions), `hooks/D3D12_Hooks.cpp` and
   `resource_tracking/ResTrack_dx12.cpp` (exposure-scan resource notes), and the `[DlssNr]` block in
   `Config.h/.cpp` marked `removable as one block`. Everything must be inert when `DlssNrEnabled` is off.
   The full list, with what each site does, is in `dlssnr/README.md`.
