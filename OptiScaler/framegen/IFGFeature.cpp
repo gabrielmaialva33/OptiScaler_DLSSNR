@@ -1,7 +1,9 @@
 #include "pch.h"
 #include "IFGFeature.h"
 #include <Config.h>
+#include <Util.h>
 #include <low_latency/input/input_common.h>
+#include <atomic>
 
 int IFGFeature::GetIndex() { return (_frameCount % BUFFER_COUNT); }
 
@@ -39,8 +41,16 @@ UINT64 IFGFeature::StartNewFrame()
 
     if (_lastDispatchedFrame == 0 || (_frameCount - _lastDispatchedFrame) > 2)
     {
-        LOG_WARN("Frame count jumped too much! _frameCount: {}, _lastDispatchedFrame: {}", _frameCount,
-                 _lastDispatchedFrame);
+        // Every frame generation reset lands here, and so does each frame of a run that skips the dispatch, so it
+        // came in bursts of a dozen lines around every alt-tab or resize. One line a second says the same.
+        static std::atomic<int64_t> lastLogMs { INT64_MIN / 2 };
+        const auto nowMs = static_cast<int64_t>(Util::MillisecondsNow());
+        if (nowMs - lastLogMs.load(std::memory_order_relaxed) >= 1000)
+        {
+            lastLogMs.store(nowMs, std::memory_order_relaxed);
+            LOG_WARN("Frame count jumped too much! _frameCount: {}, _lastDispatchedFrame: {} (at most once a second)",
+                     _frameCount, _lastDispatchedFrame);
+        }
 
         _lastDispatchedFrame = _frameCount - 1;
     }

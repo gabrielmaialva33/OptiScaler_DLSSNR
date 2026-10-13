@@ -1045,8 +1045,13 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
     if (Config::Instance()->SkipFirstFrames.has_value() && evalCounter < Config::Instance()->SkipFirstFrames.value())
         return NVSDK_NGX_Result_Success;
 
-    if (InCallback)
+    // Once: a game that passes a callback passes it with every evaluate.
+    static bool callbackReported = false;
+    if (InCallback && !callbackReported)
+    {
+        callbackReported = true;
         LOG_WARN("callback exist");
+    }
 
     IFeature_Vk* deviceContext = nullptr;
     auto contextData = &VkContexts[handleId];

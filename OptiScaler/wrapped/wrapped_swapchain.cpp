@@ -553,7 +553,10 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     }
 #endif
 
-    if (presentResult == S_OK)
+    // DXGI_STATUS_OCCLUDED and the other DXGI_STATUS_* codes are successes, not errors, and a covered or
+    // minimised window returns one on every present: logged as errors they came at the frame rate (463
+    // lines in 4 s in Divinity: Original Sin 2). Only a failure is an error.
+    if (SUCCEEDED(presentResult))
     {
         LOG_DEBUG("Original present result: {:X}", (UINT) presentResult);
     }

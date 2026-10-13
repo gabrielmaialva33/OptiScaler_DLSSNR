@@ -162,7 +162,8 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     else
         presentResult = ((IDXGISwapChain1*) pSwapChain)->Present1(SyncInterval, Flags, pPresentParameters);
 
-    if (presentResult == S_OK)
+    // DXGI_STATUS_* codes (a covered or minimised window) are successes; only a failure is an error.
+    if (SUCCEEDED(presentResult))
     {
         LOG_DEBUG("Original present result: {:X}", (UINT) presentResult);
     }

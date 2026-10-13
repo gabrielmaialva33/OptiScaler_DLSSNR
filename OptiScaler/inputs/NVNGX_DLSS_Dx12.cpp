@@ -1069,8 +1069,13 @@ static NVSDK_NGX_Result TryEvaluateOptiFeature(ID3D12GraphicsCommandList* InCmdL
         }
     }
 
-    if (InCallback)
+    // Once: a game that passes a callback passes it with every evaluate.
+    static bool callbackReported = false;
+    if (InCallback && !callbackReported)
+    {
+        callbackReported = true;
         LOG_INFO("Progress callback provided but unused in synchronous OptiScaler path");
+    }
 
     // Resolution change detection (only for upscalers that may require recreation)
     if (feature != nullptr)
