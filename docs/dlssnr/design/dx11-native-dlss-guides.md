@@ -1,8 +1,8 @@
 # Native D3D11 DLSS and Neural Rendering: getting the game's guides and image across the bridge
 
-Status: design for review, not implementation, 2026-10-13. Written against `93730d39`. Line numbers are
-into that tree. Nothing here is built, and nothing here has been run; the cost figures are arithmetic
-from stated formats, not measurements.
+Status: steps 1 and 2 of the Recommendation implemented on 2026-10-13 (see "Implemented" below); the rest is design
+for review. Written against `93730d39`. Line numbers are into that tree. Nothing here has been run in a game; the cost
+figures are arithmetic from stated formats, not measurements.
 
 Read first: [nr-dx11-bridge-host.md](nr-dx11-bridge-host.md) (the swapchain bridge and its hazards),
 [nr-without-game-dlss.md](nr-without-game-dlss.md), [nr-before-upscale.md](nr-before-upscale.md) (the
@@ -236,6 +236,51 @@ A driver around the existing bridge, not a second bridge. The pieces are already
   counter. Nothing is freed under the GPU: a cache reset waits for the bridge fence, as it does for
   the upscaler path.
 
+## Implemented
+
+**Step 1**, 2026-10-13, on `f3b42cca`. Not run in a game: the title the test plan asks for is still not in our set.
+
+- `retoque/dlssnr/DlssNr_Dx11Route.h` holds the decision (`Decide`), pure and standard library only, as planned.
+  It takes NR on/off, the route of the evaluate (native `dlss`, `dlss_12`, or anything else) and `HookMethod`, and
+  answers one of two reports: at `HookMethod` 0, 1 or any other value the pass belongs after the upscaler and
+  cannot get there; at 2 the game's depth and motion never reach the bridge's present host. GPU capability and NGX
+  are not inputs to the report: a native `dlss` feature exists only when both held. The texts name the reason, the
+  setting (`Dx11Upscaler dlss`), the menu entry (DLSS w/Dx12, under Upscalers) and `dlss_12`, and deliberately do
+  not claim the pass is or is not running, because a present host built at HookMethod 2 keeps running after the
+  key changes and the panel's own status line already says whether the pass ran.
+- `retoque/dlssnr/DlssNr_Dx11Upscaler.h`, header-only, is what the call site and the panel use.
+  `NoteDx11Evaluate(upscaler)` is one line in `NVSDK_NGX_D3D11_EvaluateFeature`, after the evaluate, with the
+  feature's own `GetUpscalerType()` (so a backend switched in the menu is seen at its next evaluate). With NR off it
+  returns before it stores or logs. Otherwise it keeps the route and its time for the panel and logs each report at
+  warning level once per process (`LogOnce`), not once per frame and not again when the route comes back.
+- The panel's line is DEVELOPMENT.md §2.2, from `Dx11RouteReport()`. It replaces "Waiting for the upscaler to
+  run.", which on this route was waiting for something that was not coming, and in the after-upscaler case it also
+  hides the hook status line under Source, whose "upscaled: active on the upscaler's output" said the opposite.
+- `tests/nr-dx11-route` covers the decision, the once-only log, the panel's window, the production layer against a
+  `Config.h` stub, the call site's position, and the pt-BR entries.
+
+**Step 2**, 2026-10-13, as proposed. A separate commit, so it can be reverted alone if open question 2 is answered
+the other way.
+
+- `PreferBridge` in the same header: NR on, `Dx11Upscaler` unset, and the default upstream already chose is native
+  DLSS. `Dx11DefaultUpscaler(upscalerChoice)` is one line in `NVSDK_NGX_D3D11_CreateFeature`, after upstream's own
+  DLSS default and before the key is applied, so an explicit key still wins by upstream's own line, and GPU
+  capability and NGX stay upstream's two conditions rather than inputs copied into the header. The suite mirrors
+  those lines with and without the call, and a source guard holds the production order to the mirror.
+- The choice is logged once, at info, saying what was chosen and that `Dx11Upscaler=dlss` keeps native DLSS.
+  `OptiScaler.ini` (under `[DlssNr] Enabled`) and `Config.md` say it too.
+- Found while implementing, not anticipated above. `FeatureProvider_Dx11::GetFeature` writes `Dx11Upscaler` with
+  whatever it created, and the key is a `SoftDefault`: after the first feature the key is set for the session, and
+  saving from the menu writes it. So NR switched on over a native feature keeps native DLSS until a restart or a
+  switch in the Upscalers card (step 1 reports it); NR switched off keeps `dlss_12` until a restart or a switch; and
+  a user who saved while NR chose `dlss_12` keeps
+  `Dx11Upscaler=dlss_12` with NR off later, as today an auto `dlss` is written. Stopping that would take a second
+  upstream line after `GetFeature`, and was not done.
+- Unchanged, as the Risks section says: a `dlss_12` that fails to load or to run falls back to FSR 2.2, not to
+  native DLSS, with upstream's toast; and since `GetFeature` then writes `fsr22` into the key, the rest of the
+  session stays on FSR 2.2. The in-game check for step 2 is therefore that `dlss_12` is what the Upscalers card
+  shows after the first frames, not merely what the log line says was chosen.
+
 ## Config surface
 
 **No new key.** Where DLSS runs for a D3D11 game is already one quantity, `Dx11Upscaler` (`dlss`
@@ -328,7 +373,8 @@ and NR on against native `dlss`, and a Hold-frame pair for the image.
 1. Which D3D11 titles in the library call `NVSDK_NGX_D3D11_*` directly, and which use Streamline? That
    decides whether any of this reaches BG3 or Satisfactory, and which title tests steps 3 and 4.
 2. Is step 2 (choose `dlss_12` when NR is on and the upscaler is unset) acceptable, or should the
-   default stay native and only report? It changes which DLSS runs for NR users.
+   default stay native and only report? It changes which DLSS runs for NR users. (Implemented as proposed, in a
+   commit of its own; reverting it leaves step 1's report in place.)
 3. Should a bridge route refuse `MVJittered` motion as NeuRotic's does (their comment: "convention is
    not validated"), or keep parity with the D3D12 route, which ignores the flag?
 4. Is a present-time route for D3D11 DLSS titles ((c)) wanted at all, given its HUD cost, or is

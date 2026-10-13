@@ -26,6 +26,7 @@ what keeps it honest (last taken 2026-09-23).
 |---|---|
 | `inputs/NVNGX_DLSS_Dx12.cpp` | the pass after an upscale on each evaluate route, the pre-upscale scope, an exposure-scan note |
 | `inputs/NVNGX_DLSS_Vk.cpp` | the Vulkan pass after an upscale |
+| `inputs/NVNGX_DLSS_Dx11.cpp` | `dlss_12` as the D3D11 DLSS default while NR is on and `Dx11Upscaler` is unset (`Dx11DefaultUpscaler`), and the note at each evaluate that native D3D11 DLSS leaves the pass inert (`NoteDx11Evaluate`) |
 | `upscalers/IFeature_Dx11wDx12.cpp` | the pass and pre-upscale scope inside the D3D11-on-D3D12 bridge, the D3D11 probe |
 | `upscalers/IFeature_VkwDx12.cpp` | the pass and pre-upscale scope inside the Vulkan-on-D3D12 bridge |
 | `wrapped/wrapped_swapchain.cpp` | the present-time pass (`RunPresentPass`) |
@@ -67,6 +68,7 @@ experiment.
 | `DlssNr_DirectRuntime.h/.cpp` | `ModelLoader=direct`: the forwarder's D3D12 calls made from OptiScaler.dll, passing the caller check through the model's own `GetModuleFileNameW/A` imports (wilsjo2's technique); `../../docs/history/FORWARDER_INVESTIGATION.md` |
 | `DlssNr_NgxInfo.h/.cpp` | the `DLSS-NR NGX:` line at the first build (loader, its build, whether it routes feature 18 itself, the model) and the 616.64 pairing check; `../../docs/dlssnr/design/ngx-driver-616.md` |
 | `DlssNr_PeScan.h` | header-only byte scans both of those act on: the model's caller-path import slots, the loader's feature-18 table; tested by `tests/nr-model-loader` |
+| `DlssNr_Dx11Route.h`, `DlssNr_Dx11Upscaler.h` | a D3D11 game's DLSS with NR on: `dlss_12` (the bridge, which runs the pass) chosen over native D3D11 DLSS when `Dx11Upscaler` is unset, and native D3D11 DLSS, where the pass cannot run, said once in the log and shown in the panel. The decisions are pure (`Dx11Route`); `Dx11Upscaler` is the header-only layer the call sites and the panel use; `../../docs/dlssnr/design/dx11-native-dlss-guides.md`, tested by `tests/nr-dx11-route` |
 | `DlssNr_PresentColour.h` | which presented frames the present hosts decline: HDR10/PQ, scRGB and other non-sRGB swapchains, until the hosts convert them; `../../docs/dlssnr/design/nr-present-hook.md` |
 | `DlssNr_PresentGuideIdentity.h` | whether a capture in the present guide ring (`DlssNr_PresentGuideRing.h`) is the frame being presented: the stamp, the eight rules, the presenting-swapchain registry, and step 0's per-window record. Log only for now; `../../docs/dlssnr/design/present-real-guides.md`, tested by `tests/nr-present-guide-identity` |
 | `DlssNr_Enlarge.h` | Transfer 2's rules as pure functions: what the resolve is sent and why, the Vulkan 2 -> 1 mapping, the menu's index table, when the private SR's history resets; `../../docs/dlssnr/design/dlss-enlargement.md`, tested by `tests/nr-enlarge` |

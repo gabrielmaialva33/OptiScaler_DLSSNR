@@ -26,8 +26,8 @@ with the present hook live (`:7086-7088`). `RunPresentPass` picks the newest eli
 no pick. The D3D11 bridge's present host takes the same ring through `CapturedPresentGuides`
 (`:7493`, called at `retoque/dlssnr/DlssNr_PresentHost.cpp:423`), which is what happens when a D3D11
 title runs an upscaler through the Dx11wDx12 interop. The comment there says so in as many words.
-The `RequireDlss` text in `OptiScaler.ini` ("the D3D11 bridge's host always runs on constant depth and
-no motion") predates that and is stale; it is not edited here.
+The `RequireDlss` text in `OptiScaler.ini` once said "the D3D11 bridge's host always runs on constant depth and
+no motion", which predated that; it was corrected on 2026-10-13 (`ec8a5e61`).
 
 What was measured about this route is small. The ring's selection logic has a host suite
 (`tests/nr-present-guides`). The route ran in Crimson Desert on 2026-10-04 with DLSS-G off (68 presents

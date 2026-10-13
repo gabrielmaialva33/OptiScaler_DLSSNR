@@ -4,6 +4,7 @@
 
 #include "DlssNr.h"
 #include "DlssNr_Cadence.h"
+#include "DlssNr_Dx11Upscaler.h"
 #include "DlssNr_Enlarge.h"
 #include "DlssNr_ExposureScan.h"
 #include "DlssNr_GpuTiming.h"
@@ -542,6 +543,12 @@ void RenderMenu(Config* config, float menuResScale)
         // that is demonstrably running.
         const bool vulkan = DlssNr::IsRunningVk();
 
+        // A D3D11 game whose DLSS runs natively, where the pass cannot follow it
+        // (docs/dlssnr/design/dx11-native-dlss-guides.md, step 1). "Waiting for the upscaler" would be waiting
+        // for something that is not coming, so this line says why instead, and names the route that carries NR.
+        const auto routeReport = enabled ? DlssNr::Dx11RouteReport() : DlssNr::Dx11Route::Report::None;
+        const char* routeNotice = DlssNr::Dx11Route::ReportText(routeReport);
+
         // Turning the pass off does not release the model, so the feature handle stays alive and
         // IsRunning keeps answering yes. Reporting a cost from that was wrong in the way that matters
         // most: the toggle is how anyone A/Bs this, so the one moment the number is read is the one
@@ -563,7 +570,7 @@ void RenderMenu(Config* config, float menuResScale)
                 if (ImGui::SmallButton(Localization::Label("Retry")))
                     DlssNr::RetryAfterFailure();
             }
-            else if (enabled)
+            else if (enabled && routeNotice == nullptr)
                 ImGui::TextUnformatted(Localization::Tr("Waiting for the upscaler to run."));
         }
         else
@@ -596,6 +603,13 @@ void RenderMenu(Config* config, float menuResScale)
                 ImGui::SetTooltip(Localization::Tr("The native Vulkan timer is legacy and is not fence-confirmed."
                                                    "\nFor D3D12, use the separate Fence-confirmed GPU timing panel."
                                                    "\nA historical sample is not the current frame's cost."));
+        }
+
+        if (routeNotice != nullptr)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+            ImGui::TextWrapped("%s", Localization::Tr(routeNotice));
+            ImGui::PopStyleColor();
         }
 
         ImGui::Spacing();
@@ -696,7 +710,9 @@ void RenderMenu(Config* config, float menuResScale)
                            "forces it either way.");
             }
 
-            if (!vkOnly)
+            // "upscaled: active on the upscaler's output" is not true of native D3D11 DLSS, which the pass cannot
+            // follow; the route line above says so, and this one would contradict it.
+            if (!vkOnly && routeReport != DlssNr::Dx11Route::Report::NoPass)
             {
                 const char* status = DlssNr::HookStatus();
                 if (status != nullptr && status[0] != '\0')

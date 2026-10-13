@@ -381,6 +381,11 @@ and comparison of the NR edit with the upscaler's output. The full section, incl
 `Enabled`, model settings and stage selection, is in the distributed [OptiScaler.ini](OptiScaler.ini).
 `auto` uses the declared default; the entries below do not enable NR.
 
+With `Enabled=true`, a D3D11 game that calls DLSS and leaves `[Upscalers] Dx11Upscaler` on `auto` gets `dlss_12`
+(DLSS on OptiScaler's D3D12 bridge, which runs the pass) where it would have had native D3D11 DLSS, which cannot
+carry the pass. An explicit `Dx11Upscaler=dlss` is kept, and the log and the NR panel then say the pass cannot run
+there.
+
 ```ini
 [DlssNr]
 ; Keep NR off for one session after a session that ended without closing while NR ran (crash, killed
@@ -413,10 +418,13 @@ ModelLoader=auto
 ; 0 to 2 - Default (auto) is 1
 HookMethod=auto
 
-; D3D12 Present (HookMethod=2) only: require the game's DLSS depth and motion. On, a frame with no
-; temporal inputs yet is shown as the game rendered it; off, the pass runs on constant depth and no
-; motion, which is right for a title whose upscaler is not DLSS. The D3D11 bridge's host always runs
-; on constant depth and no motion, whatever this says.
+; The D3D12 present pass only (HookMethod=2, and Auto once it has moved to present): require the game's
+; own depth and motion, captured from its upscaler. On, a frame with none ready is shown as the game
+; rendered it; off, the pass runs on constant depth and no motion (or on SynthMotion's estimate), which is
+; right for a title whose upscaler is not DLSS. The D3D11 bridge's present host does not read this: it
+; uses the game's depth and motion when the game's upscaler runs through OptiScaler's D3D11-on-D3D12
+; bridge (dlss_12 and the other _12 upscalers), and constant depth and no motion (or SynthMotion's
+; estimate) otherwise.
 ; true or false - Default (auto) is false
 RequireDlss=auto
 
