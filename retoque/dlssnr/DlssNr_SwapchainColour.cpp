@@ -2,6 +2,8 @@
 
 #include "DlssNr_SwapchainColour.h"
 
+#include <Config.h>
+
 namespace DlssNr::SwapchainColour
 {
 namespace
@@ -29,10 +31,18 @@ bool Describe(IDXGISwapChain* swapchain, const void*& window, DXGI_FORMAT& forma
     format = desc.BufferDesc.Format;
     return window != nullptr;
 }
+
+// The notes run on upstream's swapchain paths, so with NR off they do nothing at all: no query, no record. NR switched
+// on mid-session meets a window with no record, which the HDR decision declines until the swapchain is recreated or
+// its colour space set again (a decline, never a guess).
+bool Watching() { return Config::Instance()->DlssNrEnabled.value_or_default(); }
 } // namespace
 
 void NoteCreated(IDXGISwapChain* swapchain)
 {
+    if (!Watching())
+        return;
+
     const void* window = nullptr;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     if (Describe(swapchain, window, format))
@@ -41,7 +51,7 @@ void NoteCreated(IDXGISwapChain* swapchain)
 
 void NoteColourSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE colourSpace, HRESULT result)
 {
-    if (FAILED(result))
+    if (FAILED(result) || !Watching())
         return;
 
     const void* window = nullptr;
@@ -52,7 +62,7 @@ void NoteColourSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE colourSpac
 
 void NoteResized(IDXGISwapChain* swapchain, HRESULT result)
 {
-    if (FAILED(result))
+    if (FAILED(result) || !Watching())
         return;
 
     const void* window = nullptr;
