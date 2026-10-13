@@ -6514,9 +6514,20 @@ static bool EnsureBbCopy(ID3D12Device* device, unsigned int width, unsigned int 
 
 // HDR10 and scRGB at present ([DlssNr] HdrPresent, docs/dlssnr/design/hdr-present-conversion.md section 5.1). The
 // conversion pass, built once for the device this route runs on, and its two textures, made only once a frame is
-// decided HDR -- an SDR game never allocates them -- and parked like the backbuffer copy when the size or format
-// changes, or when the frames go back to SDR.
+// decided HDR -- an SDR game never allocates them -- and retired when the size or format changes, or when the frames
+// go back to SDR.
+//
+// Retired by the present lists' own fence, not parked on the NR recording's usage like the backbuffer copy: a list
+// whose pass declined still decoded into the work texture, and a switch back to SDR comes with no resize and so no GPU
+// idle wait. Every list that used a texture was submitted before it was retired, so it is released once the fence has
+// passed the last value submitted then -- never under the GPU, and without a CPU wait.
 static DlssNr_PresentHdr_Dx12* g_presentHdr = nullptr;
+struct PresentHdrRetired
+{
+    ID3D12Resource* resource = nullptr;
+    UINT64 fenceValue = 0;
+};
+static std::vector<PresentHdrRetired> g_hdrRetired;
 static ID3D12Resource* g_hdrWork = nullptr; // FP16, linear Rec.709 in scRGB units; rests in UNORDERED_ACCESS
 static ID3D12Resource* g_hdrOut = nullptr; // the backbuffer's format, what the encode writes; rests in UNORDERED_ACCESS
 static unsigned int g_hdrWidth = 0;
@@ -6527,14 +6538,46 @@ static unsigned int g_hdrFailedWidth = 0;
 static unsigned int g_hdrFailedHeight = 0;
 static DXGI_FORMAT g_hdrFailedFormat = DXGI_FORMAT_UNKNOWN;
 
+// Under g_nrMutex. Released once every present list submitted so far has completed (see above).
+static void RetirePresentHdrTexture(ID3D12Resource*& resource)
+{
+    if (resource == nullptr)
+        return;
+
+    g_hdrRetired.push_back({ resource, g_presentFenceValue });
+    resource = nullptr;
+}
+
+// Under g_nrMutex, once per present: the retired textures the GPU is done with. Nothing pending, nothing done.
+static void CollectPresentHdrRetired()
+{
+    if (g_hdrRetired.empty() || g_presentList.fence == nullptr)
+        return;
+
+    const UINT64 completed = g_presentList.fence->GetCompletedValue();
+    for (size_t i = 0; i < g_hdrRetired.size();)
+    {
+        if (g_hdrRetired[i].fenceValue <= completed)
+        {
+            g_hdrRetired[i].resource->Release();
+            g_hdrRetired[i] = g_hdrRetired.back();
+            g_hdrRetired.pop_back();
+        }
+        else
+        {
+            ++i;
+        }
+    }
+}
+
 // Under g_nrMutex. An SDR frame does not keep the textures a game that left HDR no longer uses.
 static void ParkPresentHdrTextures()
 {
     if (g_hdrWork == nullptr && g_hdrOut == nullptr)
         return;
 
-    ParkNrResource(g_hdrWork);
-    ParkNrResource(g_hdrOut);
+    RetirePresentHdrTexture(g_hdrWork);
+    RetirePresentHdrTexture(g_hdrOut);
     g_hdrWidth = 0;
     g_hdrHeight = 0;
     g_hdrFormat = DXGI_FORMAT_UNKNOWN;
@@ -6569,15 +6612,15 @@ static const char* EnsurePresentHdr(ID3D12Device* device, unsigned int width, un
     if (g_hdrFailedWidth == width && g_hdrFailedHeight == height && g_hdrFailedFormat == format)
         return PresentColourText::kNoScratch;
 
-    // Parked, not released: the present lists that used them may still be on the GPU.
+    // Retired, not released: the present lists that used them may still be on the GPU.
     ParkPresentHdrTextures();
     g_hdrWork = CreateScratch(device, DXGI_FORMAT_R16G16B16A16_FLOAT, width, height);
     g_hdrOut = CreateScratch(device, format, width, height);
 
     if (g_hdrWork == nullptr || g_hdrOut == nullptr)
     {
-        ParkNrResource(g_hdrWork);
-        ParkNrResource(g_hdrOut);
+        RetirePresentHdrTexture(g_hdrWork);
+        RetirePresentHdrTexture(g_hdrOut);
         g_hdrFailedWidth = width;
         g_hdrFailedHeight = height;
         g_hdrFailedFormat = format;
@@ -6851,6 +6894,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     // once, and nothing else is spent on it. The decision read the swapchain's format; the copy is of this buffer.
     const bool presentHdr = IsHdrProfile(presentProfile);
     const char* hdrRefusal = nullptr;
+    CollectPresentHdrRetired();
     if (presentHdr)
         hdrRefusal = bbDesc.Format != presentFormat ? PresentColourText::kBufferFormat
                                                     : EnsurePresentHdr(device, width, height, bbDesc.Format);
@@ -9168,7 +9212,8 @@ void Shutdown()
         g_bbCopy = nullptr;
     }
 
-    // The HDR conversion's textures and pass, with the backbuffer copy they were made beside.
+    // The HDR conversion's textures, retired ones included, and its pass, with the backbuffer copy they were made
+    // beside.
     if (g_hdrWork != nullptr)
     {
         g_hdrWork->Release();
@@ -9179,6 +9224,9 @@ void Shutdown()
         g_hdrOut->Release();
         g_hdrOut = nullptr;
     }
+    for (const auto& retired : g_hdrRetired)
+        retired.resource->Release();
+    g_hdrRetired.clear();
     delete g_presentHdr;
     g_presentHdr = nullptr;
     g_hdrWidth = g_hdrHeight = 0;

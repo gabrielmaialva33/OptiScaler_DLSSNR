@@ -584,6 +584,10 @@ Where the code differs from sections 4 to 7, and why:
   without the reference would move 42% of random HDR10 texels by up to ~200 codes (saturated Rec.2020 colours lose a
   near-zero channel to FP16). Inside Rec.709 the slack hides no code; outside it, it can hide 0.2% of a pixel's light
   in a channel near zero, which is many codes at PQ's dark end, and is reported, not bounded.
+- **The D3D12 route's two textures are retired by the present lists' own fence**, not parked with `ParkNrResource`
+  (section 5.1): that parks on the NR recording's usage, and a present list whose pass declined still decoded into
+  the work texture; a switch back to SDR comes with no resize and so no GPU idle wait. A retired texture is released
+  once the fence passes the last present list submitted before it was retired.
 - **The stabilizer's HDR10 unit** is `1/128` relative: the finest PQ step from code 64 up (0.90%, near code 800)
   rounded down to a power of two. scRGB keeps the stabilizer's own FP16 unit.
 - **Timing**: the decode and the encode sit outside the NR Dispatch's GPU-timing interval, so they are their own
