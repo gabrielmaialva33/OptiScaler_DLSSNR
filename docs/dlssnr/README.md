@@ -35,6 +35,7 @@ These are records, not designs.
 - [stage-before-upscale-measured.md](design/stage-before-upscale-measured.md): running the model before the upscaler, measured in one Cyberpunk 2077 session.
 - [model-cost-vs-working-scale.md](design/model-cost-vs-working-scale.md): four GPU measurements of what the pass costs and how it answers to working scale.
 - [model-cost-across-architectures.md](design/model-cost-across-architectures.md): the same cost on a card that is not Ada.
+- [comparison-capture.md](design/comparison-capture.md): saving the game's frame and the processed frame of the same frame, with provenance, without stalling it (design).
 
 ## Colour, HDR and image quality
 
@@ -63,6 +64,8 @@ Related, outside that sequence:
 
 - [nr-before-upscale.md](design/nr-before-upscale.md): optional NR before the upscaler (Stage=1).
 - [nr-menu-mode.md](design/nr-menu-mode.md): keeping NR running while the upscaler is idle in menus.
+- [present-real-guides.md](design/present-real-guides.md): checking that the guides the present pass reuses belong to the frame being presented (design).
+- [dx11-native-dlss-guides.md](design/dx11-native-dlss-guides.md): NR for D3D11 games that call DLSS themselves, through `dlss_12` first (design).
 - [pr-improvements.md](design/pr-improvements.md): review of state, exposure, multipass and localization work taken from open PRs.
 
 ## Frame generation
@@ -76,4 +79,5 @@ Related, outside that sequence:
 
 - [ngx-driver-616.md](design/ngx-driver-616.md): NVIDIA 616.64 and the loader's own route to feature 18.
 - [ngx-shutdown-order.md](design/ngx-shutdown-order.md): the D3D12 NGX core shutdown ABI.
+- [session-guard.md](design/session-guard.md): keeping NR off for the next launch after a session that ended without closing while NR ran.
 - [../history/FORWARDER_INVESTIGATION.md](../history/FORWARDER_INVESTIGATION.md) and [retoque/dlssnr/forwarder/README.md](../../retoque/dlssnr/forwarder/README.md) (linked, not design notes).

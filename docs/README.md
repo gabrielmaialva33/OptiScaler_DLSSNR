@@ -17,7 +17,7 @@ here or beside the code it describes.
 
 ## DLSS Neural Rendering design
 
-- [dlssnr/README.md](dlssnr/README.md): topic index of the 41 design notes in [dlssnr/design/](dlssnr/design/), with a reading order for the present hosts.
+- [dlssnr/README.md](dlssnr/README.md): topic index of the design notes in [dlssnr/design/](dlssnr/design/), with a reading order for the present hosts.
 - [dlssnr/design/DEVELOPMENT.md](dlssnr/design/DEVELOPMENT.md): the invariants and per-change review every NR change is held to.
 
 ## History
