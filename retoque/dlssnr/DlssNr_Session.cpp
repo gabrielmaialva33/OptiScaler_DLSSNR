@@ -83,6 +83,9 @@ struct WinEnv
         return ok;
     }
 
+    // Inside DllMain at process exit: the delete only. No fallback write, which could log.
+    void RemoveAtExit() { DeleteFileW(path.c_str()); }
+
     void Remove()
     {
         if (!DeleteFileW(path.c_str()))
@@ -218,6 +221,12 @@ void SessionGuardOff()
 {
     if (g_begun)
         TheGuard().NoteOff();
+}
+
+void SessionGuardOffAtExit()
+{
+    if (g_begun)
+        TheGuard().NoteOffAtExit();
 }
 
 SessionGuard::Verdict SessionGuardNotice()

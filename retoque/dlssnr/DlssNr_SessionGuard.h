@@ -187,6 +187,8 @@ struct Verdict
 //   bool Read(std::string&)           the marker's text; false when there is none or it cannot be read
 //   bool Write(const std::string&)    replace the marker; false when that failed
 //   void Remove()                     delete it, best effort
+//   void RemoveAtExit()               delete it and nothing else: no logging, no allocation, no locks (it runs inside
+//                                     DllMain while the process exits)
 //   Owner Probe(uint32_t pid, uint64_t created)
 //   uint32_t SelfPid(); uint64_t SelfCreated()
 //   int64_t Now()                     unix seconds
@@ -357,6 +359,24 @@ template <class Env> class Guard
             return;
 
         _env.Remove();
+        _carriedStreak = 0;
+        _mode = Mode::Armed;
+    }
+
+    // The process is exiting (DLL_PROCESS_DETACH with lpReserved set). ExitProcess has already stopped every other
+    // thread, and one may have stopped while holding the lock (a heartbeat write), so this never waits for it: when the
+    // lock is held the marker stays, and the next launch reads an exit that did not close. That costs at most one false
+    // notice; waiting would hang the game's exit.
+    void NoteOffAtExit()
+    {
+        if (_mode != Mode::Running)
+            return;
+
+        std::unique_lock<std::mutex> lock(_mutex, std::try_to_lock);
+        if (!lock.owns_lock() || _mode != Mode::Running)
+            return;
+
+        _env.RemoveAtExit();
         _carriedStreak = 0;
         _mode = Mode::Armed;
     }

@@ -53,6 +53,7 @@ struct FakeEnv
         exists = false;
         text.clear();
     }
+    void RemoveAtExit() { Remove(); }
     Owner Probe(uint32_t pid, uint64_t created)
     {
         probedPid = pid;
@@ -108,9 +109,9 @@ int main()
         CHECK(!Parse("", junk));
         CHECK(!Parse("garbage", junk));
         CHECK(!Parse("retoque-nr-session 2\nactive=1\n", junk));
-        CHECK(!Parse(good.substr(0, good.size() / 2), junk));                  // truncated mid-write
-        CHECK(!Parse(std::string(good) + "active=0\n", junk));                // key twice
-        CHECK(!Parse(good + "extra\n", junk));                                // not key=value
+        CHECK(!Parse(good.substr(0, good.size() / 2), junk));  // truncated mid-write
+        CHECK(!Parse(std::string(good) + "active=0\n", junk)); // key twice
+        CHECK(!Parse(good + "extra\n", junk));                 // not key=value
         CHECK(!Parse(good + "pid=-1\n", junk));
         std::string bad = good;
         bad.replace(bad.find("beat=9"), 6, "beat=4"); // beat before first
@@ -228,6 +229,22 @@ int main()
         const auto second = next.Begin(true, true);
         CHECK(second.action == Action::Disable && second.reason == Reason::RepeatedEnd && second.streak == 2);
         CHECK(Stored(env).blocked);
+    }
+
+    // Process exit (DllMain detach): the at-exit form removes the marker like an orderly NoteOff, and does nothing when
+    // the guard never ran.
+    {
+        FakeEnv env;
+        Guard<FakeEnv> guard(env);
+        CHECK(guard.Begin(true, true).action == Action::None);
+        guard.NoteOffAtExit(); // armed, never evaluated: no marker to remove
+        CHECK(env.removes == 0);
+        guard.NoteEvaluated();
+        CHECK(env.exists);
+        guard.NoteOffAtExit();
+        CHECK(!env.exists && env.removes == 1);
+        guard.NoteOffAtExit(); // already armed again: nothing more
+        CHECK(env.removes == 1);
     }
 
     // Two consecutive unclean sessions where the first was clean in between do not add up.

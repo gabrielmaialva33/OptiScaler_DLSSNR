@@ -31,7 +31,7 @@ ini = read('OptiScaler.ini')
 
 require('DlssNr::SessionGuardBegin();' in dllmain, 'dllmain.cpp never starts the guard')
 detach = dllmain[dllmain.index('case DLL_PROCESS_DETACH:'):]
-off_at = detach.find('DlssNr::SessionGuardOff();')
+off_at = detach.find('DlssNr::SessionGuardOffAtExit();')
 return_at = detach.find('if (lpReserved != nullptr)')
 require(0 <= off_at < return_at, 'the guard must be told of an orderly exit before the lpReserved early break')
 require('SessionGuardEvaluated' in dx12 and 'SessionGuardEvaluated' in vk, 'an NR evaluate does not mark the session')

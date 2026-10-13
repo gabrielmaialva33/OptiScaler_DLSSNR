@@ -17,6 +17,9 @@ void SessionGuardEvaluated();
 // NR is not running any more (turned off, faulted) or the process is exiting in order. Cheap when nothing is owned.
 void SessionGuardOff();
 
+// The same, from DLL_PROCESS_DETACH while the process exits: never waits on a lock, never logs.
+void SessionGuardOffAtExit();
+
 // What the menu shows; Action::None means nothing to say.
 SessionGuard::Verdict SessionGuardNotice();
 
