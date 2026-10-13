@@ -221,17 +221,6 @@ if len(failures) == before:
 # free), and the tree must stay testable in between. Drop an entry once its bytecode has been rebuilt.
 import hashlib
 PREDATES = [
-        # Cadence smoothing (cadence-smoothing.md): modes 5-8, t10 and the cbuffer's tail. This binary runs none of them;
-    # the pass recognises it by its DXBC digest (SmoothingAvailable) and runs the cadence without smoothing, which is
-    # otherwise on by default whenever the cadence runs.
-    ('DlssNr_Cadence_Shader.cso', 'e3e2076bef61705e7b8cf123ff43d02c9a6f079327d02f9d3659e3aa8fe20217',
-     'dlssnr_cadence.hlsl', 'gMode == 5', 'cadence smoothing'),
-    # The residual limit (residual-limit.md): gResidualLimit at the cbuffer's end. These binaries ignore it, so the
-    # control does nothing until both targets are rebuilt; the composition is otherwise as before.
-    ('DlssNr_Shader.cso', '7b919cc715df82294b48b7caeda8838c5470d9924f60ea3a5b68a04974f17c48', 'dlssnr.hlsl',
-     'gResidualLimit', 'the residual limit'),
-    ('DlssNr_Shader_Vk.spv', '99c6fdda9235c427d87a7f8311ceabf1f76263bce2deee4411d3ea900e296628', 'dlssnr.hlsl',
-     'gResidualLimit', 'the residual limit'),
 ]
 for binary, digest, source, marker, what in PREDATES:
     path = precompile / binary

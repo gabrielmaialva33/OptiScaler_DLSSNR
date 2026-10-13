@@ -456,28 +456,18 @@ static void RenderCadenceControls(Config* config, bool nativeVulkan)
     if (configured <= 1)
         return;
 
-    // Smoothing (docs/dlssnr/design/cadence-smoothing.md) acts on the cadence's own frames, so it exists only above 1,
-    // and only with a cadence shader that runs it: with the bytecode from before it there is no control, and one line
-    // if the ini asks for it.
+    // Smoothing (docs/dlssnr/design/cadence-smoothing.md) acts on the cadence's own frames, so it exists only above 1.
     bool smoothing = config->DlssNrCadenceSmoothing.value_or_default();
-    if (DlssNr::CadenceSmoothingAvailable())
-    {
-        if (ImGui::Checkbox(Localization::Label("Smooth the model's frames###nrCadenceSmoothing"), &smoothing))
-            config->DlssNrCadenceSmoothing = smoothing;
+    if (ImGui::Checkbox(Localization::Label("Smooth the model's frames###nrCadenceSmoothing"), &smoothing))
+        config->DlssNrCadenceSmoothing = smoothing;
 
-        HelpMarker("Without it, each new answer of the model replaces the carried one on the frame the model runs,"
-                   "\nand the picture's light steps there every N frames: the pulse. With it, the new answer is walked"
-                   "\nin from the carried one over the whole interval, in N equal steps, and the mean light of what the"
-                   "\ncadence shows may move by at most 1.5 stops a second while the frame's own light holds still."
-                   "\n\nOnly what is shown changes: the stored edit and the model's own history stay as the model made"
-                   "\nthem. The previous answer stays on screen, fading, for up to N-1 frames longer, which can trail a"
-                   "\nlittle where things move fast. Measure it with \"Measure the light step\" under Compare.");
-    }
-    else if (smoothing)
-    {
-        ImGui::TextDisabled("%s",
-                            Localization::Tr("Smoothing is not available: this build's cadence shader predates it."));
-    }
+    HelpMarker("Without it, each new answer of the model replaces the carried one on the frame the model runs,"
+               "\nand the picture's light steps there every N frames: the pulse. With it, the new answer is walked"
+               "\nin from the carried one over the whole interval, in N equal steps, and the mean light of what the"
+               "\ncadence shows may move by at most 1.5 stops a second while the frame's own light holds still."
+               "\n\nOnly what is shown changes: the stored edit and the model's own history stay as the model made"
+               "\nthem. The previous answer stays on screen, fading, for up to N-1 frames longer, which can trail a"
+               "\nlittle where things move fast. Measure it with \"Measure the light step\" under Compare.");
 
     bool withFrameGen = config->DlssNrCadenceWithFrameGen.value_or_default();
     if (ImGui::Checkbox(Localization::Label("Allow with frame generation###nrCadenceFrameGen"), &withFrameGen))

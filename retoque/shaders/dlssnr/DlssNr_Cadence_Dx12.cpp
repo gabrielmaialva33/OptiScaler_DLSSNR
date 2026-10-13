@@ -68,20 +68,6 @@ static_assert(sizeof(kNullSrv) / sizeof(kNullSrv[0]) == 11 && sizeof(kNullUav) /
 
 bool DlssNr_Cadence_Dx12::Available() { return DLSSNR_CADENCE_BYTECODE != 0; }
 
-// The cadence bytecode committed before smoothing, by its DXBC container digest (bytes 4..19 of the .cso). It runs
-// modes 0 to 4 only, so with it smoothing stands down -- the carry runs as it did -- instead of leaving every smoothed
-// carried frame unwritten. tests/nr-invariants warns while that binary is committed; drop this when it is rebuilt.
-bool DlssNr_Cadence_Dx12::SmoothingAvailable()
-{
-#if DLSSNR_CADENCE_BYTECODE
-    static constexpr unsigned char kPreSmoothing[16] = { 0x54, 0x53, 0x89, 0x09, 0x82, 0x42, 0x9a, 0x4a,
-                                                         0xaf, 0xe2, 0x76, 0xf6, 0xa6, 0xcb, 0xe6, 0x6d };
-    return sizeof(DlssNr_Cadence_cso) > 20 && std::memcmp(DlssNr_Cadence_cso + 4, kPreSmoothing, 16) != 0;
-#else
-    return false;
-#endif
-}
-
 ID3D12Resource* DlssNr_Cadence_Dx12::CreateTexture(ID3D12Device* device, DXGI_FORMAT format, UINT width, UINT height,
                                                    const wchar_t* name, D3D12_RESOURCE_STATES state)
 {

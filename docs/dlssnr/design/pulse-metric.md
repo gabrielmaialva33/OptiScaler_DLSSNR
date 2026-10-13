@@ -1,9 +1,9 @@
 # Pulse metric: the light step per frame, model frames against carried ones
 
 Status: implemented on D3D12 behind `[DlssNr] PulseMetric` (default off) and a checkbox under Compare; **not yet
-run in a game**. The shader's bytecode header is optional (`__has_include`): until `DlssNr_Pulse_Shader.h` is
-generated the metric reports itself unavailable and the menu does not offer it. Native Vulkan has no
-implementation and is not offered the control.
+run in a game**. The shader's bytecode header is optional (`__has_include`): a build without
+`DlssNr_Pulse_Shader.h` reports the metric unavailable and the menu does not offer it (it was first generated on
+2026-10-13). Native Vulkan has no implementation and is not offered the control.
 
 ## Why
 

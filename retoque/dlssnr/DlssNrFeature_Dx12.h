@@ -361,10 +361,6 @@ const char* CadenceStatus();
 // is not offered.
 bool CadenceAvailable();
 
-// Whether that shader runs cadence smoothing (docs/dlssnr/design/cadence-smoothing.md): false for the bytecode
-// committed before it, in which case smoothing stands down and its control is not offered.
-bool CadenceSmoothingAvailable();
-
 // Whether the buffer the last D3D12 dispatch worked on was linear HDR, i.e. the colour transform was on. False
 // until something has run. For the menu: highlight recovery acts only there
 // (docs/dlssnr/design/hdr-highlight-recovery.md).

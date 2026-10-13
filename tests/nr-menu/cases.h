@@ -52,16 +52,10 @@ int main() {
  ImGui::Reset(); ImGui::actions[optIn]=true; cadence(); assert(c.DlssNrCadenceWithFrameGen.value);
  ImGui::Reset(); ImGui::actions[smooth]=true; cadence(); assert(c.DlssNrCadenceSmoothing.value);
   ImGui::Reset(); ImGui::actions[smooth]=false; cadence(); assert(!c.DlssNrCadenceSmoothing.value);
- // A cadence shader from before smoothing: no control; one line only if the ini asks for smoothing.
- DlssNr::cadenceSmoothingAvailable=false;
- ImGui::Reset(); cadence(); assert(ImGui::Saw(combo) && !ImGui::Saw(smooth) && ImGui::texts.empty());
- c.DlssNrCadenceSmoothing.value=true;
- ImGui::Reset(); cadence(); assert(!ImGui::Saw(smooth) && ImGui::texts.size()==1 && said("predates"));
- DlssNr::cadenceSmoothingAvailable=true;
  ImGui::Reset(); ImGui::actions[combo]=3; cadence(); assert(c.DlssNrCadence.value==4);
  ImGui::Reset(); ImGui::actions[combo]=0; cadence(); assert(c.DlssNrCadence.value==1);
  ImGui::Reset(); cadence(); assert(ImGui::Saw(combo) && !ImGui::Saw(optIn));
  c.DlssNrCadence.value=9;
  ImGui::Reset(); cadence(); assert(ImGui::Saw(combo) && !ImGui::Saw(optIn) && !ImGui::Saw(smooth));
- std::cout << "PASS: 35 scripted menu frames: unsupported paths, inheritance, seven fields, clear, retained inactive passes, preset hidden at one weight set, skin inert with the mask off; model cadence hidden on native Vulkan, a line only under the proxy or without its shader, the frame-generation opt-in and smoothing only above a cadence of 1, smoothing only with a shader that runs it\n";
+ std::cout << "PASS: 33 scripted menu frames: unsupported paths, inheritance, seven fields, clear, retained inactive passes, preset hidden at one weight set, skin inert with the mask off; model cadence hidden on native Vulkan, a line only under the proxy or without its shader, the frame-generation opt-in and smoothing only above a cadence of 1\n";
 }

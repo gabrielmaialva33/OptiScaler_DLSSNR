@@ -4229,8 +4229,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                                       cfg.DlssNrReversibleMode.value_or_default() == 4);
     // The spread and the light limiter (docs/dlssnr/design/cadence-smoothing.md). Part of what the surfaces are built
     // for and of the settings the scheduler watches, so a toggle rebuilds them and drops the stored edit together.
-    cadenceInputs.smoothing =
-        cfg.DlssNrCadenceSmoothing.value_or_default() && DlssNr_Cadence_Dx12::SmoothingAvailable();
+    cadenceInputs.smoothing = cfg.DlssNrCadenceSmoothing.value_or_default();
 
     // The carry works at the model's working size, on the proxy the model is shown; without the reduced
     // proxy's surface there is no such picture to carry onto.
@@ -8511,7 +8510,6 @@ unsigned int ActivePassCount() { return g_activePasses.load(); }
 const char* MultipassStatus() { return g_chainStatus.load(); }
 const char* CadenceStatus() { return g_cadenceStatus.load(); }
 bool CadenceAvailable() { return DlssNr_Cadence_Dx12::Available(); }
-bool CadenceSmoothingAvailable() { return DlssNr_Cadence_Dx12::SmoothingAvailable(); }
 bool BufferIsLinearHdr() { return g_lastLinearHdr.load(); }
 
 PeripheryState PeripheryStatus()

@@ -1,9 +1,8 @@
 # Residual limit: a flat bound, in stops, on how far the model may move a pixel
 
 Status: implemented in the composition shader, D3D12 and native Vulkan, behind `[DlssNr] ResidualLimit` (default 0,
-off) and a slider in the card's "How much of it lands" section; **not yet run in a game**. It needs `dlssnr.hlsl`
-recompiled for both targets (`DlssNr_Shader.h`, `DlssNr_Shader_Vk.h`); until then the shader ignores the new constant
-and the control does nothing.
+off) and a slider in the card's "How much of it lands" section; **not yet run in a game**. Both shader targets
+(`DlssNr_Shader.h`, `DlssNr_Shader_Vk.h`) were rebuilt with it on 2026-10-13.
 
 ## The problem
 
@@ -86,10 +85,8 @@ struct/cbuffer order.
 
 ## In game
 
-After both shader targets are rebuilt:
-
-1. Default (0): the composition log line says `residual limit off`; a capture is byte-identical to one before the
-   rebuild at the same settings (Hold frame on).
+1. Default (0): the composition log line says `residual limit off`; a capture is byte-identical to one from before
+   the limit existed, at the same settings (Hold frame on).
 2. A still view where the model blotches (foliage, a textured wall at low light): raise the limit to 2, then lower it
    in steps; the blotches should fade by about 1 stop and the model's ordinary detail should survive to about 0.25.
    "Measure detail" before and after gives the detail added and the flicker as numbers; the pulse metric's every-frame

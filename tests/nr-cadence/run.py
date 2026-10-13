@@ -105,18 +105,7 @@ for axis in 'XY':
 # Smoothing (docs/dlssnr/design/cadence-smoothing.md). Its surfaces exist only on an object built with it, and the
 # switch is part of what an object was built for and of the settings the scheduler watches, so a toggle rebuilds the
 # surfaces and drops the stored edit together.
-assert re.search(r'cadenceInputs\.smoothing\s*=\s*cfg\.DlssNrCadenceSmoothing\.value_or_default\(\)\s*&&\s*'
-                 r'DlssNr_Cadence_Dx12::SmoothingAvailable\(\);', renderer)
-# The bytecode from before smoothing runs none of its modes. The pass recognises it by its DXBC digest, and the digest
-# it carries must be that binary's: while the committed .cso is the old one, its bytes 4..19 are the constant.
-import hashlib
-digest = re.search(r'kPreSmoothing\[16\] = \{([^}]*)\}', pass_cpp)
-assert digest, 'SmoothingAvailable lost its digest'
-digest = bytes(int(v, 16) for v in re.findall(r'0x[0-9a-fA-F]{2}', digest.group(1)))
-cso = (retoque / 'shaders/dlssnr/precompile/DlssNr_Cadence_Shader.cso').read_bytes()
-if hashlib.sha256(cso).hexdigest() == 'e3e2076bef61705e7b8cf123ff43d02c9a6f079327d02f9d3659e3aa8fe20217':
-    assert cso[4:20] == digest, 'SmoothingAvailable no longer recognises the bytecode from before smoothing'
-assert 'DlssNr::CadenceSmoothingAvailable()' in read_nr('dlssnr/DlssNr_Menu.cpp')
+assert re.search(r'cadenceInputs\.smoothing\s*=\s*cfg\.DlssNrCadenceSmoothing\.value_or_default\(\);', renderer)
 assert 'cadenceSettings = Cadence::Mix(cadenceSettings, cadenceInputs.smoothing ? 1u : 0u);' in renderer
 assert renderer.count('g_nr.cadence->Fits(device, workWidth, workHeight, cadenceInputs.smoothing)') == 2
 assert 'new DlssNr_Cadence_Dx12("DLSS-NR cadence", device, workWidth, workHeight, cadenceInputs.smoothing)' in renderer

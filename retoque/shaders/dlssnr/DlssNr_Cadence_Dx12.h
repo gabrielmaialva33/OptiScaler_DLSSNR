@@ -148,10 +148,6 @@ class DlssNr_Cadence_Dx12 : public Shader_Dx12
     // Whether this build carries the pass's bytecode at all.
     static bool Available();
 
-    // Whether that bytecode runs smoothing's modes: false for the binary committed before them, which writes nothing
-    // in modes 5 to 8 and would leave every smoothed carried frame unwritten.
-    static bool SmoothingAvailable();
-
     DlssNr_Cadence_Dx12(std::string InName, ID3D12Device* InDevice, UINT InWidth, UINT InHeight, bool InSmoothing);
     ~DlssNr_Cadence_Dx12();
 
