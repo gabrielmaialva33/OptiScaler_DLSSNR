@@ -50,6 +50,7 @@
 #include <magic_enum.hpp>
 #include <version_check.h>
 #include <misc/IdentifyGpu.h>
+#include <dlssnr/DlssNr_Session.h>
 #include <sha1/sha1.hpp>
 
 static std::vector<HMODULE> _asiHandles;
@@ -1640,6 +1641,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         spdlog::info("");
         State::Instance().isRunningOnLinux = IsRunningOnWine();
         ResolveVulkanHookPolicy();
+        DlssNr::SessionGuardBegin();
 
         // Not foolproof
         // calls LoadLibraryExW inside DllMain but seems mostly fine if we only call NvAPI_GetInterfaceVersionString
@@ -1932,6 +1934,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
     case DLL_PROCESS_DETACH:
         State::Instance().isShuttingDown = true;
+
+        // An orderly exit: if NR was running, the session guard's marker says it ended cleanly. The at-exit form
+        // takes no lock it could wait on and logs nothing, for the reason given below.
+        DlssNr::SessionGuardOffAtExit();
 
         // lpReserved != NULL: the process is terminating. ExitProcess has already stopped every other
         // thread, possibly while one held a lock (the async logger's queue, a loader-side lock), so

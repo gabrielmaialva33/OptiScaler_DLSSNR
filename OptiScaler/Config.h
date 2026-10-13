@@ -300,6 +300,9 @@ class Config
     // DLSS Neural Rendering: a detail-synthesis pass over the upscaler's output. Off by default -- it is
     // an undocumented feature driven directly through its snippet, not something NVIDIA exposes.
     CustomOptional<bool> DlssNrEnabled { false };
+    // Session guard: after a session that ended without closing while NR ran, keep NR off for the next
+    // launch (this session only, the ini is not rewritten) and say why. See dlssnr/DlssNr_Session.h.
+    CustomOptional<bool> DlssNrSessionGuard { true };
     // Optional NR after native Ray Reconstruction (DX12).
     CustomOptional<bool> DlssNrApplyAfterRR { false };
     CustomOptional<unsigned int> DlssNrRRPasses { 1 };

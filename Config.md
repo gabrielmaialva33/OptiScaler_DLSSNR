@@ -383,6 +383,11 @@ and comparison of the NR edit with the upscaler's output. The full section, incl
 
 ```ini
 [DlssNr]
+; Keep NR off for one session after a session that ended without closing while NR ran (crash, killed
+; hang). A marker file retoque_nr_session.state beside the log records it; the ini is never rewritten.
+; true or false - Default (auto) is true
+SessionGuard=auto
+
 ; Apply the model's edit. Off shows the clean upscaler frame while the NR pass keeps running,
 ; so ApplyModel can be toggled with HoldFrame for a frozen-frame comparison.
 ; true or false - Default (auto) is true

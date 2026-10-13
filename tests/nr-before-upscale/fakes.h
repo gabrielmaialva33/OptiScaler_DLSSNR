@@ -268,3 +268,5 @@ inline float WorkingScale()
 }
 
 namespace DlssNr::GpuTiming { inline void SetEnabled(bool) {} }
+// The session guard's Windows layer (DlssNr_Session.cpp) is not part of this harness.
+namespace DlssNr { inline void SessionGuardOff() {} inline void SessionGuardEvaluated() {} }

@@ -396,6 +396,7 @@ bool Config::Reload(std::filesystem::path iniPath)
 
             // --- DLSS 5 Neural Rendering (retoque/dlssnr) ---
             DlssNrEnabled.set_from_config(readBool("DlssNr", "Enabled"));
+            DlssNrSessionGuard.set_from_config(readBool("DlssNr", "SessionGuard"));
             DlssNrApplyAfterRR.set_from_config(readBool("DlssNr", "ApplyAfterRR"));
             DlssNrRRPasses.set_from_config(readUInt("DlssNr", "RRPasses"));
             DlssNrRRWorkingScale.set_from_config(readFloat("DlssNr", "RRWorkingScale"));
@@ -1371,6 +1372,7 @@ bool Config::SaveIni()
 
         // --- DLSS 5 Neural Rendering (retoque/dlssnr) ---
         ini.SetValue("DlssNr", "Enabled", GetBoolValue(Instance()->DlssNrEnabled.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SessionGuard", GetBoolValue(Instance()->DlssNrSessionGuard.value_for_config()).c_str());
         ini.SetValue("DlssNr", "ApplyAfterRR", GetBoolValue(Instance()->DlssNrApplyAfterRR.value_for_config()).c_str());
         ini.SetValue("DlssNr", "RRPasses", GetIntValue(Instance()->DlssNrRRPasses.value_for_config()).c_str());
         ini.SetValue("DlssNr", "RRWorkingScale",

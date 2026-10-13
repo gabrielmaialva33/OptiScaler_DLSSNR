@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Thirty-three suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
+**Host tier.** Thirty-four suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit,
@@ -46,6 +46,10 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-detail-measure` — the "Measure detail" CPU tile reduction and statistical aggregation (detail added,
   Laplacian raw, flicker beyond native, OkLab chroma/warmth, and shadow darkening/crush), delta comparisons
   and textual metric generation.
+- `nr-session-guard` — the NR session guard (`DlssNr_SessionGuard.h`): what a marker left by an unclean session
+  means (early end disables and stays blocked until acknowledged, middle ends warn then disable on the second,
+  long ends are not blamed), who owns a marker (live second instance, reused pid), unreadable and read-only
+  cases, and the call-site and session-only-disable source guards. The Windows layer is not exercised.
 - `nr-present-sync` — what `[DlssNr] PresentSync=auto` means: the D3D12 present pass waits for its write-back
   only when frame generation could be involved (`DlssNr_PresentSync.h`). The wait itself is not exercised.
 - `nr-present-guides` — selection and completion tracking for the present-time guide snapshot ring
