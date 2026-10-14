@@ -465,6 +465,15 @@ Crimson Desert (310.9.1), at 2X and 4X with the count override. Pass: the module
 the camera, no device removal, and the image matches the `AdaBlackwellKernels` route on a held scene by eye. This tests
 the rewrite and the commit; it cannot test admission or the provider's below-89 network branch.
 
+**Step 1 measured (2026-10-14, scratch build `c0ce60d8`, branch `scratch/mfg-sm86-kernels`, never merged).**
+Crimson Desert, provider 310.9.1.0, wrapper 2.14.1, RTX 4090, GE-Proton11-7, `AdaMfgUnlock=true`,
+`AdaBlackwellKernels=true`, the count forced to 4x. All 31 frame-kernel containers took the relabel to sm_86 with
+the Ada images parked ("31 kernel containers answer with the Blackwell image relabelled sm_86, 0 failed"), so the
+driver JIT-compiled for sm_89 the very images an RTX 30 card would load. The probe read 4.00 presents and three
+DLSS-G evaluates per game present over the session, no device removal, no model fault; by eye (the user) the
+generated frames followed the camera normally. The rewrite and the commit are therefore proven on this machine; what
+remains is admission and the provider's below-89 network branch, which only a 30-series card can show (step 2).
+
 **Step 2, admission only on Rafael's 3060 (option b, scratch build, never merged).** G1 and G3 answered, kernels
 untouched. Expected: feature 11 supported, then a `CreateFeature` or evaluate failure with a code. The question is
 what the game does with it.
