@@ -816,6 +816,11 @@ groups; the code from before this fails there, at the first sRGB case.
 
 ### Found on the way
 
+- **The presenter refused the game's first resize.** The same log has `the presenter refused ResizeBuffers: 80070057`
+  at startup: the game named `R8G8B8A8_UNORM_SRGB` in `ResizeBuffers`, which a flip-model swapchain refuses, and only
+  the retry at the presenter's own size, which passes `DXGI_FORMAT_UNKNOWN`, got through. The resize now hands the
+  presenter the UNORM sibling it was created with (`Dx11wDx12::PresenterResizeFormat`); test:
+  `bridge-lifetime`, `refusedResizeCases`.
 - **Left open, colour only:** the synthesized frame-generation inputs read the bridge's sRGB source through its own
   view, so linear values. The HUD layer (`SynthOverlay_Dx12::RecordLayer`) is then linear, composed by FFX over the
   UNORM presenter: darker in generated frames. When the pass runs, the layer now reads the host's UNORM output and is

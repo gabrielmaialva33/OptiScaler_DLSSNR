@@ -153,6 +153,22 @@ UINT PresenterResizeFlags(IDXGISwapChain1* presenter, UINT gameFlags)
     return (flags & ~fixedAtCreation) | (desc.Flags & fixedAtCreation);
 }
 
+DXGI_FORMAT PresenterResizeFormat(DXGI_FORMAT gameFormat)
+{
+    // Metal: Hellsinger names R8G8B8A8_UNORM_SRGB in its first resize. On native Windows the presenter refused it
+    // (80070057), and only the retry at the presenter's own size, which passes DXGI_FORMAT_UNKNOWN, got through
+    // (Rafael's RTX 3060, 2026-10-14). A resize to another size would have left the presenter at the old one.
+    switch (gameFormat)
+    {
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    default:
+        return gameFormat;
+    }
+}
+
 void MatchHiddenToPresenter(IDXGISwapChain* hidden, IDXGISwapChain1* presenter)
 {
     UINT width = 0;
@@ -1417,6 +1433,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     UINT hiddenHeight = Height;
     Dx11wDx12::ResolveZeroExtent(_handle, hiddenWidth, hiddenHeight, _fgSwapChain != nullptr ? _fgSwapChain : _real);
     const UINT presenterFlags = Dx11wDx12::PresenterResizeFlags(_fgSwapChain, SwapChainFlags);
+    const DXGI_FORMAT presenterFormat = Dx11wDx12::PresenterResizeFormat(NewFormat);
 
     // If Width and Height were 0x0 and the window is tiny (< 16), ResolveZeroExtent kept the current buffer
     // size in hiddenWidth/hiddenHeight. Hand those to the presenter as well so DXGI does not collapse it to 1x1.
@@ -1430,8 +1447,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         presenterHeight = hiddenHeight;
     }
 
-    const bool skipFgResize = !_presenterResizeOwed &&
-                              IsSame(_fgSwapChain, BufferCount, hiddenWidth, hiddenHeight, NewFormat, presenterFlags);
+    const bool skipFgResize = !_presenterResizeOwed && IsSame(_fgSwapChain, BufferCount, hiddenWidth, hiddenHeight,
+                                                              presenterFormat, presenterFlags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
     _presenterRecoveryArmed = true;
@@ -1480,7 +1497,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         }
         else
         {
-            fgResult = _ResizePresenter(BufferCount, presenterWidth, presenterHeight, NewFormat, presenterFlags);
+            fgResult = _ResizePresenter(BufferCount, presenterWidth, presenterHeight, presenterFormat, presenterFlags);
         }
     }
 
@@ -1732,6 +1749,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     UINT hiddenHeight = Height;
     Dx11wDx12::ResolveZeroExtent(_handle, hiddenWidth, hiddenHeight, _fgSwapChain != nullptr ? _fgSwapChain : _real);
     const UINT presenterFlags = Dx11wDx12::PresenterResizeFlags(_fgSwapChain, SwapChainFlags);
+    const DXGI_FORMAT presenterFormat = Dx11wDx12::PresenterResizeFormat(Format);
 
     // If Width and Height were 0x0 and the window is tiny (< 16), ResolveZeroExtent kept the current buffer
     // size in hiddenWidth/hiddenHeight. Hand those to the presenter as well so DXGI does not collapse it to 1x1.
@@ -1745,8 +1763,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         presenterHeight = hiddenHeight;
     }
 
-    const bool skipFgResize =
-        !_presenterResizeOwed && IsSame(_fgSwapChain, BufferCount, hiddenWidth, hiddenHeight, Format, presenterFlags);
+    const bool skipFgResize = !_presenterResizeOwed && IsSame(_fgSwapChain, BufferCount, hiddenWidth, hiddenHeight,
+                                                              presenterFormat, presenterFlags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
     _presenterRecoveryArmed = true;
@@ -1794,7 +1812,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         }
         else
         {
-            fgResult = _ResizePresenter(BufferCount, presenterWidth, presenterHeight, Format, presenterFlags);
+            fgResult = _ResizePresenter(BufferCount, presenterWidth, presenterHeight, presenterFormat, presenterFlags);
         }
     }
 

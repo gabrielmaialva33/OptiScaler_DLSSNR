@@ -140,10 +140,10 @@ showing that output on a frame the host declined, and leaking its textures at te
 ## Exclusive fullscreen and the presenter's extent
 
 `fullscreenCases` compiles the production `SetFullscreenState`, `_EmulatesFullscreen`,
-`_RecoverPresenter` and `_ResizePresenterToMatch`. It also compiles three helpers:
-`PresenterExtent`, `PresenterResizeFlags` and `MatchHiddenToPresenter`. The window half of the
-emulation (`_EnterBorderless` and `_LeaveBorderless`) needs Win32, so it is a counting stub. The
-fake swapchain resolves a zero against its own window when it resizes, the way DXGI does.
+`_RecoverPresenter` and `_ResizePresenterToMatch`. It also compiles four helpers:
+`PresenterExtent`, `PresenterResizeFlags`, `PresenterResizeFormat` and `MatchHiddenToPresenter`.
+The window half of the emulation (`_EnterBorderless` and `_LeaveBorderless`) needs Win32, so it is
+a counting stub. The fake swapchain resolves a zero against its own window when it resizes, the way DXGI does.
 `resizedAt` orders resizes across swapchains.
 
 The cases:
@@ -159,6 +159,11 @@ The cases:
   size. The hidden swapchain gets the presenter's extent and never 1x1.
 - **Flags.** `GDI_COMPATIBLE` is dropped. `ALLOW_TEARING` and `FRAME_LATENCY_WAITABLE_OBJECT` follow
   the presenter. The hidden swapchain keeps the game's flags.
+- **An sRGB format named in a resize** (`refusedResizeCases`; Metal: Hellsinger on native Windows,
+  2026-10-14). The presenter, flip model, is handed the UNORM sibling it was created with
+  (`PresenterResizeFormat`, compiled verbatim); the hidden swapchain keeps the sRGB format the game named;
+  the same size named again in sRGB is skipped, through both resize entry points. Handing the presenter
+  the game's format fails it.
 - **Present recovery.**
   - Nothing happens without a transition since the last resize.
   - After a transition, the presenter alone is resized, once, behind the drain, with its interop

@@ -70,6 +70,7 @@ predicates = 'namespace Dx11wDx12\n{\n' + ''.join(map(function, [
     'void ResolveZeroExtent(HWND gameWindow,',
     'bool PresenterExtent(IDXGISwapChain1* presenter,',
     'UINT PresenterResizeFlags(IDXGISwapChain1* presenter,',
+    'DXGI_FORMAT PresenterResizeFormat(DXGI_FORMAT gameFormat)',
     'void MatchHiddenToPresenter(IDXGISwapChain* hidden,',
 ])) + '} // namespace Dx11wDx12\n'
 # Upstream's skip-resize test lives in the production file's anonymous namespace; verbatim here too.

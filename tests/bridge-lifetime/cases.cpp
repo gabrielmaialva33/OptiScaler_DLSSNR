@@ -1072,6 +1072,39 @@ void refusedResizeCases()
         assert(f.presenter.resizes == 1 && f.real.resizes == 0);
         assert(f.sc->_presenterResizeRefused && f.sc->_refusedResizeRetriesLeft == kRetries);
     }
+
+    // A game that names its sRGB format in a resize (Metal: Hellsinger on native Windows, 2026-10-14). The presenter
+    // is flip model, created with the UNORM sibling, and refuses an sRGB buffer with E_INVALIDARG; it is handed the
+    // sibling. The hidden swapchain is the game's own, blt model, and keeps the format the game named.
+    for (bool resize1 : { false, true })
+    {
+        Fixture f;
+        if (resize1)
+        {
+            f.sc->_real3 = &f.real;
+            f.real.AddRef();
+        }
+        f.presenter.descResult = S_OK;
+        f.presenter.desc.BufferCount = 2;
+        f.presenter.desc.BufferDesc.Width = 800;
+        f.presenter.desc.BufferDesc.Height = 600;
+        f.presenter.desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        const auto resize = [&]()
+        {
+            return resize1 ? f.sc->ResizeBuffers1(2, 1280, 720, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 0, nullptr, nullptr)
+                           : f.sc->ResizeBuffers(2, 1280, 720, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 0);
+        };
+        assert(resize() == S_OK);
+        assert(f.presenter.resizes == 1 && f.presenter.lastResizeFormat == DXGI_FORMAT_R8G8B8A8_UNORM);
+        assert(f.presenter.lastResizeWidth == 1280 && f.presenter.lastResizeHeight == 720);
+        assert(resize1 || f.real.lastResizeFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+
+        // The same size with the sRGB format named again is what the presenter already holds: no resize at all.
+        assert(resize() == S_OK && f.presenter.resizes == 1);
+    }
+    assert(Dx11wDx12::PresenterResizeFormat(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) == DXGI_FORMAT_B8G8R8A8_UNORM);
+    assert(Dx11wDx12::PresenterResizeFormat(DXGI_FORMAT_UNKNOWN) == DXGI_FORMAT_UNKNOWN);
+    assert(Dx11wDx12::PresenterResizeFormat(DXGI_FORMAT_R8G8B8A8_UNORM) == DXGI_FORMAT_R8G8B8A8_UNORM);
 }
 
 // A second swapchain on the same window (docs/dlssnr/design/nr-dx11-bridge-host.md, "A second swapchain on the same

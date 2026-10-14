@@ -73,6 +73,11 @@ bool PresenterExtent(IDXGISwapChain1* presenter, UINT& width, UINT& height);
 // are fixed at creation, and ResizeBuffers refuses (DXGI_ERROR_INVALID_CALL) any call that changes them.
 UINT PresenterResizeFlags(IDXGISwapChain1* presenter, UINT gameFlags);
 
+// The game's ResizeBuffers format made acceptable to the presenter. A flip-model swapchain takes no sRGB buffer, so the
+// presenter was created with the UNORM sibling (PrepareDx12FlipFormat), and a resize that names the sRGB format is
+// refused with E_INVALIDARG. Every other format, DXGI_FORMAT_UNKNOWN included, is handed over as given.
+DXGI_FORMAT PresenterResizeFormat(DXGI_FORMAT gameFormat);
+
 // At creation, right after both swapchains exist and before the game holds a buffer of the hidden one:
 // resizes the hidden swapchain to the presenter's extent when the two differ.
 void MatchHiddenToPresenter(IDXGISwapChain* hidden, IDXGISwapChain1* presenter);

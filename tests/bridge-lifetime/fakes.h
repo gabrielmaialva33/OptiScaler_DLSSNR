@@ -33,6 +33,10 @@ inline bool GetClientRect(HWND, RECT* out)
 using HANDLE = void*;
 using DXGI_FORMAT = int;
 constexpr DXGI_FORMAT DXGI_FORMAT_UNKNOWN = 0;
+constexpr DXGI_FORMAT DXGI_FORMAT_R8G8B8A8_UNORM = 28;
+constexpr DXGI_FORMAT DXGI_FORMAT_R8G8B8A8_UNORM_SRGB = 29;
+constexpr DXGI_FORMAT DXGI_FORMAT_B8G8R8A8_UNORM = 87;
+constexpr DXGI_FORMAT DXGI_FORMAT_B8G8R8A8_UNORM_SRGB = 91;
 constexpr HRESULT S_OK = 0, E_FAIL = -1, E_UNEXPECTED = -2, E_INVALIDARG = -3;
 constexpr HRESULT DXGI_ERROR_DEVICE_REMOVED = -4, DXGI_ERROR_DEVICE_HUNG = -5, DXGI_ERROR_INVALID_CALL = -6;
 constexpr HRESULT DXGI_ERROR_DEVICE_RESET = -7;
@@ -309,6 +313,7 @@ struct Swapchain : Ref
         return S_OK;
     }
     UINT lastResizeWidth = 0, lastResizeHeight = 0, lastResizeFlags = 0;
+    int lastResizeFormat = -1;
     int resizedAt = 0;
     // DXGI resolves a zero against the swapchain's own window when it resizes: the game's client area
     // unless a case gives this swapchain a window of another size -- the output, say, once a
@@ -323,6 +328,7 @@ struct Swapchain : Ref
         lastResizeWidth = width;
         lastResizeHeight = height;
         lastResizeFlags = flags;
+        lastResizeFormat = format;
         resizedAt = ++g_resizeClock;
         HRESULT result = resizeResult;
         if (!resizeResults.empty())
