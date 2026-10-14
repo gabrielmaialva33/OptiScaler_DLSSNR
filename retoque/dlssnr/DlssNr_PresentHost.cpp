@@ -220,6 +220,11 @@ bool PresentHost::_EnsureFeature(ID3D12Device* device, ID3D12CommandQueue* queue
             LOG_ERROR("DLSS-NR present host: setup list {} failed", i);
             return false;
         }
+
+        // Named so a DRED report (DlssNr_Dred.h) attributes a removal in this list to the host directly.
+        const std::wstring name = std::format(L"DLSS-NR present host setup {}", i);
+        _setupAllocators[i]->SetName(name.c_str());
+        _setupLists[i]->SetName(name.c_str());
     }
 
     const auto depthRest = static_cast<D3D12_RESOURCE_STATES>(GuideRestState(false));

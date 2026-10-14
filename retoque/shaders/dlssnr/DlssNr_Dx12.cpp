@@ -12,6 +12,7 @@
 #include <dlssnr/DlssNr_Submission.h>
 #include <dlssnr/DlssNr_ModelLog.h>
 #include <dlssnr/DlssNr_Session.h>
+#include <dlssnr/DlssNr_Dred.h>
 #include <dlssnr/DlssNr_DirectRuntime.h>
 #include <dlssnr/DlssNr_NgxInfo.h>
 #include <dlssnr/DlssNr_PresentColour.h>
@@ -3549,6 +3550,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         reportSkip("D3D12 device removed or hung");
         LOG_ERROR("DLSS-NR: D3D12 device removed or hung (reason: 0x{:08X})", (unsigned) removedReason);
+        DlssNr::Dred::Report(device);
         device->Release();
         return false;
     }
@@ -6549,6 +6551,10 @@ static bool EnsurePresentList(ID3D12Device* device)
             return false;
         }
 
+        // Named so a DRED report (DlssNr_Dred.h) attributes a removal in this list to the pass directly.
+        const std::wstring name = std::format(L"DLSS-NR present list {}", i);
+        g_presentList.allocator[i]->SetName(name.c_str());
+        g_presentList.list[i]->SetName(name.c_str());
         g_presentList.list[i]->Close();
     }
 

@@ -303,6 +303,9 @@ class Config
     // Session guard: after a session that ended without closing while NR ran, keep NR off for the next
     // launch (this session only, the ini is not rewritten) and say why. See dlssnr/DlssNr_Session.h.
     CustomOptional<bool> DlssNrSessionGuard { false };
+    // D3D12 DRED (auto-breadcrumbs and page-fault tracking) for chasing a device removal; costs a little on
+    // every command list, so off by default. See dlssnr/DlssNr_Dred.h.
+    CustomOptional<bool> DlssNrDred { false };
     // Optional NR after native Ray Reconstruction (DX12).
     CustomOptional<bool> DlssNrApplyAfterRR { false };
     CustomOptional<unsigned int> DlssNrRRPasses { 1 };
