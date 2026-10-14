@@ -704,7 +704,9 @@ on for the FSR side.
    SHA-256) and the validation (§3.2) refuse cleanly. Nothing guesses.
 9. **FP16 may buy nothing on D3D12.** `min16float` is a hint the driver is free to ignore (harness README). Real
    half-precision would need the converter to emit `float16_t` at SM 6.2 with `-enable-16bit-types`. That is a separate
-   change, worth it only if measured.
+   change, worth it only if measured. *Measured 2026-10-14 (`FP16_NOTES.md` section 7):* under vkd3d-proton the native
+   conversion gives the same bytes as `min16float`, 8-12% faster than FP32 in quality mode and ~1% in performance mode.
+   It stays 42-59 dB from lsfg-vk's FP16, because FP16 output depends on operation order. Not wired.
 10. **Async compute lists.** With FGAsync, the callback's list is COMPUTE. That restricts barrier states and rules out
     bundles. It is covered by design (§4.3) but needs testing in both modes.
 11. **The NR stand-down rule depends on the FFX swapchain being `currentFGSwapchain`**

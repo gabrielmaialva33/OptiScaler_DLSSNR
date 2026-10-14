@@ -34,7 +34,7 @@ struct Settings
 {
     float flow = 1.0f;
     bool performance = false;
-    bool fp16 = false; // no key: FP16 variants buy nothing measurable on D3D12 yet (harness README)
+    bool fp16 = false; // no key: FP16 misses lsfg-vk's FP16 output by 42-59 dB at any conversion (FP16_NOTES.md 7)
     std::wstring shaderDir;
     std::wstring dllPath;
 

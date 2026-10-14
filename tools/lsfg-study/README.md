@@ -12,3 +12,6 @@ install (`lsfg-vk` beta branch, `lsfg-vk.dll`). Generated files go to `Tmp/lsfg-
    the generated one, checked against `lsfg-vk-cli debug` on the same frames.
 
 Needs: `spirv-cross` (Arch extra), `uvx --with pefile`, dxc from `OptiScaler/shaders/shader_tools/`.
+
+`convert.py --fp16-native` also writes SM 6.2 native 16-bit conversions of the FP16 modules (ids 51..98) to
+`<target>/fp16-native/`, for study. Nothing reads them: `FP16_NOTES.md` section 7 says why.

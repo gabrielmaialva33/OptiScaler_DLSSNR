@@ -10,6 +10,13 @@ Modes:
 
   2. Legacy directory conversion:
        convert.py <spv dir> <out dir>
+
+  --fp16-native (study only, mode 1): also converts every module that declares OpCapability Float16 (lsfg-vk's FP16
+  variants, ids 51..98) with native 16-bit types: spirv-cross --shader-model 62 --hlsl-enable-16bit-types, dxc
+  cs_6_2 -enable-16bit-types. Written to <target>/fp16-native/ (<rid>.cso, hlsl/, manifest.json), beside and never in
+  place of the default output, which stays byte-identical. Nothing in OptiScaler reads it: under vkd3d-proton it
+  renders byte-identical frames to the default SM 6.0 min16float modules (FP16_NOTES.md, section 7). Needs the release
+  dxc.exe under Wine; the Arch /usr/sbin/dxc is an assertion build and aborts on these modules.
 """
 
 import argparse
@@ -24,6 +31,12 @@ import sys
 
 REG = re.compile(r"register\(([btsu])(\d+), space0\)")
 
+SPIRV_OP_CAPABILITY = 17
+SPIRV_CAPABILITY_FLOAT16 = 9
+FP16_NATIVE_DIR = "fp16-native"
+FP16_SPIRV_CROSS = ["--hlsl", "--shader-model", "62", "--hlsl-enable-16bit-types"]
+FP16_DXC = ["-T", "cs_6_2", "-enable-16bit-types", "-E", "main", "-O3"]
+
 
 def remap(hlsl: str):
     bindings = {}
@@ -34,6 +47,23 @@ def remap(hlsl: str):
         return f"register({cls}0, space{binding})"
 
     return REG.sub(sub, hlsl), bindings
+
+
+def declares_float16(spv: bytes) -> bool:
+    """True when the module declares OpCapability Float16. Capabilities open a module (SPIR-V 2.4, logical layout),
+    so the scan stops at the first other instruction."""
+    if len(spv) < 24 or len(spv) % 4:
+        return False
+    words = struct.unpack_from(f"<{len(spv) // 4}I", spv)
+    i = 5  # header: magic, version, generator, bound, schema
+    while i < len(words):
+        count, opcode = words[i] >> 16, words[i] & 0xFFFF
+        if count == 0 or opcode != SPIRV_OP_CAPABILITY:
+            return False
+        if count >= 2 and words[i + 1] == SPIRV_CAPABILITY_FLOAT16:
+            return True
+        i += count
+    return False
 
 
 def find_default_dll() -> Path | None:
@@ -254,6 +284,69 @@ def convert_modules(
         print(f"FAIL {rid_fail}: {err_str}")
 
 
+def convert_fp16_native(modules: dict[int, bytes], out_dir: Path, repo_root: Path, dll_hash: str | None = None):
+    """Study: native 16-bit conversions of the Float16 modules into <out_dir>/fp16-native/. Returns the failures."""
+    target = out_dir / FP16_NATIVE_DIR
+    hlsl_dir = target / "hlsl"
+    hlsl_dir.mkdir(parents=True, exist_ok=True)
+
+    dxc_wine = repo_root / "OptiScaler/shaders/shader_tools/dxc.exe"
+    if not dxc_wine.is_file():
+        return [("all", f"{dxc_wine} not found (the native /usr/sbin/dxc asserts on 16-bit modules)")]
+    env = dict(
+        os.environ,
+        WINEPREFIX=os.path.expanduser("~/.local/opt/msvc-wineprefix"),
+        WINEDEBUG="-all",
+    )
+
+    rids = sorted(rid for rid, spv in modules.items() if declares_float16(spv))
+    compiled, failed = [], []
+    for rid in rids:
+        spv_file = target / f"tmp_{rid}.spv"
+        spv_file.write_bytes(modules[rid])
+        cross = subprocess.run(["spirv-cross", *FP16_SPIRV_CROSS, str(spv_file)], capture_output=True, text=True)
+        spv_file.unlink(missing_ok=True)
+        if cross.returncode != 0:
+            failed.append((str(rid), cross.stderr.strip()[:300]))
+            continue
+
+        hlsl, _ = remap(cross.stdout)
+        hlsl_file = hlsl_dir / f"{rid}.hlsl"
+        hlsl_file.write_text(hlsl)
+        cso_file = target / f"{rid}.cso"
+        cso_file.unlink(missing_ok=True)
+        res = subprocess.run(
+            ["wine", str(dxc_wine), *FP16_DXC, f"Z:{hlsl_file}", "-Fo", f"Z:{cso_file}"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if res.returncode == 0 and cso_file.is_file() and cso_file.stat().st_size > 0:
+            compiled.append(rid)
+        else:
+            err = "\n".join(
+                line for line in (res.stdout + res.stderr).splitlines() if "MESA" not in line and "pci id" not in line
+            )
+            failed.append((str(rid), err.strip()[:300]))
+
+    version = subprocess.run(["wine", str(dxc_wine), "--version"], capture_output=True, text=True, env=env)
+    dxc_version = next((line.strip() for line in version.stdout.splitlines() if "dxcompiler" in line), "unknown")
+    manifest = {
+        "kind": "lsfg-fp16-native-study",
+        "lsfg_vk_sha256": dll_hash,
+        "spirv_cross": FP16_SPIRV_CROSS,
+        "dxc": FP16_DXC,
+        "dxc_version": dxc_version,
+        "rids": compiled,
+        "failed": [rid for rid, _ in failed],
+    }
+    (target / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
+    print(f"fp16-native ok={len(compiled)} failed={len(failed)} -> {target}")
+    for rid_fail, err_str in failed:
+        print(f"FAIL fp16-native {rid_fail}: {err_str}")
+    return failed
+
+
 def main():
     repo = Path(__file__).resolve().parents[2]
 
@@ -291,6 +384,11 @@ def main():
         default=None,
         help="Direct output directory override",
     )
+    parser.add_argument(
+        "--fp16-native",
+        action="store_true",
+        help="study: also write native 16-bit (cs_6_2) conversions of the FP16 modules to <target>/fp16-native/",
+    )
     args = parser.parse_args()
 
     dll_path = args.dll
@@ -321,6 +419,8 @@ def main():
         print(f"Warning: Expected 99 modules, found {len(modules)}", file=sys.stderr)
 
     convert_modules(modules, target_dir, repo)
+    if args.fp16_native:
+        convert_fp16_native(modules, target_dir, repo, dll_hash)
     print(f"LSFG shader cache ready at: {target_dir}")
 
 

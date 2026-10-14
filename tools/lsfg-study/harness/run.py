@@ -42,6 +42,7 @@ def main():
     modes.add_argument('--run-only', action='store_true')
     ap.add_argument('--artifacts', type=Path, default=DEFAULT)
     ap.add_argument('--output', type=Path)
+    ap.add_argument('--shaders', type=Path, help='DXIL directory, <rid>.cso (default <artifacts>/dxil)')
     ap.add_argument('--multiplier', type=int, choices=(2, 3, 4), default=2)
     ap.add_argument('--fp16', action='store_true', help='select original FP16 shader variants (+48)')
     ap.add_argument('--performance', action='store_true')
@@ -82,7 +83,8 @@ def main():
     output = (args.output or base / 'out').resolve()
     output.mkdir(parents=True, exist_ok=True)
     win = lambda p: 'Z:' + str(p.resolve())
-    cmd = ['wine', work / 'lsfg-harness.exe', '--shaders', win(base / 'dxil'), '--out', win(output),
+    shaders = (args.shaders or base / 'dxil').resolve()
+    cmd = ['wine', work / 'lsfg-harness.exe', '--shaders', win(shaders), '--out', win(output),
            '--multiplier', str(args.multiplier), '--flow-scale', str(args.flow_scale)]
     if args.benchmark:
         for name in ('width', 'height', 'iterations', 'warmup'):
