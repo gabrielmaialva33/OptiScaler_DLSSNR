@@ -394,6 +394,28 @@ after warm-up (logs kept in the session scratchpad, not in git).
   p50 11.02-11.05 ms, p99 12.1-12.8 ms, 0.0% over target after the first window.
 - No `DEVICE REMOVED`, no `[E]` line in OptiScaler.log, no D3D12 error from vkd3d-proton, clean `wineserver -k`.
 
+**Generated frames against lsfg-vk.** OpenCode's standalone harness (`tools/lsfg-study/harness`, `main.cpp` as merged
+in `d3f1b108`, rebuilt for this) on the two 1920x1080 test sequences, against `lsfg-vk-cli debug -m N -f 1.0`'s own
+frames (`Tmp/lsfg-study/ref_m3`, `ref_m4`, `ref`; made without `-a`, so FP16 is the matching variant), through
+`compare.py` (RGB, threshold 2/255):
+
+| | translation PSNR / max diff / over 2 | rotzoom PSNR / max diff / over 2 |
+|---|---|---|
+| x2 t=1/2 (baseline, the existing gap) | 50.1 dB / 47 / 1.43% | 54.1 dB / 57 / 0.69% |
+| x3 t=1/3 | 57.0 dB / 32 / 0.37% | 54.9 dB / 76 / 0.44% |
+| x3 t=2/3 | 56.6 dB / 34 / 0.37% | 56.3 dB / 43 / 0.40% |
+| x4 t=1/4 | 54.0 dB / 36 / 0.84% | 55.7 dB / 73 / 0.34% |
+| x4 t=2/4 | 50.1 dB / 47 / 1.43% | 54.1 dB / 57 / 0.69% |
+| x4 t=3/4 | 53.3 dB / 38 / 0.81% | 57.4 dB / 50 / 0.28% |
+
+- The x4 t=1/2 frame is **byte-identical** to the x2 frame in the harness (FP16 and FP32, both sequences), as
+  lsfg-vk's own x4 1_2 is to its x2 1: re-running the main pass against the shared pre-pass changes nothing but the
+  timestamp.
+- x3 and x4 sit in the band x2 already had against lsfg-vk (FP32: 47.8-58.5 dB), so the difference is the existing
+  D3D12/Vulkan one (min16float, sampling), not anything multi-frame.
+- This is the harness's recording, not `LsfgFrameGen_Dx12`'s; `ctxbench` (OPTI_INTEGRATION.md, second step) holds
+  the two to the same bytes at x2 and was not rerun at x3/x4 here.
+
 **Open problems.**
 
 1. **PCSX2 makes a second swapchain on a new window** about 4 s in, without releasing the first. FSR-FG's
