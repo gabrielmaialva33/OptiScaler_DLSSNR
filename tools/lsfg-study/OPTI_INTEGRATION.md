@@ -16,6 +16,62 @@ What differs from the design below, for this step:
 - FFX keeps interpolating while LSFG builds on a worker thread (the decision is latched per base frame in
   `FSRFG_Dx12::Dispatch`), instead of showing only real frames.
 
+**GPU cost, second step (2026-10-13).** PCSX2's ~1.0 ms per generated frame against the harness's ~0.5 ms was mostly
+the GPU's clock, not the integration. At 1691x1312 PCSX2 keeps the RTX 4090 about 38% busy, and the driver holds it
+in P3: graphics ~1650 MHz and memory 5-9 GHz (nvidia-smi every 250 ms), where the harness ran at 2730-2760 MHz and
+10.5 GHz. In game the cost tracks the core clock: ms × MHz is about constant. What changed:
+
+- **Barrier waves** (`LsfgGraph.h` `ScheduleWaves`): the harness's barrier around every dispatch (about 200
+  `ResourceBarrier` calls for 100 dispatches) became one batch per wave of mutually independent passes. That makes
+  10 waves for a frame that only ingests and 42 for one that also generates. The seven alpha levels run side by
+  side, the delta chain runs alongside the gamma chain, gamma, delta and epsilon run together at levels 4-6, and
+  the main pass's first levels overlap the pre-pass's beta chain. The gamma chain (7 levels × 5) is the floor.
+  Each batch holds only the transitions and UAV barriers that wave needs. A per-image dirty flag carries an
+  unordered UAV write across waves and across lists.
+- **Direct output**: generate writes FFX's `outputs[0]` through a UAV written per frame into an 8-slot ring at the
+  end of LSFG's heap. Nothing is cached by pointer, because FFX alternates two outputs and may recreate them.
+  The copy-out stays only when D3D12 forbids the UAV: no `ALLOW_UNORDERED_ACCESS`, a size mismatch, or an `_SRGB`
+  output (`DirectOutputFormat`). The log names which. FFX hands over UAV-capable RGBA8 in `UNORDERED_ACCESS`
+  here, so PCSX2 takes the direct route.
+- **The ingest copy stays.** The shaders sample the frame as one slice of a two-slice `Texture2DArray` (`0.hlsl`
+  `Input`), and FFX's single backbuffer cannot be bound as a slice of it.
+- **The synthesized input's HUD mask** (`[FrameGen] SynthesizedHudDepth`, on by default) is no longer computed
+  while LSFG takes the frames. Its depth fed only FFX's prepare, which LSFG frames skip. The design note measured
+  it at 0.080 ms at 1080p and 0.174 ms at 3440x1440, at full clock (synthesized-frame-generation.md). The UI layer,
+  which FFX still composes, keeps it. The **motion estimate stays**: DLSS-NR takes it here (`[DlssNr]
+  SynthMotion`), and its scene cuts reset LSFG as well as FFX.
+- FFX's prepare and optical flow were already skipped on LSFG frames. The idle FFX context costs VRAM, not GPU time.
+
+Measured on the RTX 4090 at 1691x1312, quality, FP32, flow 1.0, in ms per generated frame. The bench rows are
+`tools/lsfg-study/ctxbench` at full clock, 1500 frames each. The game rows are PCSX2 under vkd3d-proton, NR on,
+from the 10 s summary windows at 1691x1312 without a mode change in them, at ~1650-1700 MHz. The A/B rows alternate
+the two schedules frame by frame, so both run at the same clocks.
+
+| | p50 | p99 |
+|---|---|---|
+| bench, `0ba40b6a` (before) | 0.607 | 0.637 |
+| bench, waves, copy-out forced (`--output-copy`) | 0.469 | 0.487 |
+| bench, waves, direct output | 0.445 | 0.491 |
+| PCSX2 before (steady windows) | 0.96-0.99 | 1.00-1.05 |
+| PCSX2 `OPTISCALER_LSFG_AB=1`, same frames: harness's schedule | 0.89-0.99 | 0.99-1.04 |
+| PCSX2 `OPTISCALER_LSFG_AB=1`, same frames: waves, direct | 0.67-0.76 | 0.76-0.81 |
+| PCSX2 after (steady windows) | 0.68-0.74 | 0.78-0.81 |
+
+- **Same images.** The bench hashes every generated frame of a 16-frame moving sequence (15 generated). The
+  hashes are identical across the `0ba40b6a` code, waves with direct output, waves with the copy-out, the
+  harness's schedule, and the two alternating frame by frame. BGRA8 is identical to `0ba40b6a` too. The reason is
+  structural: every dispatch reads the same finished inputs through the same views, only in a different order.
+- **Where the rest goes** (`ctxbench --wave-timing`, full clock): a wave of a few dozen thread groups costs ~4 µs
+  however little it does, and 35 of the 42 waves sit on the gamma chain. The heavy items are the ingest copy
+  15 µs, mipmaps 18, the alpha waves 63 together, the beta and level-0 waves 62, the level-6 waves ~80, and
+  generate 31. Any further gain is inside the shaders (FP16, `FP16_NOTES.md`), not in the recording.
+- **Open problems.**
+  - In game the GPU clock decides: 0.445 ms at full clock is ~0.7 ms at P3 clocks. That is the driver's DVFS, which
+    nothing in OptiScaler controls; pinning clocks would be a system setting, and was not changed for these runs.
+  - `OPTISCALER_LSFG_AB` is a study switch read from the environment, with no ini key.
+  - Native Windows with the debug layer is still needed for the new barrier batches. vkd3d-proton does not
+    validate them (CLAUDE.md, "Proton is not a D3D12 validator").
+
 The rest of this note is the design as written before any of it existed.
 
 It is the third part of the study: the harness (`tools/lsfg-study/harness/`) runs LSFG's pass graph on D3D12, a

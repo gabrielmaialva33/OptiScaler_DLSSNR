@@ -89,3 +89,29 @@ Func: User
   }
   ```
   If `Native16BitShaderOpsSupported` is false, fallback to the FP32 pipeline (resource IDs 3..26) rather than SM 6.0 `min16float` to maintain visual quality and avoid performance degradation.
+
+---
+
+## 6. What FP16 could still buy after the barrier waves (2026-10-13)
+
+Not attempted in the performance step (`OPTI_INTEGRATION.md`, "GPU cost, second step"). Native 16-bit needs the
+converter to emit `float16_t` for `cs_6_2` with `-enable-16bit-types`, plus the section 4 workarounds. That is
+`convert.py` / `LsfgShaderLibrary` work, not recording work. The recording side needs only the variant ids (+48),
+which `VariantRid` already handles. The per-wave timing bounds what it could buy (`tools/lsfg-study/ctxbench
+--wave-timing`, RTX 4090 at full clock, 1691x1312, quality, FP32, 0.445 ms per generated frame):
+
+- **Out of FP16's reach, about 230 µs:**
+  - the ingest copy, 15 µs;
+  - mipmaps, 18 µs, and generate, 31 µs: base shaders with no FP16 variant;
+  - a floor of ~4 µs per wave, whatever the wave holds, across 42 waves. The waves of a few dozen thread groups
+    cost exactly that.
+- **Where it could act, about 240 µs:** the core-shader waves that are compute-heavy.
+  - the alpha waves, 63 µs;
+  - the beta chain with gamma/delta level 0, 62 µs;
+  - gamma2/3 at level 2, 39 µs;
+  - the level-6 waves, ~80 µs.
+  Even a 2x on those alone would leave about 0.33 ms.
+- **Parity is the condition, and it is not met yet.** FP16 is Lossless Scaling's own lower-precision mode, so it is
+  judged against lsfg-vk's FP16 output, not against FP32. The `min16float` conversion reaches only 42.8-56.6 dB
+  there (harness README). A native conversion would have to reach the 72-75 dB the FP32 path reaches before its
+  timing means anything.
