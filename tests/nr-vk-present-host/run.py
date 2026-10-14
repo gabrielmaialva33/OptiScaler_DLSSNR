@@ -203,7 +203,7 @@ assert prepare.count('info.pWaitSemaphores') == 2  # one submit per route takes 
 for name in ('Prepared Prepare(', 'void AfterPresent(', 'Retired RetireSwapchain(', 'std::string TeardownDevice(',
              'uint32_t Poll(', 'bool WaitSlot(', 'NrDecision DecideNr(', 'void StandDown(', 'void TakeModelLines(',
              'std::string MissingFormatFeatures(', 'void Observed(', 'void Housekeep(', 'void StartHandBack(',
-             'void PollHandBack(', 'void EndHandBack('):
+             'void PollHandBack(', 'bool EndHandBack('):
     held = code(function(host, name))
     assert 'LOG_' not in held and 'next(' not in held, name
 
@@ -337,11 +337,12 @@ assert 'VULKAN_Shutdown1()(' not in code(model) and 'shutdown(device, &remaining
 # model of the host's on the device and the route quiet there; followed at every present, before any refusal.
 housekeep_flat = flat(housekeep)
 assert re.search(r'if \(dev\.handBack\.active\) PollHandBack\(dev\); else if \(dev\.model == nullptr && .*'
-                 r'CouldRunModel\(dev\) && DlssNr::AfterUpscaleIdleOn\(dev\.device\)\) StartHandBack\(dev\);',
+                 r'DlssNr::AfterUpscaleIdleOn\(dev\.device\) && CouldRunModel\(dev\)\) StartHandBack\(dev\);',
                  housekeep_flat), housekeep_flat
 assert housekeep.index('StartHandBack(dev)') < housekeep.index('if (dev.model == nullptr)')
-could_run = code(function(host, 'bool CouldRunModel(const DeviceTransport& dev)'))
-for needed in ('DlssNrEnabled', 'dev.nrReady', 'dev.lost', 'sc.colour.sdr', 'sc.nrOff.empty()', '!sc.retired'):
+could_run = code(function(host, 'bool CouldRunModel(DeviceTransport& dev)'))
+for needed in ('DlssNrEnabled', 'dev.nrReady', 'dev.lost', 'sc.colour.sdr', 'sc.nrOff.empty()', '!sc.retired',
+               'PresentHostMustYield(dev.device)', 'MissingFormatFeatures(dev, sc.colour.raw).empty()'):
     assert needed in could_run, needed
 # Never waits: every queue's present and submit locks try-locked (a refusal tries again at the next present); the
 # fences made before the hand-back begins, and submitted only after it began, each on an empty batch.
@@ -364,20 +365,23 @@ assert poll_hb.count('FinishAfterUpscaleHandBack(') == 1 and 'waitForFences' not
 assert re.search(r'if \(status == VK_NOT_READY\)\s*\{.*?return;\s*\}', poll_hb, re.S)
 # The device going: the drain's fences within the drain's bound, the hand-back off, then the after-upscale route's
 # objects on the device abandoned and its token released, before NGX on it is shut down; lost, nothing waited for.
-end_hb = code(function(host, 'void EndHandBack(DeviceTransport& dev, uint64_t budgetNs)'))
+end_hb = code(function(host, 'bool EndHandBack(DeviceTransport& dev, uint64_t budgetNs)'))
 assert end_hb.index('CancelAfterUpscaleHandBack(') < end_hb.index('waitForFences(')
 assert end_hb.index('!dev.lost') < end_hb.index('waitForFences(') < end_hb.index('destroyFence(')
 for name, text in (('TeardownDevice', teardown), ('AbandonModel', abandon_model)):
     assert text.index('EndHandBack(dev') < text.index('AfterUpscaleDeviceGone(dev.device') < \
         text.index('ShutdownPresentNgx(dev.device'), name
-assert 'EndHandBack(dev, 0);' in abandon_model
+assert 'EndHandBack(dev, 0);' in abandon_model and 'AfterUpscaleDeviceGone(dev.device, true, dev.lines);' in abandon_model
+# The route's objects are freed at the device's destruction only where nothing says the GPU may still be busy.
+assert ('AfterUpscaleDeviceGone(dev.device, dev.lost || forgetOnly || abandoned != 0 || !drained, dev.lines);'
+        in teardown)
 
 # The route's side (DlssNrFeature_Vk.cpp). Its lock never waited for under the host's; the token released before
 # anything is freed, and nothing freed unless the hand-back finished; freed without a device-wide wait (the drain proved
 # it idle), which ShutdownVk(true) still does first.
 finish = code(function(feature_vk, 'AfterUpscaleHandBack FinishAfterUpscaleHandBack(VkDevice device, '))
 assert 'std::unique_lock<std::mutex> route(g_vkMutex, std::try_to_lock);' in finish
-assert finish.index('g_owner.FinishHandBack()') < finish.index('return AfterUpscaleHandBack::Cancelled;') < \
+assert finish.index('g_owner.FinishHandBack(reinterpret_cast<uint64_t>(device))') < finish.index('return AfterUpscaleHandBack::Cancelled;') < \
     finish.index('return AfterUpscaleHandBack::NotRetiring;') < finish.index('FreeRouteObjects();')
 assert finish.count('FreeRouteObjects();') == 1 and 'DeviceWaitIdle' not in finish
 free_route = code(function(feature_vk, 'void FreeRouteObjects()'))
@@ -386,6 +390,13 @@ assert 'g_vk.floatSlotKnown = false;' in free_route
 shutdown_vk = code(function(feature_vk, 'void ShutdownVk(bool deviceAlive)'))
 assert shutdown_vk.index('vkDeviceWaitIdle(g_vk.device)') < shutdown_vk.index('FreeRouteObjects();')
 assert code(feature_vk).count('FreeRouteObjects();') == 2
+# The idle clock counts from the end of the route's recording: a guard right after its claim stamps it when the evaluate
+# returns, whatever path it takes.
+claimed = flat(after_upscale)
+assert claimed.index('if (!ClaimModelForAfterUpscale(device)) return;') < claimed.index('} recordingDone;') < \
+    claimed.index('g_vk.instance = instance;')
+assert re.search(r'~RecordingDone\(\)\s*\{\s*std::lock_guard<std::mutex> lock\(g_ownerMutex\);\s*'
+                 r'g_owner\.AfterUpscaleDone\(OwnerNowMs\(\)\);', after_upscale)
 # The route records nothing before it asks: a hand-back it did not call off saw everything it recorded drained.
 before_claim = after_upscale[:after_upscale.index('ClaimModelForAfterUpscale(device)')]
 assert not re.search(r'vkCmd|cmdBuffer\)|\(void\*\) cmdBuffer|->Dispatch|g_fwd\.(create|evaluate)', before_claim[
@@ -393,15 +404,18 @@ assert not re.search(r'vkCmd|cmdBuffer\)|\(void\*\) cmdBuffer|->Dispatch|g_fwd\.
 # Taking the token from nobody, the route finds the forwarder's float slot again for its own parameter block.
 claim = code(function(feature_vk, 'bool ClaimModelForAfterUpscale(VkDevice device)'))
 assert re.search(r'if \(!held\)\s*\{\s*g_vk\.floatSlotKnown = false;', claim)
-# The device's destruction abandons the route's objects on it (ShutdownVk(false)) and gives its token back.
-gone = code(function(feature_vk, 'void AfterUpscaleDeviceGone(VkDevice device, std::vector<std::string>& lines)'))
-assert gone.index('ShutdownVk(false);') < gone.index('g_owner.DeviceGone(')
-assert 'ShutdownVk(true)' not in code(feature_vk)
+# The device's destruction frees the route's objects on it once the device is idle (ShutdownVk(true): before NGX is
+# shut down on it), or only forgets them (ShutdownVk(false)) when it is lost or its GPU may be busy; then the token goes
+# back. That is the one ShutdownVk(true) of the file.
+gone = code(function(feature_vk, 'void AfterUpscaleDeviceGone(VkDevice device, bool forgetOnly, '))
+assert re.search(r'if \(forgetOnly\)\s*\{\s*ShutdownVk\(false\);', gone), gone
+assert gone.index('ShutdownVk(false);') < gone.index('ShutdownVk(true);') < gone.index('g_owner.DeviceGone(')
+assert code(feature_vk).count('ShutdownVk(true)') == 1
 
-print('PASS: the way back (begun only with no model here and the route quiet; queues try-locked, fences made before '
-      'and submitted after the hand-back began; the route freed only once every fence signalled and the token was '
-      'released, without a device-wide wait; the route records nothing before it asks; the device going ends it)',
-      flush=True)
+print('PASS: the way back (begun only with no model here and the route quiet since its last recording ended; queues '
+      'try-locked, fences made before and submitted after the hand-back began; the route freed only once every fence '
+      'signalled and the token was released, without a device-wide wait; the route records nothing before it asks; '
+      'the device going ends it, the route freed only where the GPU is proven done)', flush=True)
 
 print('PASS: stage-3 guards (decided before recording, counted on submit, seen complete on a fence, freed only idle, '
       'abandoned on loss; after-upscale route asks first; passthrough encode; semaphores freed after the destroy)',

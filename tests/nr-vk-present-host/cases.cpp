@@ -1008,8 +1008,23 @@ static void OwnerArbitration()
 }
 
 // The way back (DOOM Eternal, 2026-10-14): the game's DLSS turned off left the after-upscale route holding the model
-// for the session. Once it has not asked for kAfterUpscaleIdleMs the present host takes it back; asking again is the
-// ordinary stand-down, as many times as the game turns its upscaler on and off.
+// for the session. Once it has been out of an evaluate for kAfterUpscaleIdleMs the present host takes it back; asking
+// again is the ordinary stand-down, as many times as the game turns its upscaler on and off.
+//
+// One evaluate of the route: granted (or not) at `at`, its recording over `takes` later.
+static DlssNr::VkModelOwner::Verdict Evaluate(DlssNr::VkModelOwner::Arbiter& a, uint64_t device, uint64_t at,
+                                               uint64_t takes = 2)
+{
+    const auto verdict = a.AfterUpscale(device, at);
+    if (verdict.granted)
+    {
+        CHECK(a.Recording() && a.IdleAfterUpscaleDevice(at + 100000) == 0);
+        a.AfterUpscaleDone(at + takes);
+        CHECK(!a.Recording());
+    }
+    return verdict;
+}
+
 static void OwnerHandBack()
 {
     using namespace DlssNr::VkModelOwner;
@@ -1025,23 +1040,23 @@ static void OwnerHandBack()
     for (int cycle = 0; cycle < 3; ++cycle)
     {
         // DLSS on: the route asks; the present host yields, releases once drained, and the route takes the model.
-        Verdict v = a.AfterUpscale(d1, now);
-        CHECK(!v.granted && v.reason == kHeldByPresentHost);
+        Verdict v = Evaluate(a, d1, now);
+        CHECK(!v.granted && v.reason == kHeldByPresentHost && !a.Recording());
         CHECK(a.PresentHostMustYield(d1, now + 1));
         CHECK(a.IdleAfterUpscaleDevice(now + 1) == 0);
         a.Release(Who::PresentHost, d1);
-        CHECK(a.AfterUpscale(d1, now + 16).granted && a.Owner() == Who::AfterUpscale && a.Device() == d1);
+        CHECK(Evaluate(a, d1, now + 16).granted && a.Owner() == Who::AfterUpscale && a.Device() == d1);
 
         // It evaluates for a minute, every frame; never idle, nothing to hand back.
         uint64_t last = now + 16;
         for (uint64_t frame = last; frame < now + 60000; frame += 16)
         {
-            CHECK(a.AfterUpscale(d1, frame).granted);
+            CHECK(Evaluate(a, d1, frame).granted);
             CHECK(!a.BeginHandBack(d1, frame + 8));
-            last = frame;
+            last = frame + 2; // its recording's end
         }
 
-        // DLSS off: the route stops asking. Not idle until kAfterUpscaleIdleMs has passed since its last ask.
+        // DLSS off: the route stops asking. Not idle until kAfterUpscaleIdleMs has passed since its last recording.
         v = a.PresentHost(d1, last + kAfterUpscaleIdleMs - 1);
         CHECK(!v.granted && v.reason == kAfterUpscaleOwns);
         CHECK(a.IdleAfterUpscaleDevice(last + kAfterUpscaleIdleMs - 1) == 0);
@@ -1058,10 +1073,12 @@ static void OwnerHandBack()
         CHECK(a.IdleAfterUpscaleDevice(idle + 1) == 0 && !a.BeginHandBack(d1, idle + 1));
         CHECK(a.Owner() == Who::AfterUpscale);
 
-        // Drained: the token is released, and the present host takes the model back on the route's device.
-        CHECK(a.FinishHandBack() == HandBack::Done);
+        // Drained: the token is released, and the present host takes the model back on the route's device. Finishing
+        // another device's drain, or one never begun, changes nothing.
+        CHECK(a.FinishHandBack(d2) == HandBack::NotRetiring && a.Retiring());
+        CHECK(a.FinishHandBack(d1) == HandBack::Done);
         CHECK(a.Owner() == Who::None && a.Device() == 0 && !a.Retiring());
-        CHECK(a.FinishHandBack() == HandBack::NotRetiring);
+        CHECK(a.FinishHandBack(d1) == HandBack::NotRetiring);
         CHECK(a.PresentHost(d1, idle + 2).granted);
         a.Take(d1);
         CHECK(!a.PresentHostMustYield(d1, idle + 3));
@@ -1069,36 +1086,51 @@ static void OwnerHandBack()
         now = idle + 5000; // NR at present for five seconds, then DLSS on again
     }
 
-    // The route asking again while its queues drain calls the hand-back off: it keeps the model and everything of its,
-    // and the next idle window starts from that ask.
+    // The quiet counts from the end of the route's last recording, not from its ask: an evaluate that builds a cold
+    // feature for longer than the window is never handed back under it, nor right after it.
     a.Release(Who::PresentHost, d1);
-    CHECK(a.AfterUpscale(d1, 500000).granted);
-    CHECK(a.BeginHandBack(d1, 500000 + kAfterUpscaleIdleMs));
-    CHECK(a.AfterUpscale(d1, 500000 + kAfterUpscaleIdleMs + 3).granted && a.Owner() == Who::AfterUpscale);
-    CHECK(a.FinishHandBack() == HandBack::Cancelled);
-    CHECK(a.Owner() == Who::AfterUpscale && a.Device() == d1 && !a.Retiring());
-    CHECK(a.IdleAfterUpscaleDevice(500000 + 2 * kAfterUpscaleIdleMs) == 0);
-    CHECK(a.IdleAfterUpscaleDevice(500000 + 2 * kAfterUpscaleIdleMs + 3) == d1);
-    // A route that asks while its queues drain and goes quiet again: still called off, nothing freed.
-    CHECK(a.BeginHandBack(d1, 500000 + 2 * kAfterUpscaleIdleMs + 3));
-    CHECK(a.AfterUpscale(d1, 500000 + 2 * kAfterUpscaleIdleMs + 4).granted);
-    CHECK(a.FinishHandBack() == HandBack::Cancelled && a.Owner() == Who::AfterUpscale);
+    CHECK(a.AfterUpscale(d1, 400000).granted && a.Recording());
+    CHECK(a.IdleAfterUpscaleDevice(400000 + 3 * kAfterUpscaleIdleMs) == 0);
+    CHECK(!a.BeginHandBack(d1, 400000 + 3 * kAfterUpscaleIdleMs));
+    a.AfterUpscaleDone(400000 + 3 * kAfterUpscaleIdleMs);
+    CHECK(a.IdleAfterUpscaleDevice(400000 + 4 * kAfterUpscaleIdleMs - 1) == 0);
+    CHECK(a.IdleAfterUpscaleDevice(400000 + 4 * kAfterUpscaleIdleMs) == d1);
+    a.AfterUpscaleDone(400000 + 5 * kAfterUpscaleIdleMs); // not recording: nothing moves
+    CHECK(a.IdleAfterUpscaleDevice(400000 + 4 * kAfterUpscaleIdleMs) == d1);
 
-    // A drain that cannot finish (a submit failed, the device lost): off, the route keeps the model.
+    // The route asking again while its queues drain calls the hand-back off: it keeps the model and everything of its,
+    // and the next idle window starts from that recording.
+    CHECK(Evaluate(a, d1, 500000).granted);
+    CHECK(a.BeginHandBack(d1, 500002 + kAfterUpscaleIdleMs));
+    CHECK(Evaluate(a, d1, 500002 + kAfterUpscaleIdleMs + 3).granted && a.Owner() == Who::AfterUpscale);
+    CHECK(a.FinishHandBack(d1) == HandBack::Cancelled);
+    CHECK(a.Owner() == Who::AfterUpscale && a.Device() == d1 && !a.Retiring());
+    CHECK(a.IdleAfterUpscaleDevice(500002 + 2 * kAfterUpscaleIdleMs + 4) == 0);
+    CHECK(a.IdleAfterUpscaleDevice(500002 + 2 * kAfterUpscaleIdleMs + 5) == d1);
+    // A route that asks while its queues drain and goes quiet again: still called off, nothing freed.
+    const uint64_t again = 500002 + 2 * kAfterUpscaleIdleMs + 5;
+    CHECK(a.BeginHandBack(d1, again));
+    CHECK(Evaluate(a, d1, again + 1).granted);
+    CHECK(a.FinishHandBack(d1) == HandBack::Cancelled && a.Owner() == Who::AfterUpscale);
+
+    // A drain that cannot finish (a submit failed, the device lost): off, the route keeps the model. Calling off
+    // another device's drain changes nothing.
     CHECK(a.BeginHandBack(d1, 600000));
-    a.CancelHandBack();
-    CHECK(!a.Retiring() && a.Owner() == Who::AfterUpscale && a.FinishHandBack() == HandBack::NotRetiring);
+    a.CancelHandBack(d2);
+    CHECK(a.Retiring());
+    a.CancelHandBack(d1);
+    CHECK(!a.Retiring() && a.Owner() == Who::AfterUpscale && a.FinishHandBack(d1) == HandBack::NotRetiring);
     CHECK(a.PresentHost(d1, 600001).reason == kAfterUpscaleOwns);
 
     // Loading screens and menus: a route that pauses for less than the idle window, again and again, never loses it.
     Arbiter b;
     uint64_t t = 1000;
-    CHECK(b.AfterUpscale(d1, t).granted);
+    CHECK(Evaluate(b, d1, t, 0).granted);
     for (int pause = 0; pause < 20; ++pause)
     {
         t += kAfterUpscaleIdleMs - 1;
         CHECK(b.IdleAfterUpscaleDevice(t) == 0 && !b.BeginHandBack(d1, t));
-        CHECK(b.AfterUpscale(d1, t).granted);
+        CHECK(Evaluate(b, d1, t, 0).granted);
     }
     CHECK(b.Owner() == Who::AfterUpscale);
 
@@ -1106,7 +1138,7 @@ static void OwnerHandBack()
     CHECK(b.IdleAfterUpscaleDevice(t - 1) == 0);
 
     // The route's own device change moves the token: the present host on the new device sees it idle there.
-    CHECK(b.AfterUpscale(d2, t + 1).granted);
+    CHECK(Evaluate(b, d2, t + 1, 0).granted);
     CHECK(b.IdleAfterUpscaleDevice(t + 1 + kAfterUpscaleIdleMs) == d2);
     CHECK(!b.BeginHandBack(d1, t + 1 + kAfterUpscaleIdleMs));
 
@@ -1122,14 +1154,35 @@ static void OwnerHandBack()
 
     // ... during a hand-back too, and for the present host's own token.
     Arbiter c;
-    CHECK(c.AfterUpscale(d1, 0).granted);
+    CHECK(Evaluate(c, d1, 0, 0).granted);
     CHECK(c.BeginHandBack(d1, kAfterUpscaleIdleMs) && c.Retiring());
     c.DeviceGone(d1);
-    CHECK(c.Owner() == Who::None && !c.Retiring() && c.FinishHandBack() == HandBack::NotRetiring);
+    CHECK(c.Owner() == Who::None && !c.Retiring() && c.FinishHandBack(d1) == HandBack::NotRetiring);
     CHECK(c.PresentHost(d2, kAfterUpscaleIdleMs + 1).granted);
     c.Take(d2);
     c.DeviceGone(d2);
     CHECK(c.Owner() == Who::None);
+
+    // A drain under way on d1 when the route moves to d2 (the review, 2026-10-14): the move calls it off, and d1 then
+    // destroyed or lost before its drain is seen through ends the hand-back -- it must not stay open for the session,
+    // or the present host would be refused (kAfterUpscaleRetiring) and never see the route idle again.
+    for (int ending = 0; ending < 3; ++ending)
+    {
+        Arbiter e;
+        CHECK(Evaluate(e, d1, 0, 0).granted);
+        CHECK(e.BeginHandBack(d1, kAfterUpscaleIdleMs));
+        CHECK(Evaluate(e, d2, kAfterUpscaleIdleMs + 1, 0).granted && e.Device() == d2);
+        if (ending == 0)
+            e.DeviceGone(d1); // destroyed
+        else if (ending == 1)
+            e.CancelHandBack(d1); // lost, or its drain failed
+        else
+            CHECK(e.FinishHandBack(d1) == HandBack::Cancelled); // drained: the route moved, nothing of d1's freed
+        CHECK(!e.Retiring() && e.Owner() == Who::AfterUpscale && e.Device() == d2);
+        CHECK(e.IdleAfterUpscaleDevice(2 * kAfterUpscaleIdleMs + 1) == d2);
+        CHECK(e.BeginHandBack(d2, 2 * kAfterUpscaleIdleMs + 1));
+        CHECK(e.FinishHandBack(d2) == HandBack::Done && e.Owner() == Who::None);
+    }
 }
 
 // The model's results in the lines: per window, and in a swapchain's last line.
