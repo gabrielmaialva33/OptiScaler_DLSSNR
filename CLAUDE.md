@@ -156,7 +156,7 @@ commands below work as written, from any cwd. The other scripts we own (`tools/d
   seven-minute stall. And the detector used to return "not stalled" whenever it saw no compiler
   process, which fails *open*: a detector that cannot see anything reports health. It now samples
   every build process including msbuild, and only an empty process list — the build genuinely being
-  over — counts as not-stalled. Per-invocation logs are `x64/build-forwarder.log` and `x64/build-optiscaler.log`;
+  over — counts as not-stalled. Per-invocation logs are `x64/logs/build-forwarder.log` and `x64/logs/build-optiscaler.log`;
   watchdog events go to stderr. The original single-invocation form is in git history.
 - **Observed recovery, by hand** (before the watchdog existed): build the forwarder project on its
   own with the original flags, then run the normal build. This is what the script now automates.

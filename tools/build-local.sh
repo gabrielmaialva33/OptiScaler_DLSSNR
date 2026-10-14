@@ -105,9 +105,10 @@ run_msbuild() {
   return 1
 }
 
-run_msbuild forwarder "$ROOT/x64/build-forwarder.log" \
+mkdir -p "$ROOT/x64/logs"
+run_msbuild forwarder "$ROOT/x64/logs/build-forwarder.log" \
   retoque/dlssnr/forwarder/dlssnr_forwarder.vcxproj "${common[@]}" "${@:2}"
-run_msbuild optiscaler "$ROOT/x64/build-optiscaler.log" \
+run_msbuild optiscaler "$ROOT/x64/logs/build-optiscaler.log" \
   OptiScaler/OptiScaler.vcxproj "${common[@]}" "${@:2}"
 
 mkdir -p "$ROOT/x64/out"
