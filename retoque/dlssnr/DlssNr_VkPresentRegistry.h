@@ -1,7 +1,7 @@
 #pragma once
 
 // What the Vulkan present host has seen, and the lines that say so (docs/dlssnr/design/nr-vulkan-present-host.md,
-// stages 1 and 2).
+// stages 1 to 3).
 //
 // hooks/Vulkan_Hooks.cpp remembers one of each thing -- _instance, _PD, _device, _hwnd, and o_CreateSwapchainKHR as a
 // first-device sentinel -- the last one seen, for the overlay. A present host has to know, for any present, which
@@ -173,6 +173,7 @@ struct PresentView
     bool internal = false; // OptiScaler's own device: never transported, never counted
     Handle device = 0;
     Handle physical = 0;
+    Handle instance = 0; // the physical device's instance, 0 when not on record
     RecordId deviceId = 0;
     RecordId swapchainId = 0;
     uint32_t presentFamily = 0;
@@ -184,6 +185,7 @@ struct PresentView
     Handle image = 0;
     uint32_t imageCount = 0;
     bool acquired = false; // an acquire of the image was observed since its last present
+    bool retired = false;  // a newer swapchain named this one as its oldSwapchain
 };
 
 class Registry
@@ -193,6 +195,8 @@ class Registry
     {
         RecordId id = 0;
         bool internal = false;
+        bool properties2 = false; // Vulkan 1.1 or VK_KHR_get_physical_device_properties2: what the NR extensions need
+        uint32_t apiVersion = 0;  // VkApplicationInfo::apiVersion (0 when none was given: Vulkan 1.0)
     };
 
     struct Physical
@@ -289,7 +293,7 @@ class Registry
 
     // --- Creation and destruction --------------------------------------------------------------------------------
 
-    RecordId OnInstanceCreated(Handle instance, bool internal)
+    RecordId OnInstanceCreated(Handle instance, bool internal, bool properties2 = false, uint32_t apiVersion = 0)
     {
         if (instance == 0)
             return 0;
@@ -301,7 +305,7 @@ class Registry
         }
 
         const RecordId id = Next();
-        _instances[instance] = Instance { id, internal };
+        _instances[instance] = Instance { id, internal, properties2, apiVersion };
         return id;
     }
 
@@ -716,6 +720,34 @@ class Registry
         return found != _devices.end() ? found->second.desc.physical : 0;
     }
 
+    // The instance a physical device was enumerated from, 0 when not on record.
+    Handle InstanceOf(Handle physical) const
+    {
+        const auto found = _physicals.find(physical);
+        return found != _physicals.end() ? found->second.instance : 0;
+    }
+
+    // The API version the instance a physical device was enumerated from asked for, 0 when not on record.
+    uint32_t ApiVersionOf(Handle physical) const
+    {
+        const auto physicalFound = _physicals.find(physical);
+        if (physicalFound == _physicals.end())
+            return 0;
+        const auto instance = _instances.find(physicalFound->second.instance);
+        return instance != _instances.end() ? instance->second.apiVersion : 0;
+    }
+
+    // Whether the instance a physical device was enumerated from can take the NR extensions' dependencies (Vulkan 1.1
+    // or VK_KHR_get_physical_device_properties2). False when the instance is not on record.
+    bool Properties2Of(Handle physical) const
+    {
+        const auto physicalFound = _physicals.find(physical);
+        if (physicalFound == _physicals.end())
+            return false;
+        const auto instance = _instances.find(physicalFound->second.instance);
+        return instance != _instances.end() && instance->second.properties2;
+    }
+
     const Stats& GetStats() const { return _stats; }
     size_t LiveDevices() const { return _devices.size(); }
     size_t LiveQueues() const { return _queues.size(); }
@@ -745,6 +777,7 @@ class Registry
         view.internal = device.desc.internal;
         view.device = queueFound->second.device;
         view.physical = device.desc.physical;
+        view.instance = InstanceOf(device.desc.physical);
         view.deviceId = device.id;
         view.swapchainId = record.id;
         view.presentFamily = queueFound->second.family;
@@ -756,6 +789,7 @@ class Registry
         view.imageKnown = index < record.images.size();
         view.image = view.imageKnown ? record.images[index] : 0;
         view.acquired = index < record.acquired.size() && record.acquired[index] != 0;
+        view.retired = record.retired;
         return true;
     }
 
@@ -789,16 +823,23 @@ class Registry
         return found != _swapchains.end() ? found->second.acquired : std::vector<uint8_t> {};
     }
 
-    // Completions of round trips observed when a swapchain was retired (its last ones, which no later present polled).
-    void OnCompletions(Handle device, Handle swapchain, uint64_t completions)
+    // Completions of round trips observed when a swapchain was retired (its last ones, which no later present polled),
+    // with the model's pass GPU times read back from them.
+    void OnCompletions(Handle device, Handle swapchain, uint64_t completions, uint32_t timed = 0, double lastMs = 0.0,
+                       double maxMs = 0.0, double sumMs = 0.0)
     {
         auto found = _swapchains.find(SwapchainKey { device, swapchain });
-        if (found == _swapchains.end() || completions == 0)
+        if (found == _swapchains.end() || (completions == 0 && timed == 0))
             return;
 
         found->second.transport.completions += completions;
+        found->second.transport.AddGpuTimes(timed, lastMs, maxMs, sumMs);
         if (found->second.hasWindow)
-            Find(found->second).transport.completions += completions;
+        {
+            Window& window = Find(found->second);
+            window.transport.completions += completions;
+            window.transport.AddGpuTimes(timed, lastMs, maxMs, sumMs);
+        }
     }
 
     // Written once when a swapchain is created: what was asked, what the driver got, and whether the round trip runs.
@@ -845,7 +886,7 @@ class Registry
 
         return "DLSS-NR Vulkan present host: swapchain " + Hex(swapchain) + " #" + std::to_string(record.id) +
                " destroyed after " + std::to_string(record.presents) + " presents; " + TransportText(record.transport) +
-               (resources.empty() ? "" : "; " + resources);
+               (resources.empty() ? "" : "; " + resources) + "; " + NrText(record.transport.nr);
     }
 
     // The line written when a device is created, for the log and the tests.
@@ -964,7 +1005,7 @@ class Registry
         const SwapchainDesc& d = swapchain.desc;
         const auto n = [](uint64_t value) { return std::to_string(value); };
 
-        std::string line = "DLSS-NR Vulkan present host (round trip, no NR): window ";
+        std::string line = "DLSS-NR Vulkan present host (cold NR): window ";
         line += window.hwndKnown ? Hex(window.hwnd) : std::string("unknown");
         line += " (" + why + "); presents " + n(window.presents) + ", swapchains " + n(window.swapchainIds.size()) +
                 ", devices " + n(window.deviceIds.size());
@@ -1058,6 +1099,7 @@ class Registry
         if (!window.firstNoRoute.empty())
             line += "; first no-route reason: " + window.firstNoRoute;
 
+        line += "; " + NrText(window.transport.nr);
         return line;
     }
 

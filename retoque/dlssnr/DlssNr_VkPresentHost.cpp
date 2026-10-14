@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "DlssNr_VkPresentHost.h"
+#include "DlssNr_VkPresentModel.h"
 #include "DlssNr_VkPresentRegistry.h"
 #include "DlssNr_VkPresentTransport.h"
 
@@ -23,6 +24,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -30,12 +32,14 @@
 
 #pragma intrinsic(_ReturnAddress)
 
-// Stages 1 and 2 of docs/dlssnr/design/nr-vulkan-present-host.md: see DlssNr_VkPresentHost.h. Every hook below calls
+// Stages 1 to 3 of docs/dlssnr/design/nr-vulkan-present-host.md: see DlssNr_VkPresentHost.h. Every hook below calls
 // down to the trampoline of the target it was attached to, once. Stage 1's hooks hand their own arguments down; stage
 // 2 changes exactly two things on the way: the image usage of an eligible swapchain (TRANSFER_SRC/TRANSFER_DST added,
 // decided before the call), and the wait semaphores of a transported present (the application's are waited on by the
 // round trip, and the present waits on the host's semaphore instead; everything else of VkPresentInfoKHR, its pNext
-// chain included, goes down as it came).
+// chain included, goes down as it came). Stage 3 changes one more: the extension list of a device the host will carry
+// presents on, which gets the model's device extensions the device offers (decided before the call, never retried);
+// and it runs the model (DlssNr_VkPresentModel.h) inside the round trip's own command buffer.
 //
 // Locks. Each queue the application retrieves has two (g_queueLocks): a submit lock, which the queue-call hooks
 // (submit, bind sparse, wait idle) take around their call down, and a present lock, which the present hook takes for
@@ -70,6 +74,9 @@ PFN_vkGetPhysicalDeviceQueueFamilyProperties g_getQueueFamilies = nullptr;
 PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR g_getSurfaceCapabilities = nullptr;
 PFN_vkGetPhysicalDeviceMemoryProperties g_getMemoryProperties = nullptr;
 PFN_vkGetPhysicalDeviceImageFormatProperties g_getImageFormatProperties = nullptr;
+PFN_vkGetPhysicalDeviceFormatProperties g_getFormatProperties = nullptr;
+PFN_vkEnumerateDeviceExtensionProperties g_enumerateDeviceExtensions = nullptr;
+PFN_vkGetInstanceProcAddr g_getInstanceProcAddr = nullptr;
 
 // vulkan-1.dll's exports, one address each.
 PFN_vkCreateInstance o_CreateInstance = nullptr;
@@ -261,6 +268,7 @@ struct DeviceFns
     PFN_vkEndCommandBuffer endCommandBuffer = nullptr;
     PFN_vkCmdPipelineBarrier cmdPipelineBarrier = nullptr;
     PFN_vkCmdCopyImage cmdCopyImage = nullptr;
+    PFN_vkCmdBlitImage cmdBlitImage = nullptr;
     PFN_vkQueueSubmit queueSubmit = nullptr;
     PFN_vkCreateFence createFence = nullptr;
     PFN_vkDestroyFence destroyFence = nullptr;
@@ -275,6 +283,8 @@ struct DeviceFns
     PFN_vkAllocateMemory allocateMemory = nullptr;
     PFN_vkFreeMemory freeMemory = nullptr;
     PFN_vkBindImageMemory bindImageMemory = nullptr;
+    PFN_vkCreateImageView createImageView = nullptr;
+    PFN_vkDestroyImageView destroyImageView = nullptr;
 };
 
 // One frame of the round trip in flight. Its command buffers, semaphores and fence are reused only once the fence was
@@ -293,6 +303,7 @@ struct Slot
     uint32_t presentFamily = UINT32_MAX;
     VkSemaphore toWork = VK_NULL_HANDLE;    // cross-family: presenting queue -> work queue
     VkSemaphore toPresent = VK_NULL_HANDLE; // ... and back
+    uint64_t nrTicket = 0;                  // the model's frame in this slot's work buffer, until seen complete
 };
 
 struct SwapchainTransport
@@ -301,12 +312,25 @@ struct SwapchainTransport
     std::string off; // why the round trip stopped after creation, when it did
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkExtent2D extent {};
+    RecordId id = 0;      // the registry's record of it
+    bool retired = false; // a newer swapchain named it as its oldSwapchain
+
+    // Stage 3: whether the model may be shown it, and the raw format its bytes are copied through (the sRGB formats'
+    // UNORM twins, so nothing is decoded on the way; the swapchain's own format otherwise).
+    ColourPlan colour;
+    std::string nrOff; // the model is off for this swapchain (its working colour could not be made)
+    bool nrCut = true; // its next frame of the model starts the history over: the first, or one after a gap
 
     // One work image per swapchain: every slot's round trip runs on one queue (a change of queue waits for the ring),
-    // and each recording orders its first write after the previous recording's reads on that queue.
+    // and each recording orders its first write after the previous recording's reads on that queue. In the raw format.
     VkImage work = VK_NULL_HANDLE;
     VkDeviceMemory workMemory = VK_NULL_HANDLE;
     VkQueue lastWorkQueue = VK_NULL_HANDLE;
+
+    // The working colour the model's pass reads and writes (kWorkingFormat), blitted from the work image and back.
+    VkImage working = VK_NULL_HANDLE;
+    VkDeviceMemory workingMemory = VK_NULL_HANDLE;
+    VkImageView workingView = VK_NULL_HANDLE;
 
     // Per swapchain image: the semaphore the present waits on. Reused only for a present of the same image, which needs
     // that image acquired again since, and the validation layer's own advice for exactly this ("a separate semaphore
@@ -326,12 +350,16 @@ struct Leftover
     std::vector<Slot> slots;
     VkImage work = VK_NULL_HANDLE;
     VkDeviceMemory workMemory = VK_NULL_HANDLE;
+    VkImage working = VK_NULL_HANDLE;
+    VkDeviceMemory workingMemory = VK_NULL_HANDLE;
+    VkImageView workingView = VK_NULL_HANDLE;
 };
 
 struct DeviceTransport
 {
     VkDevice device = VK_NULL_HANDLE;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
+    VkInstance instance = VK_NULL_HANDLE;
     RecordId id = 0;
     DeviceFns fn;
     VkPhysicalDeviceMemoryProperties memory {};
@@ -340,8 +368,18 @@ struct DeviceTransport
     bool leaked = false; // a command buffer whose completion is unknown was left in a pool: never destroy the pools
     std::unordered_map<uint32_t, VkCommandPool> pools; // by family
     std::unordered_map<VkSwapchainKHR, SwapchainTransport> swapchains;
-    std::vector<VkSemaphore> retained; // present semaphores no reacquire proved free, destroyed with the device
+    std::vector<VkSemaphore> retained; // present semaphores nothing proved free, destroyed with the device
     std::vector<Leftover> leftovers;
+
+    // Stage 3. The model's extensions at creation (ExtensionPlan::ready), and why not.
+    bool nrReady = false;
+    std::string nrMissing;
+    std::vector<uint32_t> timestampBits;             // per queue family
+    std::unordered_map<uint32_t, uint32_t> features; // optimal-tiling format features, by format, as queried
+    std::unique_ptr<DlssNr::VkPresentModel> model;   // made at the first frame it may run on
+    RecordId modelSwapchain = 0;                     // the swapchain the model serves (one at a time)
+    uint64_t nextTicket = 1;
+    std::vector<std::string> lines; // the model's lines, logged once the transport's lock is released
 };
 
 std::mutex g_transportMutex;
@@ -374,6 +412,7 @@ std::unique_ptr<DeviceTransport> MakeDeviceTransport(VkDevice device, VkPhysical
     ok = ok && Resolve(device, "vkEndCommandBuffer", f.endCommandBuffer);
     ok = ok && Resolve(device, "vkCmdPipelineBarrier", f.cmdPipelineBarrier);
     ok = ok && Resolve(device, "vkCmdCopyImage", f.cmdCopyImage);
+    ok = ok && Resolve(device, "vkCmdBlitImage", f.cmdBlitImage);
     ok = ok && Resolve(device, "vkQueueSubmit", f.queueSubmit);
     ok = ok && Resolve(device, "vkCreateFence", f.createFence);
     ok = ok && Resolve(device, "vkDestroyFence", f.destroyFence);
@@ -388,6 +427,8 @@ std::unique_ptr<DeviceTransport> MakeDeviceTransport(VkDevice device, VkPhysical
     ok = ok && Resolve(device, "vkAllocateMemory", f.allocateMemory);
     ok = ok && Resolve(device, "vkFreeMemory", f.freeMemory);
     ok = ok && Resolve(device, "vkBindImageMemory", f.bindImageMemory);
+    ok = ok && Resolve(device, "vkCreateImageView", f.createImageView);
+    ok = ok && Resolve(device, "vkDestroyImageView", f.destroyImageView);
 
     if (!ok)
         dev->off = "a device function the round trip needs did not resolve";
@@ -483,15 +524,51 @@ void DestroySlot(DeviceTransport& dev, Slot& slot)
     slot = Slot {};
 }
 
-void DestroyWorkImage(DeviceTransport& dev, VkImage& image, VkDeviceMemory& memory)
+void DestroyWorkImage(DeviceTransport& dev, VkImage& image, VkDeviceMemory& memory, VkImageView* view = nullptr)
 {
+    if (view != nullptr && *view != VK_NULL_HANDLE)
+        dev.fn.destroyImageView(dev.device, *view, nullptr);
     if (image != VK_NULL_HANDLE)
         dev.fn.destroyImage(dev.device, image, nullptr);
     if (memory != VK_NULL_HANDLE)
         dev.fn.freeMemory(dev.device, memory, nullptr);
 
+    if (view != nullptr)
+        *view = VK_NULL_HANDLE;
     image = VK_NULL_HANDLE;
     memory = VK_NULL_HANDLE;
+}
+
+// The model's pass GPU times read back while observing completions, for the lines.
+struct GpuTimes
+{
+    uint32_t timed = 0;
+    double last = 0.0;
+    double max = 0.0;
+    double sum = 0.0;
+
+    void Add(double ms)
+    {
+        ++timed;
+        last = ms;
+        max = ms > max ? ms : max;
+        sum += ms;
+    }
+};
+
+// A slot was seen complete: the model's frame in it, if any, is too.
+void Observed(DeviceTransport& dev, Slot& slot, GpuTimes& times)
+{
+    if (slot.nrTicket == 0)
+        return;
+
+    if (dev.model != nullptr)
+    {
+        if (const auto ms = dev.model->Completed(slot.nrTicket))
+            times.Add(*ms);
+    }
+
+    slot.nrTicket = 0;
 }
 
 uint64_t Since(std::chrono::steady_clock::time_point start)
@@ -501,7 +578,7 @@ uint64_t Since(std::chrono::steady_clock::time_point start)
 }
 
 // Every pending slot whose fence is signalled becomes idle. Returns the completions observed.
-uint32_t Poll(DeviceTransport& dev, SwapchainTransport& sc)
+uint32_t Poll(DeviceTransport& dev, SwapchainTransport& sc, GpuTimes& times)
 {
     uint32_t completions = 0;
 
@@ -514,6 +591,7 @@ uint32_t Poll(DeviceTransport& dev, SwapchainTransport& sc)
         if (status == VK_SUCCESS)
         {
             slot.state = SlotState::Idle;
+            Observed(dev, slot, times);
             ++completions;
         }
         else if (status == VK_ERROR_DEVICE_LOST)
@@ -526,7 +604,8 @@ uint32_t Poll(DeviceTransport& dev, SwapchainTransport& sc)
 }
 
 // A bounded wait for one pending slot. True when it completed; the time spent is added to `waitNs`.
-bool WaitSlot(DeviceTransport& dev, Slot& slot, uint64_t timeoutNs, uint64_t& waitNs, uint32_t& completions)
+bool WaitSlot(DeviceTransport& dev, Slot& slot, uint64_t timeoutNs, uint64_t& waitNs, uint32_t& completions,
+              GpuTimes& times)
 {
     if (slot.state != SlotState::Pending || dev.lost)
         return slot.state == SlotState::Idle;
@@ -538,6 +617,7 @@ bool WaitSlot(DeviceTransport& dev, Slot& slot, uint64_t timeoutNs, uint64_t& wa
     if (result == VK_SUCCESS)
     {
         slot.state = SlotState::Idle;
+        Observed(dev, slot, times);
         ++completions;
         return true;
     }
@@ -548,31 +628,31 @@ bool WaitSlot(DeviceTransport& dev, Slot& slot, uint64_t timeoutNs, uint64_t& wa
     return false;
 }
 
-bool EnsureWorkImage(DeviceTransport& dev, SwapchainTransport& sc)
+// A device-local image of the swapchain's extent the host owns: the work image (raw format, transfer only) or the
+// working colour (kWorkingFormat, also sampled and stored by the model's pass).
+bool MakeImage(DeviceTransport& dev, const SwapchainTransport& sc, VkFormat format, VkImageUsageFlags usage,
+               VkImage& image, VkDeviceMemory& memory)
 {
-    if (sc.work != VK_NULL_HANDLE)
-        return true;
-
     VkImageCreateInfo info { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     info.imageType = VK_IMAGE_TYPE_2D;
-    info.format = sc.format;
+    info.format = format;
     info.extent = { sc.extent.width, sc.extent.height, 1 };
     info.mipLevels = 1;
     info.arrayLayers = 1;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    info.usage = usage;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (dev.fn.createImage(dev.device, &info, nullptr, &sc.work) != VK_SUCCESS)
+    if (dev.fn.createImage(dev.device, &info, nullptr, &image) != VK_SUCCESS)
     {
-        sc.work = VK_NULL_HANDLE;
+        image = VK_NULL_HANDLE;
         return false;
     }
 
     VkMemoryRequirements requirements {};
-    dev.fn.getImageMemoryRequirements(dev.device, sc.work, &requirements);
+    dev.fn.getImageMemoryRequirements(dev.device, image, &requirements);
 
     uint32_t type = UINT32_MAX;
     for (const VkMemoryPropertyFlags wanted : { VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT), 0u })
@@ -589,10 +669,44 @@ bool EnsureWorkImage(DeviceTransport& dev, SwapchainTransport& sc)
     allocate.allocationSize = requirements.size;
     allocate.memoryTypeIndex = type;
 
-    if (type == UINT32_MAX || dev.fn.allocateMemory(dev.device, &allocate, nullptr, &sc.workMemory) != VK_SUCCESS ||
-        dev.fn.bindImageMemory(dev.device, sc.work, sc.workMemory, 0) != VK_SUCCESS)
+    if (type == UINT32_MAX || dev.fn.allocateMemory(dev.device, &allocate, nullptr, &memory) != VK_SUCCESS ||
+        dev.fn.bindImageMemory(dev.device, image, memory, 0) != VK_SUCCESS)
     {
-        DestroyWorkImage(dev, sc.work, sc.workMemory);
+        DestroyWorkImage(dev, image, memory);
+        return false;
+    }
+
+    return true;
+}
+
+bool EnsureWorkImage(DeviceTransport& dev, SwapchainTransport& sc)
+{
+    return sc.work != VK_NULL_HANDLE ||
+           MakeImage(dev, sc, static_cast<VkFormat>(sc.colour.raw),
+                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, sc.work, sc.workMemory);
+}
+
+bool EnsureWorkingImage(DeviceTransport& dev, SwapchainTransport& sc)
+{
+    if (sc.workingView != VK_NULL_HANDLE)
+        return true;
+
+    if (sc.working == VK_NULL_HANDLE && !MakeImage(dev, sc, static_cast<VkFormat>(kWorkingFormat),
+                                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+                                                   sc.working, sc.workingMemory))
+        return false;
+
+    VkImageViewCreateInfo view { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    view.image = sc.working;
+    view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view.format = static_cast<VkFormat>(kWorkingFormat);
+    view.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    if (dev.fn.createImageView(dev.device, &view, nullptr, &sc.workingView) != VK_SUCCESS)
+    {
+        sc.workingView = VK_NULL_HANDLE;
+        DestroyWorkImage(dev, sc.working, sc.workingMemory);
         return false;
     }
 
@@ -701,14 +815,34 @@ bool Begin(DeviceTransport& dev, VkCommandBuffer buffer)
     return dev.fn.beginCommandBuffer(buffer, &begin) == VK_SUCCESS;
 }
 
-// The round trip, on the work queue: the presented image into the work image and back, unchanged, the image left in
-// PRESENT_SRC. On the cross-family route it starts with the acquire of the presenting family's release and ends with
-// the release back. Everything is recorded before any application semaphore is consumed.
-bool RecordWork(DeviceTransport& dev, VkCommandBuffer buffer, VkImage image, VkImage work, VkExtent2D extent,
-                Route route, uint32_t presentFamily, uint32_t workFamily)
+enum class Recorded : uint8_t
+{
+    Ok,
+    Failed,   // the buffer could not be recorded
+    NrFailed, // the model's pass failed after recording began: record the plain round trip instead
+};
+
+VkImageBlit WholeImage(VkExtent2D extent)
+{
+    VkImageBlit blit {};
+    blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    blit.srcOffsets[1] = { static_cast<int32_t>(extent.width), static_cast<int32_t>(extent.height), 1 };
+    blit.dstSubresource = blit.srcSubresource;
+    blit.dstOffsets[1] = blit.srcOffsets[1];
+    return blit;
+}
+
+// The round trip, on the work queue: the presented image into the work image and back, the image left in PRESENT_SRC.
+// On the cross-family route it starts with the acquire of the presenting family's release and ends with the release
+// back. With `nr`, the work image is blitted into the working colour, the model's pass runs on that, and it is blitted
+// back before the copy out (stage 3); without, the image goes back unchanged. Everything is recorded before any
+// application semaphore is consumed.
+Recorded RecordWork(DeviceTransport& dev, VkCommandBuffer buffer, VkImage image, VkImage work, VkExtent2D extent,
+                    Route route, uint32_t presentFamily, uint32_t workFamily,
+                    const DlssNr::VkPresentNrFrame* nr = nullptr)
 {
     if (!Begin(dev, buffer))
-        return false;
+        return Recorded::Failed;
 
     const bool cross = route == Route::CrossFamily;
     const uint32_t from = cross ? presentFamily : VK_QUEUE_FAMILY_IGNORED;
@@ -734,7 +868,47 @@ bool RecordWork(DeviceTransport& dev, VkCommandBuffer buffer, VkImage image, VkI
     dev.fn.cmdCopyImage(buffer, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, work, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                         1, &region);
 
-    // Stage 3 runs the model here, on the work image.
+    if (nr != nullptr && dev.model != nullptr)
+    {
+        // Into the working colour: a blit converts number by number (and BGRA by channel), from the raw bytes, which
+        // are the sRGB formats' UNORM twins, so nothing is decoded. Its earlier frames' reads and writes of the working
+        // colour (the pass, the blit back) are in the source scope.
+        const VkImageMemoryBarrier toBlit[] = {
+            Barrier(work, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+            Barrier(nr->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT),
+        };
+        dev.fn.cmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, toBlit);
+
+        const VkImageBlit blit = WholeImage(extent);
+        dev.fn.cmdBlitImage(buffer, work, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, nr->image,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+
+        const VkImageMemoryBarrier toPass =
+            Barrier(nr->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        dev.fn.cmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
+                                  nullptr, 0, nullptr, 1, &toPass);
+
+        // The model: encode, the model itself, resolve back into the working colour (DlssNrFeature_Vk.cpp).
+        if (!dev.model->Record(*nr))
+            return Recorded::NrFailed;
+
+        // And back into the work image, which the copy out below takes to the presented image.
+        const VkImageMemoryBarrier back[] = {
+            Barrier(nr->image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+            Barrier(work, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                    VK_ACCESS_TRANSFER_WRITE_BIT),
+        };
+        dev.fn.cmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, back);
+
+        dev.fn.cmdBlitImage(buffer, nr->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, work,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+    }
 
     const VkImageMemoryBarrier turn[] = {
         Barrier(work, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -754,7 +928,7 @@ bool RecordWork(DeviceTransport& dev, VkCommandBuffer buffer, VkImage image, VkI
     dev.fn.cmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0,
                               nullptr, 0, nullptr, 1, &out);
 
-    return dev.fn.endCommandBuffer(buffer) == VK_SUCCESS;
+    return dev.fn.endCommandBuffer(buffer) == VK_SUCCESS ? Recorded::Ok : Recorded::Failed;
 }
 
 // Cross-family, on the presenting queue: the release to the work family (layout PRESENT_SRC -> TRANSFER_SRC, which
@@ -794,6 +968,195 @@ bool RecordRecovery(DeviceTransport& dev, VkCommandBuffer buffer, VkImage image)
     return dev.fn.endCommandBuffer(buffer) == VK_SUCCESS;
 }
 
+// --- The model (stage 3) -----------------------------------------------------------------------------------------
+
+// The model's lines, for the host to log after its lock is released.
+void TakeModelLines(DeviceTransport& dev)
+{
+    if (dev.model == nullptr)
+        return;
+
+    for (std::string& line : dev.model->TakeLines())
+        dev.lines.push_back(std::move(line));
+}
+
+// What a format allows on this device in optimal tiling, asked once.
+uint32_t FormatFeatures(DeviceTransport& dev, uint32_t format)
+{
+    if (const auto found = dev.features.find(format); found != dev.features.end())
+        return found->second;
+
+    VkFormatProperties properties {};
+    if (g_getFormatProperties != nullptr)
+        g_getFormatProperties(dev.physical, static_cast<VkFormat>(format), &properties);
+
+    return dev.features[format] = properties.optimalTilingFeatures;
+}
+
+// Why the device cannot convert the presented image or hold the model's images, or empty when it can: the raw image
+// is blitted from and to, the working colour also sampled and stored, the guides cleared and sampled.
+std::string MissingFormatFeatures(DeviceTransport& dev, uint32_t raw)
+{
+    const uint32_t transfer = kFeatureTransferSrc | kFeatureTransferDst;
+    const uint32_t images = kFeatureSampledImage | kFeatureStorageImage | transfer;
+    const std::pair<uint32_t, uint32_t> needs[] = {
+        { raw, kFeatureBlitSrc | kFeatureBlitDst | transfer },
+        { kWorkingFormat, kFeatureBlitSrc | kFeatureBlitDst | images },
+        { kFormatR32Sfloat, images },
+        { kFormatR16G16Sfloat, images },
+    };
+
+    for (const auto& [format, wanted] : needs)
+    {
+        const uint32_t has = FormatFeatures(dev, format);
+        if ((has & wanted) != wanted)
+            return FormatName(format) + " lacks format features " + Hex(wanted & ~has) +
+                   " the conversion or the model needs";
+    }
+
+    return {};
+}
+
+// Stop using the model on this device: nothing new is recorded, and once nothing of it is in flight it is freed and
+// the token given back. Called on every frame that refuses for it until that happens.
+void StandDown(DeviceTransport& dev)
+{
+    if (dev.model == nullptr || dev.model->InFlight() != 0)
+        return;
+
+    dev.model->Release(false);
+    TakeModelLines(dev);
+    dev.model.reset();
+    dev.modelSwapchain = 0;
+    DlssNr::ReleaseModelFromPresentHost(dev.device);
+    dev.lines.push_back("DLSS-NR Vulkan present host: device " + Hex(H(dev.device)) + " #" + std::to_string(dev.id) +
+                        ": the model stood down and was freed");
+}
+
+struct NrDecision
+{
+    NrSkip skip = NrSkip::None;
+    std::string note;
+};
+
+// Whether this present's frame may be shown to the model, decided before anything of it is recorded. With `None`, the
+// model exists, is admitted for this size, and the swapchain's working colour exists.
+NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workFamily)
+{
+    const auto refuse = [](NrSkip skip, std::string note) { return NrDecision { skip, std::move(note) }; };
+
+    // Turned off live: nothing new is recorded, and the model is freed once nothing of it is in flight. It comes back
+    // cold when NR is turned on again.
+    if (!Config::Instance()->DlssNrEnabled.value_or_default())
+    {
+        StandDown(dev);
+        return refuse(NrSkip::Off, "[DlssNr] Enabled is off");
+    }
+
+    if (!sc.colour.sdr)
+        return refuse(NrSkip::Colour, sc.colour.refusal);
+    if (!dev.nrReady)
+        return refuse(NrSkip::Extensions, dev.nrMissing);
+    if (std::string missing = MissingFormatFeatures(dev, sc.colour.raw); !missing.empty())
+        return refuse(NrSkip::FormatFeatures, std::move(missing));
+    if (!sc.nrOff.empty())
+        return refuse(NrSkip::Unavailable, sc.nrOff);
+    if (dev.instance == VK_NULL_HANDLE)
+        return refuse(NrSkip::Unavailable, "the device's instance is not on record");
+
+    // Another route wants the model (the game's own upscaler on Vulkan, or the D3D12 route): stand down.
+    if (dev.model != nullptr)
+    {
+        if (const auto yield = DlssNr::PresentHostMustYield(dev.device); yield.skip != NrSkip::None)
+        {
+            StandDown(dev);
+            return refuse(yield.skip, yield.text);
+        }
+    }
+
+    if (const auto claim = DlssNr::ClaimModelForPresentHost(dev.device); claim.skip != NrSkip::None)
+        return refuse(claim.skip, claim.text);
+
+    // One swapchain at a time: the model's size and history are one picture's. A live one keeps it; a retired or
+    // destroyed one hands it over (a resize, a recreation), and the frame that takes it starts the history over.
+    if (dev.modelSwapchain != 0 && dev.modelSwapchain != sc.id)
+    {
+        for (const auto& [handle, other] : dev.swapchains)
+        {
+            if (other.id == dev.modelSwapchain && !other.retired)
+                return refuse(NrSkip::OtherSwapchain,
+                              "the model serves swapchain #" + std::to_string(dev.modelSwapchain) + " of this device");
+        }
+    }
+
+    if (dev.modelSwapchain != sc.id)
+    {
+        dev.modelSwapchain = sc.id;
+        sc.nrCut = true;
+    }
+
+    if (dev.model == nullptr)
+    {
+        DlssNr::VkPresentModelDevice device;
+        device.instance = dev.instance;
+        device.physical = dev.physical;
+        device.device = dev.device;
+        device.timestampValidBits = workFamily < dev.timestampBits.size() ? dev.timestampBits[workFamily] : 0;
+        dev.model = std::make_unique<DlssNr::VkPresentModel>(device);
+    }
+
+    const DlssNr::VkPresentAdmission admission = dev.model->Admit(sc.extent.width, sc.extent.height);
+    TakeModelLines(dev);
+    if (admission.skip != NrSkip::None)
+    {
+        // A model that cannot run here, with nothing of it in flight, holds nothing: another device, or the
+        // after-upscale route, may try.
+        if (admission.skip == NrSkip::Unavailable && dev.model->InFlight() == 0)
+            DlssNr::ReleaseModelFromPresentHost(dev.device);
+        return refuse(admission.skip, admission.text);
+    }
+
+    if (!EnsureWorkingImage(dev, sc))
+    {
+        sc.nrOff = "the working colour (" + FormatName(kWorkingFormat) + ") could not be made";
+        if (dev.model->InFlight() == 0)
+            DlssNr::ReleaseModelFromPresentHost(dev.device);
+        return refuse(NrSkip::Unavailable, sc.nrOff);
+    }
+
+    return {};
+}
+
+// A recording of the model's pass, until it is known to have been submitted: anything else -- a refusal after the
+// recording, a failed submit -- discards it, so the model never counts a frame that will not run.
+struct NrRecording
+{
+    DeviceTransport* dev = nullptr;
+    uint64_t ticket = 0;
+
+    void Submitted(Slot& slot)
+    {
+        if (dev != nullptr && dev->model != nullptr && ticket != 0)
+        {
+            dev->model->Submitted(ticket);
+            slot.nrTicket = ticket;
+        }
+        ticket = 0;
+    }
+
+    void Discard()
+    {
+        if (dev != nullptr && dev->model != nullptr && ticket != 0)
+        {
+            dev->model->Discarded(ticket);
+            TakeModelLines(*dev);
+        }
+        ticket = 0;
+    }
+
+    ~NrRecording() { Discard(); }
+};
+
 // --- At present -------------------------------------------------------------------------------------------------
 
 struct Prepared
@@ -819,9 +1182,33 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     prep.swapchain = info.pSwapchains[0];
     prep.image = view->imageIndex;
 
-    const auto skip = [&prep](Skip reason) -> Prepared&
+    // What every return hands back besides its reason: the model's GPU times observed on the way, and its lines (any
+    // its recording's discard adds after that are logged at the next present).
+    GpuTimes times;
+    DeviceTransport* devFound = nullptr;
+    SwapchainTransport* scFound = nullptr;
+    const auto flush = [&prep, &times, &devFound, &scFound]()
+    {
+        // A present the model did not see leaves its history behind the picture: the next one it sees starts over.
+        if (scFound != nullptr && !prep.outcome.nrEvaluated)
+            scFound->nrCut = true;
+
+        prep.outcome.nrTimed = times.timed;
+        prep.outcome.nrLastGpuMs = times.last;
+        prep.outcome.nrMaxGpuMs = times.max;
+        prep.outcome.nrSumGpuMs = times.sum;
+        if (devFound != nullptr)
+        {
+            for (std::string& line : devFound->lines)
+                prep.warnings.push_back(std::move(line));
+            devFound->lines.clear();
+        }
+    };
+
+    const auto skip = [&prep, &flush](Skip reason) -> Prepared&
     {
         prep.outcome.skip = reason;
+        flush();
         return prep;
     };
 
@@ -855,6 +1242,7 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     std::lock_guard lock(g_transportMutex);
 
     DeviceTransport* dev = FindDevice(prep.device);
+    devFound = dev;
     if (dev == nullptr || !dev->off.empty())
         return skip(Skip::DeviceOff);
 
@@ -863,9 +1251,10 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
         return skip(Skip::ObserveOnly);
 
     SwapchainTransport& sc = found->second;
+    scFound = &sc;
     Outcome& out = prep.outcome;
 
-    out.completions += Poll(*dev, sc);
+    out.completions += Poll(*dev, sc, times);
     out.ring = static_cast<uint32_t>(sc.ring.size());
     if (!dev->off.empty())
         return skip(Skip::DeviceOff);
@@ -875,7 +1264,8 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     {
         for (Slot& slot : sc.ring)
         {
-            if (slot.state == SlotState::Pending && !WaitSlot(*dev, slot, kSlotWaitNs, out.waitNs, out.completions))
+            if (slot.state == SlotState::Pending &&
+                !WaitSlot(*dev, slot, kSlotWaitNs, out.waitNs, out.completions, times))
                 return skip(dev->off.empty() ? Skip::QueueChange : Skip::DeviceOff);
         }
     }
@@ -900,7 +1290,7 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
         index = sc.ring.size() - 1;
         break;
     case SlotChoice::WaitOldest:
-        if (!WaitSlot(*dev, sc.ring[index], kSlotWaitNs, out.waitNs, out.completions))
+        if (!WaitSlot(*dev, sc.ring[index], kSlotWaitNs, out.waitNs, out.completions, times))
             return skip(dev->off.empty() ? Skip::RingBusy : Skip::DeviceOff);
         break;
     default:
@@ -925,8 +1315,46 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
         return skip(Skip::SetupFailed);
     }
 
+    // Stage 3: the model, when this frame may be shown to it, decided before anything is recorded. The swapchain's next
+    // frame of the model starts the history over unless this one reaches it.
+    const NrDecision nr = DecideNr(*dev, sc, route.workFamily);
+    const bool cut = sc.nrCut;
+    sc.nrCut = true;
+
+    DlssNr::VkPresentNrFrame frame;
+    NrRecording recording;
+    if (nr.skip == NrSkip::None)
+    {
+        frame.cmd = slot.work;
+        frame.image = sc.working;
+        frame.view = sc.workingView;
+        frame.width = sc.extent.width;
+        frame.height = sc.extent.height;
+        frame.ticket = dev->nextTicket++;
+        frame.cut = cut;
+        recording.dev = dev;
+        recording.ticket = frame.ticket;
+    }
+    else
+    {
+        out.nrSkip = nr.skip;
+        out.nrNote = nr.note;
+    }
+
     const bool cross = route.route == Route::CrossFamily;
-    if (!RecordWork(*dev, slot.work, image, sc.work, sc.extent, route.route, presentFamily, route.workFamily) ||
+    Recorded work = RecordWork(*dev, slot.work, image, sc.work, sc.extent, route.route, presentFamily, route.workFamily,
+                               recording.ticket != 0 ? &frame : nullptr);
+    if (work == Recorded::NrFailed)
+    {
+        // The model failed after its recording began: thrown away, and the frame goes back unchanged. The model is
+        // off on this device from now on (its reason is in its lines).
+        recording.Discard();
+        out.nrSkip = NrSkip::RecordFailed;
+        out.nrNote = dev->model != nullptr ? dev->model->Failure() : std::string("the model's pass failed");
+        work = RecordWork(*dev, slot.work, image, sc.work, sc.extent, route.route, presentFamily, route.workFamily);
+    }
+
+    if (work != Recorded::Ok ||
         (cross && (!RecordHandOver(*dev, slot.release, image, true, presentFamily, route.workFamily) ||
                    !RecordHandOver(*dev, slot.acquire, image, false, presentFamily, route.workFamily))))
         return skip(Skip::RecordFailed);
@@ -994,6 +1422,7 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
         out.submits = 1;
         presentWait = signal;
         slot.state = SlotState::Pending;
+        recording.Submitted(slot);
     }
     else
     {
@@ -1011,7 +1440,10 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
         VkSemaphore chain = slot.toWork;
         const VkResult second = submit(workQueue, 1, &chain, &allCommands, slot.work, slot.toPresent, VK_NULL_HANDLE);
         if (second == VK_SUCCESS)
+        {
             chain = slot.toPresent;
+            recording.Submitted(slot);
+        }
 
         // 3: the presenting queue acquires it back and signals what the present waits on; the fence is here. Should
         // 2 have failed, nothing released the image back: the recovery takes it with its contents discarded instead.
@@ -1044,11 +1476,27 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     sc.lastWorkQueue = workQueue;
     sc.used[view->imageIndex] = 1;
 
+    // The model's frame reached the GPU with the round trip: its history continues from it.
+    if (slot.nrTicket != 0 && slot.nrTicket == frame.ticket)
+    {
+        out.nrEvaluated = true;
+        out.nrReset = dev->model != nullptr && dev->model->LastFrameReset();
+        out.nrSkip = NrSkip::None;
+        out.nrNote.clear();
+        sc.nrCut = false;
+    }
+    else if (frame.ticket != 0 && out.nrSkip == NrSkip::None)
+    {
+        out.nrSkip = NrSkip::RecordFailed;
+        out.nrNote = "the work queue's submit failed; the model's frame was not run";
+    }
+
     out.transported = true;
     out.skip = Skip::None;
     out.route = route.route;
     out.waitsTaken = info.waitSemaphoreCount;
     prep.wait = presentWait;
+    flush();
     return prep;
 }
 
@@ -1086,14 +1534,26 @@ void AfterPresent(const Prepared& prep, VkResult result)
 struct Retired
 {
     uint64_t completions = 0;
+    GpuTimes times;   // the model's pass GPU times read back from its last frames
     std::string text; // for the swapchain's last line
+
+    // Present semaphores whose waits the swapchain's destruction proves done: freed once the call down returned.
+    std::vector<VkSemaphore> afterDestroy;
 };
 
-// The swapchain is going: drain its round trips (bounded), free what is proven done, keep the rest. `acquired`: per
-// image, acquired again since its last present, which proves its present semaphore's wait ran.
-Retired RetireSwapchain(DeviceTransport& dev, SwapchainTransport& sc, const std::vector<uint8_t>& acquired)
+// The swapchain is going: drain its round trips (bounded), free what is proven done, keep the rest. Its present
+// semaphores: a valid vkDestroySwapchainKHR comes after every use of its images has completed
+// (VUID-vkDestroySwapchainKHR-swapchain-01282), the presentation engine's included, and a present's wait on its
+// semaphore precedes that use, so every one whose present was enqueued (not `uncertain`) is free once the destroy
+// returned. Stage 2 kept them until the device went, unless a reacquire proved them free, and a game that recreates
+// its swapchain hundreds of times reached the bound of kRetainedMax (nr-vulkan-present-host.md, "Stage 3 as built").
+// `destroyed`: the swapchain itself is being destroyed (false: a handle on record whose destroy was not seen).
+Retired RetireSwapchain(DeviceTransport& dev, SwapchainTransport& sc, bool destroyed)
 {
     Retired retired;
+
+    if (dev.modelSwapchain == sc.id)
+        dev.modelSwapchain = 0;
 
     if (dev.lost)
     {
@@ -1117,7 +1577,7 @@ Retired RetireSwapchain(DeviceTransport& dev, SwapchainTransport& sc, const std:
 
         const uint64_t spent = Since(start);
         if (slot.state == SlotState::Pending &&
-            (spent >= kDrainNs || !WaitSlot(dev, slot, kDrainNs - spent, waitNs, completions)))
+            (spent >= kDrainNs || !WaitSlot(dev, slot, kDrainNs - spent, waitNs, completions, retired.times)))
             drained = false;
     }
 
@@ -1134,6 +1594,7 @@ Retired RetireSwapchain(DeviceTransport& dev, SwapchainTransport& sc, const std:
         for (Slot& slot : sc.ring)
             DestroySlot(dev, slot);
         DestroyWorkImage(dev, sc.work, sc.workMemory);
+        DestroyWorkImage(dev, sc.working, sc.workingMemory, &sc.workingView);
         retired.text = "freed after a drain of " + Milliseconds(Since(start)) + " ms";
     }
     else
@@ -1142,6 +1603,9 @@ Retired RetireSwapchain(DeviceTransport& dev, SwapchainTransport& sc, const std:
         left.slots = std::move(sc.ring);
         left.work = sc.work;
         left.workMemory = sc.workMemory;
+        left.working = sc.working;
+        left.workingMemory = sc.workingMemory;
+        left.workingView = sc.workingView;
         dev.leftovers.push_back(std::move(left));
         retired.text = "the GPU did not finish within " + Milliseconds(kDrainNs) +
                        " ms; its objects are kept until the device goes";
@@ -1150,6 +1614,9 @@ Retired RetireSwapchain(DeviceTransport& dev, SwapchainTransport& sc, const std:
     sc.ring.clear();
     sc.work = VK_NULL_HANDLE;
     sc.workMemory = VK_NULL_HANDLE;
+    sc.working = VK_NULL_HANDLE;
+    sc.workingMemory = VK_NULL_HANDLE;
+    sc.workingView = VK_NULL_HANDLE;
 
     size_t freed = 0;
     size_t kept = 0;
@@ -1159,10 +1626,9 @@ Retired RetireSwapchain(DeviceTransport& dev, SwapchainTransport& sc, const std:
         if (semaphore == VK_NULL_HANDLE)
             continue;
 
-        const bool proven = sc.used[i] == 0 || (sc.uncertain[i] == 0 && i < acquired.size() && acquired[i] != 0);
-        if (proven)
+        if (sc.used[i] == 0 || (destroyed && sc.uncertain[i] == 0))
         {
-            dev.fn.destroySemaphore(dev.device, semaphore, nullptr);
+            retired.afterDestroy.push_back(semaphore);
             ++freed;
         }
         else
@@ -1173,8 +1639,8 @@ Retired RetireSwapchain(DeviceTransport& dev, SwapchainTransport& sc, const std:
     }
 
     sc.presentSemaphores.clear();
-    retired.text += "; present semaphores " + std::to_string(freed) + " freed, " + std::to_string(kept) +
-                    " kept until the device goes (no reacquire proved their wait ran)";
+    retired.text += "; present semaphores " + std::to_string(freed) + " freed with it, " + std::to_string(kept) +
+                    " kept until the device goes (a present that failed may not have waited on them)";
 
     if (dev.retained.size() > kRetainedMax && dev.off.empty())
         dev.off = "more than " + std::to_string(kRetainedMax) + " present semaphores retained";
@@ -1186,22 +1652,30 @@ Retired RetireSwapchain(DeviceTransport& dev, SwapchainTransport& sc, const std:
 std::string TeardownDevice(DeviceTransport& dev)
 {
     size_t swapchains = 0;
+    std::vector<VkSemaphore> semaphores;
     for (auto& [handle, sc] : dev.swapchains)
     {
         // At device destruction every present semaphore goes: the application has finished with the device.
-        RetireSwapchain(dev, sc, std::vector<uint8_t>(sc.presentSemaphores.size(), 1));
+        Retired retired = RetireSwapchain(dev, sc, true);
+        semaphores.insert(semaphores.end(), retired.afterDestroy.begin(), retired.afterDestroy.end());
         ++swapchains;
     }
     dev.swapchains.clear();
+    dev.retained.insert(dev.retained.end(), semaphores.begin(), semaphores.end());
 
     if (dev.lost)
+    {
+        if (dev.model != nullptr)
+            dev.model->Abandon();
         return "the device was lost: every object of the host's on it is abandoned, none destroyed";
+    }
 
     size_t leftoverSlots = 0;
     size_t abandoned = 0;
     const auto start = std::chrono::steady_clock::now();
     uint64_t waitNs = 0;
     uint32_t completions = 0;
+    GpuTimes times;
 
     for (Leftover& left : dev.leftovers)
     {
@@ -1211,7 +1685,7 @@ std::string TeardownDevice(DeviceTransport& dev)
             const uint64_t spent = Since(start);
             if (slot.state == SlotState::Abandoned ||
                 (slot.state == SlotState::Pending &&
-                 (spent >= kDrainNs || !WaitSlot(dev, slot, kDrainNs - spent, waitNs, completions))))
+                 (spent >= kDrainNs || !WaitSlot(dev, slot, kDrainNs - spent, waitNs, completions, times))))
                 done = false;
         }
 
@@ -1220,6 +1694,7 @@ std::string TeardownDevice(DeviceTransport& dev)
             for (Slot& slot : left.slots)
                 DestroySlot(dev, slot);
             DestroyWorkImage(dev, left.work, left.workMemory);
+            DestroyWorkImage(dev, left.working, left.workingMemory, &left.workingView);
             leftoverSlots += left.slots.size();
         }
         else
@@ -1231,7 +1706,32 @@ std::string TeardownDevice(DeviceTransport& dev)
     dev.leftovers.clear();
 
     if (dev.lost)
+    {
+        if (dev.model != nullptr)
+            dev.model->Abandon();
         return "the device was lost during the last drain: every object of the host's on it is abandoned";
+    }
+
+    // The model: freed, and NGX shut down on the device, when every frame it recorded was seen complete; abandoned
+    // (nothing destroyed) when one never was.
+    std::string model;
+    if (dev.model != nullptr)
+    {
+        const size_t inFlight = dev.model->InFlight();
+        if (inFlight == 0)
+        {
+            dev.model->Release(true);
+            model = "; the model freed";
+        }
+        else
+        {
+            dev.model->Abandon();
+            model = "; the model abandoned (" + std::to_string(inFlight) + " of its frames never seen complete)";
+        }
+        TakeModelLines(dev);
+        dev.model.reset();
+        DlssNr::ReleaseModelFromPresentHost(dev.device);
+    }
 
     for (const VkSemaphore semaphore : dev.retained)
         dev.fn.destroySemaphore(dev.device, semaphore, nullptr);
@@ -1248,7 +1748,7 @@ std::string TeardownDevice(DeviceTransport& dev)
            " retained present semaphore(s), " + std::to_string(leftoverSlots) +
            " slot(s) kept from earlier swapchains" +
            (abandoned != 0 ? "; " + std::to_string(abandoned) + " set(s) abandoned, the GPU never finished them" : "") +
-           (dev.leaked ? "; command pools kept: a command buffer in them never finished" : "");
+           (dev.leaked ? "; command pools kept: a command buffer in them never finished" : "") + model;
 }
 
 // --- Attaching ---------------------------------------------------------------------------------------------------
@@ -1311,15 +1811,19 @@ void AttachTarget(Targets<Pfn>& set, const std::array<void*, kTargets>& hooks, P
 void OnDestroyDevice(PFN_vkDestroyDevice next, VkDevice device, const VkAllocationCallbacks* allocator)
 {
     std::string line;
+    std::vector<std::string> modelLines;
     {
         std::lock_guard lock(g_transportMutex);
         if (DeviceTransport* dev = FindDevice(device))
         {
             line = "DLSS-NR Vulkan present host: device " + Hex(H(device)) + " #" + std::to_string(dev->id) +
                    " destroyed; " + TeardownDevice(*dev);
+            modelLines.swap(dev->lines);
             g_transport.erase(device);
         }
     }
+
+    Log(modelLines);
 
     {
         std::lock_guard lock(g_registryMutex);
@@ -1428,11 +1932,15 @@ VkResult OnCreateSwapchain(PFN_vkCreateSwapchainKHR next, VkDevice device, const
         }
     }
 
+    // The work image is in the raw format: the swapchain's own, or its UNORM twin when it is sRGB (stage 3).
+    const ColourPlan colour =
+        PlanColour(static_cast<uint32_t>(info->imageFormat), static_cast<uint32_t>(info->imageColorSpace));
+
     if (physical != 0)
     {
         query.formatAllows = FormatAllows(pd, info->imageFormat, Wanted(info->imageUsage), ImageFlagsOf(info->flags));
-        query.workAllows =
-            FormatAllows(pd, info->imageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0);
+        query.workAllows = FormatAllows(pd, static_cast<VkFormat>(colour.raw),
+                                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0);
     }
 
     const UsagePlan plan = PlanUsage(query);
@@ -1470,24 +1978,48 @@ VkResult OnCreateSwapchain(PFN_vkCreateSwapchainKHR next, VkDevice device, const
     desc.transportNote = plan.note;
 
     std::string line;
+    RecordId swapchainId = 0;
     {
         std::lock_guard lock(g_registryMutex);
-        g_registry.OnSwapchainCreated(H(device), H(*swapchain), std::move(desc));
+        swapchainId = g_registry.OnSwapchainCreated(H(device), H(*swapchain), std::move(desc));
         if (!internal)
             line = g_registry.SwapchainLine(H(device), H(*swapchain));
     }
+
+    // What the model may be shown of it (stage 3): SDR only. The round trip runs either way.
+    if (!internal && plan.transport)
+        line += colour.sdr ? "; the model may run on it (" + colour.formatName + ", sRGB non-linear)"
+                           : "; the model will not run on it: " + colour.refusal;
 
     {
         std::lock_guard lock(g_transportMutex);
         if (DeviceTransport* dev = FindDevice(device))
         {
             SwapchainTransport& sc = dev->swapchains[*swapchain];
-            if (!sc.ring.empty() || !sc.presentSemaphores.empty() || sc.work != VK_NULL_HANDLE)
-                RetireSwapchain(*dev, sc, {}); // a handle on record whose destroy was never seen
+            if (!sc.ring.empty() || !sc.presentSemaphores.empty() || sc.work != VK_NULL_HANDLE ||
+                sc.working != VK_NULL_HANDLE)
+            {
+                // A handle on record whose destroy was never seen: only semaphores never handed to a present go now.
+                const Retired stale = RetireSwapchain(*dev, sc, false);
+                if (!dev->lost)
+                {
+                    for (const VkSemaphore semaphore : stale.afterDestroy)
+                        dev->fn.destroySemaphore(dev->device, semaphore, nullptr);
+                }
+            }
             sc = SwapchainTransport {};
             sc.on = plan.transport;
             sc.format = info->imageFormat;
             sc.extent = info->imageExtent;
+            sc.id = swapchainId;
+            sc.colour = colour;
+
+            // The swapchain it replaces is retired: the model may move on from it.
+            if (info->oldSwapchain != VK_NULL_HANDLE)
+            {
+                if (const auto old = dev->swapchains.find(info->oldSwapchain); old != dev->swapchains.end())
+                    old->second.retired = true;
+            }
         }
     }
 
@@ -1503,15 +2035,10 @@ void OnDestroySwapchain(PFN_vkDestroySwapchainKHR next, VkDevice device, VkSwapc
 {
     if (swapchain != VK_NULL_HANDLE)
     {
-        std::vector<uint8_t> acquired;
-        {
-            std::lock_guard lock(g_registryMutex);
-            acquired = g_registry.AcquiredImages(H(device), H(swapchain));
-        }
-
         // Its images are about to go: every round trip on them must be over first (bounded; kept if not).
         Retired retired;
         bool known = false;
+        std::vector<std::string> modelLines;
         {
             std::lock_guard lock(g_transportMutex);
             if (DeviceTransport* dev = FindDevice(device))
@@ -1519,23 +2046,41 @@ void OnDestroySwapchain(PFN_vkDestroySwapchainKHR next, VkDevice device, VkSwapc
                 if (const auto found = dev->swapchains.find(swapchain); found != dev->swapchains.end())
                 {
                     known = true;
-                    retired = RetireSwapchain(*dev, found->second, acquired);
+                    retired = RetireSwapchain(*dev, found->second, true);
                     dev->swapchains.erase(found);
                 }
+                modelLines.swap(dev->lines);
             }
         }
 
         std::string line;
         {
             std::lock_guard lock(g_registryMutex);
-            g_registry.OnCompletions(H(device), H(swapchain), retired.completions);
+            g_registry.OnCompletions(H(device), H(swapchain), retired.completions, retired.times.timed,
+                                     retired.times.last, retired.times.max, retired.times.sum);
             if (known)
                 line = g_registry.SwapchainSummary(H(device), H(swapchain), retired.text);
             g_registry.OnSwapchainDestroyed(H(device), H(swapchain));
         }
 
+        Log(modelLines);
         if (!line.empty())
             LOG_INFO("{}", line);
+
+        next(device, swapchain, allocator);
+
+        // After the destroy returned, so an implementation that finishes its pending presents inside it has.
+        if (!retired.afterDestroy.empty())
+        {
+            std::lock_guard lock(g_transportMutex);
+            if (DeviceTransport* dev = FindDevice(device); dev != nullptr && !dev->lost)
+            {
+                for (const VkSemaphore semaphore : retired.afterDestroy)
+                    dev->fn.destroySemaphore(dev->device, semaphore, nullptr);
+            }
+        }
+
+        return;
     }
 
     next(device, swapchain, allocator);
@@ -1870,6 +2415,27 @@ void HookPresent(VkDevice device)
 
 // --- Instance-level hooks, on vulkan-1.dll's exports ------------------------------------------------------------
 
+// Whether an instance can take the model's device extensions' dependencies: Vulkan 1.1, or
+// VK_KHR_get_physical_device_properties2 enabled on it.
+bool HasProperties2(const VkInstanceCreateInfo* info)
+{
+    if (info == nullptr)
+        return false;
+
+    if (info->pApplicationInfo != nullptr && VK_API_VERSION_MAJOR(info->pApplicationInfo->apiVersion) == 1 &&
+        VK_API_VERSION_MINOR(info->pApplicationInfo->apiVersion) >= 1)
+        return true;
+
+    for (uint32_t i = 0; info->ppEnabledExtensionNames != nullptr && i < info->enabledExtensionCount; ++i)
+    {
+        if (std::string_view(info->ppEnabledExtensionNames[i]) ==
+            VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)
+            return true;
+    }
+
+    return false;
+}
+
 VkResult VKAPI_CALL hkCreateInstance(const VkInstanceCreateInfo* info, const VkAllocationCallbacks* allocator,
                                      VkInstance* instance)
 {
@@ -1883,7 +2449,9 @@ VkResult VKAPI_CALL hkCreateInstance(const VkInstanceCreateInfo* info, const VkA
         RecordId id = 0;
         {
             std::lock_guard lock(g_registryMutex);
-            id = g_registry.OnInstanceCreated(H(*instance), internal);
+            id = g_registry.OnInstanceCreated(
+                H(*instance), internal, HasProperties2(info),
+                info != nullptr && info->pApplicationInfo != nullptr ? info->pApplicationInfo->apiVersion : 0);
         }
 
         LOG_INFO("DLSS-NR Vulkan present host: instance {} #{} created by {} ({}){}", Hex(H(*instance)), id,
@@ -1921,14 +2489,199 @@ VkResult VKAPI_CALL hkEnumeratePhysicalDevices(VkInstance instance, uint32_t* co
     return result;
 }
 
+// Whether the application enabled shaderStorageImageWriteWithoutFormat, in pEnabledFeatures or a
+// VkPhysicalDeviceFeatures2 in its pNext chain.
+bool StorageWithoutFormatEnabled(const VkDeviceCreateInfo* info)
+{
+    if (info->pEnabledFeatures != nullptr && info->pEnabledFeatures->shaderStorageImageWriteWithoutFormat)
+        return true;
+
+    for (auto chain = static_cast<const VkBaseInStructure*>(info->pNext); chain != nullptr; chain = chain->pNext)
+    {
+        if (chain->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 &&
+            reinterpret_cast<const VkPhysicalDeviceFeatures2*>(chain)->features.shaderStorageImageWriteWithoutFormat)
+            return true;
+    }
+
+    return false;
+}
+
+// What the application's create info says about bufferDeviceAddress.
+BdaChain ReadBdaChain(const VkDeviceCreateInfo* info)
+{
+    BdaChain chain;
+
+    for (auto node = static_cast<const VkBaseInStructure*>(info->pNext); node != nullptr; node = node->pNext)
+    {
+        if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES)
+        {
+            chain.khrNode = true;
+            chain.enabled =
+                chain.enabled ||
+                reinterpret_cast<const VkPhysicalDeviceBufferDeviceAddressFeatures*>(node)->bufferDeviceAddress;
+        }
+        else if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT)
+        {
+            chain.extNode = true;
+            chain.enabled =
+                chain.enabled ||
+                reinterpret_cast<const VkPhysicalDeviceBufferDeviceAddressFeaturesEXT*>(node)->bufferDeviceAddress;
+        }
+        else if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
+        {
+            chain.v12Node = true;
+            chain.enabled =
+                chain.enabled || reinterpret_cast<const VkPhysicalDeviceVulkan12Features*>(node)->bufferDeviceAddress;
+        }
+    }
+
+    return chain;
+}
+
+// Whether the physical device offers bufferDeviceAddress: vkGetPhysicalDeviceFeatures2, or its KHR name on a Vulkan
+// 1.0 instance with VK_KHR_get_physical_device_properties2.
+bool BdaSupported(VkInstance instance, VkPhysicalDevice physical, uint32_t apiVersion)
+{
+    if (g_getInstanceProcAddr == nullptr || instance == VK_NULL_HANDLE)
+        return false;
+
+    const bool vulkan11 = VK_API_VERSION_MAJOR(apiVersion) > 1 || VK_API_VERSION_MINOR(apiVersion) >= 1;
+    const auto features2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
+        g_getInstanceProcAddr(instance, vulkan11 ? "vkGetPhysicalDeviceFeatures2" : "vkGetPhysicalDeviceFeatures2KHR"));
+    if (features2 == nullptr)
+        return false;
+
+    VkPhysicalDeviceBufferDeviceAddressFeatures bda {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES
+    };
+    VkPhysicalDeviceFeatures2 features { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    features.pNext = &bda;
+    features2(physical, &features);
+    return bda.bufferDeviceAddress == VK_TRUE;
+}
+
+// What the physical device offers, by name.
+std::vector<std::string> SupportedDeviceExtensions(VkPhysicalDevice physical)
+{
+    std::vector<std::string> names;
+    uint32_t count = 0;
+
+    if (g_enumerateDeviceExtensions == nullptr ||
+        g_enumerateDeviceExtensions(physical, nullptr, &count, nullptr) != VK_SUCCESS || count == 0)
+        return names;
+
+    std::vector<VkExtensionProperties> properties(count);
+    if (g_enumerateDeviceExtensions(physical, nullptr, &count, properties.data()) != VK_SUCCESS)
+        return names;
+
+    for (uint32_t i = 0; i < count; ++i)
+        names.emplace_back(properties[i].extensionName);
+    return names;
+}
+
+// Per queue family, how many bits of a timestamp are valid: 0 where timestamps are not supported.
+std::vector<uint32_t> TimestampBits(VkPhysicalDevice physical)
+{
+    std::vector<uint32_t> bits;
+    uint32_t count = 0;
+
+    if (g_getQueueFamilies == nullptr || physical == VK_NULL_HANDLE)
+        return bits;
+
+    g_getQueueFamilies(physical, &count, nullptr);
+    std::vector<VkQueueFamilyProperties> properties(count);
+    g_getQueueFamilies(physical, &count, properties.data());
+
+    for (uint32_t i = 0; i < count; ++i)
+        bits.push_back(properties[i].timestampValidBits);
+    return bits;
+}
+
 VkResult VKAPI_CALL hkCreateDevice(VkPhysicalDevice physical, const VkDeviceCreateInfo* info,
                                    const VkAllocationCallbacks* allocator, VkDevice* device)
 {
     void* const returnAddress = _ReturnAddress();
     const bool internal = Internal();
 
-    // The create info goes down as the caller made it: the host adds no extension, feature or queue.
-    const VkResult result = o_CreateDevice(physical, info, allocator, device);
+    // Stage 3: on a device the host will carry presents on, the model's device extensions the device offers are
+    // appended to a copy of the create info -- exactly the after-upscale route's list, decided before the call and
+    // never by retrying one: a device's extensions are fixed at creation. Everything else goes down as it came; no
+    // feature or queue is added. OptiScaler's own devices get nothing.
+    ExtensionPlan extensions;
+    BdaAction bda = BdaAction::Already;
+    VkDeviceCreateInfo withExtensions {};
+    std::vector<const char*> names;
+    VkPhysicalDeviceBufferDeviceAddressFeatures bdaFeatures {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES
+    };
+    VkPhysicalDeviceBufferDeviceAddressFeaturesEXT bdaFeaturesExt {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT
+    };
+    bool edited = false;
+    if (!internal && info != nullptr)
+    {
+        std::vector<std::string> asked;
+        for (uint32_t i = 0; info->ppEnabledExtensionNames != nullptr && i < info->enabledExtensionCount; ++i)
+            asked.emplace_back(info->ppEnabledExtensionNames[i]);
+
+        bool properties2 = false;
+        uint32_t apiVersion = 0;
+        Handle instanceOfPhysical = 0;
+        {
+            std::lock_guard lock(g_registryMutex);
+            properties2 = g_registry.Properties2Of(H(physical));
+            apiVersion = g_registry.ApiVersionOf(H(physical));
+            instanceOfPhysical = g_registry.InstanceOf(H(physical));
+        }
+
+        const bool vulkan13 = VK_API_VERSION_MAJOR(apiVersion) > 1 ||
+                              (VK_API_VERSION_MAJOR(apiVersion) == 1 && VK_API_VERSION_MINOR(apiVersion) >= 3);
+        extensions = PlanDeviceExtensions(asked, SupportedDeviceExtensions(physical), properties2,
+                                          vulkan13 || StorageWithoutFormatEnabled(info));
+
+        // The feature the model's allocations need, only where its extension will be there: on a device the model
+        // cannot use anyway, nothing is added for it.
+        if (extensions.ready)
+            bda = PlanBufferDeviceAddress(ReadBdaChain(info),
+                                          BdaSupported(As<VkInstance>(instanceOfPhysical), physical, apiVersion),
+                                          Listed(asked, kBdaExt));
+
+        if (!extensions.add.empty() || bda == BdaAction::AddKhr || bda == BdaAction::AddExt)
+        {
+            withExtensions = *info;
+            edited = true;
+        }
+
+        if (!extensions.add.empty())
+        {
+            for (uint32_t i = 0; info->ppEnabledExtensionNames != nullptr && i < info->enabledExtensionCount; ++i)
+                names.push_back(info->ppEnabledExtensionNames[i]);
+            for (const std::string& name : extensions.add)
+                names.push_back(name.c_str());
+            withExtensions.enabledExtensionCount = static_cast<uint32_t>(names.size());
+            withExtensions.ppEnabledExtensionNames = names.data();
+        }
+
+        // Prepended to the application's chain, which goes down as it came behind it.
+        if (bda == BdaAction::AddKhr)
+        {
+            bdaFeatures.bufferDeviceAddress = VK_TRUE;
+            bdaFeatures.pNext = const_cast<void*>(info->pNext);
+            withExtensions.pNext = &bdaFeatures;
+        }
+        else if (bda == BdaAction::AddExt)
+        {
+            bdaFeaturesExt.bufferDeviceAddress = VK_TRUE;
+            bdaFeaturesExt.pNext = const_cast<void*>(info->pNext);
+            withExtensions.pNext = &bdaFeaturesExt;
+        }
+    }
+
+    const VkResult result = o_CreateDevice(physical, edited ? &withExtensions : info, allocator, device);
+
+    if (edited && result != VK_SUCCESS)
+        LOG_WARN("DLSS-NR Vulkan present host: vkCreateDevice returned {} with the model's extensions ({}) and {}",
+                 static_cast<int>(result), JoinNames(extensions.add), BdaText(bda));
 
     if (result != VK_SUCCESS || device == nullptr || *device == VK_NULL_HANDLE)
         return result;
@@ -1953,16 +2706,27 @@ VkResult VKAPI_CALL hkCreateDevice(VkPhysicalDevice physical, const VkDeviceCrea
 
     std::string line;
     RecordId id = 0;
+    VkInstance instance = VK_NULL_HANDLE;
     {
         std::lock_guard lock(g_registryMutex);
         id = g_registry.OnDeviceCreated(H(*device), std::move(desc));
         line = g_registry.DeviceLine(H(*device));
+        instance = As<VkInstance>(g_registry.InstanceOf(H(physical)));
     }
 
     // OptiScaler's own devices get no transport: nothing of theirs is ever transported.
     if (!internal)
     {
         auto dev = MakeDeviceTransport(*device, physical, id);
+        dev->instance = instance;
+        dev->nrReady = extensions.ready && BdaReady(bda);
+        dev->nrMissing = !extensions.ready
+                             ? "the device was created without the model's extensions: " + JoinNames(extensions.missing)
+                             : std::string("the device was created without the model's features: ") + BdaText(bda);
+        dev->timestampBits = TimestampBits(physical);
+        line += "; " + ExtensionText(extensions);
+        if (extensions.ready)
+            line += std::string("; ") + BdaText(bda);
         if (!dev->off.empty())
             line += "; round trip off on it: " + dev->off;
 
@@ -2075,6 +2839,11 @@ void DlssNr::VkPresentHost::Install(HMODULE vulkan1)
         reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(get("vkGetPhysicalDeviceMemoryProperties"));
     g_getImageFormatProperties =
         reinterpret_cast<PFN_vkGetPhysicalDeviceImageFormatProperties>(get("vkGetPhysicalDeviceImageFormatProperties"));
+    g_getFormatProperties =
+        reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties>(get("vkGetPhysicalDeviceFormatProperties"));
+    g_enumerateDeviceExtensions =
+        reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(get("vkEnumerateDeviceExtensionProperties"));
+    g_getInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(get("vkGetInstanceProcAddr"));
 
     const auto reset = []()
     {
@@ -2089,6 +2858,9 @@ void DlssNr::VkPresentHost::Install(HMODULE vulkan1)
         g_getSurfaceCapabilities = nullptr;
         g_getMemoryProperties = nullptr;
         g_getImageFormatProperties = nullptr;
+        g_getFormatProperties = nullptr;
+        g_enumerateDeviceExtensions = nullptr;
+        g_getInstanceProcAddr = nullptr;
     };
 
     if (o_CreateDevice == nullptr || o_DestroyInstance == nullptr || g_getDeviceProcAddr == nullptr)
@@ -2118,8 +2890,8 @@ void DlssNr::VkPresentHost::Install(HMODULE vulkan1)
     g_installed = true;
     g_module = vulkan1;
 
-    LOG_INFO("DLSS-NR Vulkan present host (round trip, no NR; stage 2 of nr-vulkan-present-host.md): installed on "
-             "vulkan-1.dll, {}",
+    LOG_INFO("DLSS-NR Vulkan present host (cold NR on zero guides; stage 3 of nr-vulkan-present-host.md): installed "
+             "on vulkan-1.dll, {}",
              State::Instance().vulkanHooksSkipped
                  ? "while the rest of OptiScaler's Vulkan hooks stay off ([Vulkan] SkipHooks or the marker); this "
                    "host is the one exception"

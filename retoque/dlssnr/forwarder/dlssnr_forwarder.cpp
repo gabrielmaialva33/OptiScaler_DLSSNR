@@ -265,6 +265,11 @@ extern "C"
     using PFN_NrVkInitExt = int(__cdecl*)(unsigned long long, const wchar_t*, void*, void*, void*, int, const void*);
     using PFN_NrVkCreate = int(__cdecl*)(void*, int, const void*, void**);
     using PFN_NrVkEvaluate = int(__cdecl*)(void*, const void*, const void*, void*);
+    // The device-specific shutdown NGX exports takes an out count of what is left after it (the D3D12 one does too:
+    // NVNGXProxy::ShutdownDx12Device). Declared with it: a one-argument call leaves the pointer to whatever is in the
+    // register, and the core was seen writing through it (a null write inside _nvngx.dll, 2026-10-14). If the entry
+    // reads only the device, the extra argument is ignored.
+    using PFN_NrVkShutdown1 = int(__cdecl*)(void*, unsigned int*);
 
     struct VkSnippet
     {
@@ -273,6 +278,7 @@ extern "C"
         PFN_NrVkCreate create = nullptr;
         PFN_NrVkEvaluate evaluate = nullptr;
         PFN_NrRelease release = nullptr;
+        PFN_NrVkShutdown1 shutdown1 = nullptr;
         // The device NGX was initialised on. NGX binds to a device, so a new one needs its own init: a single
         // "initialised" flag answered 1 for the replacement device without initialising NGX on it.
         void* initialisedDevice = nullptr;
@@ -298,6 +304,7 @@ extern "C"
         g_vk.create = (PFN_NrVkCreate) GetProcAddress(g_vk.module, "NVSDK_NGX_VULKAN_CreateFeature");
         g_vk.evaluate = (PFN_NrVkEvaluate) GetProcAddress(g_vk.module, "NVSDK_NGX_VULKAN_EvaluateFeature");
         g_vk.release = (PFN_NrRelease) GetProcAddress(g_vk.module, "NVSDK_NGX_VULKAN_ReleaseFeature");
+        g_vk.shutdown1 = (PFN_NrVkShutdown1) GetProcAddress(g_vk.module, "NVSDK_NGX_VULKAN_Shutdown1");
 
         return g_vk.create != nullptr && g_vk.evaluate != nullptr;
     }
@@ -922,6 +929,26 @@ extern "C"
             volatile int ignored = Guarded(g_vk.release, feature);
             (void) ignored;
         }
+    }
+
+    // NGX shut down on the device it was initialised on (NVSDK_NGX_VULKAN_Shutdown1), before that device is destroyed,
+    // with every feature on it released. The Vulkan present host calls it from its vkDestroyDevice hook: a later device
+    // can get the same handle value back, and dlssnr_vk_init would answer it "initialised" without initialising NGX on
+    // it. Returns NGX's result, or -1 when the device is not the one initialised (nothing is called then).
+    __declspec(dllexport) int dlssnr_vk_shutdown(void* device)
+    {
+        if (g_vk.shutdown1 == nullptr || device == nullptr || device != g_vk.initialisedDevice)
+        {
+            return -1;
+        }
+
+        // Forgotten whatever NGX answers: the device is about to be destroyed, so nothing initialised on it survives.
+        g_vk.initialisedDevice = nullptr;
+
+        // Assigned rather than returned, as every call through this module is: the snippet checks its caller.
+        unsigned int remaining = 0;
+        volatile int result = Guarded(g_vk.shutdown1, device, &remaining);
+        return (int) result;
     }
 
     // Creates a persistent Neural Rendering feature. The handle records initialisation work into cmd, so it

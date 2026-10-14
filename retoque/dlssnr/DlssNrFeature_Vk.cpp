@@ -6,7 +6,11 @@
 #include <State.h>
 #include <Util.h>
 #include <NVNGX_Parameter.h>
+#include <proxies/NVNGX_Proxy.h>
 #include <dlssnr/DlssNr_Consumers.h>
+#include <dlssnr/DlssNrFeature_Dx12.h>
+#include <dlssnr/DlssNr_VkModelOwner.h>
+#include <dlssnr/DlssNr_VkPresentModel.h>
 #include <dlssnr/DlssNr_Enlarge.h>
 #include <dlssnr/DlssNr_Exposure.h>
 #include <dlssnr/DlssNr_ModelLog.h>
@@ -20,6 +24,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -62,12 +67,16 @@ struct OwnedImage
     bool Valid() const { return image != VK_NULL_HANDLE && view != VK_NULL_HANDLE; }
 };
 
-struct VkState
+// The forwarder, once per process: one DLL, one snippet inside it, one fault record and one float slot, whichever
+// route calls it -- the after-upscale route below, or the Vulkan present host's model (VkPresentModel). Loaded under
+// its own lock, because the two are called from different threads under different locks.
+struct Forwarder
 {
-    bool failed = false;
-    const char* reason = "";
+    std::mutex mutex;
+    bool tried = false;
+    const char* failure = nullptr; // why it is not usable, latched for the process
 
-    HMODULE forwarder = nullptr;
+    HMODULE module = nullptr;
     PFN_VkProbe probe = nullptr;
     PFN_VkInit init = nullptr;
     PFN_VkCreate create = nullptr;
@@ -77,10 +86,25 @@ struct VkState
     // The forwarder's record of a fault caught inside the model. Null on a forwarder that predates it.
     int (*faultState)(unsigned long*, void**) = nullptr;
 
-    // Where this block keeps floats, and the forwarder calls that find out. Optional: an older
+    // Where a parameter block keeps floats, and the forwarder calls that find out. Optional: an older
     // forwarder lacks them and the floats go to the header's slot, as they always did here.
     PFN_NrSetFloatSlot setFloatSlot = nullptr;
     PFN_NrProbeFloat probeFloat = nullptr;
+
+    // NGX's shutdown on one device (NVSDK_NGX_VULKAN_Shutdown1), so the forwarder forgets the device it initialised.
+    // Absent from a forwarder older than the present host's stage 3.
+    int(__cdecl* shutdown)(void*) = nullptr;
+};
+
+Forwarder g_fwd;
+
+struct VkState
+{
+    bool failed = false;
+    const char* reason = "";
+
+    // Whether the float slot was found for this owner's parameter block (the forwarder's slot is one, the blocks may
+    // differ).
     bool floatSlotKnown = false;
 
     VkInstance instance = VK_NULL_HANDLE;
@@ -175,6 +199,37 @@ std::atomic<bool> g_vkResetOnReturn { false };
 // can act; the same as g_lastLinearHdr on the D3D12 side.
 std::atomic<bool> g_vkLinearHdr { false };
 
+// One owner of the model in the process: the after-upscale route above, or the Vulkan present host's model.
+std::mutex g_ownerMutex;
+VkModelOwner::Arbiter g_owner;
+
+uint64_t OwnerNowMs()
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
+// The after-upscale route, at an evaluate it is about to run on `device`. False while the present host holds the model.
+bool ClaimModelForAfterUpscale(VkDevice device)
+{
+    VkModelOwner::Verdict verdict;
+    {
+        std::lock_guard<std::mutex> lock(g_ownerMutex);
+        verdict = g_owner.AfterUpscale(reinterpret_cast<uint64_t>(device), OwnerNowMs());
+    }
+
+    static bool said = false;
+
+    if (!verdict.granted && !said)
+    {
+        said = true;
+        LOG_INFO("DLSS-NR Vulkan: this route waits: {}", verdict.reason);
+    }
+
+    return verdict.granted;
+}
+
 void Fail(const char* why)
 {
     if (g_vk.failed)
@@ -186,19 +241,20 @@ void Fail(const char* why)
     SessionGuardOff(); // not running any more
 }
 
+bool ModelFaulted(std::string* description);
+
 // Whether the forwarder has caught a fault inside the model; if so, says where once and fails the
 // session with that reason. Called before the generic "refused" failures, because a faulted call comes
 // back as an ordinary failed result and would otherwise be reported as one.
 bool NoteModelFault()
 {
-    unsigned long code = 0;
-    void* address = nullptr;
+    std::string description;
 
-    if (g_vk.faultState == nullptr || g_vk.faultState(&code, &address) == 0)
+    if (!ModelFaulted(&description))
         return false;
 
     if (!g_vk.failed)
-        LOG_ERROR("DLSS-NR Vulkan: {}", DlssNr::ModelLog::DescribeFault(code, address));
+        LOG_ERROR("DLSS-NR Vulkan: {}", description);
 
     Fail("the model faulted inside its own code; off for this session");
     return true;
@@ -208,27 +264,29 @@ bool NoteModelFault()
 // Images this pass owns
 // ---------------------------------------------------------------------------------------------
 
-void DestroyImage(OwnedImage& img)
+void DestroyImageOn(VkDevice device, OwnedImage& img)
 {
-    if (g_vk.device == VK_NULL_HANDLE)
+    if (device == VK_NULL_HANDLE)
         return;
 
     if (img.view != VK_NULL_HANDLE)
-        vkDestroyImageView(g_vk.device, img.view, nullptr);
+        vkDestroyImageView(device, img.view, nullptr);
 
     if (img.image != VK_NULL_HANDLE)
-        vkDestroyImage(g_vk.device, img.image, nullptr);
+        vkDestroyImage(device, img.image, nullptr);
 
     if (img.memory != VK_NULL_HANDLE)
-        vkFreeMemory(g_vk.device, img.memory, nullptr);
+        vkFreeMemory(device, img.memory, nullptr);
 
     img = OwnedImage {};
 }
 
-uint32_t FindMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags properties)
+void DestroyImage(OwnedImage& img) { DestroyImageOn(g_vk.device, img); }
+
+uint32_t FindMemoryTypeIndexOn(VkPhysicalDevice physicalDevice, uint32_t typeBits, VkMemoryPropertyFlags properties)
 {
     VkPhysicalDeviceMemoryProperties memProps {};
-    vkGetPhysicalDeviceMemoryProperties(g_vk.physicalDevice, &memProps);
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
 
     for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
     {
@@ -237,6 +295,11 @@ uint32_t FindMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags properties
     }
 
     return UINT32_MAX;
+}
+
+uint32_t FindMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags properties)
+{
+    return FindMemoryTypeIndexOn(g_vk.physicalDevice, typeBits, properties);
 }
 
 // STORAGE and SAMPLED both, because every one of these is written by one dispatch and read by the
@@ -255,9 +318,10 @@ static VkImageInfo ImageInfoOf(const OwnedImage& img)
     return info;
 }
 
-bool CreateImage(OwnedImage& img, uint32_t width, uint32_t height, VkFormat format, bool readWrite)
+bool CreateImageOn(VkDevice device, VkPhysicalDevice physicalDevice, OwnedImage& img, uint32_t width, uint32_t height,
+                   VkFormat format, bool readWrite)
 {
-    DestroyImage(img);
+    DestroyImageOn(device, img);
 
     VkImageCreateInfo info {};
     info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -273,26 +337,26 @@ bool CreateImage(OwnedImage& img, uint32_t width, uint32_t height, VkFormat form
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vkCreateImage(g_vk.device, &info, nullptr, &img.image) != VK_SUCCESS)
+    if (vkCreateImage(device, &info, nullptr, &img.image) != VK_SUCCESS)
     {
         LOG_ERROR("DLSS-NR Vulkan: could not create a {}x{} image", width, height);
         return false;
     }
 
     VkMemoryRequirements req {};
-    vkGetImageMemoryRequirements(g_vk.device, img.image, &req);
+    vkGetImageMemoryRequirements(device, img.image, &req);
 
     VkMemoryAllocateInfo alloc {};
     alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     alloc.allocationSize = req.size;
-    alloc.memoryTypeIndex = FindMemoryTypeIndex(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    alloc.memoryTypeIndex =
+        FindMemoryTypeIndexOn(physicalDevice, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    if (alloc.memoryTypeIndex == UINT32_MAX ||
-        vkAllocateMemory(g_vk.device, &alloc, nullptr, &img.memory) != VK_SUCCESS ||
-        vkBindImageMemory(g_vk.device, img.image, img.memory, 0) != VK_SUCCESS)
+    if (alloc.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(device, &alloc, nullptr, &img.memory) != VK_SUCCESS ||
+        vkBindImageMemory(device, img.image, img.memory, 0) != VK_SUCCESS)
     {
         LOG_ERROR("DLSS-NR Vulkan: could not back a {}x{} image", width, height);
-        DestroyImage(img);
+        DestroyImageOn(device, img);
         return false;
     }
 
@@ -303,10 +367,10 @@ bool CreateImage(OwnedImage& img, uint32_t width, uint32_t height, VkFormat form
     view.format = format;
     view.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
 
-    if (vkCreateImageView(g_vk.device, &view, nullptr, &img.view) != VK_SUCCESS)
+    if (vkCreateImageView(device, &view, nullptr, &img.view) != VK_SUCCESS)
     {
         LOG_ERROR("DLSS-NR Vulkan: could not view a {}x{} image", width, height);
-        DestroyImage(img);
+        DestroyImageOn(device, img);
         return false;
     }
 
@@ -326,6 +390,11 @@ bool CreateImage(OwnedImage& img, uint32_t width, uint32_t height, VkFormat form
     img.ngx.ReadWrite = readWrite;
 
     return true;
+}
+
+bool CreateImage(OwnedImage& img, uint32_t width, uint32_t height, VkFormat format, bool readWrite)
+{
+    return CreateImageOn(g_vk.device, g_vk.physicalDevice, img, width, height, format, readWrite);
 }
 
 // The ring of host-visible buffers the meter's grid is copied into, created once and mapped for
@@ -448,10 +517,16 @@ void TransitionForeign(VkCommandBuffer cmd, VkImage image, VkImageSubresourceRan
 // Bring-up
 // ---------------------------------------------------------------------------------------------
 
-bool LoadForwarder()
+// nullptr when the forwarder is loaded and usable, otherwise why not. Tried once per process: a forwarder that is
+// missing or from another build stays so.
+const char* LoadForwarderShared()
 {
-    if (g_vk.forwarder != nullptr)
-        return g_vk.create != nullptr;
+    std::lock_guard<std::mutex> lock(g_fwd.mutex);
+
+    if (g_fwd.tried)
+        return g_fwd.failure;
+
+    g_fwd.tried = true;
 
     auto path = Util::FindFilePath(Util::DllPath().remove_filename(), "nvngx.dll_dlssnr.dll");
 
@@ -459,56 +534,74 @@ bool LoadForwarder()
         path = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx.dll_dlssnr.dll");
 
     if (!path.has_value())
-    {
-        Fail("nvngx.dll_dlssnr.dll was not found beside OptiScaler or the game");
-        return false;
-    }
+        return g_fwd.failure = "nvngx.dll_dlssnr.dll was not found beside OptiScaler or the game";
 
-    g_vk.forwarder = LoadLibraryW(path->wstring().c_str());
+    g_fwd.module = LoadLibraryW(path->wstring().c_str());
 
-    if (g_vk.forwarder == nullptr)
-    {
-        Fail("the forwarder would not load");
-        return false;
-    }
+    if (g_fwd.module == nullptr)
+        return g_fwd.failure = "the forwarder would not load";
 
-    g_vk.probe = (PFN_VkProbe) GetProcAddress(g_vk.forwarder, "dlssnr_vk_probe");
-    g_vk.init = (PFN_VkInit) GetProcAddress(g_vk.forwarder, "dlssnr_vk_init");
-    g_vk.create = (PFN_VkCreate) GetProcAddress(g_vk.forwarder, "dlssnr_vk_create");
-    g_vk.evaluate = (PFN_VkEvaluate) GetProcAddress(g_vk.forwarder, "dlssnr_vk_evaluate");
-    g_vk.release = (PFN_VkRelease) GetProcAddress(g_vk.forwarder, "dlssnr_vk_release");
-    g_vk.faultState = (int (*)(unsigned long*, void**)) GetProcAddress(g_vk.forwarder, "dlssnr_fault_state");
+    g_fwd.probe = (PFN_VkProbe) GetProcAddress(g_fwd.module, "dlssnr_vk_probe");
+    g_fwd.init = (PFN_VkInit) GetProcAddress(g_fwd.module, "dlssnr_vk_init");
+    g_fwd.create = (PFN_VkCreate) GetProcAddress(g_fwd.module, "dlssnr_vk_create");
+    g_fwd.evaluate = (PFN_VkEvaluate) GetProcAddress(g_fwd.module, "dlssnr_vk_evaluate");
+    g_fwd.release = (PFN_VkRelease) GetProcAddress(g_fwd.module, "dlssnr_vk_release");
+    g_fwd.faultState = (int (*)(unsigned long*, void**)) GetProcAddress(g_fwd.module, "dlssnr_fault_state");
     // Optional, and shared with the D3D12 path: one global slot inside the forwarder.
-    g_vk.setFloatSlot = (PFN_NrSetFloatSlot) GetProcAddress(g_vk.forwarder, "dlssnr_call_set_float_slot");
-    g_vk.probeFloat = (PFN_NrProbeFloat) GetProcAddress(g_vk.forwarder, "dlssnr_call_probe_float");
+    g_fwd.setFloatSlot = (PFN_NrSetFloatSlot) GetProcAddress(g_fwd.module, "dlssnr_call_set_float_slot");
+    g_fwd.probeFloat = (PFN_NrProbeFloat) GetProcAddress(g_fwd.module, "dlssnr_call_probe_float");
+    g_fwd.shutdown = (int(__cdecl*)(void*)) GetProcAddress(g_fwd.module, "dlssnr_vk_shutdown");
 
-    if (g_vk.init == nullptr || g_vk.create == nullptr || g_vk.evaluate == nullptr)
-    {
-        Fail("the forwarder is missing its Vulkan entry points");
-        return false;
-    }
+    if (g_fwd.init == nullptr || g_fwd.create == nullptr || g_fwd.evaluate == nullptr)
+        return g_fwd.failure = "the forwarder is missing its Vulkan entry points";
 
     // The same refusal the D3D12 loader makes, for the same reason: the export names have outlived
     // several argument lists, so an old forwarder resolves and then misreads every argument past the
     // fourth. See kDlssNrForwarderAbi.
-    const auto* forwarderAbi = (const int*) GetProcAddress(g_vk.forwarder, "dlssnr_abi_version");
+    const auto* forwarderAbi = (const int*) GetProcAddress(g_fwd.module, "dlssnr_abi_version");
 
     if (forwarderAbi == nullptr || *forwarderAbi != kDlssNrForwarderAbi)
     {
         LOG_ERROR("nvngx.dll_dlssnr.dll is version {} and this build needs {}; copy the forwarder from "
                   "the same build as OptiScaler",
                   forwarderAbi == nullptr ? 1 : *forwarderAbi, kDlssNrForwarderAbi);
-        Fail("nvngx.dll_dlssnr.dll is from a different build");
-        return false;
+        return g_fwd.failure = "nvngx.dll_dlssnr.dll is from a different build";
     }
 
     // The same announcement the D3D12 loader makes; a host too old to make it is refused by the
     // forwarder rather than mismatching its arguments in silence.
-    if (const auto setHostAbi = (void(__cdecl*)(int)) GetProcAddress(g_vk.forwarder, "dlssnr_set_host_abi"))
+    if (const auto setHostAbi = (void(__cdecl*)(int)) GetProcAddress(g_fwd.module, "dlssnr_set_host_abi"))
         setHostAbi(kDlssNrForwarderAbi);
 
     // Same check the D3D12 loader makes, once per process either way.
     DlssNr::Consumers::WarnIfCompeting();
+
+    return nullptr;
+}
+
+bool LoadForwarder()
+{
+    if (const char* why = LoadForwarderShared())
+    {
+        Fail(why);
+        return false;
+    }
+
+    return true;
+}
+
+// Whether the forwarder has caught a fault inside the model, and the description of it. Shared by both owners: the
+// forwarder refuses every call after the first fault, whoever made it.
+bool ModelFaulted(std::string* description)
+{
+    unsigned long code = 0;
+    void* address = nullptr;
+
+    if (g_fwd.faultState == nullptr || g_fwd.faultState(&code, &address) == 0)
+        return false;
+
+    if (description != nullptr)
+        *description = DlssNr::ModelLog::DescribeFault(code, address);
 
     return true;
 }
@@ -516,12 +609,12 @@ bool LoadForwarder()
 // Where this parameter block keeps floats. The same probe as DlssNr_Dx12's DiscoverFloatSlot, for
 // the reason documented there: the header's slot is not where the driver's own block keeps them.
 // This path never ran it, so every float the model was given went into a slot that discards it.
-void DiscoverFloatSlot(NVSDK_NGX_Parameter* params)
+void DiscoverFloatSlotFor(bool& known, NVSDK_NGX_Parameter* params)
 {
-    if (g_vk.floatSlotKnown || params == nullptr || g_vk.probeFloat == nullptr || g_vk.setFloatSlot == nullptr)
+    if (known || params == nullptr || g_fwd.probeFloat == nullptr || g_fwd.setFloatSlot == nullptr)
         return;
 
-    g_vk.floatSlotKnown = true;
+    known = true;
 
     static const char* kProbeKey = "DLSSNR.OptiScalerFloatProbe";
     static const int kCandidates[] = { 1, 2, 5, 6, 7, 4, 3, 0 };
@@ -530,11 +623,11 @@ void DiscoverFloatSlot(NVSDK_NGX_Parameter* params)
     for (int slot : kCandidates)
     {
         float readBack = 0.0f;
-        g_vk.probeFloat(params, kProbeKey, expected, slot);
+        g_fwd.probeFloat(params, kProbeKey, expected, slot);
 
         if (params->Get(kProbeKey, &readBack) == NVSDK_NGX_Result_Success && readBack == expected)
         {
-            g_vk.setFloatSlot(slot);
+            g_fwd.setFloatSlot(slot);
             LOG_INFO("DLSS-NR Vulkan: float parameters go through vtable slot {}", slot);
             return;
         }
@@ -544,6 +637,8 @@ void DiscoverFloatSlot(NVSDK_NGX_Parameter* params)
               "local structure, local tone and skin structure will have no effect. The uint "
               "parameters still apply.");
 }
+
+void DiscoverFloatSlot(NVSDK_NGX_Parameter* params) { DiscoverFloatSlotFor(g_vk.floatSlotKnown, params); }
 
 // Whether a format can hold linear, open-ended light. A frame the game already tone mapped has white
 // at 1 and must not be encoded a second time; an 8-bit or normalised format cannot be scene-referred
@@ -575,6 +670,14 @@ unsigned int GameCreateFlags(NVSDK_NGX_Parameter* params)
         params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &flags);
 
     return flags;
+}
+
+// Both Vulkan routes set the encode's Transfer here. Transfer 2's private DLSS is D3D12 only: sent as is, the shader
+// would decode this path's plain answer as the carrier that DLSS writes; it runs matched residual instead
+// (docs/dlssnr/design/dlss-enlargement.md).
+void SetVulkanTransfer(DlssNrConstants& encode, const Config& cfg)
+{
+    encode.Transfer = Enlarge::VulkanTransfer(cfg.DlssNrTransfer.value_or_default());
 }
 
 std::optional<std::filesystem::path> FindSnippet()
@@ -799,6 +902,12 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         return;
     }
 
+    // One owner of the model in the process (DlssNr_VkModelOwner.h): this route wins, but not on a frame the Vulkan
+    // present host may still have in flight; asking is what makes it stand down at its next present. Never refused
+    // when the present host is off, so the route is what it was.
+    if (!ClaimModelForAfterUpscale(device))
+        return;
+
     g_vk.instance = instance;
     g_vk.physicalDevice = physicalDevice;
 
@@ -831,7 +940,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         // Before init and the first build, so the model's own account of them is in the log.
         DlssNr::ModelLog::Install(*snippet);
 
-        const int probe = g_vk.probe != nullptr ? g_vk.probe(snippet->wstring().c_str()) : 0;
+        const int probe = g_fwd.probe != nullptr ? g_fwd.probe(snippet->wstring().c_str()) : 0;
 
         // Four bits, one per entry point. Anything short of fifteen means the model's Vulkan surface
         // is not entirely reachable and there is no point going further.
@@ -842,8 +951,8 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
             return;
         }
 
-        const int result = g_vk.init(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                                     (void*) instance, (void*) physicalDevice, (void*) device, 0x0000015);
+        const int result = g_fwd.init(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
+                                      (void*) instance, (void*) physicalDevice, (void*) device, 0x0000015);
 
         if (result != 1)
         {
@@ -924,9 +1033,9 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         if (g_vk.device != VK_NULL_HANDLE)
             vkDeviceWaitIdle(g_vk.device);
 
-        if (g_vk.feature != nullptr && g_vk.release != nullptr)
+        if (g_vk.feature != nullptr && g_fwd.release != nullptr)
         {
-            g_vk.release(g_vk.feature);
+            g_fwd.release(g_vk.feature);
             g_vk.feature = nullptr;
         }
 
@@ -968,7 +1077,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
     if (g_vk.feature == nullptr)
     {
-        g_vk.feature = g_vk.create(
+        g_vk.feature = g_fwd.create(
             (void*) cmdBuffer, g_vk.capabilityParams, workWidth, workHeight, (int) cfg.DlssNrPreset.value_or_default(),
             cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
             cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
@@ -1140,9 +1249,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     encode.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
     encode.ColourStrength = cfg.DlssNrColourStrength.value_or_default();
     encode.MaxRatio = cfg.DlssNrMaxRatio.value_or_default();
-    // Transfer 2's private DLSS is D3D12 only. Sent as is, the shader would decode this path's plain answer as
-    // the carrier that DLSS writes; it runs matched residual instead (docs/dlssnr/design/dlss-enlargement.md).
-    encode.Transfer = Enlarge::VulkanTransfer(cfg.DlssNrTransfer.value_or_default());
+    SetVulkanTransfer(encode, cfg);
     encode.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
     encode.GuideWidth = guideWidth;
     encode.GuideHeight = guideHeight;
@@ -1391,7 +1498,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
                      workWidth, workHeight);
         }
     }
-    const int evaluated = g_vk.evaluate(
+    const int evaluated = g_fwd.evaluate(
         (void*) cmdBuffer, g_vk.feature, g_vk.capabilityParams, &modelInput->ngx, depth, motion, &g_vk.output.ngx,
         workWidth, workHeight, guideWidth, guideHeight, motionWidth, motionHeight, depthBaseX, depthBaseY, motionBaseX,
         motionBaseY, depthInverted ? 1 : 0, g_vk.reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
@@ -1541,8 +1648,8 @@ void ShutdownVk(bool deviceAlive)
     if (g_vk.device != VK_NULL_HANDLE)
         vkDeviceWaitIdle(g_vk.device);
 
-    if (g_vk.feature != nullptr && g_vk.release != nullptr)
-        g_vk.release(g_vk.feature);
+    if (g_vk.feature != nullptr && g_fwd.release != nullptr)
+        g_fwd.release(g_vk.feature);
 
     g_vk.feature = nullptr;
 
@@ -1581,6 +1688,825 @@ void ShutdownVk(bool deviceAlive)
     g_vk.height = 0;
     g_vk.ngxInitialised = false;
     g_vk.reset = true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The Vulkan present host's model (DlssNr_VkPresentModel.h)
+// ---------------------------------------------------------------------------------------------
+
+namespace
+{
+using VkPresentHost::NrSkip;
+
+// Timestamp pairs for the pass's GPU time: more than the frames that can be in flight, so a frame finds one free.
+constexpr uint32_t kPresentQueryPairs = 8;
+
+// The device the present host brought the driver's NGX core up on (NVNGXProxy holds one), if it did. Read and written
+// only under the host's transport lock, as every present-model call is.
+VkDevice g_presentCoreDevice = VK_NULL_HANDLE;
+
+// A feature and images replaced while frames that used them were in flight: freed once every one of those frames is
+// seen complete, never before.
+struct RetiredSet
+{
+    void* feature = nullptr;
+    std::vector<OwnedImage> images;
+    std::vector<uint64_t> waitFor;
+};
+
+// The core's shutdown on one device. Its device-specific entry takes an out count of what is left, as the D3D12 one
+// does (NVNGXProxy::ShutdownDx12Device), which NVNGXProxy's Vulkan typedef leaves out: called through that, the core
+// wrote the count through whatever was in the register (a null write inside _nvngx.dll, 2026-10-14). Called here with
+// it.
+void ShutdownPresentCore(VkDevice device)
+{
+    using PFN_Shutdown1 = NVSDK_NGX_Result (*)(VkDevice, unsigned int*);
+
+    if (const auto shutdown = reinterpret_cast<PFN_Shutdown1>(NVNGXProxy::VULKAN_Shutdown1()))
+    {
+        unsigned int remaining = 0;
+        shutdown(device, &remaining);
+    }
+}
+
+// The forwarder's record of an NGX call's result (an exported int), as NGX names it.
+std::string LastNgxResult(const char* variable)
+{
+    const auto* value = g_fwd.module != nullptr ? (const int*) GetProcAddress(g_fwd.module, variable) : nullptr;
+
+    if (value == nullptr)
+        return "result not recorded";
+
+    char text[16];
+    std::snprintf(text, sizeof(text), "0x%08X", static_cast<unsigned int>(*value));
+    return text;
+}
+
+std::wstring PresentModelDataPath()
+{
+    // NGX wants a writable folder for its own files. Nothing populates State's path when no game initialised NGX,
+    // which is exactly this route's case: OptiScaler's own folder, where its log is written, is writable.
+    if (!State::Instance().NVNGX_ApplicationDataPath.empty())
+        return State::Instance().NVNGX_ApplicationDataPath;
+
+    return Util::DllPath().parent_path().wstring();
+}
+} // namespace
+
+struct VkPresentModel::Impl
+{
+    VkPresentModelDevice dev;
+
+    bool failed = false;
+    std::string failure;
+    std::vector<std::string> lines; // for the host to log once its lock is released
+
+    bool ngxInitialised = false;
+    bool coreReady = false;                // the driver's NGX core is up on this device (NVNGXProxy)
+    NVSDK_NGX_Parameter* params = nullptr; // the core's capability block
+    bool floatSlotKnown = false;
+    std::unique_ptr<DlssNr_Vk> pass;
+    bool everSubmitted = false; // a recording of this model reached the GPU: the pass's one-time setup is real
+
+    void* feature = nullptr;
+    uint64_t featureTicket = 0; // the recording that created it and records its initialisation, until submitted
+
+    OwnedImage output;     // the model's answer, at the working size
+    OwnedImage proxy;      // the encode's display-referred proxy, full size
+    OwnedImage keep;       // the untouched frame, full size
+    OwnedImage proxySmall; // the proxy at the working size, below native only
+    OwnedImage depth;      // zero guides at the working size: constant depth ...
+    OwnedImage motion;     // ... and no motion
+    bool guidesCleared = false;
+    uint64_t guidesTicket = 0; // the recording that clears them, until submitted
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t workWidth = 0;
+    uint32_t workHeight = 0;
+    bool reset = true;
+
+    VkQueryPool queryPool = VK_NULL_HANDLE;
+    double tickNs = 0.0;
+    uint64_t tickMask = ~0ull;
+    std::array<uint64_t, kPresentQueryPairs> queryTicket {}; // 0: free
+
+    std::vector<uint64_t> pending; // submitted, not yet seen complete
+    std::vector<RetiredSet> retired;
+    bool adapterNoted = false;
+    uint64_t submitted = 0;
+
+    void Say(std::string line) { lines.push_back("DLSS-NR Vulkan present host: " + std::move(line)); }
+
+    VkPresentAdmission Latch(NrSkip skip, std::string why)
+    {
+        if (!failed)
+        {
+            failed = true;
+            failure = std::move(why);
+            Say("the model is off on this device: " + failure);
+        }
+
+        return { skip, failure };
+    }
+
+    bool FaultLatched()
+    {
+        std::string description;
+        if (!ModelFaulted(&description))
+            return false;
+
+        Latch(NrSkip::Unavailable, "the model faulted inside its own code (" + description + "); off for this session");
+        return true;
+    }
+
+    void Free(RetiredSet& set)
+    {
+        if (set.feature != nullptr && g_fwd.release != nullptr)
+            g_fwd.release(set.feature);
+
+        set.feature = nullptr;
+
+        for (OwnedImage& image : set.images)
+            DestroyImageOn(dev.device, image);
+
+        set.images.clear();
+    }
+
+    // Free the retired sets nothing in flight uses any more.
+    void FreeRetired()
+    {
+        for (auto it = retired.begin(); it != retired.end();)
+        {
+            if (it->waitFor.empty())
+            {
+                Free(*it);
+                it = retired.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+};
+
+VkPresentModel::VkPresentModel(const VkPresentModelDevice& device) : _impl(std::make_unique<Impl>())
+{
+    _impl->dev = device;
+}
+
+// Neither Release nor Abandon ran: whatever is left is abandoned (nothing here may call Vulkan).
+VkPresentModel::~VkPresentModel() { Abandon(); }
+
+size_t VkPresentModel::InFlight() const { return _impl->pending.size(); }
+
+const std::string& VkPresentModel::Failure() const { return _impl->failure; }
+
+std::vector<std::string> VkPresentModel::TakeLines()
+{
+    std::vector<std::string> lines;
+    lines.swap(_impl->lines);
+    return lines;
+}
+
+VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height)
+{
+    Impl& m = *_impl;
+    auto& cfg = *Config::Instance();
+
+    if (m.failed)
+        return { NrSkip::Unavailable, m.failure };
+
+    if (m.FaultLatched())
+        return { NrSkip::Unavailable, m.failure };
+
+    if (!m.adapterNoted)
+    {
+        VkPhysicalDeviceProperties props {};
+        vkGetPhysicalDeviceProperties(m.dev.physical, &props);
+        DlssNr::NoteAdapter(props.vendorID, props.deviceID);
+        m.adapterNoted = true;
+    }
+
+    // Never above native: on zero guides the model refuses a working size above the frame (FAIL_InvalidParameter),
+    // as the D3D12 present hosts found; they clamp it the same way.
+    const float workScale = std::clamp(DlssNr::WorkingScale(), 0.25f, 1.0f);
+    const uint32_t workWidth = (uint32_t) (width * workScale + 0.5f);
+    const uint32_t workHeight = (uint32_t) (height * workScale + 0.5f);
+
+    // See kDlssNrMinExtent: a probe-sized swapchain must never get a model built for it.
+    if (width < kDlssNrMinExtent || height < kDlssNrMinExtent || workWidth < kDlssNrMinExtent ||
+        workHeight < kDlssNrMinExtent)
+    {
+        return { NrSkip::TooSmall, std::to_string(width) + "x" + std::to_string(height) + " (working " +
+                                       std::to_string(workWidth) + "x" + std::to_string(workHeight) + ") is below " +
+                                       std::to_string(kDlssNrMinExtent) +
+                                       " pixels; the model is not built that small" };
+    }
+
+    if (m.pending.size() >= VkPresentHost::kNrInFlightMax)
+        return { NrSkip::Busy, "the model already has " + std::to_string(m.pending.size()) + " frames in flight" };
+
+    if (const char* why = LoadForwarderShared())
+        return m.Latch(NrSkip::Unavailable, why);
+
+    if (!m.ngxInitialised)
+    {
+        auto snippet = FindSnippet();
+
+        if (!snippet.has_value())
+            return m.Latch(NrSkip::Unavailable, "nvngx_dlssnr.dll was not found beside OptiScaler or the game");
+
+        // Before init and the first build, so the model's own account of them is in the log.
+        DlssNr::ModelLog::Install(*snippet);
+
+        // Four bits, one per entry point: anything short of fifteen and the model's Vulkan surface is not all there.
+        const int probe = g_fwd.probe != nullptr ? g_fwd.probe(snippet->wstring().c_str()) : 0;
+
+        if (probe != 15)
+            return m.Latch(NrSkip::Unavailable,
+                           "the model does not expose a complete Vulkan surface (probe " + std::to_string(probe) + ")");
+
+        // Cold: no application NGX initialisation exists to reuse. The same SDK version the after-upscale route
+        // initialises with.
+        const std::wstring dataPath = PresentModelDataPath();
+        const int result = g_fwd.init(snippet->wstring().c_str(), dataPath.c_str(), (void*) m.dev.instance,
+                                      (void*) m.dev.physical, (void*) m.dev.device, 0x0000015);
+
+        if (result != 1)
+        {
+            if (m.FaultLatched())
+                return { NrSkip::Unavailable, m.failure };
+
+            return m.Latch(NrSkip::Unavailable, "NVSDK_NGX_VULKAN_Init_Ext returned " + std::to_string(result) +
+                                                    " on this device (NGX " + LastNgxResult("dlssnr_vk_last_init") +
+                                                    ")");
+        }
+
+        m.ngxInitialised = true;
+        char device[24];
+        std::snprintf(device, sizeof(device), "0x%llX",
+                      static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(m.dev.device)));
+        m.Say(std::string("the model initialised on device ") + device +
+              " (cold: no application NGX initialisation; the driver's NGX core brought up on it)");
+    }
+
+    // The driver's NGX core on this device, as the D3D12 route brings it up: the model's feature wants the core's own
+    // capability block, which carries the snippet's and the presets' callbacks; a freshly allocated block (OptiScaler's
+    // own, when no DLSS is loaded) does not, and the feature is then refused at creation.
+    if (!m.coreReady)
+    {
+        // Brought up by an earlier model of the host's on another device, still alive: shut down there first, since
+        // NVNGXProxy holds one. Brought up by anything else (a game's own NGX through OptiScaler): used as it is.
+        if (g_presentCoreDevice != VK_NULL_HANDLE && g_presentCoreDevice != m.dev.device)
+        {
+            ShutdownPresentCore(g_presentCoreDevice);
+            NVNGXProxy::SetVulkanInited(false);
+            g_presentCoreDevice = VK_NULL_HANDLE;
+        }
+
+        if (!NVNGXProxy::IsVulkanInited())
+        {
+            NVNGXProxy::InitVulkan(m.dev.instance, m.dev.physical, m.dev.device, vkGetInstanceProcAddr,
+                                   vkGetDeviceProcAddr);
+
+            if (!NVNGXProxy::IsVulkanInited())
+                return m.Latch(NrSkip::Unavailable, "the driver's NGX core would not initialise on this device");
+
+            g_presentCoreDevice = m.dev.device;
+        }
+
+        m.coreReady = true;
+    }
+
+    if (m.params == nullptr)
+    {
+        const auto capabilities = NVNGXProxy::VULKAN_GetCapabilityParameters();
+
+        if (capabilities == nullptr || capabilities(&m.params) != NVSDK_NGX_Result_Success || m.params == nullptr)
+        {
+            m.params = nullptr;
+            return m.Latch(NrSkip::Unavailable, "the driver's NGX core gave no capability parameters");
+        }
+    }
+
+    // Before anything is written to it, where this block keeps floats.
+    DiscoverFloatSlotFor(m.floatSlotKnown, m.params);
+
+    if (m.queryPool == VK_NULL_HANDLE && m.dev.timestampValidBits != 0)
+    {
+        VkPhysicalDeviceProperties props {};
+        vkGetPhysicalDeviceProperties(m.dev.physical, &props);
+
+        if (props.limits.timestampPeriod > 0.0f)
+        {
+            VkQueryPoolCreateInfo info {};
+            info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+            info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            info.queryCount = kPresentQueryPairs * 2;
+
+            if (vkCreateQueryPool(m.dev.device, &info, nullptr, &m.queryPool) == VK_SUCCESS)
+            {
+                m.tickNs = props.limits.timestampPeriod;
+                m.tickMask = m.dev.timestampValidBits >= 64 ? ~0ull : ((1ull << m.dev.timestampValidBits) - 1);
+            }
+            else
+            {
+                m.queryPool = VK_NULL_HANDLE;
+            }
+        }
+    }
+
+    if (m.pass == nullptr)
+    {
+        m.pass = std::make_unique<DlssNr_Vk>("Neural Rendering (present host)", m.dev.device, m.dev.physical);
+
+        if (!m.pass->IsInit())
+        {
+            // Nothing of it was ever recorded: its own destructor frees what it made.
+            m.pass.reset();
+            return m.Latch(NrSkip::Unavailable, "the composition pass could not be created");
+        }
+    }
+
+    if (m.width != width || m.height != height || m.workWidth != workWidth || m.workHeight != workHeight)
+    {
+        // The feature is built for a size and the images are this size. Whatever frames in flight still use the old
+        // ones keep them until they are seen complete (DEVELOPMENT.md rule 8), then they are freed.
+        RetiredSet old;
+        old.feature = m.feature;
+        for (OwnedImage* image : { &m.output, &m.proxy, &m.keep, &m.proxySmall, &m.depth, &m.motion })
+        {
+            if (image->image != VK_NULL_HANDLE || image->memory != VK_NULL_HANDLE)
+                old.images.push_back(*image);
+            *image = OwnedImage {};
+        }
+        old.waitFor = m.pending;
+        m.feature = nullptr;
+        m.featureTicket = 0;
+
+        if (old.feature != nullptr || !old.images.empty())
+            m.retired.push_back(std::move(old));
+        m.FreeRetired();
+
+        const bool reduced = workWidth != width || workHeight != height;
+        const VkFormat working = VK_FORMAT_R16G16B16A16_SFLOAT;
+        VkDevice d = m.dev.device;
+        VkPhysicalDevice pd = m.dev.physical;
+
+        // The guides are made at the working size: a resample of a constant is the constant, so this is the
+        // source-to-working scaling done once, exactly.
+        const bool ok = CreateImageOn(d, pd, m.output, workWidth, workHeight, working, true) &&
+                        CreateImageOn(d, pd, m.proxy, width, height, working, true) &&
+                        CreateImageOn(d, pd, m.keep, width, height, working, true) &&
+                        (!reduced || CreateImageOn(d, pd, m.proxySmall, workWidth, workHeight, working, true)) &&
+                        CreateImageOn(d, pd, m.depth, workWidth, workHeight, VK_FORMAT_R32_SFLOAT, false) &&
+                        CreateImageOn(d, pd, m.motion, workWidth, workHeight, VK_FORMAT_R16G16_SFLOAT, false);
+
+        m.width = width;
+        m.height = height;
+        m.workWidth = workWidth;
+        m.workHeight = workHeight;
+        m.guidesCleared = false;
+        m.guidesTicket = 0;
+        m.reset = true;
+
+        if (!ok)
+            return m.Latch(NrSkip::Unavailable, "the model's images could not be allocated at " +
+                                                    std::to_string(width) + "x" + std::to_string(height));
+
+        m.Say("the model's images built for " + std::to_string(width) + "x" + std::to_string(height) + " (working " +
+              std::to_string(workWidth) + "x" + std::to_string(workHeight) +
+              "), zero guides (constant depth, no motion) at the working size");
+    }
+
+    return {};
+}
+
+bool VkPresentModel::Record(const VkPresentNrFrame& frame)
+{
+    Impl& m = *_impl;
+    auto& cfg = *Config::Instance();
+    VkCommandBuffer cmd = frame.cmd;
+
+    if (m.failed || m.pass == nullptr || cmd == VK_NULL_HANDLE || frame.view == VK_NULL_HANDLE ||
+        frame.width != m.width || frame.height != m.height)
+        return false;
+
+    const bool reduced = m.workWidth != m.width || m.workHeight != m.height;
+
+    // Every image the pass rewrites starts the frame discarded, so no layout is carried over from a recording that may
+    // have been thrown away. Earlier frames' use of them is ordered before by Transition's ALL_COMMANDS dependency.
+    for (OwnedImage* image : { &m.output, &m.proxy, &m.keep, &m.proxySmall })
+        image->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // The pass's GPU time: a pair of timestamps, read once this frame's fence is seen signalled, never waited on.
+    uint32_t pair = UINT32_MAX;
+    if (m.queryPool != VK_NULL_HANDLE)
+    {
+        for (uint32_t i = 0; i < kPresentQueryPairs && pair == UINT32_MAX; ++i)
+        {
+            if (m.queryTicket[i] == 0)
+                pair = i;
+        }
+
+        if (pair != UINT32_MAX)
+        {
+            m.queryTicket[pair] = frame.ticket;
+            vkCmdResetQueryPool(cmd, m.queryPool, pair * 2, 2);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m.queryPool, pair * 2);
+        }
+    }
+
+    const auto fail = [&m](std::string why)
+    {
+        if (!m.FaultLatched())
+            m.Latch(NrSkip::RecordFailed, std::move(why));
+        return false;
+    };
+
+    // The zero guides, once per allocation: cleared with vkCmdClearColorImage and left in GENERAL, where the model
+    // reads them, with the clear's writes made visible to it.
+    if (!m.guidesCleared)
+    {
+        VkImageMemoryBarrier toClear[2] {};
+        VkImageMemoryBarrier toRead[2] {};
+        OwnedImage* guides[2] = { &m.depth, &m.motion };
+
+        for (int i = 0; i < 2; ++i)
+        {
+            toClear[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            toClear[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            toClear[i].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            toClear[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toClear[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toClear[i].image = guides[i]->image;
+            toClear[i].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            toClear[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+            toRead[i] = toClear[i];
+            toRead[i].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            toRead[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            toRead[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            toRead[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        }
+
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                             nullptr, 2, toClear);
+
+        const VkClearColorValue zero {};
+        const VkImageSubresourceRange range { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vkCmdClearColorImage(cmd, m.depth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
+        vkCmdClearColorImage(cmd, m.motion.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
+
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                             nullptr, 2, toRead);
+
+        m.depth.layout = VK_IMAGE_LAYOUT_GENERAL;
+        m.motion.layout = VK_IMAGE_LAYOUT_GENERAL;
+        m.guidesTicket = frame.ticket;
+    }
+
+    // Encode. The presented frame is display-referred SDR: the encode is the identity (gPassthrough), and so is every
+    // place the shader reproduces it. No game exposure exists on this route; the white point is the slider's.
+    DlssNrConstants encode {};
+    encode.Mode = DlssNrMode_Encode;
+    encode.Width = m.width;
+    encode.Height = m.height;
+    encode.WhitePoint = cfg.DlssNrWhitePointScale.value_or_default();
+    encode.Passthrough = 1u;
+    encode.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
+    encode.ApplyModel = cfg.DlssNrApplyModel.value_or_default() ? 1u : 0u;
+    encode.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
+    encode.ColourStrength = cfg.DlssNrColourStrength.value_or_default();
+    encode.MaxRatio = cfg.DlssNrMaxRatio.value_or_default();
+    SetVulkanTransfer(encode, cfg);
+    encode.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
+    encode.GuideWidth = m.workWidth;
+    encode.GuideHeight = m.workHeight;
+    encode.HighlightRecovery = 0u; // linear HDR only, and this frame is SDR
+    encode.ResidualLimit = DlssNr::ResidualLimitStops(cfg.DlssNrResidualLimit.value_or_default());
+
+    Transition(cmd, m.proxy, VK_IMAGE_LAYOUT_GENERAL);
+    Transition(cmd, m.keep, VK_IMAGE_LAYOUT_GENERAL);
+
+    if (!m.pass->Dispatch(cmd, encode, m.width, m.height, frame.view, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE,
+                          m.proxy.view, m.keep.view, VK_IMAGE_LAYOUT_GENERAL))
+        return fail("the encode dispatch failed");
+
+    OwnedImage* modelInput = &m.proxy;
+
+    if (reduced)
+    {
+        DlssNrConstants down = encode;
+        down.Mode = DlssNrMode_Downsample;
+        down.Width = m.workWidth;
+        down.Height = m.workHeight;
+
+        Transition(cmd, m.proxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        Transition(cmd, m.proxySmall, VK_IMAGE_LAYOUT_GENERAL);
+
+        if (!m.pass->Dispatch(cmd, down, m.workWidth, m.workHeight, m.proxy.view, VK_NULL_HANDLE, VK_NULL_HANDLE,
+                              VK_NULL_HANDLE, m.proxySmall.view, VK_NULL_HANDLE,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+            return fail("the downsample dispatch failed");
+
+        modelInput = &m.proxySmall;
+    }
+
+    Transition(cmd, m.output, VK_IMAGE_LAYOUT_GENERAL);
+
+    // The feature, built cold: no game parameters, the tuning from the config, UI correction on as the after-upscale
+    // route creates it. Its initialisation is recorded into this buffer, which is why a discarded recording releases
+    // it again (Discarded).
+    if (m.feature == nullptr)
+    {
+        m.feature =
+            g_fwd.create((void*) cmd, m.params, m.workWidth, m.workHeight, (int) cfg.DlssNrPreset.value_or_default(),
+                         cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
+                         cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+                         cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1);
+
+        if (m.feature == nullptr)
+            return fail("the model would not build a feature at " + std::to_string(m.workWidth) + "x" +
+                        std::to_string(m.workHeight) + " (NGX " + LastNgxResult("dlssnr_vk_last_create") + ")");
+
+        m.featureTicket = frame.ticket;
+        m.reset = true;
+        m.Say("the model's feature is up at " + std::to_string(m.workWidth) + "x" + std::to_string(m.workHeight) +
+              " (frame " + std::to_string(m.width) + "x" + std::to_string(m.height) + ")");
+    }
+
+    // Zero guides: constant depth (read inverted, so zero is the far plane) and no motion, both covering the working
+    // size from the origin, at unit scale: nothing moved, so the scale has nothing to scale.
+    const bool reset = VkPresentHost::NrReset(m.reset, frame.cut, cfg.DlssNrZeroGuideReset.value_or_default());
+    const int evaluated = g_fwd.evaluate(
+        (void*) cmd, m.feature, m.params, &modelInput->ngx, &m.depth.ngx, &m.motion.ngx, &m.output.ngx, m.workWidth,
+        m.workHeight, m.workWidth, m.workHeight, m.workWidth, m.workHeight, 0, 0, 0, 0, 1, reset ? 1 : 0,
+        cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
+        cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+        cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1.0f, 1.0f);
+
+    if (evaluated != 1)
+        return fail("the model refused to evaluate (returned " + std::to_string(evaluated) + ")");
+
+    _lastReset = reset;
+    m.reset = false;
+
+    // Resolve: the proxy, the model's answer and the untouched frame back into the working colour.
+    DlssNrConstants resolve = encode;
+    resolve.Mode = DlssNrMode_Resolve;
+
+    Transition(cmd, *modelInput, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    Transition(cmd, m.output, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    Transition(cmd, m.keep, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    if (!m.pass->Dispatch(cmd, resolve, m.width, m.height, modelInput->view, m.output.view, m.keep.view, VK_NULL_HANDLE,
+                          frame.view, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+        return fail("the resolve dispatch failed");
+
+    if (pair != UINT32_MAX)
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m.queryPool, pair * 2 + 1);
+
+    return true;
+}
+
+void VkPresentModel::Submitted(uint64_t ticket)
+{
+    Impl& m = *_impl;
+
+    m.pending.push_back(ticket);
+    m.everSubmitted = true;
+
+    if (m.guidesTicket == ticket)
+    {
+        m.guidesCleared = true;
+        m.guidesTicket = 0;
+    }
+
+    if (m.featureTicket == ticket)
+        m.featureTicket = 0;
+
+    if (++m.submitted == 1)
+        m.Say("the model runs at present on " + std::to_string(m.width) + "x" + std::to_string(m.height) +
+              " (working " + std::to_string(m.workWidth) + "x" + std::to_string(m.workHeight) + "), on zero guides");
+
+    SessionGuardEvaluated();
+}
+
+void VkPresentModel::Discarded(uint64_t ticket)
+{
+    Impl& m = *_impl;
+
+    // The clear never ran: still owed, from UNDEFINED, which is where the guides still are.
+    if (m.guidesTicket == ticket)
+    {
+        m.guidesTicket = 0;
+        m.guidesCleared = false;
+    }
+
+    // Built in this recording, so its initialisation never ran and no frame on the GPU uses it: built again next time.
+    if (m.featureTicket == ticket && m.feature != nullptr)
+    {
+        if (g_fwd.release != nullptr)
+            g_fwd.release(m.feature);
+        m.feature = nullptr;
+        m.featureTicket = 0;
+    }
+
+    for (uint64_t& owner : m.queryTicket)
+    {
+        if (owner == ticket)
+            owner = 0;
+    }
+
+    m.reset = true;
+
+    // The pass records its own one-time setup (its placeholder image's layout) into its first recording; if no
+    // recording of it ever reached the GPU, that setup is not real. Nothing submitted ever used it, so it is rebuilt.
+    if (!m.everSubmitted)
+        m.pass.reset();
+}
+
+std::optional<double> VkPresentModel::Completed(uint64_t ticket)
+{
+    Impl& m = *_impl;
+
+    const auto found = std::find(m.pending.begin(), m.pending.end(), ticket);
+    if (found == m.pending.end())
+        return std::nullopt;
+
+    m.pending.erase(found);
+
+    std::optional<double> ms;
+    for (uint32_t i = 0; i < kPresentQueryPairs; ++i)
+    {
+        if (m.queryTicket[i] != ticket)
+            continue;
+
+        uint64_t ticks[2] = {};
+        // Without WAIT: the frame's fence was seen signalled, so the pair is written.
+        if (m.queryPool != VK_NULL_HANDLE &&
+            vkGetQueryPoolResults(m.dev.device, m.queryPool, i * 2, 2, sizeof(ticks), ticks, sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+        {
+            const uint64_t begin = ticks[0] & m.tickMask;
+            const uint64_t end = ticks[1] & m.tickMask;
+            if (end > begin)
+            {
+                const double value = (double) (end - begin) * m.tickNs / 1e6;
+                if (value > 0.0 && value < 1000.0)
+                    ms = value;
+            }
+        }
+
+        m.queryTicket[i] = 0;
+    }
+
+    for (RetiredSet& set : m.retired)
+        std::erase(set.waitFor, ticket);
+    m.FreeRetired();
+
+    return ms;
+}
+
+void VkPresentModel::Release(bool deviceGoing)
+{
+    Impl& m = *_impl;
+
+    // Only with nothing in flight: the caller saw every frame complete.
+    if (!m.pending.empty())
+    {
+        Abandon();
+        return;
+    }
+
+    for (RetiredSet& set : m.retired)
+        set.waitFor.clear();
+    m.FreeRetired();
+
+    if (m.feature != nullptr && g_fwd.release != nullptr)
+        g_fwd.release(m.feature);
+    m.feature = nullptr;
+
+    if (m.params != nullptr)
+    {
+        if (const auto destroy = NVNGXProxy::VULKAN_DestroyParameters())
+            destroy(m.params);
+        m.params = nullptr;
+    }
+
+    for (OwnedImage* image : { &m.output, &m.proxy, &m.keep, &m.proxySmall, &m.depth, &m.motion })
+        DestroyImageOn(m.dev.device, *image);
+
+    m.pass.reset();
+
+    if (m.queryPool != VK_NULL_HANDLE)
+    {
+        vkDestroyQueryPool(m.dev.device, m.queryPool, nullptr);
+        m.queryPool = VK_NULL_HANDLE;
+    }
+
+    // The device is going: the core the host brought up on it shut down, and NGX through the forwarder, so neither
+    // answers "initialised" for a later device that gets this handle value back.
+    if (deviceGoing && g_presentCoreDevice == m.dev.device)
+    {
+        ShutdownPresentCore(m.dev.device);
+        NVNGXProxy::SetVulkanInited(false);
+        g_presentCoreDevice = VK_NULL_HANDLE;
+    }
+
+    m.coreReady = false;
+
+    if (deviceGoing && m.ngxInitialised)
+    {
+        if (g_fwd.shutdown != nullptr)
+        {
+            const int result = g_fwd.shutdown((void*) m.dev.device);
+            m.Say("NGX shut down on the device before it goes (returned " + std::to_string(result) + ")");
+        }
+        else
+        {
+            m.Say("this forwarder cannot shut NGX down on a device (no dlssnr_vk_shutdown); a later device with this "
+                  "handle value would not be initialised again");
+        }
+    }
+
+    if (m.ngxInitialised)
+        SessionGuardOff();
+
+    m.ngxInitialised = false;
+    m.width = m.height = m.workWidth = m.workHeight = 0;
+    m.guidesCleared = false;
+    m.reset = true;
+    m.everSubmitted = false;
+}
+
+void VkPresentModel::Abandon()
+{
+    Impl& m = *_impl;
+
+    // The pass's destructor would call vkDestroy* on a device that may be gone: leaked instead, as ShutdownVk(false)
+    // leaks the after-upscale route's.
+    (void) m.pass.release();
+
+    m.feature = nullptr;
+    m.params = nullptr;
+    m.queryPool = VK_NULL_HANDLE;
+    m.retired.clear();
+    m.pending.clear();
+    for (OwnedImage* image : { &m.output, &m.proxy, &m.keep, &m.proxySmall, &m.depth, &m.motion })
+        *image = OwnedImage {};
+    m.width = m.height = m.workWidth = m.workHeight = 0;
+    m.ngxInitialised = false;
+
+    // The core the host brought up on this device is forgotten, not shut down (that would reach the device): a later
+    // device brings it up again rather than reusing one initialised on a device that is gone.
+    if (g_presentCoreDevice == m.dev.device)
+    {
+        NVNGXProxy::SetVulkanInited(false);
+        g_presentCoreDevice = VK_NULL_HANDLE;
+    }
+    m.coreReady = false;
+}
+
+VkPresentAdmission ClaimModelForPresentHost(VkDevice device)
+{
+    // The D3D12 route's model in this process (a translated D3D12 title's own NR, a Vulkan title through the D3D12
+    // bridge, or the D3D11 bridge's present host): the frame would be processed twice.
+    if (DlssNr::IsRunning())
+        return { NrSkip::D3d12, "the D3D12 route has the model running in this process; the Vulkan present host "
+                                "stands down" };
+
+    std::lock_guard<std::mutex> lock(g_ownerMutex);
+    const auto verdict = g_owner.PresentHost(reinterpret_cast<uint64_t>(device), OwnerNowMs());
+
+    if (!verdict.granted)
+        return { verdict.reason == VkModelOwner::kOtherDevice ? NrSkip::OtherDevice : NrSkip::AfterUpscale,
+                 verdict.reason };
+
+    g_owner.Take(reinterpret_cast<uint64_t>(device));
+    return {};
+}
+
+VkPresentAdmission PresentHostMustYield(VkDevice device)
+{
+    if (DlssNr::IsRunning())
+        return { NrSkip::D3d12, "the D3D12 route has the model running in this process; the Vulkan present host "
+                                "stands down" };
+
+    std::lock_guard<std::mutex> lock(g_ownerMutex);
+    if (g_owner.PresentHostMustYield(reinterpret_cast<uint64_t>(device), OwnerNowMs()))
+        return { NrSkip::AfterUpscale, VkModelOwner::kAfterUpscaleWants };
+
+    return {};
+}
+
+void ReleaseModelFromPresentHost(VkDevice device)
+{
+    std::lock_guard<std::mutex> lock(g_ownerMutex);
+    g_owner.Release(VkModelOwner::Who::PresentHost, reinterpret_cast<uint64_t>(device));
 }
 
 } // namespace DlssNr
