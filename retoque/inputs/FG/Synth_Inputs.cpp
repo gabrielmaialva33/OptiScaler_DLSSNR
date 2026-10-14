@@ -5,6 +5,7 @@
 
 #include <State.h>
 #include <framegen/IFGFeature_Dx12.h>
+#include <lsfg/Lsfg.h>
 #include <shaders/synth_motion/SynthMotion_Dx12.h>
 #include <shaders/synth_motion/SynthMotion_Handoff.h>
 #include <shaders/synth_motion/SynthOverlay_Dx12.h>
@@ -48,9 +49,25 @@ uint32_t HudMargin()
 SynthHudPlan HudPlan()
 {
     const auto& cfg = *Config::Instance();
-    return PlanSynthHud(cfg.FGSynthesizedHudDepth.value_or_default(), cfg.FGSynthesizedHudLayer.value_or_default(),
-                        cfg.FGSynthesizedMotion.value_or_default(), cfg.FGDisableUI.value_or_default(),
-                        State::Instance().activeFgOutput == FGOutput::FSRFG);
+
+    // LSFG study (retoque/lsfg/Lsfg.h): LSFG reads no depth, so while it takes the frames the mask's depth would
+    // feed only FFX's interpolation, which does not run. The UI layer still counts: FFX composes it over LSFG's
+    // frames too. The motion field is kept: its scene cuts reset LSFG as well, and DLSS-NR may take it.
+    const bool lsfg = Lsfg::Interpolating();
+    static bool reportedLsfg = false;
+    if (lsfg != reportedLsfg)
+    {
+        reportedLsfg = lsfg;
+        if (cfg.FGSynthesizedHudDepth.value_or_default())
+            LOG_INFO("synthesized FG input: {}", lsfg
+                                                     ? "LSFG interpolates, so the HUD mask's depth (read only by FFX's "
+                                                       "interpolation) is not computed"
+                                                     : "FFX interpolates again; the HUD mask's depth is back");
+    }
+
+    return PlanSynthHud(cfg.FGSynthesizedHudDepth.value_or_default() && !lsfg,
+                        cfg.FGSynthesizedHudLayer.value_or_default(), cfg.FGSynthesizedMotion.value_or_default(),
+                        cfg.FGDisableUI.value_or_default(), State::Instance().activeFgOutput == FGOutput::FSRFG);
 }
 
 // Where the pair rests between frames, and the state FG is told it arrives in. FSR-FG's prepare reads

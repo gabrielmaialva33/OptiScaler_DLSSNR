@@ -35,6 +35,11 @@ bool TakesFrame(int fIndex, ffxDispatchDescFrameGeneration* params);
 // so FFX executes the list it handed over and the tracked resource states stay true.
 uint32_t FfxDispatch(ffxDispatchDescFrameGeneration* params);
 
+// Whether LSFG took the last base frame FSR-FG configured (the latest BeginFrame latch): false while LSFG is off,
+// refused or still building. The synthesized input reads it to skip what only FFX's interpolation consumes; it
+// is one base frame late there, which costs at most one frame of that work either way.
+bool Interpolating();
+
 // FSRFG_Dx12::ReleaseSwapchain, after FFX's swapchain context is destroyed. FFX may not have drained yet (its
 // swapchain object can outlive the context), so the current context is parked, like any retired one.
 void OnSwapchainReleased();

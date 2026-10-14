@@ -134,7 +134,8 @@ bool g_firstFrameLogged = false;
 Surface g_lastRefusal = Surface::Ok;
 Stats g_stats;
 OutputRoute g_lastRoute = OutputRoute::None;
-bool g_abPerPass = false; // the schedule of the next frame under OPTISCALER_LSFG_AB
+std::atomic<bool> g_interpolating { false }; // the latest BeginFrame decision, for Interpolating()
+bool g_abPerPass = false;                    // the schedule of the next frame under OPTISCALER_LSFG_AB
 
 // FfxApiResourceState is a bit set; COMMON and PRESENT are both D3D12's COMMON (0).
 D3D12_RESOURCE_STATES ToD3D12(uint32_t ffxState)
@@ -432,6 +433,7 @@ bool BeginFrame(int fIndex, uint64_t frameId)
     if (!Config::Instance()->LsfgEnabled.value_or_default())
     {
         g_latch[fIndex].store(0, std::memory_order_relaxed);
+        g_interpolating.store(false, std::memory_order_relaxed);
         return false;
     }
 
@@ -455,6 +457,7 @@ bool BeginFrame(int fIndex, uint64_t frameId)
     const std::string reason = FallbackReason();
     const bool decision = reason.empty();
     g_latch[fIndex].store(decision ? EncodeLatch(frameId) : 0, std::memory_order_relaxed);
+    g_interpolating.store(decision, std::memory_order_relaxed);
 
     if (decision && !g_lastDecision)
     {
@@ -637,6 +640,8 @@ uint32_t FfxDispatch(ffxDispatchDescFrameGeneration* params)
     return FFX_API_RETURN_OK;
 }
 
+bool Interpolating() { return g_interpolating.load(std::memory_order_relaxed); }
+
 void OnSwapchainReleased()
 {
     std::lock_guard lock(O().mutex);
@@ -659,6 +664,7 @@ void OnSwapchainReleased()
     g_lastRefusal = Surface::Ok;
     for (auto& latch : g_latch)
         latch.store(0, std::memory_order_relaxed);
+    g_interpolating.store(false, std::memory_order_relaxed);
 
     if (any)
         LOG_INFO("LSFG: FFX's swapchain was released; LSFG's context is parked ({} parked)", O().parked.size());
