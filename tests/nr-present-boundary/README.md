@@ -27,6 +27,11 @@ DLSS-G or shown as the game drew it, never every other one.
 Source guards: `RunPresentPass` decides through `PresentBoundary::Decide` and handles `Declined`; the upscaled route asks
 `UpscaledDefersToPresent` and `UpscaledCapturesForPresent`; the inline Auto conditions they replaced are not back.
 
+Step 0's probe (`DlssNr_SlBoundaryProbe.cpp`) is guarded the same way, by source: it installs nothing unless
+`[DlssNr] Enabled` is true with `HookMethod=2`, its `Present` detours and every note it takes from production return at
+once when it is not installed, and each of its five call sites (install, uninstall, the wrapped present, DLSS-G's NGX
+evaluate, `ExecuteCommandLists`) is there exactly once. What it logs is a game run's to read.
+
 ## What this does not cover
 
 The inputs come from `State` (`dlssgLastSetMode`, `dlssgDetectedInterpolationCount`, `currentFG`) in

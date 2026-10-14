@@ -7,6 +7,7 @@
 #include "proxies/NVNGX_Proxy.h"
 #include "dlssnr/DlssNr.h"
 #include "dlssnr/DlssNr_ExposureScan.h"
+#include "dlssnr/DlssNr_SlBoundaryProbe.h"
 #include <upscalers/dlss/DLSSFeature_Dx12.h>
 #include <shaders/output_scaling/OS_Dx12.h>
 
@@ -1199,6 +1200,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
         InParameters->Get("DLSSG.MultiFrameCount", &frameCount);
         State::Instance().dlssgDetectedInterpolationCount = frameCount;
         ReflexHooks::setDlssgFrameCount(frameCount);
+        DlssNr::SlBoundaryProbe::NoteDlssgEvaluate(InCmdList, InParameters);
 
         float dlssgCameraNear = 0.0f;
         float dlssgCameraFar = 0.0f;

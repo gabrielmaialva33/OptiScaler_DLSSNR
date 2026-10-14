@@ -1,6 +1,7 @@
 # NR before DLSS-G: the present pass at the game's Streamline real-frame boundary
 
-Status: design for review, 2026-10-14. Nothing built, nothing run. Written against `68c490d2` on
+Status: design for review, 2026-10-14. **Step 0 and the interim refusal are built** (see "Steps"); nothing run in a
+game yet. Written against `68c490d2` on
 `feat/neurotic-parity`; line numbers are into that tree. NeuRotic line numbers are into its clone at `7132a103`.
 This is the task [present-real-guides.md](present-real-guides.md) (D5) left open: "running at DLSS-G's real-frame
 boundary ... is a separate task with its own queue-ownership risk".
@@ -427,6 +428,28 @@ record. One line per window, in the style of present-real-guides.md's step 0:
   statement 1 above.
 
 The interim refusal ships with step 0, since it needs none of the boundary.
+
+**Built (2026-10-14), not yet run in a game.**
+
+- **The interim refusal** is `retoque/dlssnr/DlssNr_PresentBoundary.h`, which `RunPresentPass` and the upscaled route
+  decide through (`tests/nr-present-boundary`). "The game's DLSS-G" is a mode other than off passed to Streamline's
+  DLSS-G, or a frame count at DLSS-G's NGX evaluate, with OptiScaler's own frame generation not active. Auto latches
+  the upscaled route for the session the first time it is seen.
+- **The probe** is `retoque/dlssnr/DlssNr_SlBoundaryProbe.{h,cpp}`, installed only with `[DlssNr] Enabled=true` and
+  `HookMethod=2` when `sl.interposer.dll` is hooked. It detours the interposer's `CreateDXGIFactory`/`1`/`2` and
+  `slUpgradeInterface`, then `CreateSwapChain`/`CreateSwapChainForHwnd` on the factories they return and
+  `Present`/`Present1` on the swapchains, each only when its code lies inside the interposer, and forwards every call.
+  One line per two seconds, `DLSS-NR boundary probe: ...`, gives: game presents (and `DXGI_PRESENT_TEST` ones), presents
+  at the wrapped entry per game present, how many of those were nested inside the game's `Present` on its thread; for
+  DLSS-G's `FrameGeneration` evaluates, whether the list NGX was handed was executed on the queue the game created its
+  swapchain on, on the wrapped entry's queue or on another, and how many inside the game's `Present`; and how often
+  `DLSSG.Backbuffer` is the buffer the game's swapchain reported current at its last `Present`.
+- **Not measured by it:** `Signal`/`Wait` on the presenting queue during the forwarded call (no queue-method hook was
+  added for a log line), and which present the wrapped pass edits today: with the interim refusal the wrapped entry no
+  longer edits under the game's DLSS-G, so statement 1 above stops mattering and is left as it stands.
+- **Caveat on identities:** queues and the backbuffer are compared as raw pointers. The game's queue is what it passed
+  to the interposer, the wrapped entry's is what the wrapped swapchain holds, and the executing queue is the real one
+  `ResTrack_Dx12` sees. If any of them is a proxy of another, "another queue" is the honest reading, not proof.
 
 **Step 1, the boundary.** Option A, the ordering step 0 allows (S1, else S2), and H1 and H2 built twice and compared on
 the same scenes. Correct the `FG_Hooks.cpp` comment and the ini text.

@@ -14,6 +14,7 @@
 #include <dlssnr/DlssNr_Session.h>
 #include <dlssnr/DlssNr_Dred.h>
 #include <dlssnr/DlssNr_PresentBoundary.h>
+#include <dlssnr/DlssNr_SlBoundaryProbe.h>
 #include <dlssnr/DlssNr_DirectRuntime.h>
 #include <dlssnr/DlssNr_NgxInfo.h>
 #include <dlssnr/DlssNr_PresentColour.h>
@@ -6958,6 +6959,8 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         DlssNr::SessionGuardOff();
         return;
     }
+
+    DlssNr::SlBoundaryProbe::NoteWrappedPresent(queue, fgHook);
 
     if (g_nr.failed || swapchain == nullptr || queue == nullptr)
         return;
