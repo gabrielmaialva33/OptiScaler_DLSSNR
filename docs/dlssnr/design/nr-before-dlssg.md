@@ -11,6 +11,49 @@ measurement this note starts from), [present-real-guides.md](present-real-guides
 layer, and the first look at NeuRotic), [hud-protection.md](hud-protection.md) (where a UI mask can come from), and
 [DEVELOPMENT.md](DEVELOPMENT.md).
 
+## Step 0 measured (2026-10-14)
+
+Crimson Desert, build `c49b4b1c`, GE-Proton11-7, RTX 4090, driver 615.78.08, the game's DLSS-G with the frame count
+forced to 3x (`[DLSSG] OverrideInterpolationCount=2`), `HookMethod=2`. 464 probe windows over 16 minutes; DLSS-G was
+switched on and off three times, which split them cleanly:
+
+| | DLSS-G active (196 windows) | DLSS-G idle (268 windows) |
+|---|---|---|
+| game presents at the interposer | 11,257 | 12,812 |
+| presents at the wrapped entry | 36,830 (3.27 per game present) | 12,812 (1.00) |
+| of those, nested in the game's `Present` on its thread | 68 | 12,812 |
+| DLSS-G `FrameGeneration` evaluates | 25,856 (2.30 per game present) | 0 |
+| list executed on the game's swapchain queue / the wrapped entry's / another | 0 / 0 / 25,856 | — |
+| of those, inside the game's `Present` on its thread | 0 | — |
+| `DLSSG.Backbuffer` is the game's current buffer | 18,987 of 25,856 (73%); never unreadable | — |
+| game's creation queue and the wrapped entry's queue (as compared then: possibly proxy against native) | different, in every window | different |
+
+What it settles:
+
+- **Open question 2: DLSS-G presents on a thread of its own.** With it active, 99.8% of the wrapped entry's presents
+  arrive outside the game's `Present`; with it idle, every one arrives nested inside it. So the flip-count stand-down is
+  the right tool, and a thread-local guard alone would not be.
+- **DLSS-G submits its evaluate from another thread, after the game's `Present` has returned**: none of its evaluate
+  lists was submitted inside the game's `Present` on the game's thread. Two evaluates per game present at 3x: one per
+  generated frame. **Which queue is provisional.** The lists went to neither queue the probe compared against, but the
+  "game's queue" there was the pointer the game passed to the interposer, which may be the interposer's proxy, while
+  `ExecuteCommandLists` sees native queues; "another queue" may be the game's own native queue. Step 0b compares native
+  to native (Streamline answers a `QueryInterface` for `{ADEC44E2-...}` with the native object). NeuRotic's premise, a
+  provider-owned queue (its `PreFg.h:40-43`), is neither confirmed nor refuted yet.
+- **`DLSSG.Backbuffer` is the game's backbuffer**, read asynchronously: three in four evaluates name the buffer the game
+  had current at its last `Present`, and the rest are consistent with the game having moved to the next buffer by the
+  time DLSS-G evaluates.
+- **S1 is not established by this.** A pass submitted on the game's queue before forwarding precedes DLSS-G's read only
+  if DLSS-G's queue waits on something the game's queue signals after it. Streamline must make DLSS-G wait for the
+  game's rendering of the buffer somehow; whether that is a fence the game's queue signals inside the forwarded
+  `Present` is what step 0b measures: the probe now resolves the game's native queue, compares every queue native to
+  native, and counts `Signal` and `Wait` on the game's queue (inside and outside its `Present`) and on the queue
+  DLSS-G's evaluate lists execute on, including how many of DLSS-G's waits are on a fence the game's queue signals
+  inside its `Present`.
+
+Also seen, and not ours: Streamline's `setDynamicMFGParams failed with status 1` every frame under the forced count
+(280 lines, the same as the previous day's run without this build).
+
 ## The problem, and how much of it was measured
 
 The record is one item in nr-present-hook.md's 2026-10-04 update: in Crimson Desert, with the game's own DLSS-G at 2x
@@ -444,8 +487,9 @@ The interim refusal ships with step 0, since it needs none of the boundary.
   DLSS-G's `FrameGeneration` evaluates, whether the list NGX was handed was executed on the queue the game created its
   swapchain on, on the wrapped entry's queue or on another, and how many inside the game's `Present`; and how often
   `DLSSG.Backbuffer` is the buffer the game's swapchain reported current at its last `Present`.
-- **Not measured by it:** `Signal`/`Wait` on the presenting queue during the forwarded call (no queue-method hook was
-  added for a log line), and which present the wrapped pass edits today: with the interim refusal the wrapped entry no
+- **Step 0b** adds `ID3D12CommandQueue::Signal`/`Wait` detours (d3d12.dll's, taken from the game's native queue's
+  vtable, so every native queue shares them; they count only the two queues above) and native queue identity.
+- **Not measured by it:** which present the wrapped pass edits today: with the interim refusal the wrapped entry no
   longer edits under the game's DLSS-G, so statement 1 above stops mattering and is left as it stands.
 - **Caveat on identities:** queues and the backbuffer are compared as raw pointers. The game's queue is what it passed
   to the interposer, the wrapped entry's is what the wrapped swapchain holds, and the executing queue is the real one

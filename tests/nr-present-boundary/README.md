@@ -29,7 +29,7 @@ Source guards: `RunPresentPass` decides through `PresentBoundary::Decide` and ha
 
 Step 0's probe (`DlssNr_SlBoundaryProbe.cpp`) is guarded the same way, by source: it installs nothing unless
 `[DlssNr] Enabled` is true with `HookMethod=2`, its `Present` detours and every note it takes from production return at
-once when it is not installed, and each of its five call sites (install, uninstall, the wrapped present, DLSS-G's NGX
+once when it is not installed (its `Signal`/`Wait` detours forward first and then only count), and each of its five call sites (install, uninstall, the wrapped present, DLSS-G's NGX
 evaluate, `ExecuteCommandLists`) is there exactly once. What it logs is a game run's to read.
 
 ## What this does not cover

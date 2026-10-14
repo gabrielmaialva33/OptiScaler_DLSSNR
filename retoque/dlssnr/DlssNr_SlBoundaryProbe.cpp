@@ -12,6 +12,7 @@
 
 #include "detours/detours.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -55,6 +56,14 @@ PFN_CreateSwapChainForHwnd o_CreateSwapChainForHwnd = nullptr;
 PFN_Present o_Present = nullptr;
 PFN_Present1 o_Present1 = nullptr;
 
+// ID3D12CommandQueue::Signal and ::Wait (step 0b). They live in d3d12.dll (vkd3d-proton's under Proton), not in the
+// interposer, and every native queue in the process shares them; the hooks count only the queues this probe knows.
+using PFN_QueueFence = HRESULT(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, ID3D12Fence*, UINT64);
+constexpr size_t kQueueSignalSlot = 14;
+constexpr size_t kQueueWaitSlot = 15;
+PFN_QueueFence o_QueueSignal = nullptr;
+PFN_QueueFence o_QueueWait = nullptr;
+
 // Nesting on this thread inside the game's Present. Only the outermost call is the game's present; a Present1 that
 // forwards to Present inside the interposer is the same present.
 thread_local int t_depth = 0;
@@ -81,6 +90,27 @@ std::atomic<ID3D12Resource*> g_gameBackbuffer { nullptr };
 std::atomic<ID3D12CommandList*> g_pendingDlssgList { nullptr };
 std::atomic<long long> g_windowStartMs { 0 };
 
+// The queue the game passed may be the interposer's proxy. Streamline answers this IID with the native object behind a
+// proxy, as ResTrack_Dx12::CheckForRealObject uses it; every comparison below is between native queues, since that is
+// what ExecuteCommandLists, Signal and Wait see.
+constexpr GUID kStreamlineNativeIid = {
+    0xadec44e2, 0x61f0, 0x45c3, { 0xad, 0x9f, 0x1b, 0x37, 0x37, 0x92, 0x84, 0xff }
+};
+std::atomic<ID3D12CommandQueue*> g_gameQueueNative { nullptr };
+std::atomic<ID3D12CommandQueue*> g_dlssgQueue { nullptr };
+
+// Step 0b: does DLSS-G's queue wait on a fence the game's queue signals inside the game's Present? If so, a pass the
+// boundary submits on the game's queue before forwarding is ordered ahead of DLSS-G's read by Streamline's own fence.
+std::atomic<uint64_t> g_gameSignalsInside { 0 };
+std::atomic<uint64_t> g_gameSignalsOutside { 0 };
+std::atomic<uint64_t> g_gameWaitsInside { 0 };
+std::atomic<uint64_t> g_gameWaitsOutside { 0 };
+std::atomic<uint64_t> g_dlssgSignals { 0 };
+std::atomic<uint64_t> g_dlssgWaits { 0 };
+std::atomic<uint64_t> g_dlssgWaitsOnPresentFence { 0 };
+std::mutex g_fenceMutex;
+std::array<ID3D12Fence*, 8> g_presentFences {}; // distinct fences the game's queue signalled inside its Present
+
 long long NowMs()
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
@@ -93,15 +123,17 @@ bool InModule(const void* code)
     return at >= g_moduleBegin && at < g_moduleEnd;
 }
 
-// Detours one function the first time it is seen. Code outside sl.interposer.dll is somebody else's, and is refused.
-template <typename T> void AttachOnce(T& original, void* target, void* hook, const char* what)
+// Detours one function the first time it is seen. For the interposer's own objects, code outside sl.interposer.dll is
+// somebody else's and is refused; the queue's Signal and Wait are d3d12.dll's and are taken from there on purpose.
+template <typename T>
+void AttachOnce(T& original, void* target, void* hook, const char* what, bool interposerCode = true)
 {
     std::lock_guard lock(g_hookMutex);
 
     if (original != nullptr || target == nullptr)
         return;
 
-    if (!InModule(target))
+    if (interposerCode && !InModule(target))
     {
         LOG_INFO("DLSS-NR boundary probe: {} is not inside sl.interposer.dll; not watched", what);
         return;
@@ -126,6 +158,8 @@ template <typename T> void AttachOnce(T& original, void* target, void* hook, con
 void* Slot(IUnknown* object, size_t slot) { return (*reinterpret_cast<void***>(object))[slot]; }
 
 HRESULT STDMETHODCALLTYPE hkPresent(IDXGISwapChain* swapchain, UINT syncInterval, UINT flags);
+HRESULT STDMETHODCALLTYPE hkQueueSignal(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64 value);
+HRESULT STDMETHODCALLTYPE hkQueueWait(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64 value);
 HRESULT STDMETHODCALLTYPE hkPresent1(IDXGISwapChain1* swapchain, UINT syncInterval, UINT flags,
                                      const DXGI_PRESENT_PARAMETERS* parameters);
 
@@ -141,8 +175,26 @@ void WatchSwapchain(IUnknown* swapchain, IUnknown* device)
     if (device != nullptr && SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&queue))) && queue != nullptr)
     {
         g_gameQueue = queue;
-        LOG_INFO("DLSS-NR boundary probe: the game's Streamline swapchain {:p}, created on queue {:p} (type {})",
-                 (void*) swapchain, (void*) queue, (int) queue->GetDesc().Type);
+
+        // The native queue behind a proxy. The QueryInterface takes a reference, released at once as ResTrack does:
+        // the proxy holds the native queue for as long as the game holds the proxy.
+        ID3D12CommandQueue* native = nullptr;
+        const bool proxy =
+            SUCCEEDED(queue->QueryInterface(kStreamlineNativeIid, (void**) &native)) && native != nullptr;
+        if (proxy)
+            native->Release();
+        else
+            native = queue;
+
+        g_gameQueueNative = native;
+        LOG_INFO("DLSS-NR boundary probe: the game's Streamline swapchain {:p}, created on queue {:p} (type {}; {} "
+                 "native queue {:p})",
+                 (void*) swapchain, (void*) queue, (int) queue->GetDesc().Type,
+                 proxy ? "an interposer proxy of" : "itself the", (void*) native);
+
+        AttachOnce(o_QueueSignal, Slot(native, kQueueSignalSlot), (void*) hkQueueSignal, "ID3D12CommandQueue::Signal",
+                   false);
+        AttachOnce(o_QueueWait, Slot(native, kQueueWaitSlot), (void*) hkQueueWait, "ID3D12CommandQueue::Wait", false);
         queue->Release();
     }
     else
@@ -289,19 +341,31 @@ void Report()
     const uint64_t onOther = g_listOnOtherQueue.exchange(0);
     const uint64_t inside = g_listInsidePresent.exchange(0);
 
-    const auto* gameQueue = g_gameQueue.load();
+    const uint64_t signalsIn = g_gameSignalsInside.exchange(0);
+    const uint64_t signalsOut = g_gameSignalsOutside.exchange(0);
+    const uint64_t waitsIn = g_gameWaitsInside.exchange(0);
+    const uint64_t waitsOut = g_gameWaitsOutside.exchange(0);
+    const uint64_t dlssgSignals = g_dlssgSignals.exchange(0);
+    const uint64_t dlssgWaits = g_dlssgWaits.exchange(0);
+    const uint64_t dlssgWaitsOnPresent = g_dlssgWaitsOnPresentFence.exchange(0);
+
+    const auto* gameQueue = g_gameQueueNative.load();
     const auto* wrappedQueue = g_wrappedQueue.load();
     const char* queues = gameQueue == nullptr || wrappedQueue == nullptr ? "not both known"
                          : gameQueue == wrappedQueue                     ? "the same"
                                                                          : "different";
 
-    LOG_INFO("DLSS-NR boundary probe: {} game presents ({} test), {} at the wrapped entry ({:.2f} each; {} nested in "
-             "the game's Present on its thread, {} on other threads) | DLSS-G evaluates {}: list executed on the "
-             "game's swapchain queue {}, the wrapped entry's queue {}, another queue {}, {} of them inside the game's "
-             "Present | DLSSG.Backbuffer is the game's current buffer {} of {} ({} not readable) | game and wrapped "
-             "queues: {} | swapchains seen: {}",
-             app, test, wrapped, app != 0 ? (double) wrapped / (double) app : 0.0, nested, wrapped - nested, evaluates,
-             onGame, onWrapped, onOther, inside, match, evaluates, unread, queues, g_swapchains.load());
+    LOG_INFO(
+        "DLSS-NR boundary probe: {} game presents ({} test), {} at the wrapped entry ({:.2f} each; {} nested in "
+        "the game's Present on its thread, {} on other threads) | DLSS-G evaluates {}: list executed on the "
+        "game's swapchain queue {}, the wrapped entry's queue {}, another queue {}, {} of them inside the game's "
+        "Present | DLSSG.Backbuffer is the game's current buffer {} of {} ({} not readable) | game and wrapped "
+        "queues (native): {} | swapchains seen: {} | fences: the game's queue signalled {} inside its Present and {} "
+        "outside, waited {} inside and {} outside; DLSS-G's queue signalled {}, waited {}, {} of them on a fence "
+        "the game's queue signals inside its Present",
+        app, test, wrapped, app != 0 ? (double) wrapped / (double) app : 0.0, nested, wrapped - nested, evaluates,
+        onGame, onWrapped, onOther, inside, match, evaluates, unread, queues, g_swapchains.load(), signalsIn,
+        signalsOut, waitsIn, waitsOut, dlssgSignals, dlssgWaits, dlssgWaitsOnPresent);
 }
 
 // The game's present: counted, its current buffer noted, then forwarded untouched.
@@ -336,6 +400,71 @@ void Leave()
 {
     if (--t_depth == 0)
         Report();
+}
+
+HRESULT STDMETHODCALLTYPE hkQueueSignal(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64 value)
+{
+    const HRESULT result = o_QueueSignal(queue, fence, value);
+
+    if (!g_installed.load())
+        return result;
+
+    if (queue == g_gameQueueNative.load())
+    {
+        if (t_depth == 0)
+        {
+            ++g_gameSignalsOutside;
+            return result;
+        }
+
+        ++g_gameSignalsInside;
+
+        std::lock_guard lock(g_fenceMutex);
+        for (auto& slot : g_presentFences)
+        {
+            if (slot == fence)
+                break;
+
+            if (slot == nullptr)
+            {
+                slot = fence;
+                break;
+            }
+        }
+    }
+    else if (queue != nullptr && queue == g_dlssgQueue.load())
+    {
+        ++g_dlssgSignals;
+    }
+
+    return result;
+}
+
+HRESULT STDMETHODCALLTYPE hkQueueWait(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64 value)
+{
+    if (g_installed.load())
+    {
+        if (queue == g_gameQueueNative.load())
+        {
+            ++(t_depth > 0 ? g_gameWaitsInside : g_gameWaitsOutside);
+        }
+        else if (queue != nullptr && queue == g_dlssgQueue.load())
+        {
+            ++g_dlssgWaits;
+
+            std::lock_guard lock(g_fenceMutex);
+            for (const auto* slot : g_presentFences)
+            {
+                if (slot != nullptr && slot == fence)
+                {
+                    ++g_dlssgWaitsOnPresentFence;
+                    break;
+                }
+            }
+        }
+    }
+
+    return o_QueueWait(queue, fence, value);
 }
 
 HRESULT STDMETHODCALLTYPE hkPresent(IDXGISwapChain* swapchain, UINT syncInterval, UINT flags)
@@ -441,6 +570,8 @@ void DlssNr::SlBoundaryProbe::Uninstall()
     Detach(o_CreateSwapChainForHwnd, (void*) hkCreateSwapChainForHwnd);
     Detach(o_Present, (void*) hkPresent);
     Detach(o_Present1, (void*) hkPresent1);
+    Detach(o_QueueSignal, (void*) hkQueueSignal);
+    Detach(o_QueueWait, (void*) hkQueueWait);
     DetourTransactionCommit();
 
     g_module = nullptr;
@@ -497,12 +628,16 @@ void DlssNr::SlBoundaryProbe::NoteExecute(ID3D12CommandQueue* queue, unsigned co
         if (lists[i] != pending || !g_pendingDlssgList.compare_exchange_strong(pending, nullptr))
             continue;
 
-        if (queue == g_gameQueue.load())
+        // ResTrack's hook sees the native queue, so it is compared with the game's native one.
+        if (queue == g_gameQueueNative.load())
             ++g_listOnGameQueue;
         else if (queue == g_wrappedQueue.load())
             ++g_listOnWrappedQueue;
         else
             ++g_listOnOtherQueue;
+
+        // Whichever it is, it is the queue DLSS-G evaluates on: Signal and Wait watch it from here.
+        g_dlssgQueue = queue;
 
         if (t_depth > 0)
             ++g_listInsidePresent;
