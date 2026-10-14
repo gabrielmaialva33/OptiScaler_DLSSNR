@@ -10,6 +10,7 @@
 #include <hudfix/Hudfix_Dx11.h>
 #include <resource_tracking/ResTrack_dx11.h>
 #include <shaders/synth_motion/SynthMotion_Handoff.h>
+#include <misc/Dred.h>
 
 #include <Util.h>
 #include <Config.h>
@@ -1908,6 +1909,8 @@ bool Dx11wDx12SC::_InitInteropObjects()
             LOG_ERROR("CreateCommandAllocator[{}] failed: {:X}", i, (UINT) result);
             return false;
         }
+
+        Dred::Name(_copyAllocators[i], L"Retoque bridge interop allocator", (int) i);
     }
 
     for (UINT i = 0; i < copyAllocatorCount; ++i)
@@ -1923,6 +1926,9 @@ bool Dx11wDx12SC::_InitInteropObjects()
             return false;
         }
 
+        // What a DRED breadcrumb calls this list: everything the bridge records per frame -- the neural pass, the
+        // synthesized frame-generation inputs and the copy to the presenter -- goes on it.
+        Dred::Name(_copyCommandLists[i], L"Retoque bridge interop list", (int) i);
         _copyCommandLists[i]->Close();
     }
 
@@ -2149,7 +2155,12 @@ HRESULT Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
     const auto result =
         WaitForBridgeFence(_copyFence, _dx12Device, _copyFenceEvent, _copyAllocatorFenceValues[slot], 5000);
     if (FAILED(result))
+    {
         LOG_ERROR("bridge slot {} fence {} wait failed: {:X}", slot, _copyAllocatorFenceValues[slot], (UINT) result);
+
+        // Often the first place a removed bridge device shows. Once per device, and nothing unless asked for.
+        Dred::ReportRemoval(_dx12Device, "the bridge's copy fence wait");
+    }
     return result;
 }
 
@@ -2216,21 +2227,26 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     // the synthesized FG input after it takes that field instead of estimating again.
     SynthMotion::Handoff::BeginBaseFrame();
 
-    if (_nrHost != nullptr &&
-        _nrHost->Record(_dx12Device, _copyCommandLists[copySlot], _openedDx11BackBuffers[copySlot],
-                        D3D12_RESOURCE_STATE_COPY_SOURCE, _dx12CommandQueue))
+    // Each span below is a DRED breadcrumb context when RETOQUE_DRED asks for one, and nothing otherwise.
+    if (_nrHost != nullptr)
     {
-        // An idle host kept for the neural toggle counts from the first frame it actually ran.
-        State::Instance().nrPresentHostActive = true;
+        Dred::ScopedEvent event(_copyCommandLists[copySlot], L"Retoque bridge: DLSS-NR present host");
+        if (_nrHost->Record(_dx12Device, _copyCommandLists[copySlot], _openedDx11BackBuffers[copySlot],
+                            D3D12_RESOURCE_STATE_COPY_SOURCE, _dx12CommandQueue))
+        {
+            // An idle host kept for the neural toggle counts from the first frame it actually ran.
+            State::Instance().nrPresentHostActive = true;
 
-        if (auto* composed = _nrHost->Output(); composed != nullptr)
-            transferSource = composed;
+            if (auto* composed = _nrHost->Output(); composed != nullptr)
+                transferSource = composed;
+        }
     }
 
     // Frame generation's stand-in depth and motion, when this bridge feeds it. Only their one-time
     // clear is ever recorded, sized to the presenter's backbuffer; Present hands them to FG.
     if (_synthInputs != nullptr)
     {
+        Dred::ScopedEvent event(_copyCommandLists[copySlot], L"Retoque bridge: synthesized FG inputs");
         const auto fgDesc = fgBackBuffer->GetDesc();
         _synthInputs->RecordInit(_dx12Device, _copyCommandLists[copySlot], (UINT) fgDesc.Width, fgDesc.Height,
                                  fgDesc.Format);
@@ -2246,7 +2262,10 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
                                     D3D12_RESOURCE_STATE_COPY_SOURCE, transferSource, D3D12_RESOURCE_STATE_COPY_SOURCE);
     }
 
-    _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, transferSource);
+    {
+        Dred::ScopedEvent event(_copyCommandLists[copySlot], L"Retoque bridge: copy to the presenter");
+        _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, transferSource);
+    }
 
     TransitionResource(_copyCommandLists[copySlot], fgBackBuffer, D3D12_RESOURCE_STATE_COPY_DEST,
                        D3D12_RESOURCE_STATE_PRESENT);

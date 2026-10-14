@@ -11,6 +11,7 @@
 #include <queue>
 
 #include <hooks/Gdi32_Hooks.h>
+#include <misc/Dred.h>
 
 typedef LONG(WINAPI* RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
 typedef decltype(&GetFileVersionInfoSizeW) PFN_GetFileVersionInfoSizeW;
@@ -789,6 +790,9 @@ void Util::GetDeviceRemovedReason(ID3D12Device* pDevice)
     default:
         LOG_ERROR("Device removed reason: Unknown ({:X})", (UINT) reason);
     }
+
+    // What DRED kept about it, once per device, when RETOQUE_DRED=1 or a retoque_dred marker asks (misc/Dred.h).
+    Dred::ReportRemoval(pDevice, "Util::GetDeviceRemovedReason");
 }
 
 void Util::LoadProxyLibrary(const std::wstring& name, const std::wstring& optiPath, const std::wstring& overridePath,

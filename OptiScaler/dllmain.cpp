@@ -51,6 +51,7 @@
 #include <version_check.h>
 #include <misc/IdentifyGpu.h>
 #include <dlssnr/DlssNr_Session.h>
+#include <misc/Dred.h>
 #include <sha1/sha1.hpp>
 
 static std::vector<HMODULE> _asiHandles;
@@ -1642,6 +1643,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         State::Instance().isRunningOnLinux = IsRunningOnWine();
         ResolveVulkanHookPolicy();
         DlssNr::SessionGuardBegin();
+
+        // RETOQUE_DRED=1 or a retoque_dred marker beside the DLL: read now, so the log says it was seen before any
+        // device is created. Off, this is all it does.
+        Dred::Enabled();
 
         // Not foolproof
         // calls LoadLibraryExW inside DllMain but seems mostly fine if we only call NvAPI_GetInterfaceVersionString

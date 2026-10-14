@@ -141,9 +141,12 @@ void helperRemovalCases()
                 ++clockMs;
                 return WAIT_OBJECT_0;
             });
+        const int reports = Dred::g_removalReports;
         const auto result = idle ? f.sc->_WaitForCopyQueueIdle(5000) : f.sc->_WaitForCopyAllocator(0);
         assert(result == DXGI_ERROR_DEVICE_HUNG);
         assert(f.sc->_copyAllocatorFenceValues[0] == 8 && f.sc->_lastInteropCopyFenceValue == 8);
+        // A failed slot wait is where the bridge asks DRED for its report (which, once per device, is DRED's business).
+        assert(Dred::g_removalReports == reports + (idle ? 0 : 1));
         f.dx11.reason = DXGI_ERROR_DEVICE_REMOVED;
     }
 }

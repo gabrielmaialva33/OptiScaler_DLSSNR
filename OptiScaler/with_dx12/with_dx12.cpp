@@ -4,6 +4,7 @@
 
 #include <proxies/DXGI_Proxy.h>
 #include <proxies/D3D12_Proxy.h>
+#include <misc/Dred.h>
 
 // An event wake is not a completion proof: removal and an old timed-out registration
 // can both wake it. Keep one deadline across all such wakes.
@@ -55,6 +56,9 @@ HRESULT CreateD3D12DeviceOnAdapter(IDXGIAdapter* adapter, D3D_FEATURE_LEVEL feat
         return E_POINTER;
 
     *device = nullptr;
+
+    // DRED's settings when asked for (misc/Dred.h), for a creation the D3D12 hooks may not see.
+    Dred::BeforeDeviceCreation();
 
     if (D3d12Proxy::Module() == nullptr)
         return D3D12CreateDevice(adapter, featureLevel, IID_PPV_ARGS(device));
@@ -278,6 +282,7 @@ ID3D12CommandQueue* WithDx12::CreateD3D12CommandQueue(ID3D12Device* dx12Device)
         return nullptr;
     }
 
+    Dred::Name(commandQueue, L"Retoque D3D12 interop queue");
     return commandQueue;
 }
 

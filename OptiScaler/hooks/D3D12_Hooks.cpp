@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "D3D12_Hooks.h"
 #include <dlssnr/DlssNr_ExposureScan.h>
+#include <misc/Dred.h>
 
 #include <Util.h>
 #include <Config.h>
@@ -1454,6 +1455,9 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
         debugController->Release();
     }
 #endif
+    // DRED's settings before the device exists, when RETOQUE_DRED=1 or a retoque_dred marker asks (misc/Dred.h).
+    Dred::BeforeDeviceCreation();
+
     IdentifyGpu::updateD3d12Capabilities(o_D3D12CreateDevice);
 
     DXGI_ADAPTER_DESC desc {};
@@ -1604,6 +1608,9 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
         LOG_DEBUG("Calling from hkD3D12CreateDevice, calling original CreateDevice");
         return o_CreateDevice(pFactory, pAdapter, MinimumFeatureLevel, riid, ppDevice);
     }
+
+    // DRED's settings, globally and on this factory, when RETOQUE_DRED=1 or a retoque_dred marker asks.
+    Dred::BeforeDeviceCreation(pFactory);
 
 #ifdef ENABLE_DEBUG_LAYER_DX12
     LOG_WARN("Debug layers active!");

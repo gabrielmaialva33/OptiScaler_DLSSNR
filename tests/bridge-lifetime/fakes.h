@@ -185,6 +185,19 @@ struct ID3D12GraphicsCommandList : ID3D12CommandList
         copiedFrom = source;
     }
 };
+// misc/Dred.h with the switch off, which is every case here: the bridge's DRED calls do nothing. A removal report is
+// counted, so a case can see where the bridge would have asked for one.
+namespace Dred
+{
+inline int g_removalReports = 0;
+inline void ReportRemoval(ID3D12Device*, const char*) { ++g_removalReports; }
+struct ScopedEvent
+{
+    ScopedEvent(ID3D12GraphicsCommandList*, const wchar_t*) {}
+    ~ScopedEvent() {}
+};
+} // namespace Dred
+
 struct ID3D12CommandQueue : Ref
 {
     std::function<void()> beforeSignal;
