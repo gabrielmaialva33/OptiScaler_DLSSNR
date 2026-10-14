@@ -29,7 +29,7 @@ entry, or the next run tells you.
 | Tier | Needs | Suites |
 |---|---|---|
 | `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
-| `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
+| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
 The wine tier is serial on purpose. These suites compile through the single msvc-wine
@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Forty-seven suites. All but `nr-invariants`, `repo-privacy` and `deploy-safety` build real production code with local fakes under
+**Host tier.** Forty-eight suites. All but `nr-invariants`, `repo-privacy` and `deploy-safety` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `lsfg-shader-library` — the LSFG runtime shader library (`retoque/lsfg/LsfgShaderLibrary.{h,cpp}`): DLL discovery (Windows Steam `libraryfolders.vdf`, registry, Wine/Proton `Z:` paths, `$HOME`, `$XDG_DATA_HOME`, override, `Lossless.dll` folder mapping), PE `RT_RCDATA` SPIR-V module extraction (99 modules), SPIR-V magic validation, Quality/Performance and FP32/FP16 resource ID resolution, real user DLL extraction when present, and content-hash-keyed DXIL cache storage/invalidation; plus `tools/lsfg-study/convert.py`'s Float16 detection (synthetic modules, and exactly ids 51..98 on the real DLL).
@@ -198,6 +198,12 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-vk-extensions` — the Vulkan device-extension merge the NR hook hands `vkCreateDevice`,
   compiled against the real Vulkan headers: `VK_KHR_` and `VK_EXT_buffer_device_address` never
   leave it together, and the one the game asked for is the one kept.
+- `nr-vk-present-host` — the Vulkan present host's stage 1 (`docs/dlssnr/design/nr-vulkan-present-host.md`): the
+  registry header (`DlssNr_VkPresentRegistry.h`) through its state machine -- records with ids of their own, a reused
+  handle as a new record, two devices with the same swapchain handle value, destroys taking their children, unknown
+  and internal objects, the observe line field for field and when it is written -- and source guards: one call site,
+  first in `VulkanHooks::Hook` and ahead of the marker check, gated before anything else; an observe-only host whose
+  hooks hand their own arguments down unchanged. No Vulkan or Wine.
 - `nr-zero-guides` — zero depth and motion for a host with no engine buffers, and the
   two-heap clear contract.
 
@@ -215,6 +221,13 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   when `nvofapi64.dll` or its shaders are unavailable. No NGX, no game.
 - `vulkan-overlay` — builds a real DLL and drives real Vulkan to exercise overlay
   lifetime.
+- `vulkan-present-host` — the production DLL from `build-local.sh`, uninstrumented, under a Win32 Vulkan application:
+  with `[DlssNr] VulkanPresentHost` on (under the marker, under `SkipHooks`, beside the bundle with its menu off and
+  on) every observe line is held against the application's own record of its windows, devices, queue families,
+  usages, waits and presents, a reused device handle included; with the key or the master off there is no host line,
+  and under the marker vulkan-1.dll's exports are byte-identical to before OptiScaler loaded. Validation on and
+  proved active. Plus a D3D11 and a D3D12 title through a local Proton's DXVK and vkd3d-proton, under the marker: their
+  own devices and presents reach the host and are named for the layer (SKIP without a local Proton). No game or FG.
 
 **Not a suite.** `nr-before-upscale/verify-invariants.py` is a one-shot evidence
 script pinned to baseline commit `660303ec`. `run.py` does not call it and

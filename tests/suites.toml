@@ -123,6 +123,11 @@ tier = "host"
 timeout = 300
 summary = "The NR Vulkan device-extension merge, compiled against the real Vulkan headers: KHR and EXT buffer_device_address never leave it together."
 
+[nr-vk-present-host]
+tier = "host"
+timeout = 120
+summary = "The Vulkan present host, stage 1: the registry header (records with ids of their own, reused handles, devices side by side, unknown and internal objects, the observe lines and when they are written) under ASan/UBSan, plus source guards: one gated call site ahead of the marker check, an observe-only host whose hooks pass their arguments down unchanged."
+
 [nr-shutdown]
 tier = "host"
 timeout = 300
@@ -157,6 +162,11 @@ summary = "Real D3D12 timestamp queries in an isolated Wine prefix. Never loads 
 tier = "wine"
 timeout = 1800
 summary = "Builds a real DLL and drives real Vulkan to exercise overlay lifetime under Wine."
+
+[vulkan-present-host]
+tier = "wine"
+timeout = 1800
+summary = "The production DLL (x64/out) under a Win32 Vulkan application and Wine: with [DlssNr] VulkanPresentHost on, under the marker, SkipHooks, and beside the bundle with the Vulkan menu off and on, its observe lines are held against the application's own facts (windows, devices, queue families, usages, waits, a reused device handle); with the key or the master off, no host line and, under the marker, vulkan-1.dll's exports byte-identical. Validation on, its activity proved. A D3D11 and a D3D12 title through a local Proton's DXVK and vkd3d-proton under the marker: their devices and presents reach the host, named for the layer."
 
 [dlssnr-loopback]
 tier = "wine"
