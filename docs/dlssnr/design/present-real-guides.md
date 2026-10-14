@@ -1,6 +1,7 @@
 # Real guides for the present pass: proving the capture belongs to the frame being presented
 
-Status: design for review, 2026-10-13. **Step 0 (log only) is built**, on branch `feat/present-guide-identity`:
+Status: design for review, 2026-10-13. **Step 0 (log only) is built** and was measured in Crimson Desert on
+2026-10-14 ([Step 0 measured](#step-0-measured-2026-10-14-crimson-desert)), on branch `feat/present-guide-identity`:
 the stamp, the decision header and both consumers' calls, acting on nothing; see
 [Step 0 as built](#step-0-as-built). Steps after it are not built. Nothing here has been run in a game. Written
 against `93730d39`; line numbers are into that tree.
@@ -430,6 +431,27 @@ How to read it for step 1:
 Run the test plan's step 0 on it: Crimson Desert with DLSS-G off, `HookMethod=2` and `0`, through a menu, a cutscene,
 a resolution change and Alt-Tab. Then `HookMethod=1`, where the line must not appear. The string
 `identity check (log only` is in the DLL when the slice is linked in.
+
+### Step 0 measured (2026-10-14, Crimson Desert)
+
+Two sessions of the same day, both `HookMethod=2`, GE-Proton11-7, RTX 4090:
+
+| | at the game's own Present (`9f97f708`, the boundary of nr-before-dlssg.md, the game's DLSS-G at 3x) | at the wrapped entry (`9eb4f6e6`, DLSS-G not yet on) |
+|---|---|---|
+| windows / presents | 15 / 9,075 | 5 / 1,417 |
+| read a capture / skipped / none | 9,075 / 0 / 0 | 1,415 / 0 / 2 |
+| would pass / refused | 9,073 / 2 (`ambiguous` 2) | 0 / 1,415 (`lag` 1,414, `ambiguous` 1) |
+| epoch lag of new captures | `1`: 9,075 | `2`: 1,414, `1`: 1 |
+| captures per frame at their extent | `1`: 9,073, `2`: 1, `3+`: 1 | `1`: 1,414, `3+`: 1 |
+
+- **At the boundary the rules hold as designed, with `kLag = 1`**: every present read the capture made in the interval
+  just before it, one capture per frame, and the only refusals were two `ambiguous` at start-up.
+- **At the wrapped entry every capture was a boundary older**: `kLag = 1` would have refused all of them. That run is
+  only its first ten seconds (start-up, likely menus) before DLSS-G was switched on, so it does not separate "the
+  entry" from "that state of the game". A session at the wrapped entry with DLSS-G off throughout, through gameplay, is
+  what decides `kLag` there; until then step 1 must not enforce rule 6 at the wrapped entry.
+- **Rule 4 costs nothing in this title** (one capture per frame), and no `device`, `extent`, `output-base` or
+  `swapchain` refusal was seen in either session. Not seen either: a resize or an Alt-Tab inside these windows.
 
 ## Risks
 
