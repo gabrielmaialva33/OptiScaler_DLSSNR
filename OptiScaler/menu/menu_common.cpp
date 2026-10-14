@@ -3,6 +3,7 @@
 #include "menu_common.h"
 #include <menu/DlssgExternalTelemetry.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
+#include <lsfg/LsfgMenu.h>
 
 #include <algorithm>
 #include <cfloat>
@@ -4602,6 +4603,8 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 ImGui::Spacing();
                 ImGui::Spacing();
             }
+
+            Lsfg::RenderMenu(menuResScale);
         }
     }
 

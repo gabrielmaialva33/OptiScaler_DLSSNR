@@ -1972,6 +1972,15 @@
     <ClInclude Include="..\retoque\lsfg\LsfgShaderSource.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\retoque\lsfg\LsfgEnvironment.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\retoque\lsfg\LsfgShaderLibrary.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\retoque\lsfg\LsfgMenu.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClCompile Include="..\retoque\lsfg\Lsfg.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1979,6 +1988,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\retoque\lsfg\LsfgShaderSource.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\retoque\lsfg\LsfgShaderLibrary.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\retoque\lsfg\LsfgMenu.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

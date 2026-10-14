@@ -1037,9 +1037,14 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="..\retoque\lsfg\LsfgGraph.h" />
     <ClInclude Include="..\retoque\lsfg\LsfgFrameGen_Dx12.h" />
     <ClInclude Include="..\retoque\lsfg\LsfgShaderSource.h" />
+    <ClInclude Include="..\retoque\lsfg\LsfgEnvironment.h" />
+    <ClInclude Include="..\retoque\lsfg\LsfgShaderLibrary.h" />
+    <ClInclude Include="..\retoque\lsfg\LsfgMenu.h" />
     <ClCompile Include="..\retoque\lsfg\Lsfg.cpp" />
     <ClCompile Include="..\retoque\lsfg\LsfgFrameGen_Dx12.cpp" />
     <ClCompile Include="..\retoque\lsfg\LsfgShaderSource.cpp" />
+    <ClCompile Include="..\retoque\lsfg\LsfgShaderLibrary.cpp" />
+    <ClCompile Include="..\retoque\lsfg\LsfgMenu.cpp" />
   </ItemGroup>
   <ItemDefinitionGroup>
     <ClCompile>
