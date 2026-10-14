@@ -439,6 +439,7 @@ bool Config::Reload(std::filesystem::path iniPath)
                 DlssNrScalingDownscaler.reset();
 
             DlssNrStage.set_from_config(readUInt("DlssNr", "Stage"));
+            DlssNrVulkanPresentHost.set_from_config(readBool("DlssNr", "VulkanPresentHost"));
             DlssNrProxyProbe.set_from_config(readBool("DlssNr", "ProxyProbe"));
             DlssNrUseProxy.set_from_config(readBool("DlssNr", "UseProxy"));
             DlssNrModelLoader.set_from_config(
@@ -1444,6 +1445,8 @@ bool Config::SaveIni()
         ini.SetValue("DlssNr", "ScalingDownscaler", GetIntValue(Instance()->DlssNrScalingDownscaler).c_str());
 
         ini.SetValue("DlssNr", "Stage", GetIntValue(Instance()->DlssNrStage.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "VulkanPresentHost",
+                     GetBoolValue(Instance()->DlssNrVulkanPresentHost.value_for_config()).c_str());
 
         // These were read every launch but never written, so nothing set through the menu survived a
         // restart -- the white-point source, both trims, the anchor, the pass count and the rest all

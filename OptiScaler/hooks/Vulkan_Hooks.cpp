@@ -19,6 +19,7 @@
 #include <vulkan/vulkan.hpp>
 
 #include <dlssnr/DlssNr_VkExtensions.h>
+#include <dlssnr/DlssNr_VkPresentHost.h>
 
 #include <detours/detours.h>
 #include <misc/IdentifyGpu.h>
@@ -878,6 +879,10 @@ PFN_vkVoidFunction VulkanHooks::GetDeviceProcAddr(VkDevice device, const char* p
 
 void VulkanHooks::Hook(HMODULE vulkan1)
 {
+    // DLSS-NR's Vulkan present host: hooks of its own, only with [DlssNr] VulkanPresentHost, and also under the skip
+    // below (dlssnr/DlssNr_VkPresentHost.h). First, so the bundle's hooks on the same exports call down through it.
+    DlssNr::VkPresentHost::Install(vulkan1);
+
     // [Vulkan] SkipHooks or the marker (dllmain.cpp, ResolveVulkanHookPolicy): none of the bundle is
     // installed, at startup or when the loader hook sees vulkan-1.dll again later.
     if (State::Instance().vulkanHooksSkipped)

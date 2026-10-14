@@ -519,6 +519,13 @@ class Config
     // "at present" for both, and with_dx12/dx11_with_dx12_sc.cpp picks the transport. An ini that
     // still carries Dx11BridgeHost is inert rather than wrong.
 
+    // The Vulkan present host (docs/dlssnr/design/nr-vulkan-present-host.md), stage 1. With Enabled, at start-up:
+    // install a narrow interception of Vulkan creation and present of its own, also under [Vulkan] SkipHooks or the
+    // marker (which keep the rest of the vulkan-1.dll bundle off), and log what presents. Observes only: no submit,
+    // no resource, no change to any call or frame. Not a placement control like HookMethod; it chooses whether this
+    // host exists. Read once, when vulkan-1.dll is hooked. See dlssnr/DlssNr_VkPresentHost.h.
+    CustomOptional<bool> DlssNrVulkanPresentHost { false };
+
     // Ask the driver's own nvngx.dll whether it will dispatch Neural Rendering, once per session.
     //
     // Everything here drives the model's DLL directly through a forwarder, because the model refuses

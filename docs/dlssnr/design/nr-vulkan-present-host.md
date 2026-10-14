@@ -1,9 +1,12 @@
 # NR at Vulkan present — one Proton host below the game's rendering API
 
-Status: **design for review, not implementation**. Audited at `c3310a15` (2026-09-12), after reading
+Status: **stage 1 (coverage and no-op control) built 2026-10-14, observe only**; stages 2-5 are design.
+See [Stage 1 as built](#stage-1-as-built-2026-10-14), which also records how the tree drifted from the
+references below. Audited at `c3310a15` (2026-09-12), after reading
 [nr-present-hook.md](nr-present-hook.md), [nr-dx11-bridge-host.md](nr-dx11-bridge-host.md), both
 independent reviews, and the corrected sequencing in [nr-without-game-dlss.md](nr-without-game-dlss.md).
-Source paths below are relative to `OptiScaler/`; line references describe this baseline.
+Source paths below are relative to `OptiScaler/`; line references describe this baseline (the NR files have
+since moved to `retoque/`).
 
 ## The answer
 
@@ -449,6 +452,179 @@ control expects zero overlay coverage; a new independent NR harness must positiv
 state without weakening the old assertion. Prove validation is active with its negative-control
 technique. Run Wine suites serially and outside build windows.
 
+## Stage 1 as built (2026-10-14)
+
+Item 1 above, and only item 1: interception, identity and proof that nothing changed. Branch
+`feat/vulkan-present-host`, commits `61bc250c` (the host), `476e9f4e` (a fix the translated tests found) and
+`e460595c` (tests). No submit, resource, semaphore, NR or menu work exists in it.
+
+### What, and where
+
+- **The key.** `[DlssNr] VulkanPresentHost` (`DlssNrVulkanPresentHost`, bool, default false), the four points:
+  `Config.h` (DlssNr block, after the HookMethod notes), `Config.cpp` read and save, the shipped ini with a comment
+  that says it is an experiment that only watches. Read once, when vulkan-1.dll is hooked; a change needs a restart.
+  It works only under `[DlssNr] Enabled`.
+- **The call site.** `DlssNr::VkPresentHost::Install(vulkan1)` is the first statement of `VulkanHooks::Hook`,
+  ahead of its `vulkanHooksSkipped` return, so the startup path (`CheckWorkingMode`, which on Wine always loads
+  vulkan-1.dll) and the late path (`LibraryLoad_Hooks.cpp`'s vulkan-1 branch) both reach it. Off, `Install`
+  returns at its first statement; that and "one call site" are source guards (`tests/nr-vk-present-host`).
+  `ResolveVulkanHookPolicy`'s line and the bundle's "Skipping vulkan-1.dll hooks" line are unchanged; the host's
+  install line says the bundle stays off and this host is the one exception, so the two decisions log separately.
+- **The records.** `retoque/dlssnr/DlssNr_VkPresentRegistry.h`, standard library only: instance, physical device
+  (from `vkEnumeratePhysicalDevices`), device (with the physical device's queue families and the queue create
+  infos), queue (what `vkGetDeviceQueue`/`vkGetDeviceQueue2` returned, with family, index and create flags),
+  surface to HWND, swapchain to device, surface, images, format, extent, usage, sharing, retirement by
+  `oldSwapchain`, per-image acquires. Every record takes an id from one counter, so a reused handle value is a new
+  record; swapchains and surfaces are keyed by their parent, since non-dispatchable handles are only unique per
+  parent. Destroys retire the record before the call goes down, while the value cannot be handed out again.
+  Nothing in the bundle's globals (`_device`, `_PD`, `_instance`, `_hwnd`) was touched: the registry is additive.
+- **The hooks.** `retoque/dlssnr/DlssNr_VkPresentHost.{h,cpp}`, Detours, each hook calling the trampoline of the
+  target it was attached to with its own arguments, once:
+  - vulkan-1.dll's `vkCreateInstance`, `vkDestroyInstance`, `vkEnumeratePhysicalDevices`, `vkCreateDevice`,
+    `vkCreateWin32SurfaceKHR`, `vkDestroySurfaceKHR`, at install. Installed before the bundle's own detours on the
+    same exports, so the `hkvkCreateDevice` the bundle's `vkGetInstanceProcAddr` hands out still calls down
+    through the host. (Consequence: with the bundle on, the host's instance and device lines name
+    `OptiScaler's own Vulkan hook, called down to this one` as creator.)
+  - per device, right after `vkCreateDevice` returns, what `vkGetDeviceProcAddr` gives for `vkDestroyDevice`,
+    `vkGetDeviceQueue`, `vkGetDeviceQueue2`, `vkCreateSwapchainKHR`, `vkDestroySwapchainKHR`,
+    `vkGetSwapchainImagesKHR`, `vkAcquireNextImageKHR`, `vkAcquireNextImage2KHR`. One template instantiation per
+    distinct address (four slots, one per ICD or first layer), so each hook knows its own trampoline without a
+    lookup; a fifth address is logged and left alone. Under the bundle, its `vkCreateSwapchainKHR` hook runs
+    first, so the host records the usage the driver actually gets.
+  - `vkQueuePresentKHR` at a device's first swapchain creation, after the bundle's `HookDevice` (which runs in its
+    `vkCreateDevice`): the host's detour sits on top and runs first. That is already the order stage 2 needs,
+    application -> NR -> overlay -> present.
+- **What counts as OptiScaler's own.** `ScopedSkipVulkanHooks` only. The first build also read
+  `State::creatingD3DDevice`; the D3D hooks set it around the game's own `D3D12CreateDevice`, `CreateDXGIFactory`
+  and D3D11 device creation, inside which vkd3d-proton and DXVK make their instance and device, so every translated
+  title's device was filed as internal and never reported. The vkd3d-proton case caught it (`476e9f4e`).
+  `IdentifyGpu`'s throwaway D3D12 device, made under `ScopedSkipVulkanHooks`, is still recorded as OptiScaler's,
+  and the title's device that gets its handle value back is a separate record.
+- **What it never does** (source-guarded): submit, create, allocate, record, wait, copy or edit a create or present
+  info, touch usage; call Reflex, `FrameLimit::sleep`, `TickFrozenCheck`, upscaler timing, the overlay, spoofing or
+  the NR evaluate. Its own Vulkan calls are three read-only queries: `vkGetDeviceProcAddr`,
+  `vkGetPhysicalDeviceQueueFamilyProperties` (at device creation) and `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`
+  (at swapchain creation, to say what the surface would allow). The registry lock is never held across a call into
+  Vulkan or the log. Per present: one `GetModuleHandleExW` (as `IsDxgiBackedCaller` does), a few hash lookups, and
+  a line only when one is due.
+
+### The log
+
+At install, once: `DLSS-NR Vulkan present host (observe only; stage 1 of nr-vulkan-present-host.md): installed on
+vulkan-1.dll, while the rest of OptiScaler's Vulkan hooks stay off ([Vulkan] SkipHooks or the marker); this host is
+the one exception` (or `beside OptiScaler's own Vulkan hooks`). A later load through the loader hook adds, once,
+`vulkan-1.dll reached the hook again (the same module); already installed`. One line per instance and device:
+
+```
+DLSS-NR Vulkan present host: device 0x7FFFF1464CB0 #3 created by vk-present-host-harness.exe (native Vulkan); physical 0x7FFFF147B6F8 instance #1; queue families 0:0xFx16 1:0xCx2 2:0xEx8 3:0x2Cx1 4:0x4Cx2 5:0x10Cx1; requested family 0 x1 family 2 x1
+```
+
+Per window, at its first present, whenever its swapchain, device, presenting queue or calling module changes, and
+at 10, 100, 1000... presents (so a session writes a handful), with the wait range of the presents since the
+window's previous line:
+
+```
+DLSS-NR Vulkan present host (observe only): window 0x10058 (new swapchain, new queue); presents 13, swapchains 2, devices 1; swapchain 0x55558BE923D0 #5 632x446 format 44 colour-space 0 images 4 usage 0x13 (transfer-src yes, transfer-dst yes, storage no) surface-usage 0x9F sharing EXCLUSIVE; round-trip legal as created; device 0x7FFFF1464CB0 #3 physical 0x7FFFF147B6F8 instance #1; queue 0x7FFFF1464D08 family 2 index 0 flags 0xE (graphics no, compute yes, transfer yes); waits 0-1; acquires 1; caller vk-present-host-harness.exe (native Vulkan)
+DLSS-NR Vulkan present host (observe only): window 0x10058 (first present); presents 1, swapchains 1, devices 1; swapchain 0x555561902160 #4 632x446 format 44 colour-space 0 images 5 usage 0x12 (transfer-src no, transfer-dst yes, storage no) surface-usage 0x9F sharing EXCLUSIVE; round-trip needs TRANSFER_SRC at creation, the surface offers it; device 0x7FFFF1464610 #2 physical 0x7FFFF1484E78 instance #1; queue 0x7FFFF1464658 family 0 index 0 flags 0xF (graphics yes, compute yes, transfer yes); waits 1-1; acquires 1; present pNext 1000275001 1000275003 1000294000; caller d3d11.dll (DXVK)
+```
+
+`round-trip` answers stage 2's legality question for that swapchain: `legal as created` (both transfer usages),
+`needs X at creation, the surface offers it`, or `not possible, the surface does not offer X`. Only when non-zero:
+`presented without an observed acquire N`, `multi-swapchain presents N`, `present pNext <sTypes>`. A present of a
+swapchain the host never saw created writes one line per session and is counted after that; OptiScaler's own
+devices are never reported. The caller is classified by module: `dxgi`/`d3d11`/`d3d10core`/`d3d9`/`d3d8.dll` DXVK,
+`d3d12`/`d3d12core.dll` vkd3d-proton, `vulkan-1`/`winevulkan.dll` the loader (the real caller is not visible past
+it), OptiScaler's own module (another of its hooks ran first), anything else native.
+
+### Validated under Wine (11.19, RTX 4090, 2026-10-14)
+
+- `tests/vulkan-present-host` (new, wine tier), the production DLL uninstrumented, ten cases, all PASS. Native
+  Vulkan application: under the marker and under `SkipHooks` with the host on, every field of all six lines over
+  two windows, three devices (the third got the destroyed second's handle value back and is a new record), four
+  swapchains (one through `oldSwapchain`), presents from the graphics family and from compute-only family 2
+  (`0xE`), 0, 1 and 2 waits, `vkGetDeviceQueue2`; the 14 hooked exports patched, `vkQueueSubmit` and
+  `vkCreateFence` not; the late path's line. Key off and master off under the marker: no host text and all
+  sixteen watched exports byte-identical to before OptiScaler loaded. Beside the bundle with `OverlayMenu=false`
+  (positive coverage of the state `vulkan-overlay` must see as zero) and `true` (the overlay's present hook is in,
+  and the host's caller is still the application, so its present detour runs first). D3D titles through
+  GE-Proton11-7's DXVK and vkd3d-proton under the marker: their devices are created by `d3d11.dll (DXVK)` and
+  `d3d12core.dll (vkd3d-proton)` and their presents reach the host with that caller. Validation (core and
+  synchronization) on for the native cases, proved active by a rejected fence flag, zero errors.
+- `tests/nr-vk-present-host` (new, host tier): the registry's state machine and the source guards.
+- `tests/vulkan-overlay` PASS at `e460595c` (both non-graphics controls and the zero-coverage control);
+  `python3 tests/run_all.py` 48/48; `nr-invariants` 73 keys round-trip.
+
+What the translated cases showed: both layers present from the graphics family (0) with one wait, on EXCLUSIVE
+swapchains of usage `0x12` (no TRANSFER_SRC) whose surface offers `0x9F`; both recreate their VkSwapchain once
+early; both chain `VkSwapchainPresentFenceInfoEXT` (1000275001) and `VkSwapchainPresentModeInfoEXT` (1000275003)
+on every present, DXVK adds `VkPresentIdKHR` (1000294000), vkd3d-proton 1000479001 (not in the vendored headers;
+by its number, `VK_KHR_present_id2`'s `VkPresentId2KHR`).
+
+Found along the way, none of it caused or changed by the host:
+
+- The legacy Vulkan overlay (`OverlayMenu=true`, no marker) crashes the process when a second window's swapchain
+  is created on a second device: a null read at `0x90(rbx)` inside `MenuOverlayVk::CreateSwapchain`, right after
+  `MenuOverlayBase::Handle() != _hwnd`. With the host off too (`key-off`). The bundle cases run one window.
+- That overlay leaves its objects on a device the application destroys (`VUID-vkDestroyDevice-device-05137`): it
+  has no device-destroy hook, which `vulkan-overlay` hides by calling a test-only teardown export first.
+- Wine 11.19's winevulkan appends `VK_EXT_external_memory_dma_buf` without `VK_KHR_external_memory_fd` to its
+  host-side device, and the native validation layer reports it once per device whenever the bundle is skipped
+  (the bundle's own extension additions make it go away). The suite counts it separately.
+
+### Not validated
+
+Any game; native Windows (the Khronos loader's trampolines, where an export and `vkGetDeviceProcAddr`'s answer
+differ and only the dispatch-level detour is shared; Install inside DllMain there); concurrent presents from two
+threads (Streamline's pacer); device loss; late installation over devices that already exist (their objects would
+be unknown records); OptiScaler's Vulkan FSR-FG (its swapchain handles are not the driver's: expect the unknown-
+swapchain line); `vkAcquireNextImage2KHR` and queue create flags beyond the host test; multi-GPU (more than one
+target address per function); the per-present cost, which was not measured.
+
+### Drift against today's tree (re-checked 2026-10-14 at `508d4d2d`)
+
+| Cited (2026-09-12) | Today |
+|---|---|
+| marker check `dllmain.cpp:947–964` | `ResolveVulkanHookPolicy` at `dllmain.cpp:369–389`, called right after Wine detection (1643); `CheckWorkingMode`'s Vulkan block at 966–981; `VulkanHooks::Hook` enforces the skip itself (already noted above) |
+| late load `hooks/LibraryLoad_Hooks.cpp:392–401` | 420–432, through the same `VulkanHooks::Hook` gate |
+| `HookDevice:56` | `hooks/Vulkan_Hooks.cpp:169`; the guard is the per-thread `ScopedSkipVulkanHooks` since 2026-10-13 |
+| `hkvkCreateDevice:243`, `NoteDeviceQueues` and `HookDevice` only under `OverlayMenu` | 310–502; `NoteDeviceQueues` is now upstream's `MenuOverlayVk::DeviceCreated` (437), still under `OverlayMenu` (425); the FG path also calls `HookDevice` (419–423) |
+| `hkvkQueuePresentKHR` reads upscaler timing, ticks frozen, runs Reflex and the limiter | still all four (505 on), but since upstream `1cc9d5a1` (taken 2026-10-12) a present from dxgi/d3d11/d3d12 (`IsDxgiBackedCaller`) skips the Vulkan overlay, `swapchainApi` and `TickFrozenCheck`. **Without the marker, DXVK and vkd3d-proton presents no longer reach the Vulkan overlay at all**, which narrows the marker's original motivation (the overlay against Streamline's pacer under vkd3d-proton) to the rest of the bundle: Reflex, the limiter, spoofing, Vulkan_wDx12 |
+| `menu_overlay_vk.cpp:852` (simultaneous presents) | 1049–1056 in `QueuePresent` (1036) |
+| `QueuePresent:913` declines a non-graphics family | **changed in substance**: since `fc08aa32` (2026-09-19) a non-graphics present family is drawn on the graphics family with a queue-family transfer around it (three submits, semaphore chain), not declined |
+| waits replaced `1068–1089` | present-queue path 1283–1328, cross-family chain 1362–1426 |
+| `DxOverlayOwnsBackend:192` | 339 |
+| `DlssNrFeature_Vk.cpp:562` (record into a supplied command buffer), `562–668` early returns, `873` parameter reads, `703–758` bootstrap | now `retoque/dlssnr/DlssNrFeature_Vk.cpp`: `EvaluateAfterUpscaleVk` 608, the missing-resource return 740, parameter reads around 1015, `Init_Ext` with `0x15` 846 and `AllocateParameters` 862 |
+| `shaders/dlssnr/DlssNr_Vk.cpp` | `retoque/shaders/dlssnr/DlssNr_Vk.cpp` (moved 2026-10-13); the ring is `kSlotsPerFrame 6 x kFramesInFlight 3` in `DlssNr_Vk.h:33–35`, unchanged |
+| `inputs/NVNGX_DLSS_Vk.cpp:665` | 661 |
+| `vulkan-overlay/run.py:263` (sync validation) | 447 |
+| "fourteen suites", "all eleven host suites" | 51 registered before this stage (47 host, 4 wine); 53 now (48, 5) |
+| clang-format `/usr/lib/llvm20/bin/clang-format` | clang-format 22 through `uvx` (CLAUDE.md, "Formatting") |
+
+### What stage 2 needs
+
+- **Usage, decided before the real call.** No swapchain a translation layer made here allows the copy round trip:
+  DXVK and vkd3d-proton both ask for `0x12`, without TRANSFER_SRC, on a surface that offers it (`0x9F`, STORAGE
+  included). So stage 2 starts by editing `VkSwapchainCreateInfoKHR` under the opt-in (TRANSFER_SRC added when the
+  surface offers it, eligibility decided before the call, never a retried creation), which stage 1 deliberately
+  does not do. The overlay already does exactly that for its blur when the bundle runs with its menu, and the host
+  sees the result (`menu-on`: `0x13`). STORAGE on the swapchain image is offered but would need a format-feature
+  check on BGRA8; the copy route is the one to build.
+- **In the harness**, the round trip is legal on swapchain 2 (`0x13`) as created, and swapchain 1 (`0x12`) is the
+  "needs a usage edit" case; the compute-only present family 2 (`0xE`: compute and transfer, no graphics) is the
+  presenting queue the design wants NR to run on without graphics. Sync validation and its negative control are
+  already in place for the submission-only control.
+- **Present chain.** Both layers chain swapchain-maintenance1 present fences and present-mode info, and present
+  ids, on every present. Stage 2 must carry the chain through its local present-info copy, and the present fences
+  are the presentation-completion evidence the semaphore-retirement section asks for, available on exactly these
+  paths. One wait per present on both layers; the harness covers 0, 1 and 2.
+- **Retirement.** Both layers recreate their swapchain early, so generation retirement is exercised from the first
+  seconds; the device-destroy and swapchain-destroy hooks exist now (records only) for resources to hang on.
+- **Order with the overlay.** The host's present hook already runs ahead of the overlay's; stage 2 still has to
+  build the defined chain (NR consumes the waits once, the overlay waits on NR's signal), and the bundle-with-menu
+  tests stay single-window until the overlay's second-window crash is fixed.
+- **Game runs** before any of that: the lines from DOOM Eternal (native Vulkan, compute-family present) and from a
+  marked vkd3d-proton title (with Streamline), to confirm in a game what the harness showed.
+
 ## Decision and stop conditions
 
 Prefer this experiment over implementing the D3D11 dual-swapchain host first. It removes an entire
@@ -468,4 +644,5 @@ This note's evidence is a manual source/history audit and the cited public docum
 not a new GPU run. No implementation, marker edit, installation or game launch is part of this task.
 Local documentation links, whitespace and the fourteen-suite registry listing were checked; the
 suites themselves were not run for this documentation change.
-Eventual C++ uses the pinned `/usr/lib/llvm20/bin/clang-format`; this documentation needs no build.
+Eventual C++ uses the pinned `/usr/lib/llvm20/bin/clang-format`; this documentation needs no build. (2026-10-14:
+the pin is clang-format 22 through `uvx` now, and stage 1's C++ is clean under it.)
