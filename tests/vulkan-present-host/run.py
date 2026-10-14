@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""The Vulkan present host under Wine (docs/dlssnr/design/nr-vulkan-present-host.md, stages 1 and 2): the production
+"""The Vulkan present host under Wine (docs/dlssnr/design/nr-vulkan-present-host.md, stages 1 to 3): the production
 DLL, uninstrumented, loaded by a Win32 Vulkan application, with [DlssNr] VulkanPresentHost on and off, the skip marker
 present and absent, the Vulkan menu on and off, and a surface that hides TRANSFER_SRC. Every line of the host in
 OptiScaler.log is held against the facts the application wrote about itself -- which presents the round trip must have
 carried, by which route, with how many waits and submits, and what it must have refused -- under the validation
 layer's core and synchronization checks, and every presented image the application reads back must equal what it
-made. With the key off, nothing of the host may appear and vulkan-1.dll's exports must be byte-for-byte untouched."""
+made. With the key off, nothing of the host may appear and vulkan-1.dll's exports must be byte-for-byte untouched.
+
+Stage 3's cases (nr*) run nr.cpp with the real model: the forwarder built with this DLL, NVIDIA's nvngx_dlssnr.dll
+from the local kit (symlinked, never copied into the tree) and the driver's NGX core from /usr/lib/nvidia/wine, in a
+prefix set up as Proton sets one up for NGX. Without those files they print SKIP."""
 import argparse
 import hashlib
 import json
@@ -24,12 +28,21 @@ TOOLCHAIN_PREFIX = Path(os.environ.get('WINEPREFIX', str(Path.home() / '.local/o
 BUILD_PREFIX = OUT / 'build-prefix'
 EXE = 'vk-present-host-harness.exe'
 TRANSLATED_EXE = 'vk-present-host-translated.exe'
+NR_EXE = 'vk-present-host-nr.exe'
 MARKER = 'optiscaler_skip_vulkan_hooks'
-WINDOW_LINE = 'DLSS-NR Vulkan present host (round trip, no NR): window '
-INSTALL_LINE = 'DLSS-NR Vulkan present host (round trip, no NR; stage 2'
+WINDOW_LINE = 'DLSS-NR Vulkan present host (cold NR): window '
+INSTALL_LINE = 'DLSS-NR Vulkan present host (cold NR on zero guides; stage 3'
 HOST_TEXT = 'DLSS-NR Vulkan present host'
 HIDE_LAYER = 'VK_LAYER_RETOQUE_hide_transfer_src'
 LAYER_DIR = OUT / 'layer'
+
+# Stage 3: the model's device extensions, as the host names them, and what a case without the model files says.
+NR_EXTENSIONS = ['VK_NVX_binary_import', 'VK_NVX_image_view_handle', 'VK_KHR_push_descriptor',
+                 'VK_KHR_buffer_device_address']
+# The harness's devices are Vulkan 1.1 without shaderStorageImageWriteWithoutFormat: the composition pass's format-less
+# storage writes need this one too.
+FORMAT_FLAGS2 = 'VK_KHR_format_feature_flags2'
+NO_FORWARDER = 'nvngx.dll_dlssnr.dll was not found beside OptiScaler or the game'
 
 # What the host detours: stage 1's creation, lifetime and present calls, and stage 2's queue calls (vkQueueSubmit,
 # vkQueueWaitIdle), whose lock keeps a borrowed queue externally synchronised. vkCreateFence is the control: never.
@@ -124,10 +137,11 @@ def check_dll(dll):
     if not dll.exists():
         raise RuntimeError(f'{dll} does not exist; run ./build-local.sh Release first')
     data = dll.read_bytes()
-    if WINDOW_LINE.encode() not in data:
-        raise RuntimeError(f'{dll} has no stage-2 present host in it (stale build); run ./build-local.sh Release')
+    if b'(cold NR): window ' not in data:
+        raise RuntimeError(f'{dll} has no stage-3 present host in it (stale build); run ./build-local.sh Release')
     # A source newer than the DLL means the DLL is not what the tree says.
     sources = [ROOT / 'OptiScaler/hooks/Vulkan_Hooks.cpp', ROOT / 'OptiScaler/Config.h', ROOT / 'OptiScaler/Config.cpp',
+               ROOT / 'retoque/dlssnr/DlssNrFeature_Vk.cpp', ROOT / 'retoque/dlssnr/DlssNr_VkModelOwner.h',
                *sorted((ROOT / 'retoque/dlssnr').glob('DlssNr_VkPresent*'))]
     stale = [str(s.relative_to(ROOT)) for s in sources if s.stat().st_mtime > dll.stat().st_mtime]
     if stale:
@@ -148,6 +162,11 @@ def build_harness():
         run([MSVC / 'cl', '/nologo', '/std:c++20', '/EHsc', '/MD', '/W4', '/O2', HERE / 'translated.cpp',
              '/Fo' + str(OUT / 'translated.obj'), '/Fe' + str(OUT / TRANSLATED_EXE), '/link', 'user32.lib'],
             env=env, logfile=OUT / 'build-translated.log', timeout=600)
+        run([MSVC / 'cl', '/nologo', '/std:c++20', '/EHsc', '/MD', '/W4', '/O2',
+             '/I' + str(ROOT / 'external/vulkan/include'), HERE / 'nr.cpp',
+             '/Fo' + str(OUT / 'nr.obj'), '/Fe' + str(OUT / NR_EXE),
+             '/link', '/LIBPATH:' + str(ROOT / 'OptiScaler/library/vulkan'), 'vulkan-1.lib', 'user32.lib'],
+            env=env, logfile=OUT / 'build-nr.log', timeout=600)
     finally:
         # Leave no server running on the disposable compiler prefix; never touch any other prefix.
         subprocess.run(['wineserver', '-k'], env=env, stdin=subprocess.DEVNULL, capture_output=True)
@@ -294,7 +313,7 @@ def usage_names(bits):
 
 def new_stats():
     return dict(presents=0, transported=0, skipped=0, skips={}, waits=0, submits=0, completions=0, ring=0,
-                max_wait_ms=0.0, routes={})
+                max_wait_ms=0.0, routes={}, nr_refused=0, nr_skips={}, nr_first=None)
 
 
 def add(stats, outcome):
@@ -307,6 +326,10 @@ def add(stats, outcome):
     if outcome['transported']:
         stats['transported'] += 1
         stats['routes'][outcome['route']] = stats['routes'].get(outcome['route'], 0) + 1
+        # Without the model's files every carried present is refused by the model, for that reason.
+        stats['nr_refused'] += 1
+        stats['nr_skips']['model unavailable'] = stats['nr_skips'].get('model unavailable', 0) + 1
+        stats['nr_first'] = stats['nr_first'] or NO_FORWARDER
     else:
         stats['skipped'] += 1
         stats['skips'][outcome['skip']] = stats['skips'].get(outcome['skip'], 0) + 1
@@ -391,7 +414,7 @@ def model(facts, plan_of):
 
 
 LINE = re.compile(
-    r'DLSS-NR Vulkan present host \(round trip, no NR\): window (?P<window>0x[0-9A-F]+|unknown) \((?P<why>[^)]*)\); '
+    r'DLSS-NR Vulkan present host \(cold NR\): window (?P<window>0x[0-9A-F]+|unknown) \((?P<why>[^)]*)\); '
     r'presents (?P<presents>\d+), swapchains (?P<swapchains>\d+), devices (?P<devices>\d+); '
     r'swapchain (?P<swapchain>0x[0-9A-F]+) #(?P<swapchain_id>\d+) (?P<width>\d+)x(?P<height>\d+) '
     r'format (?P<format>\d+) colour-space (?P<color_space>\d+) images (?P<images>\d+) usage (?P<usage>0x[0-9A-F]+) '
@@ -404,7 +427,7 @@ LINE = re.compile(
     r'queue (?P<queue>0x[0-9A-F]+) family (?P<family>\d+) index (?P<index>\d+) flags (?P<flags>0x[0-9A-F]+) '
     r'\(graphics (?P<graphics>yes|no), compute (?P<compute>yes|no), transfer (?P<transfer>yes|no)\); '
     r'waits (?P<waits>\d+-\d+); acquires (?P<acquires>\d+)(?P<rest>.*?); '
-    r'caller (?P<caller>.+?); transport: (?P<transport>.+)$')
+    r'caller (?P<caller>.+?); transport: (?P<transport>.+?); (?P<nr>NR: .+)$')
 
 TRANSPORT = re.compile(
     r'transported (?P<transported>\d+), skipped (?P<skipped>\d+)(?: \((?P<skips>[^)]*)\))?, '
@@ -412,6 +435,35 @@ TRANSPORT = re.compile(
     r'ring (?P<ring>\d+), max CPU wait (?P<wait>[\d.]+) ms(?:, routes (?P<routes>[^;]+))?'
     r'(?:; first no-route reason: (?P<noroute>.+?))?'
     r'(?:; (?P<resources>.+))?$')
+
+
+NR = re.compile(
+    r'NR: evaluated (?P<evaluated>\d+), refused (?P<refused>\d+)(?: \((?P<skips>[^)]*)\))?, history resets '
+    r'(?P<resets>\d+), pass GPU (?:not measured|last (?P<last>[\d.]+) ms, mean (?P<mean>[\d.]+) ms, max '
+    r'(?P<max>[\d.]+) ms)(?:; first refusal: (?P<first>.+))?$')
+
+
+def nr_problems(where, text, evaluated, refused, skips, first=None, resets=None, timed=None):
+    """`text` is a line's "NR: ..." part."""
+    m = NR.match(text)
+    if not m:
+        return [f'{where}: NR text unparsed: {text!r}']
+    problems = []
+    if int(m.group('evaluated')) != evaluated:
+        problems.append(f'{where}: NR evaluated {m.group("evaluated")} != {evaluated}')
+    if int(m.group('refused')) != refused:
+        problems.append(f'{where}: NR refused {m.group("refused")} != {refused}')
+    if counts(m.group('skips')) != skips:
+        problems.append(f'{where}: NR refusals {m.group("skips")!r} != {skips}')
+    if first is not None and m.group('first') != first:
+        problems.append(f'{where}: NR first refusal {m.group("first")!r} != {first!r}')
+    if first is None and refused == 0 and m.group('first') is not None:
+        problems.append(f'{where}: an NR refusal where none was expected: {m.group("first")!r}')
+    if resets is not None and not resets(int(m.group('resets'))):
+        problems.append(f'{where}: NR history resets {m.group("resets")}')
+    if timed is True and m.group('last') is None:
+        problems.append(f'{where}: no pass GPU time was measured')
+    return problems
 
 
 def counts(text):
@@ -487,10 +539,19 @@ def check_host_on(name, facts, log, *, marker_off_bundle):
          f'expected {len(facts["devices"])} device lines, found {len(device_lines)}')
     for device, line in zip(facts['devices'], device_lines):
         m = re.search(r'device (0x[0-9A-F]+) #(\d+) created by (.+?); physical (0x[0-9A-F]+) instance #(\d+); '
-                      r'queue families (.+?); requested(.*)$', line)
+                      r'queue families (.+?); requested(.*?); NR extensions: added (.+?); already enabled (.+?); not '
+                      r'possible (.+)$', line)
         if not m:
             problems.append(f'device line unparsed: {line}')
             continue
+        # The model's extensions: the host adds them under the marker; beside the bundle, the bundle's own device hook
+        # (NR on) has added them before the call reaches the host.
+        added, already = ', '.join(NR_EXTENSIONS + [FORMAT_FLAGS2]), 'none'
+        if marker_off_bundle:
+            added, already = FORMAT_FLAGS2, ', '.join(NR_EXTENSIONS)
+        need((m.group(8), m.group(9), m.group(10)) == (added, already, 'none; bufferDeviceAddress enabled by the host'),
+             f'{device["name"]}: NR extensions added {m.group(8)!r}, already {m.group(9)!r}, not possible '
+             f'{m.group(10)!r}')
         requested = ''.join(f' family {f} x{c}' for f, c in device['requested'])
         need(m.group(1) == device['handle'], f'{device["name"]}: handle {m.group(1)} != {device["handle"]}')
         need(m.group(3) == creator, f'{device["name"]}: creator {m.group(3)!r}')
@@ -504,9 +565,13 @@ def check_host_on(name, facts, log, *, marker_off_bundle):
                                                    f'#{m.group(2)} destroyed; ' in l]
             need(len(gone) == 1, f'{device["name"]}: expected one destruction line, found {len(gone)}')
             if gone:
-                need(re.search(r'destroyed; freed: 0 swapchain\(s\) the application left, \d+ retained present '
-                               r'semaphore\(s\), 0 slot\(s\) kept from earlier swapchains$', gone[0]) is not None,
-                     f'{device["name"]}: destruction line: {gone[0]}')
+                # Stage 3: the device's model (its forwarder missing here, so it never ran) is freed with it -- there is
+                # one only where the round trip carried a present; and a destroyed swapchain's present semaphores went
+                # with it, so none is left to retain.
+                freed = '' if hide else '; the model freed'
+                need(re.search(r'destroyed; freed: 0 swapchain\(s\) the application left, 0 retained present '
+                               r'semaphore\(s\), 0 slot\(s\) kept from earlier swapchains' + re.escape(freed) + '$',
+                               gone[0]) is not None, f'{device["name"]}: destruction line: {gone[0]}')
     need(len(set(device_ids.values())) == len(device_ids), f'device records alias: {device_ids}')
     if facts['third_reused_second']:
         need(device_ids.get('d2') != device_ids.get('d3'), 'd3 reused d2\'s handle and inherited its record')
@@ -533,7 +598,8 @@ def check_host_on(name, facts, log, *, marker_off_bundle):
         if created:
             m = re.search(r'swapchain (0x[0-9A-F]+) #(\d+) on device (0x[0-9A-F]+) #(\d+), window (0x[0-9A-F]+), '
                           r'(\d+)x(\d+) format (\d+): usage (0x[0-9A-F]+)(?: -> (0x[0-9A-F]+))? \(surface offers '
-                          r'(0x[0-9A-F]+)\); round trip (.+)$', created[0])
+                          r'(0x[0-9A-F]+)\); round trip (.+?)(?:; the model (may run on it \(.+\)|will not run on it: '
+                          r'.+))?$', created[0])
             if not m:
                 problems.append(f'{s["name"]}: creation line unparsed: {created[0]}')
                 continue
@@ -548,6 +614,9 @@ def check_host_on(name, facts, log, *, marker_off_bundle):
             need((m.group(10) is None) == (given == usage), f'{s["name"]}: "->" shown wrongly')
             need(int(m.group(11), 16) == s['surface_usage'], f'{s["name"]}: surface {m.group(11)}')
             need(m.group(12) == round_trip, f'{s["name"]}: round trip {m.group(12)!r} != {round_trip!r}')
+            if round_trip.startswith('on'):
+                need(m.group(13) == 'may run on it (B8G8R8A8_UNORM, sRGB non-linear)',
+                     f'{s["name"]}: the model\'s word on it {m.group(13)!r}')
 
     # The window lines, window by window, against the model of the presents.
     expected, per_swapchain = model(facts, plan_of)
@@ -604,6 +673,8 @@ def check_host_on(name, facts, log, *, marker_off_bundle):
             need(a.group('rest') == '', f'{where}: unexpected extras {a.group("rest")!r}')
             need(a.group('caller') == f'{EXE} (native Vulkan)', f'{where}: caller {a.group("caller")!r}')
             problems.extend(transport_problems(where, a.group('transport'), e['stats']))
+            problems.extend(nr_problems(where, a.group('nr'), 0, e['stats']['nr_refused'], e['stats']['nr_skips'],
+                                        e['stats']['nr_first'] if e['stats']['nr_refused'] else None))
     need(len(set(swapchain_ids.values())) == len(swapchain_ids), f'swapchain records alias: {swapchain_ids}')
     need('never saw created' not in log, 'a present of a swapchain the host never saw created')
     need('could not detour' not in log and 'not watched' not in lower, 'a detour failed or was refused')
@@ -624,10 +695,13 @@ def check_host_on(name, facts, log, *, marker_off_bundle):
         need(m is not None and int(m.group(1)) == expect['presents'], f'{s["name"]}: destruction line: {gone[0]}')
         if m:
             problems.extend(transport_problems(f'{s["name"]} destruction', m.group(2), expect))
+            nr_text = gone[0][gone[0].index('; NR: ') + 2:] if '; NR: ' in gone[0] else ''
+            problems.extend(nr_problems(f'{s["name"]} destruction', nr_text, 0, expect['nr_refused'],
+                                        expect['nr_skips'], expect['nr_first'] if expect['nr_refused'] else None))
             if expect['transported']:
                 need(expect['completions'] == expect['transported'], f'{s["name"]}: the model left round trips unseen')
-            need(re.search(r'; freed after a drain of [\d.]+ ms; present semaphores \d+ freed, \d+ kept until the '
-                           r'device goes', gone[0]) is not None or not expect['transported'],
+            need(re.search(r'; freed after a drain of [\d.]+ ms; present semaphores \d+ freed with it, 0 kept until '
+                           r'the device goes', gone[0]) is not None or not expect['transported'],
                  f'{s["name"]}: not freed: {gone[0]}')
 
     # Every transported present's image read back equal (the harness fails the run on any difference); here, that
@@ -745,7 +819,7 @@ def check_translated(name, facts, log, run_log):
     need(len(created) >= 1, 'no swapchain creation line')
     for line in created:
         need(re.search(r': usage 0x12 -> 0x13 \(surface offers 0x[0-9A-F]+\); round trip on, TRANSFER_SRC added at '
-                       r'creation$', line) is not None, f'swapchain not given TRANSFER_SRC: {line}')
+                       r'creation(?:; the model .+)?$', line) is not None, f'swapchain not given TRANSFER_SRC: {line}')
     lines = [LINE.search(l) for l in log.splitlines() if WINDOW_LINE in l]
     need(all(lines), 'a window line did not parse')
     mine = [m for m in lines if m and m.group('window') == facts['window']]
@@ -795,6 +869,224 @@ def check_translated(name, facts, log, run_log):
     return problems, summary, errors
 
 
+
+# --- Stage 3: cold NR with the real model --------------------------------------------------------------------------
+
+KIT = Path(os.environ.get('DLSSNR_KIT', str(Path.home() / '.local/opt/dlssnr-kit')))
+NGX_CORE = Path('/usr/lib/nvidia/wine')
+
+# name: (ApplyModel, WorkingScale or None, also present from the compute-only family, forwarder ('build': the one built
+# beside this DLL, 'kit': the kit's, older than dlssnr_abi_version), model staged, device extensions hidden)
+NR_CASES = {
+    'nr-control': (False, None, True, 'build', True, None),
+    'nr': (True, None, True, 'build', True, None),
+    'nr-working-scale': (True, 0.5, False, 'build', True, None),
+    'nr-no-extensions': (True, None, False, 'build', True, 'VK_NVX_binary_import'),
+    'nr-old-forwarder': (True, None, False, 'kit', True, None),
+    'nr-no-model': (True, None, False, 'build', False, None),
+}
+
+
+def nr_proton():
+    """The proton script the cold-NR cases run under, or None. Plain Wine brings the snippet up, but the driver's NGX core
+    answers FAIL_PlatformError there (0xBAD00002, measured 2026-10-14 with the prefix set up by hand as Proton sets it
+    up), as the D3D12 loopback found: the core needs Proton's own Wine. PROTON_DIR, else the newest GE-Proton (what
+    DOOM Eternal ran under), else Valve's."""
+    roots = [Path(os.environ['PROTON_DIR'])] if os.environ.get('PROTON_DIR') else []
+    steam = Path.home() / '.local/share/Steam'
+    roots += sorted((steam / 'compatibilitytools.d').glob('GE-Proton*'), reverse=True)
+    roots += [steam / 'steamapps/common/Proton - Experimental', steam / 'steamapps/common/Proton Hotfix']
+    return next((root / 'proton' for root in roots if (root / 'proton').exists()), None)
+
+
+def nr_files(dll):
+    """What the cold-NR cases need, and what of it is missing on this machine."""
+    files = dict(model=KIT / 'nvngx_dlssnr.dll', old=KIT / 'nvngx.dll_dlssnr.dll', built=dll.parent / 'nvngx.dll_dlssnr.dll',
+                 core=[NGX_CORE / '_nvngx.dll', NGX_CORE / 'nvngx.dll'], proton=nr_proton())
+    missing = [str(f) for f in (files['model'], files['old'], files['built'], *files['core']) if not f.exists()]
+    if files['proton'] is None:
+        missing.append('a local Proton')
+    return files, missing
+
+
+def nr_env(hide=None):
+    # Under Proton, which sets the prefix up for NGX itself: the driver's core and nvngx in system32, the NGXCore
+    # registry key, dxvk-nvapi. Its own overrides are appended to these; the validation layer runs as in every case.
+    env = runtime_env(False)
+    del env['WINEPREFIX']
+    env.update(STEAM_COMPAT_DATA_PATH=str(OUT / 'protonprefix-nr'),
+               STEAM_COMPAT_CLIENT_INSTALL_PATH=str(Path.home() / '.local/share/Steam'), SteamGameId='0')
+    if hide:
+        # The test layer below the validation layer takes the extension out of what the device offers.
+        env.update(VK_INSTANCE_LAYERS=f'VK_LAYER_KHRONOS_validation:{HIDE_LAYER}', VK_ADD_LAYER_PATH=str(LAYER_DIR),
+                   RETOQUE_HIDE_TRANSFER_SRC='0', RETOQUE_HIDE_DEVICE_EXTENSIONS=hide)
+    return env
+
+
+def prepare_nr_prefix(files):
+    """Proton makes its prefix on first use; nothing else is set up by hand."""
+    (OUT / 'protonprefix-nr').mkdir(parents=True, exist_ok=True)
+
+
+def execute_nr(name, dll, redist, files):
+    apply_model, scale, cross, forwarder, model, hide = NR_CASES[name]
+    work = OUT / 'cases' / name
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    shutil.copy2(dll, work / 'dxgi.dll')
+    shutil.copy2(OUT / NR_EXE, work / NR_EXE)
+    for library in redist:
+        shutil.copy2(library, work / library.name)
+    shutil.copyfile(files['built'] if forwarder == 'build' else files['old'], work / 'nvngx.dll_dlssnr.dll')
+    if model:
+        # 165 MB of NVIDIA's model: linked, never copied, never in the tree.
+        (work / 'nvngx_dlssnr.dll').symlink_to(files['model'])
+    # Into the one [DlssNr] section, never a second one.
+    extra = f'ApplyModel={str(apply_model).lower()}\n' + (f'WorkingScale={scale}\n' if scale is not None else '')
+    ini = ini_for(False, True, True, True, level=1).replace('VulkanPresentHost=true\n', 'VulkanPresentHost=true\n' + extra)
+    (work / 'OptiScaler.ini').write_text(ini)
+    (work / MARKER).write_text('')
+    with (OUT / f'{name}.log').open('w') as log:
+        process = subprocess.run([str(files['proton']), 'run', str(work / NR_EXE)] + (['--cross'] if cross else []),
+                                 cwd=work, env=nr_env(hide), stdin=subprocess.DEVNULL, stdout=log,
+                                 stderr=subprocess.STDOUT, timeout=900)
+    run_log = (OUT / f'{name}.log').read_text(errors='replace')
+    facts = json.loads((work / 'result.json').read_text())
+    log_path = work / 'OptiScaler.log'
+    log = log_path.read_text(errors='replace') if log_path.exists() else ''
+    if process.returncode != 0 or facts.get('status') != 'PASS':
+        # Proton does not pass the application's output through: its own result.json says why.
+        reason = facts.get('reason') or facts.get('first_validation') or next(
+            (l for l in reversed(run_log.splitlines()) if l.startswith('FAIL: ')), 'no reason written')
+        raise RuntimeError(f'{name}: application failed (exit {process.returncode}): {reason}; see '
+                           f'{OUT / (name + ".log")} and {log_path}')
+    if facts.get('validation_active') is not True or facts.get('validation_errors') != 0:
+        raise RuntimeError(f'{name}: validation was not proved active and clean')
+    return facts, log
+
+
+# What the validation layer reports of NVIDIA's model's own commands, recorded into the host's command buffer: an image of
+# its own (nv.ngx.dlssnr.resource) used in GENERAL at the first evaluate after each feature build without ever leaving
+# UNDEFINED. Measured 2026-10-14 with 310.8.SF and the 615.78.08 core: the only report of a whole run under synchronization
+# validation. Nothing else the model or the host does may be reported.
+MODEL_VUIDS = {'VUID-vkCmdDraw-None-09600'}
+
+
+def check_nr(name, facts, log):
+    """The model ran on every SDR present it should have, or was refused for the case's reason; what the application
+    read back is what that means: exact where the model did not run or ApplyModel is off, changed but close where it
+    ran; the device's extensions and the model's lifecycle in the log."""
+    apply_model, scale, cross, forwarder, model, hide = NR_CASES[name]
+    problems = []
+
+    def need(condition, message):
+        if not condition:
+            problems.append(message)
+
+    lines = log.splitlines()
+    need(sum(1 for l in lines if INSTALL_LINE in l) == 1, 'expected one install line')
+    device = [l for l in lines if f'DLSS-NR Vulkan present host: device {facts["device"]} #' in l and 'created by' in l]
+    need(len(device) == 1, f'expected one line for the device, found {len(device)}')
+    if device:
+        if hide:
+            need(f'not possible {hide} (the device does not offer it)' in device[0], f'device line: {device[0]}')
+        else:
+            need(device[0].endswith('; NR extensions: added ' + ', '.join(NR_EXTENSIONS + [FORMAT_FLAGS2]) +
+                                    '; already enabled none; not possible none; bufferDeviceAddress enabled by the '
+                                    'host'), f'device line: {device[0]}')
+
+    refusal = None
+    if hide:
+        refusal = ('device extensions', f'the device was created without the model\'s extensions: {hide} (the device '
+                                        f'does not offer it)')
+    elif forwarder == 'kit':
+        refusal = ('model unavailable', 'nvngx.dll_dlssnr.dll is from a different build')
+    elif not model:
+        refusal = ('model unavailable', 'nvngx_dlssnr.dll was not found beside OptiScaler or the game')
+    runs = refusal is None
+
+    evaluated_total = timed = 0
+    seen = {}
+    for s in facts['swapchains']:
+        where = f'{s["name"]} ({s["format"]}, colour space {s["color_space"]}, {s["width"]}x{s["height"]})'
+        # A handle value can come back for a later swapchain: the k-th creation line of it is this one's record.
+        created = [re.search(r'swapchain 0x[0-9A-F]+ #(\d+) on device', l).group(1) for l in lines
+                   if f'DLSS-NR Vulkan present host: swapchain {s["handle"]} #' in l and ' on device ' in l]
+        k = seen.get(s['handle'], 0)
+        seen[s['handle']] = k + 1
+        record = created[k] if k < len(created) else '?'
+        gone = [l for l in lines if f'DLSS-NR Vulkan present host: swapchain {s["handle"]} #{record} destroyed after'
+                in l]
+        need(len(gone) == 1, f'{where}: expected one destruction line, found {len(gone)}')
+        if gone:
+            m = re.search(r'destroyed after (\d+) presents; transported (\d+), skipped (\d+)', gone[0])
+            need(m is not None and int(m.group(1)) == int(m.group(2)) == s['presents'] and m.group(3) == '0',
+                 f'{where}: not every present carried: {gone[0]}')
+            nr_text = gone[0][gone[0].index('; NR: ') + 2:] if '; NR: ' in gone[0] else ''
+            if not s['sdr']:
+                problems.extend(nr_problems(where, nr_text, 0, s['presents'], {'colour': s['presents']}))
+            elif runs:
+                problems.extend(nr_problems(where, nr_text, s['presents'], 0, {}, resets=lambda n: n >= 1, timed=True))
+                evaluated_total += s['presents']
+                timed += 1
+            else:
+                problems.extend(nr_problems(where, nr_text, 0, s['presents'], {refusal[0]: s['presents']}, refusal[1]))
+        need(s['readbacks'] >= 1, f'{where}: nothing read back')
+        if not s['sdr'] or not runs or not apply_model:
+            need(s['exact'] == s['readbacks'], f'{where}: {s["readbacks"] - s["exact"]} of {s["readbacks"]} read-backs '
+                                               f'changed where the picture had to come back exactly (largest change '
+                                               f'{s["max_diff"]}, mean {s["mae_mean"]:.3f})')
+        else:
+            # The model ran and its edit landed: changed, close, opaque, not black.
+            need(s['exact'] * 2 <= s['readbacks'], f'{where}: {s["exact"]} of {s["readbacks"]} read-backs unchanged '
+                                                   'with the model applied')
+            need(0 < s['mae_mean'] and s['mae_max'] <= 25.0, f'{where}: mean change {s["mae_mean"]:.3f}, largest '
+                                                             f'mean {s["mae_max"]:.3f} (eight-bit steps)')
+            need(s['alpha_changed'] == 0 and s['black'] == 0, f'{where}: alpha changed {s["alpha_changed"]}, black '
+                                                              f'{s["black"]}')
+
+    if runs:
+        for words in ('the model initialised on device', "the model's images built for", "the model's feature is up at",
+                      'the model runs at present on'):
+            need(any(words in l for l in lines), f'no line saying {words!r}')
+        need(not any('the model is off on this device' in l for l in lines), 'the model went off: ' +
+             next((l for l in lines if 'the model is off on this device' in l), ''))
+        gone = [l for l in lines if f'DLSS-NR Vulkan present host: device {facts["device"]} #' in l and 'destroyed;' in l]
+        need(len(gone) == 1 and gone[0].endswith('; the model freed'), f'device destruction: {gone}')
+        need(any('NGX shut down on the device before it goes (returned 1)' in l for l in lines),
+             'NGX was not shut down on the device before it went')
+        if scale is not None:
+            odd = next(s for s in facts['swapchains'] if s['name'] == 'odd')
+            want = f'working {int(odd["width"] * scale + 0.5)}x{int(odd["height"] * scale + 0.5)})'
+            need(any("the model's images built for" in l and want in l for l in lines),
+                 f'no rebuild at the working size {want}')
+        if cross and facts['compute_family'] >= 0:
+            crossed = next((s for s in facts['swapchains'] if s['name'] == 'cross'), None)
+            need(crossed is not None and crossed['family'] == facts['compute_family'], 'no cross-family swapchain')
+    else:
+        need(not any("the model's feature is up at" in l for l in lines), 'a feature was built where none could be')
+
+    builds = sum(1 for l in lines if "the model's feature is up at" in l)
+    vuids = set(v for v in facts.get('model_vuids', '').split(',') if v)
+    need(vuids <= MODEL_VUIDS, f'validation reports of the model\'s own objects beyond those known: {sorted(vuids)}')
+    need(facts.get('model_messages', 0) <= builds, f'{facts.get("model_messages")} reports of the model\'s own objects '
+                                                    f'for {builds} feature builds')
+
+    sdr = [s for s in facts['swapchains'] if s['sdr']]
+    summary = (f'{len(facts["swapchains"])} swapchains ({", ".join(s["name"] for s in facts["swapchains"])}), '
+               f'{sum(s["presents"] for s in facts["swapchains"])} presents, '
+               + (f'the model ran on all {evaluated_total} SDR presents, '
+                  + ('every read-back exact (ApplyModel off)' if not apply_model else
+                     f'SDR read-backs changed by a mean of '
+                     f'{sum(s["mae_mean"] for s in sdr) / max(len(sdr), 1):.2f} eight-bit steps (largest frame mean '
+                     f'{max((s["mae_max"] for s in sdr), default=0):.2f})') if runs else
+                  f'the model refused ({refusal[0]}: {refusal[1]}), every read-back exact')
+               + f', 0 validation errors of the host\'s ({facts.get("model_messages", 0)} of the model\'s own '
+               f'{",".join(sorted(vuids)) or "objects"} set aside)')
+    return problems, summary
+
+
 def check_host_off(name, facts, log, *, marker):
     problems = []
     if HOST_TEXT in log:
@@ -829,12 +1121,12 @@ def main():
     if not redists:
         raise RuntimeError('native MSVC x64 runtime not found')
     redist = sorted(redists[-1].glob('*.dll'))
-    if not (args.skip_build and (OUT / EXE).exists() and (OUT / TRANSLATED_EXE).exists()):
+    if not (args.skip_build and (OUT / EXE).exists() and (OUT / TRANSLATED_EXE).exists() and (OUT / NR_EXE).exists()):
         build_harness()
     build_layer()
 
-    cases = args.only.split(',') if args.only else list(CASES) + list(TRANSLATED_CASES)
-    unknown = [c for c in cases if c not in CASES and c not in TRANSLATED_CASES]
+    cases = args.only.split(',') if args.only else list(CASES) + list(TRANSLATED_CASES) + list(NR_CASES)
+    unknown = [c for c in cases if c not in CASES and c not in TRANSLATED_CASES and c not in NR_CASES]
     if unknown:
         raise RuntimeError(f'unknown case(s): {unknown}')
     results = {'dll': str(dll), 'dll_sha256': sha(dll), 'harness_sha256': sha(OUT / EXE), 'cases': {}}
@@ -910,6 +1202,33 @@ def main():
                                       'third_reused_second': facts['third_reused_second'],
                                       'compute_family': facts['compute_family'], 'readbacks': facts['readbacks'],
                                       'held_back_queued': facts.get('held_back_queued')}
+            if problems:
+                failures.append(name)
+                print(f'FAIL: {name}:', file=sys.stderr)
+                for problem in problems:
+                    print(f'  - {problem}', file=sys.stderr)
+                print(f'  see {OUT / "cases" / name / "OptiScaler.log"}', file=sys.stderr)
+            else:
+                print(f'PASS: {name}: {summary}', flush=True)
+        except (RuntimeError, subprocess.TimeoutExpired, OSError, KeyError, ValueError) as error:
+            failures.append(name)
+            results['cases'][name] = {'status': 'FAIL', 'problems': [str(error)]}
+            print(f'FAIL: {name}: {error}', file=sys.stderr)
+
+    nr_cases = [c for c in cases if c in NR_CASES]
+    files, missing = nr_files(dll) if nr_cases else ({}, [])
+    if nr_cases and not missing:
+        prepare_nr_prefix(files)
+    for name in nr_cases:
+        if missing:
+            results['cases'][name] = {'status': 'SKIP', 'problems': [f'missing: {", ".join(missing)}']}
+            print(f'SKIP: {name}: missing {", ".join(missing)}', flush=True)
+            continue
+        try:
+            facts, log = execute_nr(name, dll, redist, files)
+            problems, summary = check_nr(name, facts, log)
+            results['cases'][name] = {'status': 'FAIL' if problems else 'PASS', 'problems': problems,
+                                      'swapchains': facts['swapchains'], 'offered': facts['offered']}
             if problems:
                 failures.append(name)
                 print(f'FAIL: {name}:', file=sys.stderr)

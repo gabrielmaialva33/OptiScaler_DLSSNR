@@ -1,8 +1,9 @@
 # NR at Vulkan present — one Proton host below the game's rendering API
 
-Status: **stage 1 (coverage and no-op control) and stage 2 (submission-only control: the round trip, no NR) built
-2026-10-14**; stages 3-5 are design. See [Stage 1 as built](#stage-1-as-built-2026-10-14), which also records how the
-tree drifted from the references below, and [Stage 2 as built](#stage-2-as-built-2026-10-14). Audited at `c3310a15`
+Status: **stage 1 (coverage and no-op control), stage 2 (submission-only control: the round trip) and stage 3 (cold
+NR: the model inside the round trip, on zero guides) built 2026-10-14**; stages 4-5 are design. See [Stage 1 as
+built](#stage-1-as-built-2026-10-14), which also records how the tree drifted from the references below, [Stage 2 as
+built](#stage-2-as-built-2026-10-14) and [Stage 3 as built](#stage-3-as-built-2026-10-14). Audited at `c3310a15`
 (2026-09-12), after reading [nr-present-hook.md](nr-present-hook.md), [nr-dx11-bridge-host.md](nr-dx11-bridge-host.md), both
 independent reviews, and the corrected sequencing in [nr-without-game-dlss.md](nr-without-game-dlss.md).
 Source paths below are relative to `OptiScaler/`; line references describe this baseline (the NR files have
@@ -867,6 +868,236 @@ GE-Proton11-7, RTX 4090, `[DlssNr] VulkanPresentHost=true`. About three and a ha
 - **Memory**: one swapchain-sized work image per swapchain (kept for retired swapchains until they are destroyed), and
   present semaphores retained per recreation (four or five each, never freed before the device goes in the runs here,
   since no image is reacquired after its last present).
+
+## Stage 3 as built (2026-10-14)
+
+Item 3 of "What settles the marker question", cold NR: the model inside the round trip's own command buffer, on the
+work queue, with no application NGX and no game parameters. Branch `feat/vulkan-present-host`, on top of stage 2:
+`ea506f5d` (the host and the model), `aa122612` (tests), `e3c71460` (a chain with bufferDeviceAddress off), `1894b1ae`
+(what the independent review found, below), `d325cf39` and `e2951c81` (tests). Same keys: with `[DlssNr] Enabled` and `VulkanPresentHost`
+both true the model now runs on every eligible frame; with either off, `Install` still returns at its first statement,
+and the after-upscale route is what it was (its one new call, the owner claim below, is never refused when the host
+is off).
+
+### What, and where
+
+- **The frame.** `RecordWork` (`DlssNr_VkPresentHost.cpp`) keeps stage 2's shape and puts the model between the copies:
+  the presented image copied into the work image, which is now in the *raw* format -- the swapchain's own, or its UNORM
+  twin when it is sRGB, so the bytes are never decoded and the model is shown the sRGB-encoded frame, as the D3D12
+  present pass shows it its copy of the backbuffer -- blitted into a working colour (R16G16B16A16_SFLOAT, one per
+  swapchain, sampled and stored; a blit converts number by number and swaps BGRA by channel), the model's pass on that,
+  blitted back, copied out. `NEAREST` both ways, same extent, so a frame the model leaves alone comes back to the bit:
+  the `nr-control` case reads back every frame exact. The barriers: transfer write -> compute read/write into GENERAL
+  before the pass, compute write -> transfer read after it; every earlier frame's use of the working colour is in the
+  source scope of its UNDEFINED transition.
+- **What the model may be shown** (`PlanColour`, `DlssNr_VkPresentNr.h`): RGBA8/BGRA8, UNORM or sRGB, in the sRGB
+  non-linear colour space -- SDR only, as the D3D12 present pass without its HDR conversion. HDR10, scRGB, HLG, ten-bit,
+  float and any other format are refused with format and colour space named (`an HDR10 swapchain (PQ, Rec.2020)
+  (A2B10G10R10_UNORM_PACK32, colour space 1000104008): the present host's NR takes SDR only; the frame is shown as the
+  game rendered it`), on the creation line and as the window's first refusal, and the round trip carries them unchanged.
+- **The model** (`VkPresentModel`, `DlssNr_VkPresentModel.h`, implemented in `DlssNrFeature_Vk.cpp` beside the
+  after-upscale route it reuses): per device, its own parameter block, feature, composition pass (`DlssNr_Vk`), proxy,
+  keep and output images, two zero guides and a timestamp pool. `Admit` does what needs no command buffer: the
+  forwarder (now loaded once for the process, `g_fwd`, shared with the after-upscale route: one DLL, one fault record,
+  one float slot), the snippet's NGX init on the device (`dlssnr_vk_init`, SDK `0x15`, the data path State's or
+  OptiScaler's own folder), **the driver's NGX core brought up on the device** (`NVNGXProxy::InitVulkan`) for its
+  capability block -- the D3D12 route does the same, and without it the feature was refused at creation: OptiScaler's
+  own block (what `NVSDK_NGX_VULKAN_AllocateParameters` hands back when no DLSS is loaded) carries none of the snippet's
+  callbacks -- the pass, and the images for this size. `Record` does the rest into the slot's work buffer: the guides'
+  clear when owed, the feature's creation when there is none (its initialisation is recorded there too), encode
+  (`Passthrough = 1`; the downsample and resolve are copies of those constants, so `gPassthrough` holds everywhere the
+  encode is reproduced), the downsample below native, the model, the resolve into the working colour, a timestamp pair.
+- **Zero guides**: `R32_SFLOAT` depth and `R16G16_SFLOAT` motion, made at the model's working size (a resample of a
+  constant is the constant: the source-to-working scaling done once, exactly), cleared once per allocation with
+  `vkCmdClearColorImage` and left in GENERAL, inverted depth, zero origins, unit motion scale. The working scale never
+  goes above native (the model refuses supersampling on zero guides, as the D3D12 hosts found). History starts over on
+  the model's first frame, on a frame the host knows is a cut (a swapchain the model takes over, a frame after one it
+  did not see), and on every frame with `[DlssNr] ZeroGuideReset`.
+- **Lifetime**, from the host's fences: each recording carries a ticket; the host reports it `Submitted` (only when the
+  buffer carrying it was: the same-queue submit, or the cross-family chain's work-queue submit), `Discarded` (a refusal
+  after recording, a failed submit; a feature built in it is released again, the guides' clear is owed again, and the
+  pass is rebuilt if no recording of it ever reached the GPU) or `Completed` (its slot's fence seen signalled, in `Poll`
+  or `WaitSlot`: the GPU time is read then, never waited for). A resize or a working-scale change rebuilds the feature
+  and images; the old set waits in a list for the tickets that were in flight and is freed when they complete. At most
+  four of the model's frames are in flight, and a frame is admitted only while the oldest one in flight is less than
+  a ring behind it (`model busy` otherwise): the pass hands out eighteen descriptor/constant slots in order with no
+  completion test of its own, a frame takes at most three, and a discarded recording advanced the ring too, so it is
+  counted. The model is freed only with nothing in flight (`Release`), and abandoned -- every handle forgotten, nothing
+  destroyed -- on a lost device, after a submit that lost the device, or when a frame never completed. A latched
+  failure stays when its objects are freed, so a model that cannot run is not brought up again every frame.
+- **NGX goes with the device**, not with the model (`ShutdownPresentNgx`, at `vkDestroyDevice` before the call down,
+  whatever became of the model -- stood down earlier, never made there): the driver's core is shut down
+  (`NVSDK_NGX_VULKAN_Shutdown1`) when the host brought it up on that device, and NGX through the forwarder's new
+  `dlssnr_vk_shutdown`, which answers only for the device it initialised (so a device the after-upscale route
+  initialised goes the same way). A later device with the same handle value is then initialised again: stage 2's open
+  "same-handle case". On a lost device, or with frames never seen complete, nothing is called into; both only forget
+  the device (`dlssnr_vk_forget`). The shutdowns are called with the out count NGX's device-specific entry takes (the
+  D3D12 one does too, `ShutdownDx12Device`): called without it, the core wrote through a null pointer inside
+  `_nvngx.dll` at device destruction -- the first cold run's crash.
+- **One swapchain at a time** per device: the model's size and history are one picture's. A live swapchain keeps it
+  (`another swapchain`); a retired or destroyed one hands it over, and the frame that takes it starts the history over.
+  A swapchain takes it only once the model was admitted for it, so one too small for the model never holds it.
+- **One owner of the model in the process** (`DlssNr_VkModelOwner.h`): the forwarder initialises NGX on one device at
+  a time, so it is one owner, not one per device. The after-upscale route asks (`ClaimModelForAfterUpscale`, in
+  `EvaluateAfterUpscaleVk` where it commits to a frame) and wins: refused while the present host holds the model, its
+  asking makes the host stand down at its next present -- stop recording, wait for its frames to be seen complete, free
+  the model, release -- and the route takes it at its next evaluate. The host stays down while the route asked within
+  half a second (the D3D12 boundary's `BoundaryLive` window) and for good once it owns the model. The host also stands
+  down while the D3D12 route has a model (`DlssNr::IsRunning()`: a translated D3D12 title's own NR, a Vulkan title
+  through the D3D12 bridge, the D3D11 bridge's host), and refuses on a second device while it holds the first. The
+  stand-down check runs at every present of the device, before the refusals that return without reaching the model's
+  decision, so a model that once ran (an SDR menu, then an HDR swapchain) cannot keep the token from the game's own
+  upscaler. A model that cannot run (`model unavailable`), with nothing in flight, holds no token; a lost device's
+  model gives it back. `[DlssNr] Enabled` turned off live stands the model down the same way; it comes back cold when
+  NR is turned on again.
+- **At `vkCreateDevice`**, on a device the host will carry presents on (never OptiScaler's own): the after-upscale
+  route's four extensions the device offers (`VK_NVX_binary_import`, `VK_NVX_image_view_handle`,
+  `VK_KHR_push_descriptor`, `VK_KHR_buffer_device_address`; the application's EXT buffer device address stands for the
+  KHR one; nothing at all on a device without the two NVX extensions, so another vendor's device keeps its create info;
+  the KHR buffer device address only on a Vulkan 1.1 instance, since below it it needs `VK_KHR_device_group`, which is
+  not added; push descriptors not beside a `VkPhysicalDeviceVulkan14Features` with `pushDescriptor` off), `VK_KHR_format_feature_flags2` where the composition pass's format-less storage writes are not already
+  allowed (no `shaderStorageImageWriteWithoutFormat`, below Vulkan 1.3: VUID-VkShaderModuleCreateInfo-pCode-08740, the
+  first report validation made), and the **bufferDeviceAddress feature** the model's allocations need
+  (VUID-VkMemoryAllocateInfo-flags-03331, the second): one `VkPhysicalDeviceBufferDeviceAddressFeatures` (or its EXT
+  struct) prepended to a copy of the create info, the application's chain behind it unchanged, only where nothing in
+  the chain could conflict. A chain that has the feature off (in its own struct or `VkPhysicalDeviceVulkan12Features`)
+  is not edited -- that would mean copying structs of types the host cannot know -- and the model runs with the
+  extensions alone, as the after-upscale route always has; the device line says which. Behind the bundle (no marker)
+  its own device hook has added the four first, and the host sees them as already enabled. Decided before the call,
+  never retried; nothing that needs `VK_KHR_get_physical_device_properties2` is asked of an instance without it.
+- **Present semaphores** of a destroyed swapchain are destroyed once `vkDestroySwapchainKHR` has returned: a valid
+  destroy comes after every use of its images has completed (VUID-vkDestroySwapchainKHR-swapchain-01282), the
+  presentation engine's included, and a present's wait precedes that use. Only a semaphore whose present failed in a
+  way that may not have run its wait is still kept until the device goes. Stage 2 kept them all (no reacquire follows
+  a swapchain's last presents), so a game recreating its swapchain hundreds of times walked toward the 4096 bound and
+  lost its transport; the harness's devices now go with `0 retained present semaphore(s)`. This replaces the rule in
+  "The queue and semaphore contract" (retain until present-completion evidence): the application's valid destroy is
+  that evidence. The semaphores are destroyed after the call down returned, in case an implementation finishes its
+  pending presents inside it.
+
+### The review
+
+DEVELOPMENT.md section 3's review for a Vulkan resource change and a non-NR-path touch was done as an independent
+read-only review of `ea506f5d`. It found the barriers, the ticket accounting, the lock order, the off paths and stage
+2's transport sound, and three defects in ownership and teardown, all fixed in `1894b1ae`: the token held for the
+session when the device's presents stopped reaching the model's decision; the token leaked on a lost device; NGX and
+the core never shut down when the model had stood down before the device went (the forwarder left answering
+"initialised" for a destroyed device, the core marked down while initialised). And risks, fixed with them: a discard
+after a device-lost submit released what the recording built; the pass's slot ring could alias with discards between
+frames in flight; a too-small swapchain could hold the model; extensions added to another vendor's device; the KHR
+buffer device address on a 1.0 instance without `VK_KHR_device_group`; push descriptors beside a 1.4 features struct.
+Left as risks: below.
+
+### The log
+
+The install line says `(cold NR on zero guides; stage 3 of nr-vulkan-present-host.md)`. The device line ends with
+what the host did for the model:
+
+```
+DLSS-NR Vulkan present host: device 0x14565F0 #4 created by vk-present-host-nr.exe (native Vulkan); physical 0x1470F08 instance #1; queue families 0:0xFx16 1:0xCx2 2:0xEx8 3:0x2Cx1 4:0x4Cx2 5:0x10Cx1; requested family 0 x1 family 2 x1; NR extensions: added VK_NVX_binary_import, VK_NVX_image_view_handle, VK_KHR_push_descriptor, VK_KHR_buffer_device_address, VK_KHR_format_feature_flags2; already enabled none; not possible none; bufferDeviceAddress enabled by the host
+```
+
+The swapchain's creation line adds `; the model may run on it (B8G8R8A8_UNORM, sRGB non-linear)` or `; the model will
+not run on it: <the refusal>`. The model's own lines, once each, logged after the host's lock is released:
+
+```
+DLSS-NR Vulkan present host: the model initialised on device 0x14565F0 (cold: no application NGX initialisation; the driver's NGX core brought up on it)
+DLSS-NR Vulkan present host: the model's images built for 632x446 (working 632x446), zero guides (constant depth, no motion) at the working size
+DLSS-NR Vulkan present host: the model's feature is up at 632x446 (frame 632x446)
+DLSS-NR Vulkan present host: the model runs at present on 632x446 (working 632x446), on zero guides
+```
+
+and, when it ends: `the model is off on this device: <why>` (latched: no forwarder, an old forwarder, no model, NGX
+init or the core refused, a feature refused with its NGX result, a fault inside the model), `the model stood down and
+was freed`, `NGX shut down on the device before it goes (returned 1)`. The window line (`(cold NR)` now) and the
+swapchain's destruction line end with the model's counters since the window's first present -- evaluated and refused
+count only presents the round trip carried; the pass's GPU time is the timestamp pair around encode -> model ->
+resolve, read when the frame is seen complete:
+
+```
+DLSS-NR Vulkan present host (cold NR): window 0x1008A (10 presents); presents 10, swapchains 1, devices 1; swapchain 0x55558F4D0370 #5 632x446 format 44 colour-space 0 images 4 usage 0x13 (transfer-src yes, transfer-dst yes, storage no) surface-usage 0x9F sharing EXCLUSIVE; round-trip on as created; device 0x14565F0 #4 physical 0x1470F08 instance #1; queue 0x1456638 family 0 index 0 flags 0xF (graphics yes, compute yes, transfer yes); waits 1-1; acquires 10; caller vk-present-host-nr.exe (native Vulkan); transport: transported 10, skipped 0, waits taken over 10, submits 10, completions 9, ring 1, max CPU wait 0.000 ms, routes same queue 10; NR: evaluated 10, refused 0, history resets 1, pass GPU last 2.400 ms, mean 3.265 ms, max 9.545 ms
+```
+
+Refusals are named with their counts and the first one's text is kept: `NR: evaluated 0, refused 36 (model unavailable
+36), history resets 0, pass GPU not measured; first refusal: nvngx.dll_dlssnr.dll is from a different build`. The
+reasons: `NR off`, `colour`, `device extensions`, `format features`, `too small`, `after-upscale route`, `D3D12
+route`, `another device`, `another swapchain`, `model unavailable`, `model busy`, `record failed`.
+
+### Validated (2026-10-14, RTX 4090, driver 615.78.08, model 310.8.SF from the local kit)
+
+- `tests/vulkan-present-host`, 20 cases, all PASS, before the review's fixes and again after them (`1894b1ae`): the
+  whole suite runs in about a minute. The 14 of stages 1 and 2 hold the new lines; they run with no model
+  beside the DLL, so every carried present is refused (`model unavailable`) and every read-back stays exact, and their
+  devices now go with no present semaphore retained. Six new cases (`nr.cpp`) under **Proton** (GE-Proton11-7), the
+  validation layer with synchronization on in every one:
+  - `nr-control` (`ApplyModel=false`): the model evaluated on all 48 SDR presents -- B8G8R8A8_UNORM and _SRGB (all the
+    surface offers under winevulkan here; no RGBA8, no HDR), the same from the compute-only family 2 across families
+    (36 submits for 12 presents), and a recreation at 517x389 (not a multiple of eight, the model rebuilt there) -- and
+    every read-back **byte-exact**: the conversion out, the pass and the conversion back are lossless when the edit is
+    not applied. NGX shut down on the device at its destruction, `the model freed`.
+  - `nr` (`ApplyModel=true`): the same 48 evaluated; every SDR read-back changed, by a mean of 3.0 eight-bit steps per
+    channel (largest frame mean 3.2, largest single change 40), alpha untouched, never black. The pass cost about
+    2.4 ms on the GPU at 632x446 (the first frames up to 9.5 ms).
+  - `nr-working-scale` (`WorkingScale=0.5`): evaluated on all 36, the images built at `working 259x195` for 517x389.
+  - Refusals, every read-back exact: `nr-no-extensions` (the test layer hides `VK_NVX_binary_import`; the device line
+    says it is not possible, every present refused for `device extensions`), `nr-old-forwarder` (the kit's forwarder
+    of 2026-09-03, which predates `dlssnr_abi_version`: `is from a different build`), `nr-no-model`.
+  - Validation: **no report of the host's**. NVIDIA's model makes one per feature build, in what it records into the
+    host's buffer: `VUID-vkCmdDraw-None-09600`, its own image `nv.ngx.dlssnr.resource` used in GENERAL at its first
+    evaluate without ever leaving UNDEFINED. The application keeps reports naming an `nv.ngx.*` object apart by VUID;
+    the runner accepts that one, at most once per build, and nothing else.
+  - Plain Wine is not enough: the snippet comes up, but the driver's core answers FAIL_PlatformError (0xBAD00002) even
+    with the prefix set up by hand as Proton sets it up (the core in system32, the NGXCore key, dxvk-nvapi), as the
+    D3D12 loopback found. The cases run under `proton run` for that.
+- `tests/nr-vk-present-host` (host tier): the colour plan, the extension plan, bufferDeviceAddress, the counters and the
+  lines, the arbiter; source guards for the ordering above. `python3 tests/run_all.py` 49/49; `tests/vulkan-overlay
+  --ref HEAD` PASS at `aa122612` and again with the review's fixes in; clang-format 22 clean on every C++ file touched.
+
+### Not validated
+
+- **Any game.** What a DOOM Eternal run should show is below.
+- Image quality: the picture is synthetic and the guides are zeros, so anything that moves smears (with `ZeroGuideReset`
+  it does not ghost, and loses the history that smooths); synthesized motion (`SynthMotion`) is D3D12 only. Stage 5.
+- Cost at game resolutions (the pass at 632x446 is 2.4 ms; at 3440x1440 it is several times that), and the CPU time of
+  the first frame, which brings the core and the model up inside a present.
+- RGBA8 swapchains and every HDR refusal under a real surface (none offered here: host tier only); CONCURRENT images;
+  a device lost with model frames in flight; a failed submit carrying one; the live toggles (NR off and on, the working
+  scale) in a run; the after-upscale route, or the D3D12 route, running beside the host (the arbiter is host tier only);
+  the bufferDeviceAddress-off-in-the-chain path; a translated title with the model; Streamline and FG (stage 4).
+- Native Windows.
+- Risks the review left open: the first frame brings the core and the model up inside the game's present, holding
+  that queue's present lock and the transport's lock (every device's presents wait); the host brings
+  `NVNGXProxy`'s process-wide core up, which upstream's DLSS path then finds up (a game initialising NGX after the
+  host started shares that initialisation); a queue NGX retrieves with `vkGetDeviceQueue` is recorded as one the
+  application retrieved; the zero guides are cleared for one work family per device (NVIDIA has one graphics
+  family); `DlssNr::IsRunning()` is read without its lock.
+
+### What a DOOM Eternal run should show (DLSS off, so the after-upscale route stays idle)
+
+With `[DlssNr] Enabled=true`, `VulkanPresentHost=true`, and both `nvngx.dll_dlssnr.dll` **from this build** (an older
+one has no `dlssnr_vk_shutdown`) and the model beside `winmm.dll`; the bundle on, as before:
+
+- The install line ending `beside OptiScaler's own Vulkan hooks`. The bundle's own `DLSS-NR Vulkan: device offers ...
+  added here: [VK_NVX_binary_import, ...]`, then the host's device line `created by winmm.dll (OptiScaler's own Vulkan
+  hook, called down to this one)` with `NR extensions: added none` (or `VK_KHR_format_feature_flags2`) `; already enabled
+  VK_NVX_binary_import, VK_NVX_image_view_handle, VK_KHR_push_descriptor, VK_KHR_buffer_device_address; not possible
+  none` and one of `bufferDeviceAddress already enabled`, `enabled by the host`, or `off in the application's create
+  info, not edited`.
+- Its swapchain's creation line `; the model may run on it (B8G8R8A8_UNORM, sRGB non-linear)` -- or, with the game's
+  HDR on, `; the model will not run on it: an HDR10 swapchain ...`, and nothing else changes.
+- At the first present: `the model initialised on device ... (cold ...)`, `the model's images built for 3440x1440
+  (working 3440x1440)`, `the model's feature is up at 3440x1440`, `the model runs at present on ...` (the first present
+  is slow: NGX and the model come up inside it).
+- Window lines from the compute family 2 (`graphics no, compute yes`), `routes cross-family` as in stage 2's run, and
+  `NR: evaluated` close to `transported`, few or no refusals (`model busy` if more than four of its frames queue up),
+  `history resets` at the start and after a gap, and a `pass GPU` time per frame to judge the cost by (expect several
+  milliseconds at 3440x1440; `[DlssNr] WorkingScale` lowers it).
+- On screen: the game's picture edited by the model, smearing under camera motion (zero guides); `ZeroGuideReset=true`
+  trades the smear for no history. The Vulkan menu drawn after NR (application -> NR -> overlay -> present).
+- At exit: the device's destruction line ending `; the model freed`, after `NGX shut down on the device before it goes
+  (returned 1)`.
+- Turning DLSS on in the game makes the after-upscale route ask for the model: one `the model stood down and was freed`,
+  then refusals counted as `after-upscale route`, and the route's own `DLSS-NR Vulkan:` lines take over.
 
 ## Decision and stop conditions
 

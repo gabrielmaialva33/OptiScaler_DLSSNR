@@ -1,9 +1,11 @@
-// The Vulkan present host's registry and transport decisions (retoque/dlssnr/DlssNr_VkPresentRegistry.h and
-// DlssNr_VkPresentTransport.h), as production compiles them, driven through the lifetimes the host has to keep apart
-// and the choices stage 2's round trip makes. Plain integers stand in for handles, as the headers themselves use.
+// The Vulkan present host's registry and transport decisions (retoque/dlssnr/DlssNr_VkPresentRegistry.h,
+// DlssNr_VkPresentTransport.h and DlssNr_VkPresentNr.h), and the model's one-owner arbitration (DlssNr_VkModelOwner.h),
+// as production compiles them, driven through the lifetimes the host has to keep apart, the choices stage 2's round
+// trip makes and stage 3's cold NR adds. Plain integers stand in for handles, as the headers themselves use.
 
 #include <vulkan/vulkan.h>
 
+#include "DlssNr_VkModelOwner.h"
 #include "DlssNr_VkPresentRegistry.h"
 
 #include <cstdio>
@@ -405,7 +407,7 @@ static void FirstPresentDecadesAndWaits()
         return;
 
     const std::string& first = all[0];
-    HAS(first, "DLSS-NR Vulkan present host (round trip, no NR): window 0xAAA (first present); presents 1, swapchains "
+    HAS(first, "DLSS-NR Vulkan present host (cold NR): window 0xAAA (first present); presents 1, swapchains "
                "1, devices 1; swapchain 0x5C1 #" +
                    std::to_string(swapchain) +
                    " 640x480 format 44 colour-space 0 images 3 usage 0x13 (transfer-src "
@@ -416,7 +418,8 @@ static void FirstPresentDecadesAndWaits()
                    " physical 0x2000 instance #1; queue 0x51 family 0 index 0 flags 0xF "
                    "(graphics yes, compute yes, transfer yes); waits 1-1; acquires 1; caller "
                    "game.exe (native Vulkan); transport: transported 0, skipped 0, waits "
-                   "taken over 0, submits 0, completions 0, ring 0, max CPU wait 0.000 ms");
+                   "taken over 0, submits 0, completions 0, ring 0, max CPU wait 0.000 ms; NR: evaluated 0, refused "
+                   "0, history resets 0, pass GPU not measured");
     CHECK(!Has(first, "without an observed acquire"));
     HAS(all[1], "(10 presents); presents 10,");
     HAS(all[1], "; waits 0-2; acquires 10;"); // presents 2..10 hold the 0 and the 2
@@ -728,7 +731,7 @@ static void TransportLines()
           "DLSS-NR Vulkan present host: swapchain 0x5C1 #" + std::to_string(sc) +
               " destroyed after 100 presents; transported 9, skipped 91 (no route 90, ring busy 1), waits taken over "
               "17, submits 27, completions 9, ring 4, max CPU wait 100.000 ms, routes cross-family 9; freed after a "
-              "drain of 0.010 ms");
+              "drain of 0.010 ms; NR: evaluated 0, refused 0, history resets 0, pass GPU not measured");
     CHECK(w.r.FindWindow(true, 0xAAA)->transport.completions == 9);
 
     // An observe-only swapchain: its creation line says why, and nothing about it is ever transported.
@@ -751,6 +754,307 @@ static void TransportLines()
     CHECK(w.r.SwapchainLine(0xD1, 0xBAD).empty());
 }
 
+// --- Stage 3: cold NR -------------------------------------------------------------------------------------------
+
+static void NrConstants()
+{
+    CHECK(kFormatR8G8B8A8Unorm == VK_FORMAT_R8G8B8A8_UNORM);
+    CHECK(kFormatR8G8B8A8Srgb == VK_FORMAT_R8G8B8A8_SRGB);
+    CHECK(kFormatB8G8R8A8Unorm == VK_FORMAT_B8G8R8A8_UNORM);
+    CHECK(kFormatB8G8R8A8Srgb == VK_FORMAT_B8G8R8A8_SRGB);
+    CHECK(kFormatA2R10G10B10UnormPack32 == VK_FORMAT_A2R10G10B10_UNORM_PACK32);
+    CHECK(kFormatA2B10G10R10UnormPack32 == VK_FORMAT_A2B10G10R10_UNORM_PACK32);
+    CHECK(kFormatR16G16B16A16Sfloat == VK_FORMAT_R16G16B16A16_SFLOAT);
+    CHECK(kFormatR32Sfloat == VK_FORMAT_R32_SFLOAT);
+    CHECK(kFormatR16G16Sfloat == VK_FORMAT_R16G16_SFLOAT);
+    CHECK(kColourSpaceSrgbNonlinear == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+    CHECK(kColourSpaceExtendedSrgbLinear == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT);
+    CHECK(kColourSpaceHdr10St2084 == VK_COLOR_SPACE_HDR10_ST2084_EXT);
+    CHECK(kColourSpaceHdr10Hlg == VK_COLOR_SPACE_HDR10_HLG_EXT);
+    CHECK(kFeatureSampledImage == VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+    CHECK(kFeatureStorageImage == VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+    CHECK(kFeatureBlitSrc == VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+    CHECK(kFeatureBlitDst == VK_FORMAT_FEATURE_BLIT_DST_BIT);
+    CHECK(kFeatureTransferSrc == VK_FORMAT_FEATURE_TRANSFER_SRC_BIT);
+    CHECK(kFeatureTransferDst == VK_FORMAT_FEATURE_TRANSFER_DST_BIT);
+    CHECK(kWorkingFormat == VK_FORMAT_R16G16B16A16_SFLOAT);
+    CHECK(std::string(kNrExtensions[0]) == "VK_NVX_binary_import");
+    CHECK(std::string(kNrExtensions[2]) == VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+    CHECK(std::string(kNrExtensions[3]) == VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+    CHECK(std::string(kBdaExt) == VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+    CHECK(std::string(kFormatFeatureFlags2) == VK_KHR_FORMAT_FEATURE_FLAGS_2_EXTENSION_NAME);
+    CHECK(kStructBdaFeatures == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES);
+    CHECK(kStructBdaFeaturesExt == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT);
+    CHECK(kStructVulkan12Features == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
+}
+
+// SDR only: RGBA8/BGRA8, UNORM or sRGB, in sRGB non-linear. sRGB goes through its UNORM twin, so nothing is decoded.
+static void ColourPlans()
+{
+    for (const auto [format, raw] : { std::pair { kFormatB8G8R8A8Unorm, kFormatB8G8R8A8Unorm },
+                                      std::pair { kFormatR8G8B8A8Unorm, kFormatR8G8B8A8Unorm },
+                                      std::pair { kFormatB8G8R8A8Srgb, kFormatB8G8R8A8Unorm },
+                                      std::pair { kFormatR8G8B8A8Srgb, kFormatR8G8B8A8Unorm } })
+    {
+        const ColourPlan plan = PlanColour(format, kColourSpaceSrgbNonlinear);
+        CHECK(plan.sdr && plan.raw == raw && plan.refusal.empty());
+    }
+
+    // Every refusal names what it refused, and leaves the raw format the swapchain's own (stage 2's round trip).
+    ColourPlan hdr10 = PlanColour(kFormatA2B10G10R10UnormPack32, kColourSpaceHdr10St2084);
+    CHECK(!hdr10.sdr && hdr10.raw == kFormatA2B10G10R10UnormPack32);
+    CHECK(hdr10.refusal == "an HDR10 swapchain (PQ, Rec.2020) (A2B10G10R10_UNORM_PACK32, colour space 1000104008): the "
+                           "present host's NR takes SDR only; the frame is shown as the game rendered it");
+    HAS(PlanColour(kFormatR16G16B16A16Sfloat, kColourSpaceExtendedSrgbLinear).refusal, "an scRGB swapchain (linear "
+                                                                                       "light) (R16G16B16A16_SFLOAT");
+    HAS(PlanColour(kFormatR16G16B16A16Sfloat, kColourSpaceSrgbNonlinear).refusal, "a floating-point swapchain");
+    HAS(PlanColour(kFormatA2R10G10B10UnormPack32, kColourSpaceSrgbNonlinear).refusal, "a ten-bit swapchain");
+    HAS(PlanColour(kFormatB8G8R8A8Unorm, kColourSpaceHdr10Hlg).refusal, "an HLG swapchain");
+    HAS(PlanColour(kFormatB8G8R8A8Unorm, 1000104001).refusal, "a colour space other than sRGB non-linear "
+                                                              "(B8G8R8A8_UNORM, colour space 1000104001)");
+    HAS(PlanColour(VK_FORMAT_R5G6B5_UNORM_PACK16, 0).refusal, "a format other than RGBA8/BGRA8 (format 4, colour "
+                                                              "space 0)");
+}
+
+// The model's device extensions at vkCreateDevice: what the device offers and the application did not ask for.
+static DeviceCreateFacts Facts(bool properties2 = true, bool vulkan11 = true, bool storage = true)
+{
+    DeviceCreateFacts f;
+    f.properties2 = properties2;
+    f.vulkan11 = vulkan11;
+    f.storageWithoutFormat = storage;
+    return f;
+}
+
+static void ExtensionPlans()
+{
+    const std::vector<std::string> all = {
+        "VK_KHR_swapchain",       "VK_NVX_binary_import",         "VK_NVX_image_view_handle",
+        "VK_KHR_push_descriptor", "VK_KHR_buffer_device_address", "VK_EXT_buffer_device_address"
+    };
+
+    ExtensionPlan plan = PlanDeviceExtensions({ "VK_KHR_swapchain" }, all, Facts());
+    CHECK(plan.ready && plan.missing.empty() && plan.already.empty());
+    CHECK((plan.add == std::vector<std::string> { "VK_NVX_binary_import", "VK_NVX_image_view_handle",
+                                                  "VK_KHR_push_descriptor", "VK_KHR_buffer_device_address" }));
+    CHECK(ExtensionText(plan) == "NR extensions: added VK_NVX_binary_import, VK_NVX_image_view_handle, "
+                                 "VK_KHR_push_descriptor, VK_KHR_buffer_device_address; already enabled none; not "
+                                 "possible none");
+
+    // DXVK asks for the NVX pair itself; the bundle has added everything before the host sees the list.
+    plan = PlanDeviceExtensions({ "VK_NVX_binary_import", "VK_NVX_image_view_handle", "VK_KHR_push_descriptor",
+                                  "VK_KHR_buffer_device_address" },
+                                all, Facts());
+    CHECK(plan.ready && plan.add.empty() && plan.already.size() == 4);
+
+    // The application's EXT buffer device address stands for the KHR one: never both (VUID-...-03328).
+    plan = PlanDeviceExtensions({ "VK_EXT_buffer_device_address" }, all, Facts());
+    CHECK(plan.ready && !Listed(plan.add, "VK_KHR_buffer_device_address") &&
+          Listed(plan.already, "VK_EXT_buffer_device_address"));
+
+    // Without the NVX pair the model cannot run on the device: nothing at all is added to it (another vendor's device
+    // keeps its create info), and it is not ready.
+    plan = PlanDeviceExtensions({}, { "VK_KHR_push_descriptor", "VK_KHR_buffer_device_address" }, Facts());
+    CHECK(!plan.ready && plan.add.empty() && plan.missing.size() == 2);
+    HAS(ExtensionText(plan), "added none; already enabled none; not possible VK_NVX_binary_import (the device does not "
+                             "offer it), VK_NVX_image_view_handle (the device does not offer it)");
+    plan = PlanDeviceExtensions({ "VK_NVX_binary_import" }, { "VK_KHR_push_descriptor" }, Facts());
+    CHECK(!plan.ready && plan.add.empty() && plan.missing.size() == 1 && plan.already.size() == 1);
+
+    // Format-less storage writes not allowed yet (no feature, below Vulkan 1.3): format_feature_flags2 too.
+    std::vector<std::string> withFlags2 = all;
+    withFlags2.push_back("VK_KHR_format_feature_flags2");
+    plan = PlanDeviceExtensions({ "VK_KHR_swapchain" }, withFlags2, Facts(true, true, false));
+    CHECK(plan.ready && plan.add.size() == 5 && plan.add.back() == "VK_KHR_format_feature_flags2");
+    plan = PlanDeviceExtensions({}, all, Facts(true, true, false)); // not offered: the device is not ready
+    CHECK(!plan.ready && plan.missing.size() == 1);
+    HAS(ExtensionText(plan), "not possible VK_KHR_format_feature_flags2 (the device does not offer it)");
+    CHECK(PlanDeviceExtensions({}, all, Facts(true, true, true)).ready); // allowed already: not asked for
+
+    // A Vulkan 1.0 instance without properties2: the two that depend on it are not asked for.
+    plan = PlanDeviceExtensions({}, all, Facts(false, false));
+    CHECK(!plan.ready && plan.add.size() == 2);
+    HAS(ExtensionText(plan), "VK_KHR_push_descriptor (needs Vulkan 1.1 or VK_KHR_get_physical_device_properties2 on "
+                             "the instance)");
+    // With properties2 but still 1.0: the KHR buffer device address also needs VK_KHR_device_group, not added.
+    plan = PlanDeviceExtensions({}, all, Facts(true, false));
+    CHECK(!plan.ready && plan.add.size() == 3);
+    HAS(ExtensionText(plan), "VK_KHR_buffer_device_address (needs a Vulkan 1.1 instance: VK_KHR_device_group is not "
+                             "added)");
+
+    // A Vulkan 1.4 features struct with pushDescriptor off: VK_KHR_push_descriptor may not be enabled beside it.
+    DeviceCreateFacts v14 = Facts();
+    v14.vulkan14Features = true;
+    plan = PlanDeviceExtensions({}, all, v14);
+    CHECK(!plan.ready && !Listed(plan.add, "VK_KHR_push_descriptor"));
+    HAS(ExtensionText(plan), "VK_KHR_push_descriptor (the application's VkPhysicalDeviceVulkan14Features has "
+                             "pushDescriptor off)");
+    v14.pushDescriptorFeature = true;
+    CHECK(PlanDeviceExtensions({}, all, v14).ready);
+}
+
+// bufferDeviceAddress: prepended only where nothing in the application's chain could conflict.
+static void BdaPlans()
+{
+    BdaChain chain;
+    CHECK(PlanBufferDeviceAddress(chain, true, false) == BdaAction::AddKhr);
+    CHECK(PlanBufferDeviceAddress(chain, true, true) == BdaAction::AddExt);
+    CHECK(PlanBufferDeviceAddress(chain, false, false) == BdaAction::NotSupported);
+
+    chain.v12Node = true; // DXVK and vkd3d-proton: a Vulkan 1.2 features struct, here with the feature off
+    CHECK(PlanBufferDeviceAddress(chain, true, false) == BdaAction::ChainHasItOff);
+    chain.enabled = true; // ... or on
+    CHECK(PlanBufferDeviceAddress(chain, true, false) == BdaAction::Already);
+    CHECK(PlanBufferDeviceAddress(chain, false, false) == BdaAction::Already);
+
+    BdaChain ext;
+    ext.extNode = true;
+    CHECK(PlanBufferDeviceAddress(ext, true, true) == BdaAction::ChainHasItOff);
+
+    CHECK(BdaReady(BdaAction::Already) && BdaReady(BdaAction::AddKhr) && BdaReady(BdaAction::AddExt));
+    CHECK(!BdaReady(BdaAction::NotSupported));
+    // A chain with it off is not edited, and the model runs as the after-upscale route runs it.
+    CHECK(BdaReady(BdaAction::ChainHasItOff));
+    CHECK(std::string(BdaText(BdaAction::AddKhr)) == "bufferDeviceAddress enabled by the host");
+    HAS(BdaText(BdaAction::ChainHasItOff), "off in the application's create info, not edited");
+}
+
+static Outcome WithNr(Outcome o, bool evaluated, NrSkip skip = NrSkip::None, std::string note = {}, bool reset = false)
+{
+    o.nrEvaluated = evaluated;
+    o.nrSkip = skip;
+    o.nrNote = std::move(note);
+    o.nrReset = reset;
+    return o;
+}
+
+// The model's counters: evaluated and refused only on presents the round trip carried; GPU times from completions.
+static void NrCounters()
+{
+    TransportStats s;
+    CHECK(NrText(s.nr) == "NR: evaluated 0, refused 0, history resets 0, pass GPU not measured");
+
+    s.Add(WithNr(Transported(Route::SameQueue, 1, 0, 1), true, NrSkip::None, {}, true));
+    s.Add(WithNr(Transported(Route::SameQueue, 1, 1, 1), true));
+    Outcome timed = WithNr(Transported(Route::SameQueue, 1, 1, 1), true);
+    timed.nrTimed = 2;
+    timed.nrLastGpuMs = 3.0;
+    timed.nrMaxGpuMs = 4.0;
+    timed.nrSumGpuMs = 7.0;
+    s.Add(timed);
+    s.Add(WithNr(Transported(Route::SameQueue, 1, 1, 1), false, NrSkip::Colour, "an HDR10 swapchain ..."));
+    s.Add(WithNr(Transported(Route::SameQueue, 1, 1, 1), false, NrSkip::Busy, "busy"));
+    // Not transported: whatever the model would have said is not counted (the transport's skip is).
+    s.Add(WithNr(Skipped(Skip::RingBusy, 4), false, NrSkip::Off, "off"));
+    s.AddGpuTimes(1, 2.0, 2.0, 2.0); // at a swapchain's retirement
+
+    CHECK(s.nr.evaluated == 3 && s.nr.refused == 2 && s.nr.resets == 1 && s.nr.timed == 3);
+    CHECK(NrText(s.nr) == "NR: evaluated 3, refused 2 (colour 1, model busy 1), history resets 1, pass GPU last 2.000 "
+                          "ms, mean 3.000 ms, max 4.000 ms; first refusal: an HDR10 swapchain ...");
+
+    for (size_t i = 1; i < static_cast<size_t>(NrSkip::Count); ++i)
+        CHECK(std::string(NrSkipName(static_cast<NrSkip>(i))) != "none");
+
+    CHECK(NrReset(true, false, false) && NrReset(false, true, false) && NrReset(false, false, true));
+    CHECK(!NrReset(false, false, false));
+    CHECK(kNrInFlightMax * 3 <= 18); // three dispatches a frame in DlssNr_Vk's ring of eighteen slots
+}
+
+// One owner of the model in the process: the after-upscale route wins, the present host stands down and gives it up.
+static void OwnerArbitration()
+{
+    using namespace DlssNr::VkModelOwner;
+    Arbiter a;
+    constexpr uint64_t d1 = 0xD1, d2 = 0xD2;
+
+    // Nobody holds it: the present host may take it on d1, not on d2 while it holds d1.
+    CHECK(a.PresentHost(d1, 1000).granted);
+    a.Take(d1);
+    CHECK(a.Owner() == Who::PresentHost && a.Device() == d1);
+    CHECK(a.PresentHost(d1, 1001).granted);
+    Verdict v = a.PresentHost(d2, 1001);
+    CHECK(!v.granted && v.reason == kOtherDevice);
+    CHECK(!a.PresentHostMustYield(d1, 1001));
+
+    // The game's upscaler starts on Vulkan: refused while the present host holds it, which must now yield.
+    v = a.AfterUpscale(d1, 2000);
+    CHECK(!v.granted && v.reason == kHeldByPresentHost);
+    CHECK(a.PresentHostMustYield(d1, 2001) && !a.PresentHostMustYield(d2, 2001));
+    v = a.PresentHost(d1, 2001);
+    CHECK(!v.granted && v.reason == kAfterUpscaleWants);
+
+    // Released once its frames are seen complete; the after-upscale route takes it and keeps it.
+    a.Release(Who::AfterUpscale, d1); // not the holder: nothing
+    CHECK(a.Owner() == Who::PresentHost);
+    a.Release(Who::PresentHost, d1);
+    CHECK(a.Owner() == Who::None);
+    CHECK(a.AfterUpscale(d1, 2100).granted && a.Owner() == Who::AfterUpscale);
+    v = a.PresentHost(d1, 9000);
+    CHECK(!v.granted && v.reason == kAfterUpscaleOwns);
+    v = a.PresentHost(d2, 9000);
+    CHECK(!v.granted && v.reason == kAfterUpscaleOwns);
+    CHECK(!a.PresentHostMustYield(d1, 9000));
+
+    // Its own device change is its own: granted on the new one.
+    CHECK(a.AfterUpscale(d2, 9100).granted && a.Device() == d2);
+
+    // A route that asked once, half a second ago or more, no longer keeps the present host down.
+    Arbiter b;
+    CHECK(b.AfterUpscale(d1, 100).granted);
+    b.Release(Who::AfterUpscale, d1);
+    v = b.PresentHost(d1, 100 + kAfterUpscaleLiveMs - 1);
+    CHECK(!v.granted && v.reason == kAfterUpscaleWants);
+    CHECK(b.PresentHost(d1, 100 + kAfterUpscaleLiveMs).granted);
+}
+
+// The model's results in the lines: per window, and in a swapchain's last line.
+static void NrLines()
+{
+    World w;
+    w.Device(0xD1);
+    w.r.OnQueue(0xD1, 0, 0, 0, 0x51);
+    w.r.OnSurfaceCreated(World::instance, 0x5F1, 0xAAA);
+    w.Swapchain(0xD1, 0x5C1, 0x5F1, 0x12);
+
+    PresentView view;
+    CHECK(w.r.ViewPresent(0x51, 0x5C1, 0, view) && view.instance == World::instance && !view.retired);
+    CHECK(w.r.InstanceOf(World::physical) == World::instance && w.r.InstanceOf(0x9999) == 0);
+    CHECK(!w.r.Properties2Of(World::physical)); // the world's instance was recorded without it
+    w.r.OnInstanceCreated(0x1001, false, true);
+    const Handle physicals[] = { 0x2001 };
+    w.r.OnPhysicalDevices(0x1001, physicals, 1);
+    CHECK(w.r.Properties2Of(0x2001));
+
+    std::vector<std::string> lines;
+    for (int i = 0; i < 10; ++i)
+    {
+        Outcome o =
+            WithNr(Transported(Route::SameQueue, 1, i == 0 ? 0 : 1, 1), i != 3, i == 3 ? NrSkip::Busy : NrSkip::None,
+                   i == 3 ? "the model already has 4 frames in flight" : "", i == 0 || i == 4);
+        if (i == 9)
+        {
+            o.nrTimed = 1;
+            o.nrLastGpuMs = o.nrMaxGpuMs = o.nrSumGpuMs = 3.25;
+        }
+        lines = w.Present(0x51, 0x5C1, i % 3, 1, true, 0xD1, Caller::Native, 0x140000000, o);
+    }
+
+    CHECK(lines.size() == 1);
+    if (!lines.empty())
+        HAS(lines[0], "max CPU wait 0.000 ms, routes same queue 10; NR: evaluated 9, refused 1 (model busy 1), history "
+                      "resets 2, pass GPU last 3.250 ms, mean 3.250 ms, max 3.250 ms; first refusal: the model already "
+                      "has 4 frames in flight");
+
+    // A swapchain created with this one as its oldSwapchain retires it: the model may move on.
+    w.Swapchain(0xD1, 0x5C2, 0x5F1, 0x13, 0x5C1);
+    CHECK(w.r.ViewPresent(0x51, 0x5C1, 0, view) && view.retired);
+
+    w.r.OnCompletions(0xD1, 0x5C1, 1, 1, 3.75, 3.75, 3.75);
+    HAS(w.r.SwapchainSummary(0xD1, 0x5C1, "freed after a drain of 0.010 ms"),
+        "completions 10, ring 1, max CPU wait 0.000 ms, routes same queue 10; freed after a drain of 0.010 ms; NR: "
+        "evaluated 9, refused 1 (model busy 1), history resets 2, pass GPU last 3.750 ms, mean 3.500 ms, max 3.750 ms");
+}
+
 int main()
 {
     Constants();
@@ -767,6 +1071,13 @@ int main()
     Teardown();
     DeviceLine();
     TransportLines();
+    NrConstants();
+    ColourPlans();
+    ExtensionPlans();
+    BdaPlans();
+    NrCounters();
+    OwnerArbitration();
+    NrLines();
 
     if (failures != 0)
     {
@@ -774,7 +1085,8 @@ int main()
         return 1;
     }
 
-    std::puts("PASS: registry state machine (records, reuse, many devices, unknowns, internal, lines) and the "
-              "round trip's decisions (usage plan, route, ring, counters, transport lines)");
+    std::puts("PASS: registry state machine (records, reuse, many devices, unknowns, internal, lines), the round "
+              "trip's decisions (usage plan, route, ring, counters, transport lines) and cold NR's (colour plan, "
+              "device extensions, counters, one owner, NR lines)");
     return 0;
 }

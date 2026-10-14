@@ -6,11 +6,14 @@
 // every choice it acts on is made here, from plain integers, so tests/nr-vk-present-host drives all of it on the host.
 //
 // The round trip, per transported present: wait on everything the application's present was going to wait on, copy the
-// presented image into a work image the host owns and back again unchanged, signal a semaphore of the host's, and
-// present waiting on that instead. No NR: stage 3 puts the model between the two copies, on the same queue.
+// presented image into a work image the host owns and back again, signal a semaphore of the host's, and present
+// waiting on that instead. Stage 3 (DlssNr_VkPresentNr.h) runs the model between the two copies, on the same queue;
+// a frame it does not run on goes back unchanged.
 //
 // Standard library only, and Vulkan's values are plain integers; tests/nr-vk-present-host checks each constant
 // repeated here against vulkan_core.h.
+
+#include "DlssNr_VkPresentNr.h"
 
 #include <array>
 #include <cstddef>
@@ -47,7 +50,7 @@ inline constexpr uint32_t kMaxWaits = 16;          // application wait semaphore
 inline constexpr uint64_t kSlotWaitNs = 100000000; // the longest a present waits for the oldest slot: 100 ms
 inline constexpr uint64_t kQueueLockWaitMs = 50;   // the longest a present waits to borrow another queue
 inline constexpr uint64_t kDrainNs = 2000000000;   // the longest a retirement waits for the GPU: 2 s
-inline constexpr size_t kRetainedMax = 4096;       // present semaphores kept because no reacquire proved them free
+inline constexpr size_t kRetainedMax = 4096;       // present semaphores kept because nothing proved them free
 
 struct QueueFamily
 {
@@ -393,6 +396,16 @@ struct Outcome
     uint32_t ring = 0;        // the swapchain's ring depth after this call
     uint64_t waitNs = 0;      // CPU time this call spent waiting on a ring fence
     std::string note;         // NoRoute: RoutePlan::why
+
+    // Stage 3: what became of the model on a transported present.
+    bool nrEvaluated = false;     // the pass was recorded and submitted with the round trip
+    NrSkip nrSkip = NrSkip::None; // transported and not shown to the model: why
+    std::string nrNote;           // the refusal's full text
+    bool nrReset = false;         // an evaluated frame that started the model's history over
+    uint32_t nrTimed = 0;         // pass GPU times read back during this call, from earlier frames seen complete
+    double nrLastGpuMs = 0.0;
+    double nrMaxGpuMs = 0.0;
+    double nrSumGpuMs = 0.0;
 };
 
 struct TransportStats
@@ -407,11 +420,26 @@ struct TransportStats
     std::array<uint64_t, static_cast<size_t>(Route::Count)> routes {};
     uint32_t ring = 0;
     uint64_t maxWaitNs = 0;
+    NrStats nr;
+
+    // Pass GPU times read back outside a present (a swapchain's last frames, seen complete at its retirement).
+    void AddGpuTimes(uint32_t timed, double last, double max, double sum)
+    {
+        if (timed == 0)
+            return;
+
+        nr.timed += timed;
+        nr.lastGpuMs = last;
+        nr.maxGpuMs = max > nr.maxGpuMs ? max : nr.maxGpuMs;
+        nr.sumGpuMs += sum;
+    }
 
     void Add(const Outcome& o)
     {
         if (!o.counted)
             return;
+
+        AddGpuTimes(o.nrTimed, o.nrLastGpuMs, o.nrMaxGpuMs, o.nrSumGpuMs);
 
         ++presents;
         waitsTaken += o.waitsTaken;
@@ -424,6 +452,19 @@ struct TransportStats
         {
             ++transported;
             ++routes[static_cast<size_t>(o.route)];
+
+            if (o.nrEvaluated)
+            {
+                ++nr.evaluated;
+                nr.resets += o.nrReset ? 1 : 0;
+            }
+            else if (o.nrSkip != NrSkip::None)
+            {
+                ++nr.refused;
+                ++nr.skips[static_cast<size_t>(o.nrSkip)];
+                if (nr.firstRefusal.empty())
+                    nr.firstRefusal = o.nrNote.empty() ? std::string(NrSkipName(o.nrSkip)) : o.nrNote;
+            }
         }
         else
         {

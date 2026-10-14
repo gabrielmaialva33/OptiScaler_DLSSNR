@@ -2,20 +2,23 @@
 
 #include <windows.h>
 
-// The Vulkan present host, stages 1 and 2: coverage, and the submission-only control
-// (docs/dlssnr/design/nr-vulkan-present-host.md, "What settles the marker question" items 1 and 2, "A narrow NR-only
-// hook path", "The queue and semaphore contract").
+// The Vulkan present host, stages 1 to 3: coverage, the submission-only control, and cold NR
+// (docs/dlssnr/design/nr-vulkan-present-host.md, "What settles the marker question" items 1 to 3, "A narrow NR-only
+// hook path", "The queue and semaphore contract", "Stage 3 as built").
 //
 // A host for the NR pass below the game's own API, so a native Vulkan title and a D3D title translated by DXVK or
-// vkd3d-proton would be reached the same way. This stage runs no NR and draws nothing. It installs an interception of
-// its own on Vulkan creation, lifetime, queue calls and present, independent of the Vulkan menu and of the legacy
-// vulkan-1.dll hook bundle, keeps the records DlssNr_VkPresentRegistry.h describes, and carries every eligible present
-// through a round trip: the presented image copied into a work image of the host's and back unchanged, waiting on the
-// application's present semaphores, with the present then waiting on the host's semaphore instead
-// (DlssNr_VkPresentTransport.h decides when and on which queue). Two things of the application's calls change, and
-// only then: the image usage of a swapchain whose surface offers TRANSFER_SRC/TRANSFER_DST (added, decided before the
-// call), and the wait list of a present the round trip carried. Its present callback runs no Reflex, frame limiter,
-// TickFrozenCheck or upscaler timing.
+// vkd3d-proton are reached the same way. It draws nothing. It installs an interception of its own on Vulkan creation,
+// lifetime, queue calls and present, independent of the Vulkan menu and of the legacy vulkan-1.dll hook bundle, keeps
+// the records DlssNr_VkPresentRegistry.h describes, and carries every eligible present through a round trip: the
+// presented image copied into a work image of the host's and back, waiting on the application's present semaphores,
+// with the present then waiting on the host's semaphore instead (DlssNr_VkPresentTransport.h decides when and on which
+// queue). On an SDR swapchain the model runs on the way, between a blit into a working colour and a blit back, cold and
+// on zero guides (DlssNr_VkPresentNr.h decides when, DlssNr_VkPresentModel.h runs it), and stands down while the
+// after-upscale route or the D3D12 route runs it (DlssNr_VkModelOwner.h). Three things of the application's calls
+// change, and only then: the extension list of a device it will carry presents on (the model's extensions the device
+// offers, added before the call), the image usage of a swapchain whose surface offers TRANSFER_SRC/TRANSFER_DST
+// (added, decided before the call), and the wait list of a present the round trip carried. Its present callback runs
+// no Reflex, frame limiter, TickFrozenCheck or upscaler timing.
 //
 // [DlssNr] VulkanPresentHost with [DlssNr] Enabled, read when vulkan-1.dll is hooked. Off -- the default -- Install
 // returns before touching anything, so no detour, record, line or submit exists. On, it installs also when [Vulkan]
