@@ -828,7 +828,7 @@ GE-Proton11-7, RTX 4090, `[DlssNr] VulkanPresentHost=true`. About three and a ha
   ownership transfers and the three-submit chain), 7,558 on the presenting queue itself.
 - The Vulkan overlay's menu drew as before ("drawing the menu on graphics family 0 with a queue-family transfer
   around it") beside the host: the bundle-lock-then-host-lock order the review reasoned held in a game.
-- No new warning or error in the log. Frame pacing was judged by eye only.
+- No new warning or error in the log. By eye (the user): no stutter and no frame-rate drop, "all normal".
 
 ### What stage 3 needs
 

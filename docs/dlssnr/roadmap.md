@@ -10,6 +10,9 @@ and only then the change, as [nr-before-dlssg.md](design/nr-before-dlssg.md) did
   no flicker at 3x, same cost as the upscaled route. Merged in `c9c5e64f`.
 - **MFG unlock hardening** (edx wrapper ceiling, transactional gates). Measured: Crimson Desert at 6x (provider
   310.9.1); Stellar Blade's wrapper now passes 5, its provider 310.7.129 still stops at 4x.
+- **The menu under the game's DLSS-G** (D3D overlay): it read translucent at 4x because DLSS-G re-read the frame the
+  menu had been drawn into; DLSS-G now pauses while the menu is open on every overlay. Confirmed solid in Crimson
+  Desert, with FG resuming on close. The menu blur is off by default (a fork default).
 - **DRED** ([dred.md](design/dred.md)), **safe deploy** (`tools/deploy-to-game.sh`), **present-guide identity step 0
   measured** ([present-real-guides.md](design/present-real-guides.md)).
 
