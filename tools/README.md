@@ -65,10 +65,46 @@ tools/deploy-to-game.sh --uninstall [--dry-run] <game-directory>
 
 `tests/deploy-safety` runs it against fake game directories.
 
+## install-windows.ps1 and install-windows.cmd
+
+The Windows counterpart of `deploy-to-game.sh`, for end users: both ship in the release zip beside the DLLs
+(`package_release.ps1` refuses to build a release without them). The `.ps1` runs on Windows PowerShell 5.1
+and PowerShell 7 with no modules. The `.cmd` is the double-click entry: it asks for the game folder and
+whether to install, uninstall or dry-run, then starts the `.ps1` with `-ExecutionPolicy Bypass` for that one
+`powershell.exe` process (no policy is changed for the user or the machine). With arguments it passes them
+through and adds nothing.
+
+It installs from its own folder: `OptiScaler.dll` under the proxy name and as `OptiScaler.dll` beside it, the
+forwarder, the release's `OptiScaler\` support folder (FSR, XeSS, Agility SDK), and `OptiScaler.ini` only
+when the game has none. The refusals, exit codes, Keep-ReShade handling, backups and `-Uninstall` are those of
+`deploy-to-game.sh` above. The running-game check is Windows-native: refuse when any process has a module
+loaded from the game folder, or when a file it would touch cannot be opened for writing with no sharing (an
+elevated or anti-cheat-protected game hides its module list, but not that). The receipt is the same file in
+the same format, so either script uninstalls what the other installed; the one difference is that the Linux
+script, which creates no folders, leaves the emptied `OptiScaler\` folders behind. `nvngx_dlssnr.dll`,
+NVIDIA's model, is never copied, moved or removed; a missing one is reported.
+
+```powershell
+install-windows.cmd                                         # asks
+install-windows.cmd -GameDir "D:\Games\Crimson Desert\bin64" [-ProxyName winmm.dll] [-DryRun]
+install-windows.cmd -GameDir "D:\Games\Crimson Desert\bin64" -Uninstall [-DryRun]
+
+  -KeepReShade        keep a ReShade proxy as ReShade64.dll, loaded by OptiScaler
+  -ReplaceForeign     replace a file that is not ours; the original goes to .retoque\backup\
+  -AllowSecondProxy   install although another proxy name here holds OptiScaler
+  -SourceDir <dir>    take the files from <dir> instead of the script's folder
+```
+
+`tests/windows-installer` runs it against fake game folders in a PowerShell 7 container, crossing receipts
+with `deploy-to-game.sh` both ways. Windows itself (a real loaded DLL, NTFS, Windows PowerShell 5.1, the `.cmd`)
+is not exercised there; its README says what stands in for what.
+
 ## package_release.ps1
 
 Windows. Assembles the release zip from an explicit allow-list under `release/`; it refuses a stale
-forwarder, refuses any `Enabled=true` in the packaged ini, and never ships `nvngx_dlssnr.dll`.
+forwarder, refuses any `Enabled=true` in the packaged ini, and never ships `nvngx_dlssnr.dll`. It adds
+`install-windows.ps1` and `install-windows.cmd` from `tools/` (the `.cmd` rewritten with CRLF line ends) and
+refuses when either is missing.
 
 ```powershell
 pwsh tools\package_release.ps1 [-Version <tag>] [-SkipBuild]
