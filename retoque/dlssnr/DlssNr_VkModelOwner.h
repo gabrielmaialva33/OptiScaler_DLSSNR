@@ -19,13 +19,14 @@
 //   next evaluate. A frame whose completion is never seen keeps the token held: fail closed.
 // - The way back (found in DOOM Eternal's first stage-3 run, 2026-10-14: the game's DLSS turned off left the route
 //   holding the model for the session, and the present host refusing every frame). The route has no moment of its own
-//   to give the model up: a game that stops calling its upscaler simply stops calling. So once the route has not asked
-//   for kAfterUpscaleIdleMs, the present host may take it back: it marks the hand-back begun (BeginHandBack, refused if
-//   the route asked in the meantime), drains every queue of the route's device with a fence of its own, and when the
-//   fences have signalled frees the route's objects and the token together (FinishHandBack). The route asking at any
-//   point after the hand-back began cancels it: the route keeps the model, nothing of its is freed, and the fences are
-//   only waited for. Asking again after the hand-back finished is the ordinary stand-down, as many times as the game
-//   turns its upscaler on and off.
+//   to give the model up: a game that stops calling its upscaler simply stops calling. So once the route has not been
+//   inside an evaluate for kAfterUpscaleIdleMs -- counted from the end of its last one (AfterUpscaleDone), since it
+//   records after it asks -- the present host may take it back: it marks the hand-back begun on that device
+//   (BeginHandBack, refused while the route records or if it asked in the meantime), drains every queue of the device
+//   with a fence of its own, and when the fences have signalled frees the route's objects and the token together
+//   (FinishHandBack). The route asking at any point after the hand-back began, on any device, cancels it: the route
+//   keeps the model, nothing of its is freed, and the fences are only waited for. Asking again after the hand-back
+//   finished is the ordinary stand-down, as many times as the game turns its upscaler on and off.
 //
 // Standard library only, so tests/nr-vk-present-host drives the state machine on the host.
 
@@ -60,7 +61,7 @@ inline constexpr const char kAfterUpscaleWants[] =
     "the after-upscale route (the game's own upscaler) asked for the model within the last half second";
 inline constexpr const char kOtherDevice[] = "the model is in use on another VkDevice of this process";
 inline constexpr const char kAfterUpscaleRetiring[] =
-    "the after-upscale route has not asked for the model for ten seconds; it is being handed back to the present host";
+    "the after-upscale route went quiet; the model is being handed back to the present host";
 
 enum class HandBack : uint8_t
 {
@@ -83,7 +84,8 @@ class Arbiter
         _asked = true;
         _askedMs = nowMs;
 
-        // Recording again while its objects are being retired: the hand-back is off, the route keeps what it has.
+        // Recording again while its objects are being retired (on that device or, having moved, on another): the
+        // hand-back is off, the route keeps what it has.
         if (_retiring)
             _retireCancelled = true;
 
@@ -92,7 +94,19 @@ class Arbiter
 
         _owner = Who::AfterUpscale;
         _device = device;
+        _recording = true;
         return { true, nullptr };
+    }
+
+    // The route returned from an evaluate it was granted: what it recorded is in the game's command buffer, and the
+    // idle window starts now, not at the ask (a cold feature build inside one evaluate can take a while).
+    void AfterUpscaleDone(uint64_t nowMs)
+    {
+        if (!_recording)
+            return;
+
+        _recording = false;
+        _askedMs = nowMs;
     }
 
     Verdict PresentHost(uint64_t device, uint64_t nowMs) const
@@ -132,7 +146,7 @@ class Arbiter
     // way, and it has not asked for kAfterUpscaleIdleMs. 0 otherwise.
     uint64_t IdleAfterUpscaleDevice(uint64_t nowMs) const
     {
-        if (_owner != Who::AfterUpscale || _retiring || !_asked || nowMs < _askedMs ||
+        if (_owner != Who::AfterUpscale || _retiring || _recording || !_asked || nowMs < _askedMs ||
             nowMs - _askedMs < kAfterUpscaleIdleMs)
             return 0;
         return _device;
@@ -146,20 +160,23 @@ class Arbiter
             return false;
 
         _retiring = true;
+        _retireDevice = device;
         _retireCancelled = false;
         return true;
     }
 
-    // The drain's fences have signalled, with the route's lock held (so it is not recording): Done releases the token,
-    // and the caller frees the route's objects; Cancelled leaves everything with the route.
-    HandBack FinishHandBack()
+    // The drain of `device` is over, with the route's lock held (so it is not recording): Done releases the token, and
+    // the caller frees the route's objects; Cancelled leaves everything with the route.
+    HandBack FinishHandBack(uint64_t device)
     {
-        if (!_retiring)
+        if (!_retiring || _retireDevice != device)
             return HandBack::NotRetiring;
 
         _retiring = false;
+        _retireDevice = 0;
 
-        if (_retireCancelled)
+        // Not asked since the hand-back began, so the route still holds the model on this device.
+        if (_retireCancelled || _owner != Who::AfterUpscale || _device != device)
         {
             _retireCancelled = false;
             return HandBack::Cancelled;
@@ -170,10 +187,15 @@ class Arbiter
         return HandBack::Done;
     }
 
-    // The drain could not finish (a lost device, the device destroyed under it): the route keeps the model.
-    void CancelHandBack()
+    // The drain of `device` could not finish (a failed drain submit, the device lost or destroyed under it): the route
+    // keeps the model. Nothing for a hand-back of another device.
+    void CancelHandBack(uint64_t device)
     {
+        if (!_retiring || _retireDevice != device)
+            return;
+
         _retiring = false;
+        _retireDevice = 0;
         _retireCancelled = false;
     }
 
@@ -182,18 +204,20 @@ class Arbiter
     // the present host on the new device never sees the old one idle.
     void DeviceGone(uint64_t device)
     {
+        // A hand-back draining it is over, whoever holds the model now (the route may have moved to another device).
+        CancelHandBack(device);
+
         if (_owner == Who::None || _device != device)
             return;
 
         _owner = Who::None;
         _device = 0;
-        _retiring = false;
-        _retireCancelled = false;
     }
 
     Who Owner() const { return _owner; }
     uint64_t Device() const { return _device; }
     bool Retiring() const { return _retiring; }
+    bool Recording() const { return _recording; }
 
   private:
     bool AfterUpscaleLive(uint64_t nowMs) const
@@ -205,7 +229,9 @@ class Arbiter
     uint64_t _device = 0;
     bool _asked = false;
     uint64_t _askedMs = 0;
+    bool _recording = false;       // the route is inside an evaluate it was granted
     bool _retiring = false;        // a hand-back from the route is under way
+    uint64_t _retireDevice = 0;    // ... draining this device
     bool _retireCancelled = false; // ... and the route asked since it began
 };
 } // namespace DlssNr::VkModelOwner

@@ -928,6 +928,17 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     if (!ClaimModelForAfterUpscale(device))
         return;
 
+    // Whatever this evaluate records, the present host's hand-back counts the route's quiet from its end, not from the
+    // ask above: a cold feature build inside it can take a while (DlssNr_VkModelOwner.h, "The way back").
+    struct RecordingDone
+    {
+        ~RecordingDone()
+        {
+            std::lock_guard<std::mutex> lock(g_ownerMutex);
+            g_owner.AfterUpscaleDone(OwnerNowMs());
+        }
+    } recordingDone;
+
     g_vk.instance = instance;
     g_vk.physicalDevice = physicalDevice;
 
@@ -1751,7 +1762,7 @@ AfterUpscaleHandBack FinishAfterUpscaleHandBack(VkDevice device, std::vector<std
     VkModelOwner::HandBack result;
     {
         std::lock_guard<std::mutex> lock(g_ownerMutex);
-        result = g_owner.FinishHandBack();
+        result = g_owner.FinishHandBack(reinterpret_cast<uint64_t>(device));
     }
 
     if (result == VkModelOwner::HandBack::Cancelled)
@@ -1786,11 +1797,10 @@ AfterUpscaleHandBack FinishAfterUpscaleHandBack(VkDevice device, std::vector<std
 void CancelAfterUpscaleHandBack(VkDevice device)
 {
     std::lock_guard<std::mutex> lock(g_ownerMutex);
-    if (g_owner.Retiring() && g_owner.Device() == reinterpret_cast<uint64_t>(device))
-        g_owner.CancelHandBack();
+    g_owner.CancelHandBack(reinterpret_cast<uint64_t>(device));
 }
 
-void AfterUpscaleDeviceGone(VkDevice device, std::vector<std::string>& lines)
+void AfterUpscaleDeviceGone(VkDevice device, bool forgetOnly, std::vector<std::string>& lines)
 {
     // The route's lock may be waited for here: the route never takes the host's transport lock or a queue's present
     // lock, and vkDestroyDevice holds no queue's submit lock.
@@ -1799,9 +1809,28 @@ void AfterUpscaleDeviceGone(VkDevice device, std::vector<std::string>& lines)
 
         if (device != VK_NULL_HANDLE && g_vk.device == device)
         {
-            ShutdownVk(false);
-            lines.push_back("DLSS-NR Vulkan: the after-upscale route's objects on the device are abandoned with it "
-                            "(its destruction frees them)");
+            const bool feature = g_vk.feature != nullptr;
+
+            if (forgetOnly)
+            {
+                // Nothing called on a lost device, nor waited for on one whose GPU may never finish: forgotten, its
+                // destruction frees them.
+                ShutdownVk(false);
+                lines.push_back("DLSS-NR Vulkan: the after-upscale route's objects on the device are abandoned with it "
+                                "(the device is lost, or work on it was never seen complete)");
+            }
+            else
+            {
+                // Freed before the device goes and before NGX is shut down on it (its children must go first, the
+                // feature before NGX), once the device is idle: the application destroying it uses none of its queues
+                // now, so the wait is valid, and its work had to be complete anyway.
+                ShutdownVk(true);
+                lines.push_back("DLSS-NR Vulkan: the after-upscale route's objects on the device freed before it "
+                                "goes");
+            }
+
+            if (feature)
+                SessionGuardOff();
         }
     }
 

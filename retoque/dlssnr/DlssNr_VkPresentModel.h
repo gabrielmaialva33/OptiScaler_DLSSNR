@@ -149,10 +149,12 @@ AfterUpscaleHandBack FinishAfterUpscaleHandBack(VkDevice device, std::vector<std
 // model.
 void CancelAfterUpscaleHandBack(VkDevice device);
 
-// At vkDestroyDevice, before the call down: the after-upscale route's objects on `device` are abandoned (the device's
-// destruction frees them; nothing proves them drained), and whichever route held the token on it gives it back, so a
-// route that never evaluates again does not hold the model for a device that no longer exists. Lines for the log.
-void AfterUpscaleDeviceGone(VkDevice device, std::vector<std::string>& lines);
+// At vkDestroyDevice, before the call down and before NGX is shut down on the device: the after-upscale route's objects
+// on `device` freed once the device is idle (the application destroying it uses none of its queues), or, with
+// `forgetOnly` (a lost device, or work on it never seen complete), only forgotten; and whichever route held the token
+// on it gives it back, so a route that never evaluates again does not hold the model for a device that no longer
+// exists. Lines for the log.
+void AfterUpscaleDeviceGone(VkDevice device, bool forgetOnly, std::vector<std::string>& lines);
 
 // At vkDestroyDevice, before the call down, with the device's model released or abandoned: the driver's NGX core the
 // host brought up on it shut down, and NGX through the forwarder (which answers only for the device it initialised, so
