@@ -421,10 +421,11 @@ ModelLoader=auto
 ; 0 to 2 - Default (auto) is 1
 HookMethod=auto
 
-; Experiment that only watches for now: a present host on Vulkan, below the game's own API (native Vulkan, DXVK,
-; vkd3d-proton). With Enabled, installs its own narrow interception of Vulkan creation and present, also under
-; [Vulkan] SkipHooks or the marker, and logs "DLSS-NR Vulkan present host (observe only)" lines per window. Runs no
-; NR, submits nothing, changes no call. Read at start-up (docs/dlssnr/design/nr-vulkan-present-host.md).
+; Experiment: a present host on Vulkan, below the game's own API (native Vulkan, DXVK, vkd3d-proton). With Enabled,
+; installs its own narrow interception of Vulkan creation, queue calls and present, also under [Vulkan] SkipHooks or
+; the marker; adds TRANSFER_SRC to swapchains whose surface offers it, and copies every presented image out and back
+; unchanged before it is shown. Runs no NR yet. Logs "DLSS-NR Vulkan present host (round trip, no NR)" lines per
+; window. Read at start-up (docs/dlssnr/design/nr-vulkan-present-host.md).
 ; true or false - Default (auto) is false
 VulkanPresentHost=auto
 
@@ -824,7 +825,7 @@ the log says so). The narrower environment variable `OPTISCALER_DISABLE_VULKAN_W
 `[DlssNr] VulkanPresentHost=true` with `[DlssNr] Enabled=true` is the one exception to `SkipHooks` and the marker:
 DLSS-NR's Vulkan present host installs its own hooks on vulkan-1.dll's creation, lifetime and present calls anyway,
 and nothing else of the bundle comes back. The log then has both the skip line and the host's install line, which
-names the skip. Stage 1 only observes.
+names the skip. Stage 2 copies each presented image out and back unchanged (no NR yet).
 
 ```ini
 [Vulkan]

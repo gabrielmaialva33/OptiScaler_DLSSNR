@@ -1039,6 +1039,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="..\retoque\dlssnr\DlssNr_Submission.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_PairCapture.cpp" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentRegistry.h" />
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentTransport.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentHost.h" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_VkPresentHost.cpp" />
     <ClInclude Include="..\retoque\lsfg\Lsfg.h" />

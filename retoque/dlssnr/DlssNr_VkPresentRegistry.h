@@ -1,7 +1,7 @@
 #pragma once
 
 // What the Vulkan present host has seen, and the lines that say so (docs/dlssnr/design/nr-vulkan-present-host.md,
-// stage 1: coverage and no-op control).
+// stages 1 and 2).
 //
 // hooks/Vulkan_Hooks.cpp remembers one of each thing -- _instance, _PD, _device, _hwnd, and o_CreateSwapchainKHR as a
 // first-device sentinel -- the last one seen, for the overlay. A present host has to know, for any present, which
@@ -13,13 +13,14 @@
 // Instance -> physical device (vkEnumeratePhysicalDevices) -> device (vkCreateDevice, with the physical device's
 // queue families and the queues the create info asked for) -> queues (what vkGetDeviceQueue/vkGetDeviceQueue2
 // returned, never inferred from a handle). Surface -> HWND. Swapchain -> device, surface, images, format, extent,
-// usage, sharing. Destroys retire records before the downstream call, while the handle cannot yet be handed out
-// again; acquires are counted per image.
+// usage (as asked and as created), sharing, and whether the round trip may run on it. Destroys retire records before
+// the downstream call, while the handle cannot yet be handed out again; acquires are counted per image.
 //
-// Observation only. Nothing here returns an answer a caller acts on: OnPresent gives back lines to log, and the
-// production layer forwards every call unchanged whatever it says. Standard library only, and Vulkan's values are
-// plain integers, so tests/nr-vk-present-host drives all of it on the host; that suite also holds the few Vulkan
-// constants repeated below to vulkan_core.h.
+// The records decide nothing about the round trip (DlssNr_VkPresentTransport.h does); they answer what the transport
+// asks (ViewPresent), add up what each present's outcome was, and write the lines. Standard library only, and
+// Vulkan's values are plain integers, so tests/nr-vk-present-host drives all of it on the host.
+
+#include "DlssNr_VkPresentTransport.h"
 
 #include <array>
 #include <cstddef>
@@ -33,19 +34,7 @@
 
 namespace DlssNr::VkPresentHost
 {
-using Handle = uint64_t;   // a Vulkan handle's value (dispatchable ones are pointers)
 using RecordId = uint64_t; // 0: not known to the host
-
-// Vulkan's values, repeated so this header compiles alone. tests/nr-vk-present-host checks each against
-// vulkan_core.h.
-inline constexpr uint32_t kQueueGraphicsBit = 0x1;
-inline constexpr uint32_t kQueueComputeBit = 0x2;
-inline constexpr uint32_t kQueueTransferBit = 0x4;
-inline constexpr uint32_t kQueueProtectedBit = 0x10;
-inline constexpr uint32_t kUsageTransferSrcBit = 0x1;
-inline constexpr uint32_t kUsageTransferDstBit = 0x2;
-inline constexpr uint32_t kUsageStorageBit = 0x8;
-inline constexpr uint32_t kSharingModeConcurrent = 1;
 
 inline constexpr size_t kPresentSwapchains = 4; // swapchains of one present attributed to their windows
 inline constexpr size_t kPresentChain = 8;      // pNext structures of one present whose sType is noted
@@ -113,12 +102,6 @@ inline std::string Hex(uint64_t value)
 
 inline const char* YesNo(bool value) { return value ? "yes" : "no"; }
 
-struct QueueFamily
-{
-    uint32_t flags = 0; // VkQueueFlags
-    uint32_t count = 0; // queueCount
-};
-
 struct QueueRequest // one VkDeviceQueueCreateInfo
 {
     uint32_t family = 0;
@@ -145,7 +128,8 @@ struct SwapchainDesc // the VkSwapchainCreateInfoKHR the driver was given
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t arrayLayers = 0;
-    uint32_t usage = 0;
+    uint32_t usage = 0;      // as created: what the driver was given
+    uint32_t askedUsage = 0; // as the application asked
     uint32_t sharingMode = 0;
     std::vector<uint32_t> sharingFamilies; // CONCURRENT only
     uint32_t minImageCount = 0;
@@ -153,6 +137,8 @@ struct SwapchainDesc // the VkSwapchainCreateInfoKHR the driver was given
     uint32_t flags = 0;
     bool surfaceUsageKnown = false;
     uint32_t surfaceUsage = 0; // VkSurfaceCapabilitiesKHR::supportedUsageFlags, when the query answered
+    bool transport = false;    // UsagePlan::transport: the round trip may run on it
+    std::string transportNote; // UsagePlan::note
 };
 
 // One vkQueuePresentKHR, as the hook saw it before calling down.
@@ -168,32 +154,37 @@ struct PresentCall
     Caller caller = Caller::Unknown;
     Handle callerModule = 0;
     std::string_view callerName;
+    Outcome outcome; // the transport's result, the same for every swapchain of the call
 };
 
-// What stage 2's copy round trip (present image -> working image -> present image) needs from the swapchain: both
-// transfer usages. Said in the words the line uses.
+// The round trip's state for a swapchain, in the words the lines use: "on, TRANSFER_SRC added at creation", "on as
+// created", or "off, <why>" (observe only).
 inline std::string RoundTrip(const SwapchainDesc& desc)
 {
-    const uint32_t wanted = kUsageTransferSrcBit | kUsageTransferDstBit;
-    const uint32_t missing = wanted & ~desc.usage;
+    if (desc.transport)
+        return desc.transportNote == "as created" ? std::string("on as created") : "on, " + desc.transportNote;
 
-    if (missing == 0)
-        return "legal as created";
-
-    std::string names;
-    if (missing & kUsageTransferSrcBit)
-        names = "TRANSFER_SRC";
-    if (missing & kUsageTransferDstBit)
-        names += names.empty() ? "TRANSFER_DST" : "+TRANSFER_DST";
-
-    if (!desc.surfaceUsageKnown)
-        return "needs " + names + ", surface support unknown";
-
-    if ((desc.surfaceUsage & missing) == missing)
-        return "needs " + names + " at creation, the surface offers it";
-
-    return "not possible, the surface does not offer " + names;
+    return "off, " + (desc.transportNote.empty() ? std::string("not planned") : desc.transportNote);
 }
+
+// What the transport needs to know about one present, read from the records in one go.
+struct PresentView
+{
+    bool internal = false; // OptiScaler's own device: never transported, never counted
+    Handle device = 0;
+    Handle physical = 0;
+    RecordId deviceId = 0;
+    RecordId swapchainId = 0;
+    uint32_t presentFamily = 0;
+    std::vector<QueueFamily> families;
+    std::vector<QueueCandidate> queues; // the device's retrieved queues
+    SwapchainDesc desc;
+    uint32_t imageIndex = 0;
+    bool imageKnown = false; // the index is within the images the application fetched
+    Handle image = 0;
+    uint32_t imageCount = 0;
+    bool acquired = false; // an acquire of the image was observed since its last present
+};
 
 class Registry
 {
@@ -245,6 +236,8 @@ class Registry
         uint64_t acquires = 0;
         uint64_t presents = 0;
         bool retired = false; // a newer swapchain named this one as oldSwapchain
+        bool hasWindow = false;
+        TransportStats transport; // every present of this swapchain, and completions observed at its retirement
     };
 
     // What a window's line reports; a change of any of it writes a line.
@@ -276,6 +269,9 @@ class Registry
         uint64_t multiSwapchain = 0;
         uint64_t unacquired = 0;
         std::vector<uint32_t> chainTypes;
+
+        TransportStats transport; // since the window's first present
+        std::string firstNoRoute; // the first NoRoute reason, kept for the line
     };
 
     struct Stats
@@ -569,11 +565,10 @@ class Registry
                 if (!_stats.unknownSwapchainReported)
                 {
                     _stats.unknownSwapchainReported = true;
-                    lines.push_back("DLSS-NR Vulkan present host (observe only): a present of swapchain " +
-                                    Hex(call.swapchains[i]) +
+                    lines.push_back("DLSS-NR Vulkan present host: a present of swapchain " + Hex(call.swapchains[i]) +
                                     ", which the host never saw created (made before the host was installed, by a "
                                     "device it did not see, or not by the driver); such presents are counted, "
-                                    "not reported");
+                                    "not reported, and go down unchanged");
                 }
 
                 continue;
@@ -601,7 +596,12 @@ class Registry
             }
 
             Window& window = Find(*swapchain);
+            swapchain->hasWindow = true;
             ++swapchain->presents;
+            swapchain->transport.Add(call.outcome);
+            window.transport.Add(call.outcome);
+            if (call.outcome.counted && call.outcome.skip == Skip::NoRoute && window.firstNoRoute.empty())
+                window.firstNoRoute = call.outcome.note;
 
             const uint32_t index = call.imageIndices[i];
             if (index < swapchain->acquired.size() && swapchain->acquired[index] != 0)
@@ -723,6 +723,131 @@ class Registry
     size_t LiveSurfaces() const { return _surfaces.size(); }
     size_t LivePhysicals() const { return _physicals.size(); }
 
+    // Everything the transport needs for a present of `swapchain` image `index` on `queue`. False when the queue, its
+    // device or the swapchain is not on record (the present goes down unchanged and OnPresent counts it).
+    bool ViewPresent(Handle queue, Handle swapchain, uint32_t index, PresentView& view) const
+    {
+        const auto queueFound = _queues.find(queue);
+        if (queueFound == _queues.end())
+            return false;
+
+        const auto deviceFound = _devices.find(queueFound->second.device);
+        if (deviceFound == _devices.end())
+            return false;
+
+        const auto found = _swapchains.find(SwapchainKey { queueFound->second.device, swapchain });
+        if (found == _swapchains.end())
+            return false;
+
+        const Device& device = deviceFound->second;
+        const Swapchain& record = found->second;
+
+        view.internal = device.desc.internal;
+        view.device = queueFound->second.device;
+        view.physical = device.desc.physical;
+        view.deviceId = device.id;
+        view.swapchainId = record.id;
+        view.presentFamily = queueFound->second.family;
+        view.families = device.desc.families;
+        view.queues = QueuesOf(view.device);
+        view.desc = record.desc;
+        view.imageIndex = index;
+        view.imageCount = static_cast<uint32_t>(record.images.size());
+        view.imageKnown = index < record.images.size();
+        view.image = view.imageKnown ? record.images[index] : 0;
+        view.acquired = index < record.acquired.size() && record.acquired[index] != 0;
+        return true;
+    }
+
+    // The queues of a device the application retrieved, ordered by family and index.
+    std::vector<QueueCandidate> QueuesOf(Handle device) const
+    {
+        std::vector<QueueCandidate> queues;
+        for (const auto& [handle, queue] : _queues)
+        {
+            if (queue.device == device)
+                queues.push_back(QueueCandidate { handle, queue.family, queue.index, queue.flags });
+        }
+
+        for (size_t i = 1; i < queues.size(); ++i)
+        {
+            for (size_t j = i;
+                 j > 0 && (queues[j].family < queues[j - 1].family ||
+                           (queues[j].family == queues[j - 1].family && queues[j].index < queues[j - 1].index));
+                 --j)
+                std::swap(queues[j], queues[j - 1]);
+        }
+
+        return queues;
+    }
+
+    // Per image of a swapchain: acquired since its last present. A present semaphore of an image acquired again is
+    // free.
+    std::vector<uint8_t> AcquiredImages(Handle device, Handle swapchain) const
+    {
+        const auto found = _swapchains.find(SwapchainKey { device, swapchain });
+        return found != _swapchains.end() ? found->second.acquired : std::vector<uint8_t> {};
+    }
+
+    // Completions of round trips observed when a swapchain was retired (its last ones, which no later present polled).
+    void OnCompletions(Handle device, Handle swapchain, uint64_t completions)
+    {
+        auto found = _swapchains.find(SwapchainKey { device, swapchain });
+        if (found == _swapchains.end() || completions == 0)
+            return;
+
+        found->second.transport.completions += completions;
+        if (found->second.hasWindow)
+            Find(found->second).transport.completions += completions;
+    }
+
+    // Written once when a swapchain is created: what was asked, what the driver got, and whether the round trip runs.
+    std::string SwapchainLine(Handle device, Handle swapchain) const
+    {
+        const auto found = _swapchains.find(SwapchainKey { device, swapchain });
+        if (found == _swapchains.end())
+            return {};
+
+        const Swapchain& record = found->second;
+        const SwapchainDesc& d = record.desc;
+        const Device* owner = FindDevice(device);
+
+        std::string line =
+            "DLSS-NR Vulkan present host: swapchain " + Hex(swapchain) + " #" + std::to_string(record.id) +
+            " on device " + Hex(device) + " #" + std::to_string(record.deviceId) + ", window " +
+            (record.hwndKnown ? Hex(record.hwnd) : std::string("unknown")) + ", " + std::to_string(d.width) + "x" +
+            std::to_string(d.height) + " format " + std::to_string(d.format) + ": usage " + Hex(d.askedUsage);
+
+        if (d.usage != d.askedUsage)
+            line += " -> " + Hex(d.usage);
+
+        if (d.surfaceUsageKnown)
+            line += " (surface offers " + Hex(d.surfaceUsage) + ")";
+
+        line += "; round trip " + RoundTrip(d);
+
+        if (owner != nullptr && owner->desc.internal)
+            line += "; OptiScaler's own device";
+
+        return line;
+    }
+
+    // Written when a swapchain is destroyed: what became of its presents, and of the host's objects for it.
+    std::string SwapchainSummary(Handle device, Handle swapchain, const std::string& resources) const
+    {
+        const auto found = _swapchains.find(SwapchainKey { device, swapchain });
+        if (found == _swapchains.end())
+            return {};
+
+        const Swapchain& record = found->second;
+        if (!record.desc.transport && record.transport.presents == 0)
+            return {};
+
+        return "DLSS-NR Vulkan present host: swapchain " + Hex(swapchain) + " #" + std::to_string(record.id) +
+               " destroyed after " + std::to_string(record.presents) + " presents; " + TransportText(record.transport) +
+               (resources.empty() ? "" : "; " + resources);
+    }
+
     // The line written when a device is created, for the log and the tests.
     std::string DeviceLine(Handle device) const
     {
@@ -839,7 +964,7 @@ class Registry
         const SwapchainDesc& d = swapchain.desc;
         const auto n = [](uint64_t value) { return std::to_string(value); };
 
-        std::string line = "DLSS-NR Vulkan present host (observe only): window ";
+        std::string line = "DLSS-NR Vulkan present host (round trip, no NR): window ";
         line += window.hwndKnown ? Hex(window.hwnd) : std::string("unknown");
         line += " (" + why + "); presents " + n(window.presents) + ", swapchains " + n(window.swapchainIds.size()) +
                 ", devices " + n(window.deviceIds.size());
@@ -849,6 +974,9 @@ class Registry
                 " usage " + Hex(d.usage) + " (transfer-src " + YesNo(d.usage & kUsageTransferSrcBit) +
                 ", transfer-dst " + YesNo(d.usage & kUsageTransferDstBit) + ", storage " +
                 YesNo(d.usage & kUsageStorageBit) + ")";
+
+        if (d.askedUsage != d.usage)
+            line += " asked " + Hex(d.askedUsage);
 
         if (d.surfaceUsageKnown)
             line += " surface-usage " + Hex(d.surfaceUsage);
@@ -925,6 +1053,10 @@ class Registry
 
         line += "; caller " + (call.callerName.empty() ? std::string("?") : std::string(call.callerName)) + " (" +
                 CallerName(call.caller) + ")";
+
+        line += "; transport: " + TransportText(window.transport);
+        if (!window.firstNoRoute.empty())
+            line += "; first no-route reason: " + window.firstNoRoute;
 
         return line;
     }
