@@ -28,7 +28,7 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
+| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
 | `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Forty-five suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
+**Host tier.** Forty-six suites. All but `nr-invariants`, `repo-privacy` and `deploy-safety` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `lsfg-shader-library` — the LSFG runtime shader library (`retoque/lsfg/LsfgShaderLibrary.{h,cpp}`): DLL discovery (Windows Steam `libraryfolders.vdf`, registry, Wine/Proton `Z:` paths, `$HOME`, `$XDG_DATA_HOME`, override, `Lossless.dll` folder mapping), PE `RT_RCDATA` SPIR-V module extraction (99 modules), SPIR-V magic validation, Quality/Performance and FP32/FP16 resource ID resolution, real user DLL extraction when present, and content-hash-keyed DXIL cache storage/invalidation; plus `tools/lsfg-study/convert.py`'s Float16 detection (synthetic modules, and exactly ids 51..98 on the real DLL).
@@ -113,6 +113,11 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `repo-privacy` — every tracked file outside `external/` and `OptiScaler/include/` is free of home
   paths, LAN or tailnet addresses and tokens; each pattern is self-tested against a sample and a near
   miss. Pure Python. A line that must keep a match says `privacy: allow`.
+- `deploy-safety` — `tools/deploy-to-game.sh` on fake game directories: refuses while a process maps a file
+  there (a Python child mmapping a fake DLL stands in for the game), on a foreign or case-variant DLL and on a
+  second OptiScaler proxy name; Keep-ReShade renames and sets `[Plugins] LoadReshade=true` by replacing lines,
+  never adding a second; the receipt and its partial form after an injected failure; dry runs write nothing;
+  `--uninstall` returns the directory to its snapshot before the deploy. Python and bash, no Wine.
 - `fg-synth-policy` — synthesized FG's decisions (fast-motion response on incoherent motion
   and its cap, low-fps floor, duplicate-present advice, which HUD fix runs for which output), the
   motion statistics they are made from, and the NR/FG motion handoff, from the production headers,

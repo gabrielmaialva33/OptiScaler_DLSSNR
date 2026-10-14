@@ -243,6 +243,11 @@ tier = "host"
 timeout = 60
 summary = "No home path, LAN or tailnet address, or token in any tracked file outside vendored code; every pattern self-tested."
 
+[deploy-safety]
+tier = "host"
+timeout = 120
+summary = "tools/deploy-to-game.sh on fake game directories: refuses while a process maps the directory, on a foreign or case-variant DLL, and on a second OptiScaler proxy; Keep-ReShade with the ini key replaced, never duplicated; receipt, partial receipt, dry run, and uninstall back to the prior state."
+
 [lsfg-shader-library]
 tier = "host"
 timeout = 60
