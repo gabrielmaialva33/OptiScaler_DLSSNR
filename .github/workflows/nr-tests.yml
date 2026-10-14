@@ -17,6 +17,7 @@ on:
       - 'tests/**'
       - 'OptiScaler/**'
       - 'retoque/**'
+      - 'tools/**'
       - 'OptiScaler.ini'
       - '.github/workflows/nr-tests.yml'
   pull_request:
@@ -24,6 +25,7 @@ on:
       - 'tests/**'
       - 'OptiScaler/**'
       - 'retoque/**'
+      - 'tools/**'
       - 'OptiScaler.ini'
       - '.github/workflows/nr-tests.yml'
 

@@ -250,27 +250,29 @@ before committing C++, because nothing local enforces it and it had drifted by 5
 
 ### Tests
 
-`tests/README.md` is the index; read it before adding or changing a suite. Fifty-one directories under
+`tests/README.md` is the index; read it before adding or changing a suite. Fifty-four directories under
 `tests/`, each self-contained with its own `run.py` and README, registered in `tests/suites.toml`.
 
 ```bash
-python3 tests/run_all.py            # host tier, the default; 47 suites, ~60 s
+python3 tests/run_all.py            # host tier, the default; 49 suites, ~60 s
 python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
-python3 tests/run_all.py --tier all # adds the four wine suites
+python3 tests/run_all.py --tier all # adds the five wine suites
 python3 tests/<name>/run.py         # one suite, unchanged
 ```
 
-Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the thirty-five
+Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the thirty-six
 `nr-*` suites plus `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`,
 `mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy` (no home path, LAN/tailnet address or token in
 a tracked file; the tree is public), `deploy-safety` (`tools/deploy-to-game.sh` on fake game directories),
-`lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter`. One of them,
+`windows-installer` (`tools/install-windows.ps1` in a PowerShell container on the docker context, cases skipped
+without docker or `pwsh`), `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter`. One of them,
 `nr-invariants`, is the `docs/dlssnr/design/DEVELOPMENT.md` §4 mechanical guard (config round-trip for every `DlssNr`
 key, struct equals cbuffer, precompiled headers equal the committed bytecode, retired identifiers);
 it is pure Python and the one to run after touching `Config.*`, `OptiScaler.ini` or the shader. **wine** needs the msvc-wine prefix and runs serially, because these suites contend for the
 same prefix `build-local.sh` uses: `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`
-(which also needs a graphical session and a working Vulkan loader), and `dlssnr-loopback` (real
-NGX/NR under Proton).
+(which also needs a graphical session and a working Vulkan loader), `vulkan-present-host` (the production DLL's
+Vulkan present host, the round trip and, under a local Proton with the model kit, cold NR) and `dlssnr-loopback`
+(real NGX/NR under Proton).
 There are currently no **wip** suites.
 
 `suites.toml` is a drift guard, not just a config file. A directory with no entry, or an entry with
@@ -283,7 +285,7 @@ behaviour, image quality or performance. `vulkan-overlay` builds a real DLL and 
 baseline `660303ec` that no runner calls.
 
 CI: `.github/workflows/nr-tests.yml` runs the host tier on Linux for pushes and PRs that touch
-`tests/`, `OptiScaler/` or `retoque/`. It checks out only `simpleini`, `spdlog` and `vulkan` — never
+`tests/`, `OptiScaler/`, `retoque/` or `tools/`. It checks out only `simpleini`, `spdlog` and `vulkan` — never
 FidelityFX-SDK. Upstream's `test.yml` is **not** a test workflow despite the name; it publishes the
 nightly release. Nothing runs the wine tier in CI; that stays local.
 
