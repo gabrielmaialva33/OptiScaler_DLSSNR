@@ -32,8 +32,14 @@ here or beside the code it describes.
 
 - [retoque/dlssnr/README.md](../retoque/dlssnr/README.md): NR module overview, file index, shader rebuild.
 - [retoque/dlssnr/forwarder/README.md](../retoque/dlssnr/forwarder/README.md): why `nvngx.dll_dlssnr.dll` exists.
+- [retoque/lsfg/README.md](../retoque/lsfg/README.md): LSFG 3.1 D3D12 pipeline and custom MFG presenter (x2/x3/x4).
 - [retoque/shaders/synth_motion/README.md](../retoque/shaders/synth_motion/README.md): the synthesized-motion estimator and the provenance of its FidelityFX-derived files.
 - [retoque/translations/README.md](../retoque/translations/README.md): the optional pt-BR text pack (shipped in the release zip).
+
+## Tools and Studies
+
+- [tools/README.md](../tools/README.md): build, deployment, release packaging and log summarizer scripts.
+- [tools/lsfg-study/README.md](../tools/lsfg-study/README.md): LSFG on D3D12 study, bytecode conversion tooling and integration notes.
 
 ## Licences
 
