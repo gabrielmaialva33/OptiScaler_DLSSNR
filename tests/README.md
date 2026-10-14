@@ -28,7 +28,7 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
+| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `windows-installer`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
 | `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
@@ -38,8 +38,8 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Forty-eight suites. All but `nr-invariants`, `repo-privacy` and `deploy-safety` build real production code with local fakes under
-AddressSanitizer and UndefinedBehaviorSanitizer.
+**Host tier.** Forty-nine suites. All but `nr-invariants`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
+code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `lsfg-shader-library` — the LSFG runtime shader library (`retoque/lsfg/LsfgShaderLibrary.{h,cpp}`): DLL discovery (Windows Steam `libraryfolders.vdf`, registry, Wine/Proton `Z:` paths, `$HOME`, `$XDG_DATA_HOME`, override, `Lossless.dll` folder mapping), PE `RT_RCDATA` SPIR-V module extraction (99 modules), SPIR-V magic validation, Quality/Performance and FP32/FP16 resource ID resolution, real user DLL extraction when present, and content-hash-keyed DXIL cache storage/invalidation; plus `tools/lsfg-study/convert.py`'s Float16 detection (synthetic modules, and exactly ids 51..98 on the real DLL).
 - `lsfg-integration` — LSFG 3.1 as FSR-FG's interpolator (study branch, `retoque/lsfg/`): the DXIL PSV0 reader
@@ -122,6 +122,14 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   second OptiScaler proxy name; Keep-ReShade renames and sets `[Plugins] LoadReshade=true` by replacing lines,
   never adding a second; the receipt and its partial form after an injected failure; dry runs write nothing;
   `--uninstall` returns the directory to its snapshot before the deploy. Python and bash, no Wine.
+- `windows-installer` — `tools/install-windows.ps1`, the same contract for Windows users, on fake game folders
+  in a pinned PowerShell 7.4 container (streamed in with tar, since the docker context may be remote) or a local
+  `pwsh`: the same refusals, Keep-ReShade, receipt, partial receipt, dry runs and uninstall; receipts written by
+  `deploy-to-game.sh` uninstalled by it and the reverse, and both scripts writing the same receipt and files for
+  the same folder; `nvngx_dlssnr.dll` never touched. The running-game checks run through Linux stand-ins (a
+  process started from the folder, a `flock`-emulated exclusive handle). Static checks (ASCII, the `.cmd`'s CRLF,
+  the packager's allow-list) run always; without docker or `pwsh` the cases print `SKIP` and the suite passes on
+  those. Nothing here runs Windows, Windows PowerShell 5.1 or the `.cmd`.
 - `fg-synth-policy` — synthesized FG's decisions (fast-motion response on incoherent motion
   and its cap, low-fps floor, duplicate-present advice, which HUD fix runs for which output), the
   motion statistics they are made from, and the NR/FG motion handoff, from the production headers,

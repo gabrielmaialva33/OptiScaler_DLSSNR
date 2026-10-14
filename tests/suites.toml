@@ -263,6 +263,11 @@ tier = "host"
 timeout = 120
 summary = "tools/deploy-to-game.sh on fake game directories: refuses while a process maps the directory, on a foreign or case-variant DLL, and on a second OptiScaler proxy; Keep-ReShade with the ini key replaced, never duplicated; receipt, partial receipt, dry run, and uninstall back to the prior state."
 
+[windows-installer]
+tier = "host"
+timeout = 900
+summary = "tools/install-windows.ps1 on fake game folders in a pinned PowerShell 7.4 container (or a local pwsh): the deploy-safety refusals, receipt, partial receipt, dry run and uninstall, receipts crossing to and from deploy-to-game.sh, the model never touched; static ASCII/CRLF/packager checks always. SKIP for the cases without docker or pwsh."
+
 [lsfg-shader-library]
 tier = "host"
 timeout = 60

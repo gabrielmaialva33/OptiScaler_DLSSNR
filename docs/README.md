@@ -8,6 +8,7 @@ here or beside the code it describes.
 ## Users
 
 - [Config.md](../Config.md): every INI key, including the `[DlssNr]` block.
+- [README.md, Installation](../README.md#installation): Linux and Windows; on Windows the release's `install-windows.cmd`, described in [tools/README.md](../tools/README.md#install-windowsps1-and-install-windowscmd).
 - [guides/ExternalDlssgTelemetry.md](guides/ExternalDlssgTelemetry.md): feeding DLSSG source-frame telemetry from an external DLL/ASI.
 
 ## Linux and Proton
@@ -38,7 +39,7 @@ here or beside the code it describes.
 
 ## Tools and Studies
 
-- [tools/README.md](../tools/README.md): build, deployment, release packaging and log summarizer scripts.
+- [tools/README.md](../tools/README.md): build, deployment, the Windows installer, release packaging and log summarizer scripts.
 - [tools/lsfg-study/README.md](../tools/lsfg-study/README.md): LSFG on D3D12 study, bytecode conversion tooling and integration notes.
 
 ## Licences
