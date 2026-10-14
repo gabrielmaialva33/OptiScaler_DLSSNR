@@ -132,7 +132,9 @@ struct D3D12_RESOURCE_BARRIER
 struct ID3D12CommandAllocator
 {
     int refs = 1;
+    std::wstring name; // what the host named it, for a DRED report (DlssNr_Dred.h)
     void Release() { --refs; }
+    void SetName(const wchar_t* value) { name = value; }
 };
 
 struct ID3D12CommandList
@@ -146,6 +148,8 @@ struct ID3D12CommandList
 struct ID3D12GraphicsCommandList : ID3D12CommandList
 {
     int refs = 1;
+    std::wstring name; // what the host named it, for a DRED report (DlssNr_Dred.h)
+    void SetName(const wchar_t* value) { name = value; }
     HRESULT closeResult = S_OK;
     unsigned uavBarriers = 0;
     void ResourceBarrier(UINT count, const D3D12_RESOURCE_BARRIER* barriers)

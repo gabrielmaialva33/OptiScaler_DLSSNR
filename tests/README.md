@@ -28,7 +28,7 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
+| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
 | `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Forty-four suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
+**Host tier.** Forty-seven suites. All but `nr-invariants`, `repo-privacy` and `deploy-safety` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `lsfg-shader-library` — the LSFG runtime shader library (`retoque/lsfg/LsfgShaderLibrary.{h,cpp}`): DLL discovery (Windows Steam `libraryfolders.vdf`, registry, Wine/Proton `Z:` paths, `$HOME`, `$XDG_DATA_HOME`, override, `Lossless.dll` folder mapping), PE `RT_RCDATA` SPIR-V module extraction (99 modules), SPIR-V magic validation, Quality/Performance and FP32/FP16 resource ID resolution, real user DLL extraction when present, and content-hash-keyed DXIL cache storage/invalidation; plus `tools/lsfg-study/convert.py`'s Float16 detection (synthetic modules, and exactly ids 51..98 on the real DLL).
@@ -72,6 +72,10 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   late and non-finite readbacks breaking the pair, two-second windows, reset, the menu's words, the log line and
   its rate, and a synthetic cadence's pulse. Source guards on the pass and the renderer: off builds and records
   nothing, one sample per present. No GPU, no shader.
+- `nr-present-boundary` — the present pass under the game's own DLSS-G (`DlssNr_PresentBoundary.h`):
+  `HookMethod=2` declines on the wrapped entry below DLSS-G, Auto stays upscaled for the session once it has seen
+  it, `HookMethod=1` and OptiScaler's own frame generation are untouched; source guards that `RunPresentPass` and
+  the upscaled route decide through it. Not whether `State` reflects the game's DLSS-G in a given title.
 - `nr-present-sync` — what `[DlssNr] PresentSync=auto` means: the D3D12 present pass waits for its write-back
   only when frame generation could be involved (`DlssNr_PresentSync.h`). The wait itself is not exercised.
 - `nr-dx11-route` — a D3D11 game's DLSS with NR on (`docs/dlssnr/design/dx11-native-dlss-guides.md`, steps 1
@@ -101,13 +105,23 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   nonblocking readiness retry, no publication on error, single consumption. No frame-identity or GPU
   synchronization coverage.
 - `mfg-pattern` — the real MFG byte signatures and scanner matcher against synthetic
-  buffers. Runs no patcher and touches no DLL.
+  buffers, both wrapper clamp shapes (`r8d`, and the `edx` one of Streamline 2.7.3 to 2.14), and the
+  foreign-gate patterns that recognise another unlocker's rewrite. Runs no patcher and touches no DLL.
+- `mfg-patch-plan` — the MFG unlock's write half (`retoque/framegen/dlssg/MfgPatchPlan.h`) over a fake
+  module whose writes can be told to fail: a patch group commits whole or rolls back whole, a half-written
+  site is restored, a wrong read-back rolls back, a site changed since planning writes nothing, and a failed
+  restore is reported without stopping the others.
 - `sl-log-repeat` — the Streamline log repeat filter against the real `setDynamicMFGParams` line
   on a fake clock: one line per 10 s with the folded count, new sites at once, a bounded table that
   fails open. Runs no Streamline and no callback.
 - `repo-privacy` — every tracked file outside `external/` and `OptiScaler/include/` is free of home
   paths, LAN or tailnet addresses and tokens; each pattern is self-tested against a sample and a near
   miss. Pure Python. A line that must keep a match says `privacy: allow`.
+- `deploy-safety` — `tools/deploy-to-game.sh` on fake game directories: refuses while a process maps a file
+  there (a Python child mmapping a fake DLL stands in for the game), on a foreign or case-variant DLL and on a
+  second OptiScaler proxy name; Keep-ReShade renames and sets `[Plugins] LoadReshade=true` by replacing lines,
+  never adding a second; the receipt and its partial form after an injected failure; dry runs write nothing;
+  `--uninstall` returns the directory to its snapshot before the deploy. Python and bash, no Wine.
 - `fg-synth-policy` — synthesized FG's decisions (fast-motion response on incoherent motion
   and its cap, low-fps floor, duplicate-present advice, which HUD fix runs for which output), the
   motion statistics they are made from, and the NR/FG motion handoff, from the production headers,

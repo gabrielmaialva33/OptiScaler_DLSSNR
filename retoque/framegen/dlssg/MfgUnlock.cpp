@@ -1,8 +1,10 @@
 #include "pch.h"
 
 #include "MfgUnlock.h"
+#include "MfgPatchPlan.h"
 
 #include <Config.h>
+#include <Util.h>
 #include <scanner/scanner.h>
 #include <misc/IdentifyGpu.h>
 
@@ -30,7 +32,28 @@ constexpr std::string_view kValidatePattern = "3D B0 01 00 00 7C ? 83 FB 03 76";
 //     cmp   ecx, r8d
 //     cmovb r8d, ecx
 // The wrapper carries its own ceiling, so raising nvngx alone gets three back.
-constexpr std::string_view kWrapperClampPattern = "41 B8 03 00 00 00 41 3B C8 44 0F 42 C1";
+//
+// The ceiling is a wildcard so a build that already carries five is recognised rather than missed.
+// This register allocation is Streamline 2.7.1's (Cyberpunk 2077) and no other build seen here.
+constexpr std::string_view kWrapperClampPattern = "41 B8 ? 00 00 00 41 3B C8 44 0F 42 C1";
+
+// The same clamp in every other wrapper seen: 2.7.3, 2.7.30, 2.8.0, 2.9.0, 2.9.1 and 2.14.1, each one
+// match in .text across eleven copies from ten games (2026-10-14).
+//     mov   edx, 0x3          five in 2.14, which already allows 6X and needs no write
+//     cmp   ecx, edx
+//     cmovb edx, ecx
+// The r8d pattern alone missed all of them, so on 2.7.3 to 2.9 the unlock stopped at 4X; and the
+// "wrapperClamp=MISS" of the Crimson Desert run was this shape on 2.14.1, where it cost nothing.
+constexpr std::string_view kWrapperClampPatternEdx = "BA ? 00 00 00 3B CA 0F 42 D1";
+
+// The four gate shapes with the architecture constant's low byte left open. Tried only after the
+// exact pattern missed: a hit means the gate is there but compares against something other than
+// 0x1b0, which is what another unlocker leaves behind (MFGAdaUnlock rewrites it to 0x190). Such a
+// module is left alone rather than patched on top of a patch, and the log says whose it looks like.
+constexpr std::string_view kAdvertiseForeignPattern = "BB 01 00 00 00 41 B8 ? 00 00 00 81 ? ? 01 00 00 44 0F 4C C3";
+constexpr std::string_view kValidateForeignPattern = "3D ? 01 00 00 7C ? 83 FB 03 76";
+constexpr std::string_view kAdvertiseForeignPattern309 = "81 FD ? 01 00 00 0F 8C ? ? ? ? BF 05 00 00 00";
+constexpr std::string_view kValidateForeignPattern309 = "3D ? 01 00 00 0F 93 C0";
 
 // Five generated frames, the count both patched sites carry.
 constexpr uint8_t kMaxGeneratedFrames = 5;
@@ -112,8 +135,45 @@ std::string Hex(const uint8_t* bytes, size_t count)
     return out;
 }
 
-// Rewrites count and neutralises the architecture clamp, so MultiFrameCountMax is published as five.
-bool PatchAdvertise(HMODULE module)
+// What MfgPatch::Commit reads and writes through in the running process. The module is mapped
+// readable, so a read is a copy; a write goes through WriteBytes for the protection change and the
+// instruction-cache flush.
+struct LiveOps
+{
+    bool Read(uintptr_t address, uint8_t* out, size_t count)
+    {
+        std::memcpy(out, (const void*) address, count);
+        return true;
+    }
+
+    bool Write(uintptr_t address, const uint8_t* bytes, size_t count) { return WriteBytes(address, bytes, count); }
+};
+
+// What a gate search found. Foreign carries the architecture constant the gate compares against when
+// it is not 0x1b0.
+struct GateMatch
+{
+    enum Kind
+    {
+        Found,
+        Missing,
+        Foreign
+    } kind = Missing;
+
+    uint32_t foreignArch = 0;
+};
+
+GateMatch ForeignGate(uintptr_t constantAt)
+{
+    GateMatch match;
+    match.kind = GateMatch::Foreign;
+    std::memcpy(&match.foreignArch, (const void*) constantAt, sizeof(match.foreignArch));
+    return match;
+}
+
+// Plans the rewrite of the count and the neutralisation of the architecture clamp, so
+// MultiFrameCountMax is published as five.
+GateMatch PlanAdvertise(HMODULE module, std::vector<MfgPatch::Site>& plan, LiveOps& ops)
 {
     if (const auto at309 = scanner::GetAddress(module, kAdvertisePattern309); at309 != 0)
     {
@@ -124,32 +184,39 @@ bool PatchAdvertise(HMODULE module)
         LOG_INFO("MFG unlock: advertise (310.9) at {:X}, jl {} -> {}", at309,
                  Hex((const uint8_t*) branchAt, sizeof(nop)), Hex(nop, sizeof(nop)));
 
-        return WriteBytes(branchAt, nop, sizeof(nop));
+        return { MfgPatch::AddSite(plan, ops, branchAt, nop, sizeof(nop)) ? GateMatch::Found : GateMatch::Missing };
     }
 
-    const auto address = scanner::GetAddress(module, kAdvertisePattern);
-
-    if (address == 0)
+    if (const auto address = scanner::GetAddress(module, kAdvertisePattern); address != 0)
     {
-        LOG_WARN("MFG unlock: the advertise signature did not match, nvngx_dlssg.dll left alone");
-        return false;
+        // Offsets within the matched sequence: the r8d immediate, and the cmovl.
+        const auto countAt = address + 7;
+        const auto cmovAt = address + 17;
+
+        const uint8_t count[] = { kMaxGeneratedFrames };
+        const uint8_t nop[] = { 0x0F, 0x1F, 0x40, 0x00 };
+
+        LOG_INFO("MFG unlock: advertise at {:X}, count {} -> {}, cmovl {} -> {}", address, *(const uint8_t*) countAt,
+                 kMaxGeneratedFrames, Hex((const uint8_t*) cmovAt, sizeof(nop)), Hex(nop, sizeof(nop)));
+
+        const bool planned = MfgPatch::AddSite(plan, ops, countAt, count, sizeof(count)) &&
+                             MfgPatch::AddSite(plan, ops, cmovAt, nop, sizeof(nop));
+        return { planned ? GateMatch::Found : GateMatch::Missing };
     }
 
-    // Offsets within the matched sequence: the r8d immediate, and the cmovl.
-    const auto countAt = address + 7;
-    const auto cmovAt = address + 17;
+    // The constant sits at offset 2 in the 310.9 shape and 13 in the older one.
+    if (const auto foreign = scanner::GetAddress(module, kAdvertiseForeignPattern309); foreign != 0)
+        return ForeignGate(foreign + 2);
 
-    const uint8_t count[] = { kMaxGeneratedFrames };
-    const uint8_t nop[] = { 0x0F, 0x1F, 0x40, 0x00 };
+    if (const auto foreign = scanner::GetAddress(module, kAdvertiseForeignPattern); foreign != 0)
+        return ForeignGate(foreign + 13);
 
-    LOG_INFO("MFG unlock: advertise at {:X}, count {} -> {}, cmovl {} -> {}", address, *(const uint8_t*) countAt,
-             kMaxGeneratedFrames, Hex((const uint8_t*) cmovAt, sizeof(nop)), Hex(nop, sizeof(nop)));
-
-    return WriteBytes(countAt, count, sizeof(count)) && WriteBytes(cmovAt, nop, sizeof(nop));
+    LOG_WARN("MFG unlock: the advertise signature did not match");
+    return {};
 }
 
-// Drops the Ada branch and raises the accepted count, so a request for five is not rejected.
-bool PatchValidate(HMODULE module)
+// Plans dropping the Ada branch and raising the accepted count, so a request for five is not rejected.
+GateMatch PlanValidate(HMODULE module, std::vector<MfgPatch::Site>& plan, LiveOps& ops)
 {
     if (const auto at309 = scanner::GetAddress(module, kValidatePattern309); at309 != 0)
     {
@@ -160,29 +227,36 @@ bool PatchValidate(HMODULE module)
         LOG_INFO("MFG unlock: validate (310.9) at {:X}, setae {} -> {}", at309,
                  Hex((const uint8_t*) setAt, sizeof(always)), Hex(always, sizeof(always)));
 
-        return WriteBytes(setAt, always, sizeof(always));
+        return { MfgPatch::AddSite(plan, ops, setAt, always, sizeof(always)) ? GateMatch::Found : GateMatch::Missing };
     }
 
-    const auto address = scanner::GetAddress(module, kValidatePattern);
-
-    if (address == 0)
+    if (const auto address = scanner::GetAddress(module, kValidatePattern); address != 0)
     {
-        LOG_WARN("MFG unlock: the validate signature did not match, nvngx_dlssg.dll left alone");
-        return false;
+        // Offsets within the matched sequence: the jl, and the immediate of the count test behind it.
+        const auto branchAt = address + 5;
+        const auto countAt = address + 9;
+
+        const uint8_t nop[] = { 0x90, 0x90 };
+        const uint8_t count[] = { kMaxGeneratedFrames };
+
+        LOG_INFO("MFG unlock: validate at {:X}, jl {} -> {}, count {} -> {}", address,
+                 Hex((const uint8_t*) branchAt, sizeof(nop)), Hex(nop, sizeof(nop)), *(const uint8_t*) countAt,
+                 kMaxGeneratedFrames);
+
+        const bool planned = MfgPatch::AddSite(plan, ops, branchAt, nop, sizeof(nop)) &&
+                             MfgPatch::AddSite(plan, ops, countAt, count, sizeof(count));
+        return { planned ? GateMatch::Found : GateMatch::Missing };
     }
 
-    // Offsets within the matched sequence: the jl, and the immediate of the count test behind it.
-    const auto branchAt = address + 5;
-    const auto countAt = address + 9;
+    // cmp eax, imm32 in both shapes: the constant follows the 3D opcode.
+    if (const auto foreign = scanner::GetAddress(module, kValidateForeignPattern309); foreign != 0)
+        return ForeignGate(foreign + 1);
 
-    const uint8_t nop[] = { 0x90, 0x90 };
-    const uint8_t count[] = { kMaxGeneratedFrames };
+    if (const auto foreign = scanner::GetAddress(module, kValidateForeignPattern); foreign != 0)
+        return ForeignGate(foreign + 1);
 
-    LOG_INFO("MFG unlock: validate at {:X}, jl {} -> {}, count {} -> {}", address,
-             Hex((const uint8_t*) branchAt, sizeof(nop)), Hex(nop, sizeof(nop)), *(const uint8_t*) countAt,
-             kMaxGeneratedFrames);
-
-    return WriteBytes(branchAt, nop, sizeof(nop)) && WriteBytes(countAt, count, sizeof(count));
+    LOG_WARN("MFG unlock: the validate signature did not match");
+    return {};
 }
 
 // Gives Ada the Blackwell kernels the module already carries.
@@ -201,6 +275,9 @@ bool PatchValidate(HMODULE module)
 // kernel when it asks for Ada's.
 //
 // Nothing is copied in and no payload changes length. A container without both images is left alone.
+//
+// Each container is one commit: its directive, its Blackwell label and every parked Ada label land
+// together or not at all, so the driver never sees a container where sm_89 answers twice or not at all.
 constexpr uint32_t kArchAda = 89;
 constexpr uint32_t kArchBlackwell = 120;
 
@@ -211,7 +288,15 @@ constexpr uint32_t kArchParked = 122;
 constexpr size_t kImagePayloadSize = 8;
 constexpr size_t kImageArch = 28;
 
-bool PatchBlackwellKernels(HMODULE module)
+// Containers that took the swap, and containers whose commit failed and was undone.
+struct KernelSwap
+{
+    unsigned committed = 0;
+    unsigned failed = 0;
+    bool broken = false;
+};
+
+KernelSwap PatchBlackwellKernels(HMODULE module, LiveOps& ops)
 {
     auto base = reinterpret_cast<uint8_t*>(module);
     auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
@@ -219,7 +304,7 @@ bool PatchBlackwellKernels(HMODULE module)
     auto section = IMAGE_FIRST_SECTION(nt);
 
     const uint8_t magic[] = { 0x50, 0xED, 0x55, 0xBA };
-    unsigned int rewritten = 0;
+    KernelSwap swap;
 
     for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
     {
@@ -287,50 +372,84 @@ bool PatchBlackwellKernels(HMODULE module)
             if (at == bodyEnd)
                 continue;
 
-            if (!WriteBytes(reinterpret_cast<uintptr_t>(at), reinterpret_cast<const uint8_t*>(to), sizeof(to) - 1))
-                continue;
-
             const uint32_t ada89 = kArchAda;
             const uint32_t parked = kArchParked;
 
-            WriteBytes(reinterpret_cast<uintptr_t>(blackwell + kImageArch), reinterpret_cast<const uint8_t*>(&ada89),
-                       sizeof(ada89));
+            std::vector<MfgPatch::Site> plan;
+            bool planned = MfgPatch::AddSite(plan, ops, reinterpret_cast<uintptr_t>(at),
+                                             reinterpret_cast<const uint8_t*>(to), sizeof(to) - 1) &&
+                           MfgPatch::AddSite(plan, ops, reinterpret_cast<uintptr_t>(blackwell + kImageArch),
+                                             reinterpret_cast<const uint8_t*>(&ada89), sizeof(ada89));
 
             for (uint8_t* image : ada)
-                WriteBytes(reinterpret_cast<uintptr_t>(image + kImageArch), reinterpret_cast<const uint8_t*>(&parked),
-                           sizeof(parked));
+                planned = planned && MfgPatch::AddSite(plan, ops, reinterpret_cast<uintptr_t>(image + kImageArch),
+                                                       reinterpret_cast<const uint8_t*>(&parked), sizeof(parked));
 
-            ++rewritten;
+            if (!planned)
+            {
+                ++swap.failed;
+                continue;
+            }
+
+            switch (MfgPatch::Commit(plan, ops))
+            {
+            case MfgPatch::Outcome::Committed:
+            case MfgPatch::Outcome::AlreadyApplied:
+                ++swap.committed;
+                break;
+            case MfgPatch::Outcome::RollbackFailed:
+                swap.broken = true;
+                [[fallthrough]];
+            default:
+                ++swap.failed;
+                break;
+            }
         }
     }
 
-    LOG_INFO("MFG unlock: {} kernel containers answer Ada with the Blackwell image", rewritten);
+    LOG_INFO("MFG unlock: {} kernel containers answer Ada with the Blackwell image, {} failed to (the summary says "
+             "whether they were put back)",
+             swap.committed, swap.failed);
 
-    return rewritten > 0;
+    return swap;
 }
 
-// Raises the wrapper's own ceiling to match, so the min() keeps what nvngx published.
-bool PatchWrapperClamp(HMODULE module)
+// Plans raising the wrapper's own ceiling to match, so the min() keeps what nvngx published. A
+// ceiling that is already five or more is planned as a site with nothing to write.
+bool PlanWrapperClamp(HMODULE module, std::vector<MfgPatch::Site>& plan, LiveOps& ops)
 {
-    const auto address = scanner::GetAddress(module, kWrapperClampPattern);
+    // The ceiling's immediate sits at offset 2 behind the 41 B8 of mov r8d, and at offset 1 behind the
+    // BA of mov edx.
+    uintptr_t countAt = 0;
+    const char* shape = "";
 
-    if (address == 0)
+    if (const auto address = scanner::GetAddress(module, kWrapperClampPattern); address != 0)
     {
-        LOG_WARN("MFG unlock: the wrapper clamp signature did not match, sl.dlss_g.dll left alone");
+        countAt = address + 2;
+        shape = "r8d";
+    }
+    else if (const auto address = scanner::GetAddress(module, kWrapperClampPatternEdx); address != 0)
+    {
+        countAt = address + 1;
+        shape = "edx";
+    }
+    else
+    {
+        LOG_WARN("MFG unlock: the wrapper clamp signature did not match, sl.dlss_g.dll's ceiling left alone");
         return false;
     }
 
-    // The r8d immediate of the ceiling this clamps against.
-    const auto countAt = address + 2;
-    const uint8_t count[] = { kMaxGeneratedFrames };
+    const uint8_t current = *(const uint8_t*) countAt;
+    const uint8_t count[] = { std::max(current, kMaxGeneratedFrames) };
 
-    LOG_INFO("MFG unlock: wrapper clamp at {:X}, count {} -> {}", address, *(const uint8_t*) countAt,
-             kMaxGeneratedFrames);
+    LOG_INFO("MFG unlock: wrapper clamp ({}) at {:X}, count {} -> {}", shape, countAt, current, count[0]);
 
-    return WriteBytes(countAt, count, sizeof(count));
+    return MfgPatch::AddSite(plan, ops, countAt, count, sizeof(count));
 }
 
-bool PatchSlDrsClamp(HMODULE mod)
+// Plans removing the driver profile's cap on generated frames. Only seen in Streamline 2.14 so far; the
+// wrappers before it (2.7 to 2.9 here) carry no such check, so its absence there is not a miss.
+bool PlanSlDrsClamp(HMODULE mod, std::vector<MfgPatch::Site>& plan, LiveOps& ops)
 {
     auto base = reinterpret_cast<uint8_t*>(mod);
     if (!base)
@@ -371,7 +490,7 @@ bool PatchSlDrsClamp(HMODULE mod)
 
     if (hits != 1 || found == nullptr)
     {
-        LOG_WARN("MFG unlock: found {} DRS max-clamp anchors in sl.dlss_g.dll (expected 1); leaving DRS clamp alone",
+        LOG_INFO("MFG unlock: found {} DRS max-clamp anchors in sl.dlss_g.dll (expected 1); leaving DRS clamp alone",
                  hits);
         return false;
     }
@@ -394,14 +513,10 @@ bool PatchSlDrsClamp(HMODULE mod)
     std::memcpy(replacement + 1, &jmp_disp, 4);
     replacement[5] = 0x90;
 
-    if (WriteBytes(reinterpret_cast<uintptr_t>(je), replacement, sizeof(replacement)))
-    {
-        LOG_INFO("MFG unlock: removed the DRS 'max generated frames' clamp in sl.dlss_g.dll (je->jmp); "
-                 "the driver profile can no longer cap MFG to 2x");
-        return true;
-    }
-    LOG_WARN("MFG unlock: could not patch the DRS max-clamp guard");
-    return false;
+    LOG_INFO("MFG unlock: the DRS 'max generated frames' clamp in sl.dlss_g.dll, je -> jmp; the driver profile "
+             "can no longer cap MFG to 2x");
+
+    return MfgPatch::AddSite(plan, ops, reinterpret_cast<uintptr_t>(je), replacement, sizeof(replacement));
 }
 
 // Per-patch outcome for the one-line summary TryApply prints once per module. A miss is a signature
@@ -409,10 +524,21 @@ bool PatchSlDrsClamp(HMODULE mod)
 // path a Patch* function can take lands here, so a partially applied patcher cannot pass for a whole
 // one. A skip is a patch that was not attempted on this build or was turned off in config, which is
 // not a failure and must not read like one.
+//
+// Held is a gate that matched but was not written because its partner did not: the provider would
+// otherwise advertise a count its validator refuses. Foreign is a gate that some other unlocker has
+// already rewritten. RolledBack is a write or read-back that failed and was undone; Broken is one that
+// could not be undone, the only outcome that leaves a module in an unknown state.
 enum class PatchStatus
 {
     Ok,
+    Already,
     Miss,
+    Held,
+    Foreign,
+    Stale,
+    RolledBack,
+    Broken,
     Skip
 };
 
@@ -422,14 +548,80 @@ const char* Status(PatchStatus status)
     {
     case PatchStatus::Ok:
         return "ok";
+    case PatchStatus::Already:
+        return "ok(already)";
     case PatchStatus::Miss:
         return "MISS";
+    case PatchStatus::Held:
+        return "HELD";
+    case PatchStatus::Foreign:
+        return "foreign";
+    case PatchStatus::Stale:
+        return "STALE";
+    case PatchStatus::RolledBack:
+        return "ROLLED-BACK";
+    case PatchStatus::Broken:
+        return "BROKEN";
     case PatchStatus::Skip:
         return "skip";
     }
 
     return "?";
 }
+
+PatchStatus FromOutcome(MfgPatch::Outcome outcome)
+{
+    switch (outcome)
+    {
+    case MfgPatch::Outcome::Committed:
+        return PatchStatus::Ok;
+    case MfgPatch::Outcome::AlreadyApplied:
+        return PatchStatus::Already;
+    case MfgPatch::Outcome::Stale:
+        return PatchStatus::Stale;
+    case MfgPatch::Outcome::RolledBack:
+        return PatchStatus::RolledBack;
+    case MfgPatch::Outcome::RollbackFailed:
+        return PatchStatus::Broken;
+    }
+
+    return PatchStatus::Broken;
+}
+
+bool Applied(PatchStatus status) { return status == PatchStatus::Ok || status == PatchStatus::Already; }
+
+// Skip and foreign are not faults of ours; everything else that is not applied is.
+bool Faulted(PatchStatus status)
+{
+    return !Applied(status) && status != PatchStatus::Skip && status != PatchStatus::Foreign;
+}
+
+// "<file> <version>" for the summary lines, so a report says which build a miss belongs to.
+std::string Describe(HMODULE module)
+{
+    wchar_t modulePath[MAX_PATH] = {};
+    GetModuleFileNameW(module, modulePath, MAX_PATH);
+
+    std::string out = wstring_to_string(std::filesystem::path(modulePath).filename().wstring());
+
+    if (version_t v; Util::GetFileVersion(modulePath, &v))
+        out += std::format(" {}.{}.{}.{}", v.major, v.minor, v.patch, v.reserved);
+    else
+        out += " (no version)";
+
+    return out;
+}
+
+version_t ModuleVersion(HMODULE module)
+{
+    wchar_t modulePath[MAX_PATH] = {};
+    GetModuleFileNameW(module, modulePath, MAX_PATH);
+
+    version_t v;
+    Util::GetFileVersion(modulePath, &v);
+    return v;
+}
+
 } // namespace
 
 void MfgUnlock::TryApply(HMODULE provider)
@@ -452,6 +644,8 @@ void MfgUnlock::TryApply(HMODULE provider)
     static std::vector<HMODULE> snippetsDone;
     static bool wrapperDone = false;
 
+    LiveOps ops;
+
     {
         HMODULE module = provider != nullptr ? provider : GetModuleHandleW(L"nvngx_dlssg.dll");
 
@@ -461,11 +655,45 @@ void MfgUnlock::TryApply(HMODULE provider)
 
             wchar_t modulePath[MAX_PATH] = {};
             GetModuleFileNameW(module, modulePath, MAX_PATH);
-            const std::string moduleName = wstring_to_string(std::filesystem::path(modulePath).filename().wstring());
+            const std::string moduleName = Describe(module);
             LOG_INFO("MFG unlock: DLSS-G provider at {}", wstring_to_string(modulePath));
 
-            const PatchStatus advertise = PatchAdvertise(module) ? PatchStatus::Ok : PatchStatus::Miss;
-            const PatchStatus validate = PatchValidate(module) ? PatchStatus::Ok : PatchStatus::Miss;
+            // Both gates are planned before either is written, and written as one commit. A provider
+            // whose advertise took and whose validate did not would publish five generated frames and
+            // then refuse the game's request for them.
+            std::vector<MfgPatch::Site> gates;
+            const GateMatch advertiseMatch = PlanAdvertise(module, gates, ops);
+            const GateMatch validateMatch = PlanValidate(module, gates, ops);
+
+            const auto unmatched = [](const GateMatch& match)
+            {
+                return match.kind == GateMatch::Foreign ? PatchStatus::Foreign
+                       : match.kind == GateMatch::Found ? PatchStatus::Held
+                                                        : PatchStatus::Miss;
+            };
+
+            PatchStatus advertise = unmatched(advertiseMatch);
+            PatchStatus validate = unmatched(validateMatch);
+
+            if (advertiseMatch.kind == GateMatch::Found && validateMatch.kind == GateMatch::Found)
+            {
+                const auto outcome = MfgPatch::Commit(gates, ops);
+                advertise = validate = FromOutcome(outcome);
+
+                if (!Applied(advertise))
+                    LOG_WARN("MFG unlock: the gate commit on {} was {}; the provider keeps NVIDIA's gates", moduleName,
+                             MfgPatch::OutcomeName(outcome));
+            }
+
+            if (advertiseMatch.kind == GateMatch::Foreign || validateMatch.kind == GateMatch::Foreign)
+            {
+                const uint32_t arch =
+                    advertiseMatch.kind == GateMatch::Foreign ? advertiseMatch.foreignArch : validateMatch.foreignArch;
+                LOG_INFO("MFG unlock: {} compares against architecture 0x{:X} where NVIDIA's builds compare against "
+                         "0x1B0: most likely another unlocker has been here first (MFGAdaUnlock writes 0x190). "
+                         "Left alone, so the two do not patch over each other",
+                         moduleName, arch);
+            }
 
             // Default on where it applies: on Ada the unlock alone produces frames that do not advance
             // the picture, so the two belong together. dlssCapable is set from the same field, so an
@@ -481,21 +709,37 @@ void MfgUnlock::TryApply(HMODULE provider)
             const bool ada =
                 gpu.vendorId == VendorId::Nvidia && gpu.nvidiaArchInfo.architecture_id == NV_GPU_ARCHITECTURE_AD100;
 
+            // Only on top of our own gates, unless forced. Without them there is no MFG to fix, and a
+            // module another unlocker owns may have had its kernels reworked by it as well.
+            const auto& kernelsOption = Config::Instance()->FGDLSSGAdaBlackwellKernels;
+            const bool forced = kernelsOption.has_value() && kernelsOption.value();
+            const bool ourGates = Applied(advertise) && Applied(validate);
+
             // Skip is not a miss: a build or a card that does not want the kernel swap says so here,
             // and the summary must not read it as a half-applied patch.
             PatchStatus blackwellKernels = PatchStatus::Skip;
-            if (Config::Instance()->FGDLSSGAdaBlackwellKernels.value_or(ada))
-                blackwellKernels = PatchBlackwellKernels(module) ? PatchStatus::Ok : PatchStatus::Miss;
+            bool kernelsBroken = false;
+            if (kernelsOption.value_or(ada) && (ourGates || forced))
+            {
+                const KernelSwap swap = PatchBlackwellKernels(module, ops);
+                kernelsBroken = swap.broken;
+                blackwellKernels = swap.broken          ? PatchStatus::Broken
+                                   : swap.failed != 0   ? PatchStatus::RolledBack
+                                   : swap.committed > 0 ? PatchStatus::Ok
+                                                        : PatchStatus::Miss;
+            }
 
             // One line so a half-applied module cannot hide behind a single buried warning in a
             // 180k-line log: WARN the moment any patch missed, INFO only when the module is whole.
-            if (advertise == PatchStatus::Miss || validate == PatchStatus::Miss ||
-                blackwellKernels == PatchStatus::Miss)
-                LOG_WARN("MFG unlock summary ({}): advertise={} validate={} blackwellKernels={}", moduleName,
-                         Status(advertise), Status(validate), Status(blackwellKernels));
+            const auto line = std::format("MFG unlock summary ({}): advertise={} validate={} blackwellKernels={}",
+                                          moduleName, Status(advertise), Status(validate), Status(blackwellKernels));
+
+            if (advertise == PatchStatus::Broken || kernelsBroken)
+                LOG_ERROR("{}", line);
+            else if (Faulted(advertise) || Faulted(validate) || Faulted(blackwellKernels))
+                LOG_WARN("{}", line);
             else
-                LOG_INFO("MFG unlock summary ({}): advertise={} validate={} blackwellKernels={}", moduleName,
-                         Status(advertise), Status(validate), Status(blackwellKernels));
+                LOG_INFO("{}", line);
         }
     }
 
@@ -505,18 +749,32 @@ void MfgUnlock::TryApply(HMODULE provider)
         {
             wrapperDone = true;
 
-            const PatchStatus wrapperClamp = PatchWrapperClamp(module) ? PatchStatus::Ok : PatchStatus::Miss;
-            const PatchStatus drsClamp = PatchSlDrsClamp(module) ? PatchStatus::Ok : PatchStatus::Miss;
+            // The two wrapper patches are independent ceilings, so each is its own commit: one missing
+            // does not make the other wrong.
+            std::vector<MfgPatch::Site> clampPlan;
+            const PatchStatus wrapperClamp = PlanWrapperClamp(module, clampPlan, ops)
+                                                 ? FromOutcome(MfgPatch::Commit(clampPlan, ops))
+                                                 : PatchStatus::Miss;
+
+            std::vector<MfgPatch::Site> drsPlan;
+            PatchStatus drsClamp = PatchStatus::Skip;
+            if (PlanSlDrsClamp(module, drsPlan, ops))
+                drsClamp = FromOutcome(MfgPatch::Commit(drsPlan, ops));
+            else if (ModuleVersion(module) >= version_t(2, 14, 0, 0))
+                drsClamp = PatchStatus::Miss;
 
             // Same one-line summary for the wrapper. This is the patch that half-applied in the
             // Crimson Desert run - wrapperClamp missed while everything else took - and the miss was
             // one line lost in the log; here it is the level of the whole summary.
-            if (wrapperClamp == PatchStatus::Miss || drsClamp == PatchStatus::Miss)
-                LOG_WARN("MFG unlock summary (sl.dlss_g.dll): wrapperClamp={} drsClamp={}", Status(wrapperClamp),
-                         Status(drsClamp));
+            const auto line = std::format("MFG unlock summary ({}): wrapperClamp={} drsClamp={}", Describe(module),
+                                          Status(wrapperClamp), Status(drsClamp));
+
+            if (wrapperClamp == PatchStatus::Broken || drsClamp == PatchStatus::Broken)
+                LOG_ERROR("{}", line);
+            else if (Faulted(wrapperClamp) || Faulted(drsClamp))
+                LOG_WARN("{}", line);
             else
-                LOG_INFO("MFG unlock summary (sl.dlss_g.dll): wrapperClamp={} drsClamp={}", Status(wrapperClamp),
-                         Status(drsClamp));
+                LOG_INFO("{}", line);
         }
     }
 }

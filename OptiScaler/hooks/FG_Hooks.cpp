@@ -1426,8 +1426,10 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     // The DLSS-NR present hook: the frame is finished at this point, and it still is the frame
     // frame generation will interpolate FROM, so enhancing it here enhances the generated frames
     // with it. It runs before the original present, which is where the SL interposer captures the
-    // FG input, and before the wrapped swapchain's own hook on this same flip, which then stands
-    // down for the base frame and keeps enhancing the cycle's generated frames.
+    // FG input, and before the wrapped swapchain's own hook on this same flip. That hook stands down
+    // for every present within 16 counted flips of a pass here, generated ones included: a generated
+    // frame carries the edit only through the frame it was interpolated from, never by a pass of its own
+    // (nr-before-dlssg.md, statement 2).
     //
     // On the game's queue, which the FG object kept when the FG swapchain was created -- not
     // state.currentCommandQueue. FFX creates its real swapchain on a present queue of its own, through

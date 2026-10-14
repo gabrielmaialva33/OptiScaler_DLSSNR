@@ -68,6 +68,7 @@ Related, outside that sequence:
 - [nr-before-upscale.md](design/nr-before-upscale.md): optional NR before the upscaler (Stage=1).
 - [nr-menu-mode.md](design/nr-menu-mode.md): keeping NR running while the upscaler is idle in menus.
 - [present-real-guides.md](design/present-real-guides.md): checking that the guides the present pass reuses belong to the frame being presented (design; step 0, log only, built).
+- [nr-before-dlssg.md](design/nr-before-dlssg.md): running the present pass at the game's Streamline `Present`, before its DLSS-G interpolates, so generated frames carry the edit; NeuRotic's pre-FG adapter as prior art (design).
 - [dx11-native-dlss-guides.md](design/dx11-native-dlss-guides.md): NR for D3D11 games that call DLSS themselves, through `dlss_12` first (design).
 - [pr-improvements.md](design/pr-improvements.md): review of state, exposure, multipass and localization work taken from open PRs.
 
@@ -83,4 +84,5 @@ Related, outside that sequence:
 - [ngx-driver-616.md](design/ngx-driver-616.md): NVIDIA 616.64 and the loader's own route to feature 18.
 - [ngx-shutdown-order.md](design/ngx-shutdown-order.md): the D3D12 NGX core shutdown ABI.
 - [session-guard.md](design/session-guard.md): keeping NR off for the next launch after a session that ended without closing while NR ran.
+- [dred.md](design/dred.md): opt-in D3D12 DRED, so a device removal on native Windows names the queue, the command list and the operation the GPU stopped at.
 - [../history/FORWARDER_INVESTIGATION.md](../history/FORWARDER_INVESTIGATION.md) and [retoque/dlssnr/forwarder/README.md](../../retoque/dlssnr/forwarder/README.md) (linked, not design notes).

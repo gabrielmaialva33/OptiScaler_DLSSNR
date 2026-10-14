@@ -12,6 +12,9 @@
 #include <dlssnr/DlssNr_Submission.h>
 #include <dlssnr/DlssNr_ModelLog.h>
 #include <dlssnr/DlssNr_Session.h>
+#include <dlssnr/DlssNr_Dred.h>
+#include <dlssnr/DlssNr_PresentBoundary.h>
+#include <dlssnr/DlssNr_SlBoundaryProbe.h>
 #include <dlssnr/DlssNr_DirectRuntime.h>
 #include <dlssnr/DlssNr_NgxInfo.h>
 #include <dlssnr/DlssNr_PresentColour.h>
@@ -3549,6 +3552,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         reportSkip("D3D12 device removed or hung");
         LOG_ERROR("DLSS-NR: D3D12 device removed or hung (reason: 0x{:08X})", (unsigned) removedReason);
+        DlssNr::Dred::Report(device);
         device->Release();
         return false;
     }
@@ -6094,6 +6098,37 @@ static bool PresentHookLive()
     const long long at = g_presentHookAtMs.load();
     return at != 0 && NowMs() - at < 500;
 }
+
+// The pass at the game's own Present, ahead of its DLSS-G (RunPresentPass's boundary entry), ran within the last half
+// second. While it is live the entries below it stand down.
+static std::atomic<long long> g_boundaryAtMs { 0 };
+static bool BoundaryLive()
+{
+    const long long at = g_boundaryAtMs.load();
+    return at != 0 && NowMs() - at < 500;
+}
+
+// What the present pass needs to know about the game's own DLSS-G (DlssNr_PresentBoundary.h). Notes it for Auto as a
+// side effect, and says so once.
+static DlssNr::PresentBoundary::Inputs BoundaryInputs(uint32_t hookMethod, bool fgHook, bool boundary = false)
+{
+    auto& state = State::Instance();
+
+    DlssNr::PresentBoundary::Inputs in;
+    in.hookMethod = hookMethod;
+    in.fgHook = fgHook;
+    in.ownFgActive = state.currentFG != nullptr && state.currentFG->IsActive() && !state.currentFG->IsPaused();
+    in.gameDlssgSet = state.dlssgLastSetMode != sl::DLSSGMode::eOff;
+    in.gameDlssgCount = state.dlssgDetectedInterpolationCount;
+    in.boundaryLive = boundary || BoundaryLive();
+
+    if (DlssNr::PresentBoundary::NoteGameDlssg(in) && hookMethod == 0)
+        LOG_INFO("DLSS-NR: the game's own DLSS-G is active, so Auto keeps the pass on the upscaler's output for this "
+                 "session: there DLSS-G interpolates frames that already carry the edit, while a present pass would "
+                 "edit one present of each cycle (nr-before-dlssg.md)");
+
+    return in;
+}
 static unsigned long long g_renderSeq = 0;
 static unsigned long long g_nrLastEnhancedSeq = 0;
 static unsigned long long g_nrLastEnhancedRecordedSeq = 0;
@@ -6549,6 +6584,10 @@ static bool EnsurePresentList(ID3D12Device* device)
             return false;
         }
 
+        // Named so a DRED report (DlssNr_Dred.h) attributes a removal in this list to the pass directly.
+        const std::wstring name = std::format(L"DLSS-NR present list {}", i);
+        g_presentList.allocator[i]->SetName(name.c_str());
+        g_presentList.list[i]->SetName(name.c_str());
         g_presentList.list[i]->Close();
     }
 
@@ -6898,6 +6937,11 @@ const char* HookStatus()
 
     if (method == 2)
     {
+        if (BoundaryLive())
+            return "present: at the game's own Present, ahead of its frame generation";
+        if (DlssNr::PresentBoundary::g_lastDeclined.load())
+            return "present: declined, the game's DLSS-G interpolates before this pass (HookMethod=1 edits the frames "
+                   "it interpolates)";
         if (g_temporalValid.load())
             return "present: active, swapchain source with DLSS temporal inputs";
         if (Config::Instance()->DlssNrRequireDlss.value_or_default())
@@ -6907,6 +6951,8 @@ const char* HookStatus()
 
     if (method == 0)
     {
+        if (DlssNr::PresentBoundary::g_gameDlssgSeen.load())
+            return "auto: upscaled, the game's DLSS-G would interpolate before a present pass";
         if (g_temporalValid.load() && PresentHookLive())
             return "auto: present, swapchain source with DLSS temporal inputs";
         return "auto: upscaled, the upscaler has handed over no temporal inputs yet";
@@ -6915,7 +6961,7 @@ const char* HookStatus()
     return "upscaled: active on the upscaler's output";
 }
 
-void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool fgHook)
+void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool fgHook, bool boundary)
 {
     const Config& cfg = *Config::Instance();
 
@@ -6925,6 +6971,9 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         DlssNr::SessionGuardOff();
         return;
     }
+
+    if (!boundary)
+        DlssNr::SlBoundaryProbe::NoteWrappedPresent(queue, fgHook);
 
     if (g_nr.failed || swapchain == nullptr || queue == nullptr)
         return;
@@ -6945,6 +6994,20 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         return;
     }
 
+    // The pass at the game's own Present owns every frame while it is live (nr-before-dlssg.md, step 1). The entries
+    // below it -- the wrapped swapchain, which under the game's DLSS-G sees its generated presents too, and the FG
+    // present hook -- stand down, uncounted, so the status line counts the game's presents at the boundary.
+    if (boundary)
+    {
+        if (g_boundaryAtMs.exchange(NowMs()) == 0)
+            LOG_INFO("DLSS-NR present: the pass runs at the game's own Present, ahead of its frame generation, on the "
+                     "game's queue (nr-before-dlssg.md, step 1)");
+    }
+    else if (BoundaryLive())
+    {
+        return;
+    }
+
     g_presentHookAtMs = NowMs();
 
     // Every present is counted once, whichever route owns the pass; it is the numerator of the
@@ -6952,17 +7015,20 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     // FG present hook and the wrapped swapchain's hook reach here for the same flip, so the wrapped
     // entry does not count while it is standing down for the FG one -- the same rule that keeps it
     // from drawing twice below. (Read 2.00x on a 30 fps reprojection session before this check.)
-    const bool wrapStandsDown = !fgHook && g_lastFgFlip != 0 && (g_presentFlip - g_lastFgFlip) < kFgHookTimeout;
+    const bool wrapStandsDown =
+        !fgHook && !boundary && g_lastFgFlip != 0 && (g_presentFlip - g_lastFgFlip) < kFgHookTimeout;
 
     if (!wrapStandsDown)
         ++g_presentFlip;
 
-    const uint32_t method = cfg.DlssNrHookMethod.value_or_default();
+    const auto boundaryInputs = BoundaryInputs(cfg.DlssNrHookMethod.value_or_default(), fgHook, boundary);
+    const auto verdict = DlssNr::PresentBoundary::Decide(boundaryInputs, g_temporalValid.load());
 
-    if (method != 2 && !(method == 0 && g_temporalValid.load()))
+    if (verdict == DlssNr::PresentBoundary::PresentVerdict::Upscaled)
     {
         // The upscaled route recorded (or declined) its pass on the upscaler's command list; this
         // is still the one place per present to say so.
+        DlssNr::PresentBoundary::g_lastDeclined = false;
         const char* upscaleReason = g_upscaleReason.load();
         ReportRuntimeStatus(g_upscaleApplied.load(), upscaleReason ? upscaleReason : "no upscaler evaluate yet");
         return;
@@ -6970,6 +7036,19 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
 
     if (wrapStandsDown)
         return;
+
+    // HookMethod=2 under the game's own DLSS-G, on this entry below it: the frame is shown as the game drew it rather
+    // than edited on one present of each cycle (DlssNr_PresentBoundary.h).
+    if (verdict == DlssNr::PresentBoundary::PresentVerdict::Declined)
+    {
+        if (!DlssNr::PresentBoundary::g_lastDeclined.exchange(true))
+            LOG_WARN("DLSS-NR: present pass declined: {}", DlssNr::PresentBoundary::kDeclinedReason);
+
+        ReportRuntimeStatus(false, DlssNr::PresentBoundary::kDeclinedReason);
+        return;
+    }
+
+    DlssNr::PresentBoundary::g_lastDeclined = false;
 
     // Fail-open startup guard: defer neural composition during initial frames (first 4 flips)
     // so swapchains, window sizing, and DXGI/VKD3D presentation pipelines settle into a steady state.
@@ -7446,6 +7525,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     syncInputs.fgOutput = state.activeFgOutput != FGOutput::NoFG;
     syncInputs.dlssgSeen = state.dlssgDetectedInterpolationCount > 0 || state.dlssgLastSetMode != sl::DLSSGMode::eOff;
     syncInputs.dlssgLoaded = dlssgLoaded;
+    syncInputs.boundary = boundary;
     const bool presentSync = DlssNr::PresentSyncWanted(cfg.DlssNrPresentSync, syncInputs);
     DlssNr::g_presentSyncWaits.store(presentSync, std::memory_order_relaxed);
 
@@ -7813,11 +7893,12 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     ReportSpatialContract(params, GetResource(params, NVSDK_NGX_Parameter_Color, "DLSSD.Color"), target, false,
                           static_cast<unsigned>(contractOutput.Width), contractOutput.Height);
 
-    const uint32_t hookMethod = cfg.DlssNrHookMethod.value_or_default();
-    if (hookMethod == 2 || (hookMethod == 0 && PresentHookLive()))
+    // Auto that has seen the game's own DLSS-G stays here (DlssNr_PresentBoundary.h).
+    const auto boundary = BoundaryInputs(cfg.DlssNrHookMethod.value_or_default(), false);
+    if (DlssNr::PresentBoundary::UpscaledCapturesForPresent(boundary, PresentHookLive()))
         CaptureTemporal(cmdList, params, frame);
 
-    if (hookMethod == 2 || (hookMethod == 0 && g_temporalValid.load() && PresentHookLive()))
+    if (DlssNr::PresentBoundary::UpscaledDefersToPresent(boundary, PresentHookLive(), g_temporalValid.load()))
     {
         coverage.sample.reason = "deferred to present-time hook";
         return;

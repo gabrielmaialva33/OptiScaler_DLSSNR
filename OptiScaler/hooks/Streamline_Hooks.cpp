@@ -9,6 +9,7 @@
 #include <misc/IdentifyGpu.h>
 #include <hooks/Reflex_Hooks.h>
 #include <framegen/dlssg/MfgUnlock.h>
+#include <dlssnr/DlssNr_SlBoundaryProbe.h>
 #include <hooks/Streamline_LogRepeat.h>
 #include <menu/menu_overlay_base.h>
 #include <framegen/nvngx/Nvngx_FG.h>
@@ -2145,6 +2146,8 @@ void StreamlineHooks::unhookInterposer()
 {
     LOG_FUNC();
 
+    DlssNr::SlBoundaryProbe::Uninstall();
+
     std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
@@ -2412,6 +2415,8 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
             }
         }
     }
+
+    DlssNr::SlBoundaryProbe::Install(slInterposer);
 
     State::EnableChecks(owner);
 }

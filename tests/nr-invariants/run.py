@@ -68,7 +68,9 @@ start = ini.index('[DlssNr]')
 following = re.search(r'^\[', ini[start + 1:], re.M)
 section = ini[start:start + 1 + following.start()] if following else ini[start:]
 
-members = re.findall(r'CustomOptional<[^;]*?>\s+(DlssNr\w+)\s*\{', config_h)
+# A NoDefault member (DlssNrPresentSync) is declared with no initialiser, so it ends in ';' rather
+# than '{'. Matching only '{' left it out of this check without anyone noticing.
+members = re.findall(r'CustomOptional<[^;]*?>\s+(DlssNr\w+)\s*[{;]', config_h)
 if len(members) < 40:
     fail(f'found only {len(members)} DlssNr members in Config.h; the parser no longer matches the file')
 

@@ -91,14 +91,18 @@ for today in ('if (pickedSlot < DlssNr::PresentGuides::kRingSize)', 'auto& clone
               'trackedSlot = pickedSlot;', 'temporalSeq = g_presentGuideRing.GetSlot(pickedSlot).sequence;',
               'g_nrLastEnhancedRecordedSeq = newestRecordedSeq;'):
     assert present.count(today) == 1, f'today\'s read changed: {today}'
-# Whole words, so another decision in the pass (the HDR present's PresentColourDecision) is not mistaken for this one.
-for decision in (r'\bDecide\(', r'\bDecision\b', r'\bg_guideIdentity\b', r'\bPresentGuideIdentity::'):
+# Whole words, so another decision in the pass (the HDR present's PresentColourDecision) is not mistaken for this one,
+# nor PresentBoundary::Decide, the route's own decision about the game's DLSS-G (DlssNr_PresentBoundary.h).
+for decision in (r'(?<!PresentBoundary::)\bDecide\(', r'\bDecision\b', r'\bg_guideIdentity\b',
+                 r'\bPresentGuideIdentity::'):
     assert not re.search(decision, present), f'RunPresentPass reads the decision: {decision}'
 
 # At the default HookMethod (1) and with the pass off, RunPresentPass returns before the pick.
 assert 'CustomOptional<uint32_t> DlssNrHookMethod { 1 };' in config
 assert present.index('if (!cfg.DlssNrEnabled.value_or_default())') < present.index(pick)
-assert present.index('if (method != 2 && !(method == 0 && g_temporalValid.load()))') < present.index(pick)
+# The placement is decided by DlssNr_PresentBoundary.h (HookMethod=1 is Upscaled there, tests/nr-present-boundary).
+assert present.index('if (verdict == DlssNr::PresentBoundary::PresentVerdict::Upscaled)') < present.index(pick)
+assert present.index('if (verdict == DlssNr::PresentBoundary::PresentVerdict::Declined)') < present.index(pick)
 
 # CapturedPresentGuides: the same for the bridge.
 bridge = function(renderer, 'bool CapturedPresentGuides(')
@@ -127,8 +131,9 @@ assert capture.count('StampPresentGuide(') == 1 and capture.count(stamp) == 1
 assert capture.index('cmdList->CopyTextureRegion(&dstMotion') < capture.index(stamp)
 assert renderer.count('StampPresentGuide(') == 2  # its definition and its one call
 assert renderer.count('CaptureTemporal(cmdList, params, frame);') == 1
-assert 'if (hookMethod == 2 || (hookMethod == 0 && PresentHookLive()))\n        CaptureTemporal(cmdList, params, frame);' \
-    in renderer
+# The capture happens only when a present pass would use it, decided by DlssNr_PresentBoundary.h.
+assert 'if (DlssNr::PresentBoundary::UpscaledCapturesForPresent(boundary, PresentHookLive()))\n' \
+       '        CaptureTemporal(cmdList, params, frame);' in renderer
 
 # Shutdown forgets the identity together with the ring.
 release = function(renderer, 'static void ReleasePresentTemporal(')

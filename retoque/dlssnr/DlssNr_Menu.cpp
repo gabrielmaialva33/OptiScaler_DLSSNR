@@ -9,6 +9,7 @@
 #include "DlssNr_ExposureScan.h"
 #include "DlssNr_GpuTiming.h"
 #include "DlssNr_ModelLog.h"
+#include "DlssNr_PresentBoundary.h"
 #include "DlssNr_PresentHdr.h"
 #include "DlssNr_PairCapture.h"
 #include "DlssNr_PresentSync.h"
@@ -830,7 +831,10 @@ void RenderMenu(Config* config, float menuResScale)
             if (!vkOnly && routeReport != DlssNr::Dx11Route::Report::NoPass)
             {
                 const char* status = DlssNr::HookStatus();
-                if (status != nullptr && status[0] != '\0')
+                // Amber when Present declined under the game's DLSS-G: the pass the user asked for is not running.
+                if (status != nullptr && status[0] != '\0' && DlssNr::PresentBoundary::g_lastDeclined.load())
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", status);
+                else if (status != nullptr && status[0] != '\0')
                     ImGui::TextUnformatted(status);
             }
         }

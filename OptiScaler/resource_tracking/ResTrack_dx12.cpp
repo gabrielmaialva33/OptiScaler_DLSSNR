@@ -2,6 +2,7 @@
 
 #include <dlssnr/DlssNr_ExposureScan.h>
 #include <dlssnr/DlssNr_Submission.h>
+#include <dlssnr/DlssNr_SlBoundaryProbe.h>
 
 #include "ResTrack_dx12.h"
 
@@ -733,6 +734,7 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
                                           ID3D12CommandList* const* ppCommandLists)
 {
     DlssNr::Submission::Batch nrSubmission(This, NumCommandLists, ppCommandLists);
+    DlssNr::SlBoundaryProbe::NoteExecute(This, NumCommandLists, ppCommandLists);
     o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
     nrSubmission.Submitted();
 }

@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "D3D12_Hooks.h"
 #include <dlssnr/DlssNr_ExposureScan.h>
+#include <dlssnr/DlssNr_Dred.h>
 
 #include <Util.h>
 #include <Config.h>
@@ -1454,6 +1455,7 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
         debugController->Release();
     }
 #endif
+    DlssNr::Dred::EnableBeforeDeviceCreation();
     IdentifyGpu::updateD3d12Capabilities(o_D3D12CreateDevice);
 
     DXGI_ADAPTER_DESC desc {};
@@ -1604,6 +1606,8 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
         LOG_DEBUG("Calling from hkD3D12CreateDevice, calling original CreateDevice");
         return o_CreateDevice(pFactory, pAdapter, MinimumFeatureLevel, riid, ppDevice);
     }
+
+    DlssNr::Dred::EnableBeforeDeviceCreation();
 
 #ifdef ENABLE_DEBUG_LAYER_DX12
     LOG_WARN("Debug layers active!");
