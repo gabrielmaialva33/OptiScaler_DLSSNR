@@ -3,6 +3,7 @@
 
 #include <lsfg/presenter/MfgPacing.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -227,6 +228,19 @@ static void Lists()
                 CHECK(ListForFrame(k, lists) >= ListForFrame(k - 1, lists));
         }
     CHECK(kTimestampsPerEntry == kMaxGeneratedFrames + 1);
+
+    // The generator places frame k on ListForFrame(k, handed) and reports how many lists it recorded into; the
+    // presenter maps frame k over that count. Both pick the same list, and the count is min(generated, handed).
+    for (uint32_t handed = 1; handed <= kMaxGeneratedFrames; ++handed)
+        for (uint32_t generated = 1; generated <= kMaxGeneratedFrames; ++generated)
+        {
+            uint32_t used = 0;
+            for (uint32_t k = 0; k < generated; ++k)
+                used = std::max(used, ListForFrame(k, handed) + 1);
+            CHECK(used == std::min(generated, handed));
+            for (uint32_t k = 0; k < generated; ++k)
+                CHECK(ListForFrame(k, used) == ListForFrame(k, handed));
+        }
 }
 
 static void Ready()

@@ -49,6 +49,8 @@ inline uint32_t OutputSetFor(uint64_t presentCount) { return uint32_t(presentCou
 
 // The interpolation list at whose end generated frame `frame` is complete, when its entry executed `lists` of them
 // (MFG_PRESENTER.md 4.2): frame k in list k, any frame past the last list in the last one; one list holds them all.
+// The generator places frame k with the same function over the lists it was handed (Lsfg::FfxDispatch), so it uses
+// min(generated, handed) of them, and the presenter's mapping over that count picks the same list.
 inline uint32_t ListForFrame(uint32_t frame, uint32_t lists) { return lists == 0 ? 0 : std::min(frame, lists - 1); }
 
 // GPU timestamps of one entry's interpolation lists: [0] the start of its first list, [1 + i] the end of list i.

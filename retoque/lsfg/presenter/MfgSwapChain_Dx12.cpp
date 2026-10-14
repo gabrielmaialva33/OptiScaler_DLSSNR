@@ -29,9 +29,11 @@
 // - interpolationThread: every present of an entry is spaced by the real frame time divided by the frames the entry
 //   presents (MfgPacing.h PresentDelta) instead of half of it.
 // - dispatchInterpolationCommands: asks the frame generation callback for N frames into N outputs of this present's
-//   output set and takes back how many it wrote; a callback that fails has its list closed before it is dropped; GPU
-//   timestamps around the interpolation list for the summary.
-// - presentInterpolated: the entry carries those frames, then the real one.
+//   output set, on one list per frame (Lsfg::DispatchDescFrameLists), and takes back how many it wrote and on how many
+//   lists; each list is executed with an interpolation fence signal of its own; a callback that fails has its lists
+//   closed before they are dropped; GPU timestamps around the interpolation lists for the summary.
+// - presentInterpolated: the entry carries those frames, each with its own list's fence, then the real one; the
+//   entry's first wait is the first list's fence, not the last.
 // - verifyBackbufferDuplicateResources / verifyInterpolationOutputs: outputs are created per set, on demand, up to N.
 // - setFrameGenerationConfig: fed by Lsfg::Presenter with the config FFX's provider would have built; the default
 //   present callback is this swapchain's own UI composition, with its objects as the context.
@@ -45,6 +47,7 @@
 #include "MfgSwapChain_Dx12.h"
 
 #include <Logger.h>
+#include <lsfg/Lsfg.h>
 
 #include <dx12/ffx_api_dx12.h>
 
@@ -361,7 +364,8 @@ DWORD WINAPI interpolationThread(LPVOID param)
                     int64_t previousPresentQPC = presenter->previousPresentQpc;
                     int64_t targetDelta = (previousPresentQPC + previousDelta) - preWaitQPC;
 
-                    // The fence of the entry's generated frames; none to wait for when it has none (FFX's
+                    // The fence of the entry's first generated frame (its own list's: the presenter thread waits
+                    // for each later frame's fence before compositing it); none to wait for when it has none (FFX's
                     // frames[Interpolated_1] is empty then).
                     const UINT64 interpolationValue =
                         entry.generatedFrames > 0 ? entry.frames[0].interpolationCompletedFenceValue : 0;
@@ -1274,24 +1278,42 @@ InterpolationResult MfgSwapChainDX12::dispatchInterpolationCommands()
     if (set.availabilityFenceValue != 0)
         presentInfo.interpolationQueue->Wait(presentInfo.compositionFenceGPU, set.availabilityFenceValue);
 
-    Dx12Commands* interpolationCommandList =
-        presentInfo.commandPool.get(presentInfo.interpolationQueue, L"getInterpolationCommandList()");
-    if (interpolationCommandList == nullptr)
+    // One list per generated frame asked (MFG_PRESENTER.md 4.2): the callback records what the frames share and frame 0
+    // on the first, frame k on list k, and each list is executed with a fence signal of its own, so frame k is
+    // composited as soon as its list is done. Each comes from the pool with an allocator of its own, reused only when
+    // the GPU has passed it. A pool that has no more to give stops the run there; the remaining frames go on the last.
+    Dx12Commands* commands[kMaxGeneratedFrames] = {};
+    ID3D12GraphicsCommandList* lists[kMaxGeneratedFrames] = {};
+    commands[0] = presentInfo.commandPool.get(presentInfo.interpolationQueue, L"getInterpolationCommandList()");
+    if (commands[0] == nullptr)
         return result;
+    lists[0] = commands[0]->reset();
 
-    auto dx12CommandList = interpolationCommandList->reset();
+    uint32_t listCount = 1;
+    for (; listCount < wanted; listCount++)
+    {
+        commands[listCount] = presentInfo.commandPool.get(presentInfo.interpolationQueue, L"interpolationListPerFrame");
+        if (commands[listCount] == nullptr)
+            break;
+        lists[listCount] = commands[listCount]->reset();
+    }
 
     // GPU timestamps for the summary: the start of the interpolation, then the end of each list.
     const bool timed = presentInfo.timingData != nullptr;
     const uint32_t timingSlot = timed ? uint32_t(timedEntries % kTimingSlots) : kNoTimingSlot;
     const UINT timingBase = timed ? timingSlot * kTimestampsPerEntry : 0;
     if (timed)
-        dx12CommandList->EndQuery(presentInfo.timingQueries, D3D12_QUERY_TYPE_TIMESTAMP, timingBase);
+        lists[0]->EndQuery(presentInfo.timingQueries, D3D12_QUERY_TYPE_TIMESTAMP, timingBase);
+
+    Lsfg::DispatchDescFrameLists frameLists {};
+    frameLists.listCount = listCount;
+    for (uint32_t i = 0; i < listCount; i++)
+        frameLists.lists[i] = lists[i];
 
     ffxDispatchDescFrameGeneration desc {};
     desc.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION;
-    desc.header.pNext = nullptr;
-    desc.commandList = dx12CommandList;
+    desc.header.pNext = listCount > 1 ? &frameLists.header : nullptr;
+    desc.commandList = lists[0];
     for (uint32_t k = 0; k < wanted; k++)
         desc.outputs[k] = ResourceFor(set.resource[k], FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     desc.presentColor = backbuffer;
@@ -1306,11 +1328,17 @@ InterpolationResult MfgSwapChainDX12::dispatchInterpolationCommands()
     uint32_t produced = 0;
     if (frameGenerationCallback(&desc, frameGenerationCallbackContext) == FFX_API_RETURN_OK)
     {
+        // The lists the callback recorded into, from the first; 1 when FFX interpolated, LSFG held the frame or the
+        // frame was cancelled. The rest stayed empty and are dropped.
+        const uint32_t used = std::clamp<uint32_t>(frameLists.listsUsed, 1, listCount);
+
         if (timed)
         {
-            dx12CommandList->EndQuery(presentInfo.timingQueries, D3D12_QUERY_TYPE_TIMESTAMP, timingBase + 1);
-            dx12CommandList->ResolveQueryData(presentInfo.timingQueries, D3D12_QUERY_TYPE_TIMESTAMP, timingBase, 2,
-                                              presentInfo.timingReadback, UINT64(timingBase) * sizeof(uint64_t));
+            for (uint32_t i = 0; i < used; i++)
+                lists[i]->EndQuery(presentInfo.timingQueries, D3D12_QUERY_TYPE_TIMESTAMP, timingBase + 1 + i);
+            lists[used - 1]->ResolveQueryData(presentInfo.timingQueries, D3D12_QUERY_TYPE_TIMESTAMP, timingBase,
+                                              1 + used, presentInfo.timingReadback,
+                                              UINT64(timingBase) * sizeof(uint64_t));
             timedEntries++;
 
             if (timestampQueue != presentInfo.interpolationQueue)
@@ -1323,11 +1351,16 @@ InterpolationResult MfgSwapChainDX12::dispatchInterpolationCommands()
             result.timestampFrequency = timestampFrequency;
         }
 
-        interpolationCommandList->execute(true);
-
-        presentInfo.interpolationQueue->Signal(presentInfo.interpolationFence, ++interpolationFenceValue);
-        result.listFence[0] = interpolationFenceValue;
-        result.lists = 1;
+        // In order on the interpolation queue, each in its own submission followed by its own fence value.
+        for (uint32_t i = 0; i < used; i++)
+        {
+            commands[i]->execute(true);
+            presentInfo.interpolationQueue->Signal(presentInfo.interpolationFence, ++interpolationFenceValue);
+            result.listFence[i] = interpolationFenceValue;
+        }
+        for (uint32_t i = used; i < listCount; i++)
+            commands[i]->drop(true);
+        result.lists = used;
 
         // The callback says how many it wrote (FSR-FG's Lsfg::TakesFrame lowers it to 1 when FFX, which writes
         // outputs[0] only, interpolates instead).
@@ -1336,7 +1369,8 @@ InterpolationResult MfgSwapChainDX12::dispatchInterpolationCommands()
     else
     {
         // FFX drops it with the list still open, which the next Reset of its allocator would trip over.
-        interpolationCommandList->drop(true);
+        for (uint32_t i = 0; i < listCount; i++)
+            commands[i]->drop(true);
     }
 
     // reset condition if at least one frame was interpolated
@@ -1383,7 +1417,10 @@ void MfgSwapChainDX12::presentInterpolated(UINT SyncInterval, UINT)
     entry.vsync = bVsync;
     entry.tearingSupported = tearingSupported;
     entry.numFramesSentForPresentationBase = framesSentForPresentation;
-    entry.interpolationCompletedFenceValue = interpolationFenceValue;
+    // The presenter thread's first wait for the entry: the first list, which holds everything the frames share and the
+    // real frame's ingest. Each generated frame waits for its own list before it is composited (FrameInfo).
+    entry.interpolationCompletedFenceValue =
+        interpolation.lists > 0 ? interpolation.listFence[0] : interpolationFenceValue;
     entry.usePremulAlphaComposite =
         (presentInfo.uiCompositionFlags & FFX_FRAMEGENERATION_UI_COMPOSITION_FLAG_USE_PREMUL_ALPHA) != 0;
     entry.currentFrameID = currentFrameID;

@@ -13,6 +13,8 @@
 
 #include <cstdint>
 
+#include <ffx_api.h>
+
 struct ffxDispatchDescFrameGeneration;
 
 namespace Lsfg
@@ -28,13 +30,32 @@ bool BeginFrame(int fIndex, uint64_t frameId);
 // FSRFG_Dx12::DispatchCallback, at the hand-off to FFX. Returns the latch BeginFrame set for params->frameID, once.
 // On a frame FFX interpolates, with LSFG enabled, it looks at the presented frame and starts LSFG's build for it
 // on a worker.
-// When it returns false (FFX interpolates), it lowers params->numGeneratedFrames to 1: FFX writes outputs[0] only.
+// When it returns false (FFX interpolates), it lowers params->numGeneratedFrames to 1: FFX writes outputs[0] only; and
+// it unlinks a DispatchDescFrameLists, so FFX's DLL never receives a descriptor type it does not know.
 bool TakesFrame(int fIndex, ffxDispatchDescFrameGeneration* params);
 
+// Our MFG presenter's extension of ffxDispatchDescFrameGeneration, chained to its header.pNext (MFG_PRESENTER.md 4.2):
+// one open command list per generated frame asked, lists[0] being commandList, all of one queue's type and executed on
+// that queue in order, each followed by a fence signal of its own. So generated frame k can be composited as soon as
+// its list is done instead of after the last frame's. FfxDispatch records what every generated frame of the real frame
+// shares (ingest, the pre-pass) with frame 0 on lists[0], frame k on lists[LsfgMfg::ListForFrame(k, listCount)], and
+// sets listsUsed to how many it recorded into. Left at 1 (everything on commandList) by anything else: FFX
+// interpolating, LSFG holding the frame, a cancelled frame. FFX's own swapchain never attaches it, so x2 records
+// exactly as before.
+constexpr ffxStructType_t kDispatchDescTypeFrameLists = 0x4C534601u; // fork-owned, outside FFX's 0x0002xxxx range
+struct DispatchDescFrameLists
+{
+    ffxApiHeader header { kDispatchDescTypeFrameLists, nullptr };
+    uint32_t listCount = 0; // in: entries of lists[], lists[0] included
+    void* lists[4] = {};    // in: ID3D12GraphicsCommandList*, open
+    uint32_t listsUsed = 1; // out
+};
+
 // In place of FfxApiProxy::D3D12_Dispatch on a frame LSFG took: records ingest, the pre-pass and the
-// generated frame on FFX's interpolation list and sets numGeneratedFrames (0 while warming up, after a reset,
-// or when the frame cannot be served; FFX then shows only the real frame). Always returns FFX_API_RETURN_OK,
-// so FFX executes the list it handed over and the tracked resource states stay true.
+// generated frames on FFX's interpolation list (with a DispatchDescFrameLists attached, frame k on a list of its own)
+// and sets numGeneratedFrames (0 while warming up, after a reset, or when the frame cannot be served; FFX then shows
+// only the real frame). Always returns FFX_API_RETURN_OK, so FFX executes the list it handed over and the tracked
+// resource states stay true.
 uint32_t FfxDispatch(ffxDispatchDescFrameGeneration* params);
 
 // Whether LSFG took the last base frame FSR-FG configured (the latest BeginFrame latch): false while LSFG is off,

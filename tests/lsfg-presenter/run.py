@@ -66,6 +66,7 @@ router = (presenter / 'LsfgPresenter.cpp').read_text()
 swapchain = (presenter / 'MfgSwapChain_Dx12.cpp').read_text()
 swapchain_h = (presenter / 'MfgSwapChain_Dx12.h').read_text()
 lsfg = (repo / 'retoque/lsfg/Lsfg.cpp').read_text()
+framegen = (repo / 'retoque/lsfg/LsfgFrameGen_Dx12.cpp').read_text()
 
 # 2a. FSRFG_Dx12.cpp: nothing aimed at the swapchain context goes to FFX unrouted.
 for call in ('D3D12_Configure(&_swapChainContext', 'D3D12_DestroyContext(&_swapChainContext'):
@@ -137,10 +138,37 @@ if dispatch:
     check('desc.numGeneratedFrames = wanted;' in dispatch, 'the callback is not asked for N frames')
     check('produced = std::min(desc.numGeneratedFrames, wanted);' in dispatch,
           'the count shown is not what the callback wrote')
-    check('interpolationCommandList->drop(true);' in dispatch, 'a failed callback drops its list open')
     check(re.search(r'set\.availabilityFenceValue != 0\)\s*\n\s*presentInfo\.interpolationQueue->Wait\('
                     r'presentInfo\.compositionFenceGPU, set\.availabilityFenceValue\);', dispatch),
           'the interpolation queue does not wait for its output set')
+    # One list per generated frame (MFG_PRESENTER.md 4.2): handed over only when there is more than one, each list
+    # executed in its own submission with a fence value of its own, the unused ones dropped, all of them on failure.
+    check(dispatch.find('presentInfo.interpolationQueue->Wait(presentInfo.compositionFenceGPU') <
+          dispatch.find('frameGenerationCallback(&desc'), 'the output-set wait is not ahead of every list')
+    check('desc.header.pNext = listCount > 1 ? &frameLists.header : nullptr;' in dispatch,
+          'the per-frame lists are not handed to the callback (or are handed with one list)')
+    check(re.search(r'for \(uint32_t i = 0; i < used; i\+\+\)\s*\{\s*commands\[i\]->execute\(true\);\s*'
+                    r'presentInfo\.interpolationQueue->Signal\(presentInfo\.interpolationFence, '
+                    r'\+\+interpolationFenceValue\);\s*result\.listFence\[i\] = interpolationFenceValue;', dispatch),
+          'each interpolation list is not followed by a fence signal of its own')
+    check(re.search(r'for \(uint32_t i = used; i < listCount; i\+\+\)\s*commands\[i\]->drop\(true\);', dispatch),
+          'unused per-frame lists are not dropped (closed)')
+    check(re.search(r'else\s*\{[^}]*for \(uint32_t i = 0; i < listCount; i\+\+\)\s*commands\[i\]->drop\(true\);',
+                    dispatch), 'a failed callback leaves per-frame lists open')
+    check('lists[used - 1]->ResolveQueryData(' in dispatch, 'the timestamps are not resolved by the last list')
+present = body(swapchain, 'void MfgSwapChainDX12::presentInterpolated(UINT SyncInterval, UINT)')
+check(present is not None, 'presentInterpolated not found')
+if present:
+    # Frame k waits for its own list, the entry for the first one only.
+    check('fi.interpolationCompletedFenceValue = interpolation.listFence[ListForFrame(k, interpolation.lists)];'
+          in present, 'a generated frame does not carry its own list\'s fence')
+    check(re.search(r'entry\.interpolationCompletedFenceValue =\s*interpolation\.lists > 0 \? '
+                    r'interpolation\.listFence\[0\] : interpolationFenceValue;', present),
+          'the entry\'s first wait is not the first list\'s fence')
+composite = body(swapchain, 'HRESULT compositeSwapChainFrame(PresentInfo* presenter, PacingData* pacingEntry, uint32_t frameIndex)')
+check(composite is not None and re.search(r'if \(frameInfo\.generated\)\s*\n\s*presenter->presentQueue->Wait\('
+                                          r'presenter->interpolationFence, frameInfo\.interpolationCompletedFenceValue\);',
+                                          composite), 'a generated frame is composited without waiting for its list')
 
 # FGHooks detours these by code address; with /OPT:ICF a forwarder identical to another class's would be folded with it
 # and the detour would catch that class too. Each starts with the NOP that makes it unique.
@@ -180,6 +208,35 @@ takes = body(lsfg, 'bool TakesFrame(int fIndex, ffxDispatchDescFrameGeneration* 
 check(takes is not None and re.search(r'if \(!lsfg && params != nullptr && params->numGeneratedFrames > 1\)\s*\n\s*'
                                       r'params->numGeneratedFrames = 1;', takes),
       'TakesFrame does not lower numGeneratedFrames to 1 on the FFX path')
+check(takes is not None and re.search(r'if \(!lsfg && params != nullptr\)\s*\n\s*UnlinkFrameLists\(params\);', takes),
+      'TakesFrame hands FFX the per-frame lists descriptor')
+
+# 2d'. LSFG's side of the per-frame lists: frame k on its list, the list it leaves finished before the next starts.
+ffx_dispatch = body(lsfg, 'uint32_t FfxDispatch(ffxDispatchDescFrameGeneration* params)')
+check(ffx_dispatch is not None, 'FfxDispatch not found')
+if ffx_dispatch:
+    check('LsfgMfg::ListForFrame(k, lists)' in ffx_dispatch, 'FfxDispatch places frames other than by ListForFrame')
+    check(re.search(r'O\(\)\.context->Record\(list, io, frame, schedule\);[^}]*frameLists->listsUsed = '
+                    r'O\(\)\.context->LastListsUsed\(\);', ffx_dispatch, re.S),
+          'FfxDispatch does not report the lists it recorded into')
+record = body(framegen, 'void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, const FrameConstants& frame,')
+check(record is not None, 'Context_Dx12::Record not found')
+if record:
+    switch = re.search(r'if \(next != current\)\s*\{(.*?)\}', record, re.S)
+    check(switch is not None, 'Record has no list switch')
+    if switch:
+        step = switch.group(1)
+        check(step.find('_Flush(current);') >= 0 and step.find('_Flush(current);') < step.find('current = next;'),
+              'what a frame leaves pending is not issued on its own list before the next list starts')
+        check(step.find('current->SetDescriptorHeaps(1, heaps);') > step.find('current = next;'),
+              'the next list does not get the descriptor heap')
+        check('_boundPso = nullptr;' in step, 'the next list inherits a pipeline it never bound')
+    check(re.search(r'_Flush\(current\);\s*StudyTimestamp\(current\);', record),
+          'the last pending barriers are not issued on the last list')
+    check('current->ResolveQueryData(' in record and 'list->ResolveQueryData(' not in record,
+          'LSFG\'s GPU time is not resolved on the last list')
+    check('_ClearHistory(list);' in record and '_Ingest(list, io.presentColor, io.presentState);' in record,
+          'the clears or the ingest left the first list')
 
 # 2e. AMD's notice on every copied file; the bytecode is the SDK's.
 notice = ('Copyright (C) 2026 Advanced Micro Devices, Inc.', 'Permission is hereby granted, free of charge',

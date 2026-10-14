@@ -238,10 +238,12 @@ class Dx12Commands
 };
 
 // FFX's pool holds 32 lists per queue type and asserts when none is free. With N generated frames a real frame takes
-// one interpolation list, up to N + 1 composition lists and as many debug pacing lists, and the DIRECT bucket is
-// shared by the game queue and the present queue, so this one holds 64 and waits for the GPU to free one (every list
-// taken is executed or dropped, which signals its fence). After kWaitMs with none free, null: callers skip their
-// recording but keep every fence they signal.
+// up to N interpolation lists (one per generated frame, MFG_PRESENTER.md 4.2), up to N + 1 composition lists and as
+// many debug pacing lists, and the DIRECT bucket is shared by the game queue and the present queue (and the
+// interpolation lists without FGAsync), so this one holds 64 and waits for the GPU to free one (every list taken is
+// executed or dropped, which signals its fence). Each entry has its own allocator, reset only once its fence says the
+// GPU is past it: an allocator per list in flight. After kWaitMs with none free, null: callers skip their recording
+// but keep every fence they signal.
 template <size_t Capacity> class Dx12CommandPool
 {
   private:

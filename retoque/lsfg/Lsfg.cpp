@@ -423,7 +423,31 @@ void LogSummary()
     g_stats.windowStartMs = now;
 }
 
-void LogFirstFrame(const ffxDispatchDescFrameGeneration* params, uint32_t asked)
+// Our presenter's list per generated frame (Lsfg.h DispatchDescFrameLists), when it attached one.
+DispatchDescFrameLists* FindFrameLists(ffxDispatchDescFrameGeneration* params)
+{
+    for (ffxApiHeader* it = params->header.pNext; it != nullptr; it = it->pNext)
+    {
+        if (it->type == kDispatchDescTypeFrameLists)
+            return reinterpret_cast<DispatchDescFrameLists*>(it);
+    }
+    return nullptr;
+}
+
+// Takes it out of the chain: FFX's dispatch gets the descriptor as FFX's own swapchain would have built it.
+void UnlinkFrameLists(ffxDispatchDescFrameGeneration* params)
+{
+    for (ffxApiHeader** link = &params->header.pNext; *link != nullptr; link = &(*link)->pNext)
+    {
+        if ((*link)->type == kDispatchDescTypeFrameLists)
+        {
+            *link = (*link)->pNext;
+            return;
+        }
+    }
+}
+
+void LogFirstFrame(const ffxDispatchDescFrameGeneration* params, uint32_t asked, uint32_t lists)
 {
     if (g_firstFrameLogged)
         return;
@@ -438,11 +462,15 @@ void LogFirstFrame(const ffxDispatchDescFrameGeneration* params, uint32_t asked)
     // OPTI_INTEGRATION.md risk 4: these come from AMD's signed DLL, read here from SDK 2.3.0 source. Say what
     // the running one hands over.
     LOG_INFO("LSFG: first frame from FFX: presentColor {}x{} format {} state {:X}, outputs[0] {}x{} format {} "
-             "state {:X}, {} generated frame(s) asked, {} list, transfer {}, frameID {}",
+             "state {:X}, {} generated frame(s) asked, {} list, transfer {}, frameID {}{}",
              pd.Width, pd.Height, (UINT) pd.Format, params->presentColor.state, od.Width, od.Height, (UINT) od.Format,
              params->outputs[0].state, asked,
              list->GetType() == D3D12_COMMAND_LIST_TYPE_COMPUTE ? "COMPUTE (async)" : "DIRECT",
-             TransferText(params->backbufferTransferFunction), params->frameID);
+             TransferText(params->backbufferTransferFunction), params->frameID,
+             lists > 1
+                 ? std::format("; our presenter hands {} lists, one per generated frame, each with a fence of its own",
+                               lists)
+                 : std::string());
 }
 
 // Who presents, and the multiplier it shows: FFX's swapchain asks for one generated frame whatever the key says.
@@ -516,6 +544,11 @@ bool TakesFrame(int fIndex, ffxDispatchDescFrameGeneration* params)
     // swapchain always asks for one, so nothing changes there (MFG_PRESENTER.md 4.1).
     if (!lsfg && params != nullptr && params->numGeneratedFrames > 1)
         params->numGeneratedFrames = 1;
+
+    // Our presenter's lists per generated frame are LSFG's business: FFX records everything on commandList, and its
+    // DLL never sees a descriptor type it does not know (listsUsed stays 1).
+    if (!lsfg && params != nullptr)
+        UnlinkFrameLists(params);
 
     return lsfg;
 }
@@ -622,9 +655,20 @@ uint32_t FfxDispatch(ffxDispatchDescFrameGeneration* params)
         return FFX_API_RETURN_OK;
     }
 
-    LogFirstFrame(params, asked);
-
     auto list = static_cast<ID3D12GraphicsCommandList*>(params->commandList);
+    DispatchDescFrameLists* frameLists = FindFrameLists(params);
+
+    // How many lists our presenter handed: lists[0] is commandList, then a contiguous run of valid ones.
+    uint32_t lists = 1;
+    if (frameLists != nullptr)
+    {
+        const uint32_t offered = std::min<uint32_t>(frameLists->listCount, uint32_t(std::size(frameLists->lists)));
+        while (lists < offered && frameLists->lists[lists] != nullptr)
+            ++lists;
+    }
+
+    LogFirstFrame(params, asked, lists);
+
     auto& history = O().context->GetHistory();
     // A frame that does not follow the last one ingested breaks the stream as a reset does: FFX resets on the
     // same frame-ID gap, and LSFG would otherwise blend a stale source slot and feature history.
@@ -647,6 +691,13 @@ uint32_t FfxDispatch(ffxDispatchDescFrameGeneration* params)
         }
     }
 
+    // Generated frame k on its own list when the presenter gave one (frame 0 and everything shared stay on list).
+    for (uint32_t k = 1; k < io.generate && lists > 1; ++k)
+    {
+        const uint32_t index = LsfgMfg::ListForFrame(k, lists);
+        io.lists[k] = index == 0 ? list : static_cast<ID3D12GraphicsCommandList*>(frameLists->lists[index]);
+    }
+
     FrameConstants frame;
     frame.timestamp = 0.0f;
     frame.sourceIndex = history.iteration;
@@ -664,6 +715,8 @@ uint32_t FfxDispatch(ffxDispatchDescFrameGeneration* params)
 
     O().context->Record(list, io, frame, schedule);
     history.Advance(reset, params->frameID);
+    if (frameLists != nullptr)
+        frameLists->listsUsed = O().context->LastListsUsed();
 
     // Where generated frames go, said once and again whenever it changes (a new FFX output, a rebuilt context).
     const OutputRoute route = O().context->LastOutputRoute();
