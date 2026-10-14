@@ -42,7 +42,7 @@ def main():
     modes.add_argument('--run-only', action='store_true')
     ap.add_argument('--artifacts', type=Path, default=DEFAULT)
     ap.add_argument('--output', type=Path)
-    ap.add_argument('--multiplier', type=int, choices=(2, 3), default=2)
+    ap.add_argument('--multiplier', type=int, choices=(2, 3, 4), default=2)
     ap.add_argument('--fp16', action='store_true', help='select original FP16 shader variants (+48)')
     ap.add_argument('--performance', action='store_true')
     ap.add_argument('--flow-scale', type=float, default=1.0)

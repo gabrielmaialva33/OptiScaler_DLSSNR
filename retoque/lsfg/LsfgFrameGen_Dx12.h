@@ -147,6 +147,19 @@ class Context_Dx12
     void Record(ID3D12GraphicsCommandList* list, const FrameIo& io, const FrameConstants& frame,
                 Schedule schedule = Schedule::Waves);
 
+    // Multi-frame generation contract:
+    // Records generated frame `index` (0-based: 0 .. count - 1) of `count` total generated frames
+    // for the current base frame pair into `output`.
+    // - index == 0: ingests presentColor, executes pre-pass (Stages 0..9) + main-pass (Stages 10..45) at
+    //   timestamp 1/(count+1), writing to output.
+    // - index > 0: executes ONLY the main-pass (Stages 10..45) at timestamp (index+1)/(count+1), reusing the
+    //   pinned pre-pass feature images (alphaArray, betaImageArray) from index 0.
+    // Output resource is restored to `outputState`.
+    bool RecordGenerated(ID3D12GraphicsCommandList* list, ID3D12Resource* presentColor,
+                         D3D12_RESOURCE_STATES presentState, uint32_t index, uint32_t count, ID3D12Resource* output,
+                         D3D12_RESOURCE_STATES outputState, const FrameConstants& frame,
+                         Schedule schedule = Schedule::Waves);
+
     const ContextKey& Key() const { return _key; }
     History& GetHistory() { return _history; }
     bool EverRecorded() const { return _recorded; }
@@ -249,6 +262,9 @@ class Context_Dx12
     std::array<bool, kTimingSlots> _slotPerPass {}; // the schedule each slot's frame was recorded with
     uint64_t _collectedFrames = 0;                  // the oldest not yet read
     uint64_t _lastCollectedBegin = 0;
+
+    void _ClearHistory(ID3D12GraphicsCommandList* list);
+    void _Ingest(ID3D12GraphicsCommandList* list, ID3D12Resource* presentColor, D3D12_RESOURCE_STATES presentState);
 };
 
 } // namespace Lsfg

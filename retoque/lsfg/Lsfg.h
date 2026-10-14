@@ -44,6 +44,28 @@ bool Interpolating();
 // swapchain object can outlive the context), so the current context is parked, like any retired one.
 void OnSwapchainReleased();
 
+// ---------------------------------------------------------------------------------------------------------
+// Multi-Frame Generation (x3, x4) Presenter Contract
+//
+// Records generated frames for the current base frame pair. Reuses per-pair pre-pass work across all K frames.
+//
+// Sequential mode:
+//   Presenter calls RecordGenerated K times per base frame pair (index = 0 .. count - 1):
+//   - index == 0: ingests presentColor, executes Pre-Pass + Main-Pass at timestamp 1/(count+1).
+//   - index > 0: executes Main-Pass ONLY at timestamp (index+1)/(count+1), reusing the pinned feature pyramids.
+//   - When index == count - 1, the history counter advances for the next base frame.
+//
+// Batch mode:
+//   Presenter provides an array of K output resources in `outputs` to RecordBatch or FfxDispatch.
+//
+bool RecordGenerated(ID3D12GraphicsCommandList* list, ID3D12Resource* presentColor, D3D12_RESOURCE_STATES presentState,
+                     uint32_t index, uint32_t count, ID3D12Resource* output, D3D12_RESOURCE_STATES outputState,
+                     bool reset = false, uint64_t frameId = 0);
+
+bool RecordBatch(ID3D12GraphicsCommandList* list, ID3D12Resource* presentColor, D3D12_RESOURCE_STATES presentState,
+                 uint32_t count, ID3D12Resource* const* outputs, const D3D12_RESOURCE_STATES* outputStates,
+                 bool reset = false, uint64_t frameId = 0);
+
 struct Status
 {
     bool enabled = false;
