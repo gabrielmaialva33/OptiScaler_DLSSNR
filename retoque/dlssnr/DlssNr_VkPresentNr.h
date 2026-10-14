@@ -241,8 +241,10 @@ inline std::string ExtensionText(const ExtensionPlan& plan)
 // "advertising buffer-device-address is not the same as enabling bufferDeviceAddress"). What the application's
 // pNext chain already says about it decides what the host may do: a feature struct is prepended to a copy of the
 // create info only where the chain has none that could conflict (one struct of a type, and never the
-// buffer-device-address struct beside VkPhysicalDeviceVulkan12Features); a chain that has one with the feature off is
-// left alone, and the device is not ready for the model.
+// buffer-device-address struct beside VkPhysicalDeviceVulkan12Features). A chain that has one with the feature off is
+// left alone, since editing it means copying every struct before it, of types the host cannot know; the model then
+// runs as the after-upscale route has always run it, with the extensions alone (which has run in games that way),
+// and the device line says so: the validation layer reports those allocations there.
 inline constexpr uint32_t kStructBdaFeatures = 1000257000;    // VkPhysicalDeviceBufferDeviceAddressFeatures
 inline constexpr uint32_t kStructBdaFeaturesExt = 1000244000; // VkPhysicalDeviceBufferDeviceAddressFeaturesEXT
 inline constexpr uint32_t kStructVulkan12Features = 51;       // VkPhysicalDeviceVulkan12Features
@@ -287,14 +289,12 @@ inline const char* BdaText(BdaAction action)
     case BdaAction::NotSupported:
         return "bufferDeviceAddress not possible (the device does not offer it)";
     default:
-        return "bufferDeviceAddress not possible (the application's create info has it off; not edited)";
+        return "bufferDeviceAddress off in the application's create info, not edited: the model runs without it, as "
+               "on the after-upscale route";
     }
 }
 
-inline bool BdaReady(BdaAction action)
-{
-    return action != BdaAction::NotSupported && action != BdaAction::ChainHasItOff;
-}
+inline bool BdaReady(BdaAction action) { return action != BdaAction::NotSupported; }
 
 // --- At present ---------------------------------------------------------------------------------------------------
 

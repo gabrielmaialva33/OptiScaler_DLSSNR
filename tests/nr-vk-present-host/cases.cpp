@@ -885,9 +885,11 @@ static void BdaPlans()
     CHECK(PlanBufferDeviceAddress(ext, true, true) == BdaAction::ChainHasItOff);
 
     CHECK(BdaReady(BdaAction::Already) && BdaReady(BdaAction::AddKhr) && BdaReady(BdaAction::AddExt));
-    CHECK(!BdaReady(BdaAction::NotSupported) && !BdaReady(BdaAction::ChainHasItOff));
+    CHECK(!BdaReady(BdaAction::NotSupported));
+    // A chain with it off is not edited, and the model runs as the after-upscale route runs it.
+    CHECK(BdaReady(BdaAction::ChainHasItOff));
     CHECK(std::string(BdaText(BdaAction::AddKhr)) == "bufferDeviceAddress enabled by the host");
-    HAS(BdaText(BdaAction::ChainHasItOff), "has it off; not edited");
+    HAS(BdaText(BdaAction::ChainHasItOff), "off in the application's create info, not edited");
 }
 
 static Outcome WithNr(Outcome o, bool evaluated, NrSkip skip = NrSkip::None, std::string note = {}, bool reset = false)
