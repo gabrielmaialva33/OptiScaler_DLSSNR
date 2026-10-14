@@ -206,6 +206,104 @@ static void Window()
     CHECK(w.entriesByGenerated[3] == 101);
 }
 
+// The interpolation lists of one entry: generated frame k is complete at the end of list k, frames past the last list
+// at the end of the last one, all of them at the end of the only one.
+static void Lists()
+{
+    for (uint32_t k = 0; k < 8; ++k)
+    {
+        CHECK(ListForFrame(k, 0) == 0);
+        CHECK(ListForFrame(k, 1) == 0);
+    }
+    CHECK(ListForFrame(0, 3) == 0 && ListForFrame(1, 3) == 1 && ListForFrame(2, 3) == 2);
+    CHECK(ListForFrame(0, 2) == 0 && ListForFrame(1, 2) == 1 && ListForFrame(2, 2) == 1);
+    for (uint32_t lists = 1; lists <= kMaxGeneratedFrames; ++lists)
+        for (uint32_t k = 0; k < kMaxGeneratedFrames; ++k)
+        {
+            CHECK(ListForFrame(k, lists) < lists);
+            CHECK(ListForFrame(k, lists) <= k);
+            // display order is submission order: a later frame never completes in an earlier list
+            if (k > 0)
+                CHECK(ListForFrame(k, lists) >= ListForFrame(k - 1, lists));
+        }
+    CHECK(kTimestampsPerEntry == kMaxGeneratedFrames + 1);
+}
+
+static void Ready()
+{
+    const uint64_t f = 1'000'000'000; // ns ticks
+    double ms[kMaxGeneratedFrames] {};
+    uint64_t last = 0;
+
+    // Three lists: begin at 10 ms, the lists end 0.6, 1.0 and 1.4 ms later.
+    uint64_t three[kTimestampsPerEntry] { 10'000'000, 10'600'000, 11'000'000, 11'400'000 };
+    CHECK(ReadyTimes(three, 3, 3, f, last, ms));
+    CHECK(std::fabs(ms[0] - 0.6) < 1e-9 && std::fabs(ms[1] - 1.0) < 1e-9 && std::fabs(ms[2] - 1.4) < 1e-9);
+    CHECK(last == 10'000'000);
+
+    // The same slot read again (its resolve not landed for the next entry): its start is not newer, skipped.
+    ms[0] = -1.0;
+    CHECK(!ReadyTimes(three, 3, 3, f, last, ms));
+    CHECK(ms[0] == -1.0 && last == 10'000'000);
+
+    // One list for every frame (FISC's model): all three are done when it ends.
+    uint64_t one[kTimestampsPerEntry] { 20'000'000, 21'400'000, 0, 0 };
+    CHECK(ReadyTimes(one, 1, 3, f, last, ms));
+    CHECK(std::fabs(ms[0] - 1.4) < 1e-9 && std::fabs(ms[1] - 1.4) < 1e-9 && std::fabs(ms[2] - 1.4) < 1e-9);
+
+    // FFX interpolating: one frame, one list; the unwritten ends are never read.
+    uint64_t ffx[kTimestampsPerEntry] { 30'000'000, 30'700'000, 1, 1 };
+    CHECK(ReadyTimes(ffx, 1, 1, f, last, ms));
+    CHECK(std::fabs(ms[0] - 0.7) < 1e-9);
+
+    // Refused: no frequency, no lists, no frames, too many, an end before the start, a second-long span, a zero start.
+    uint64_t later[kTimestampsPerEntry] { 40'000'000, 40'500'000, 40'900'000, 41'300'000 };
+    CHECK(!ReadyTimes(later, 3, 3, 0, last, ms));
+    CHECK(!ReadyTimes(later, 0, 3, f, last, ms));
+    CHECK(!ReadyTimes(later, 3, 0, f, last, ms));
+    CHECK(!ReadyTimes(later, 4, 3, f, last, ms));
+    CHECK(!ReadyTimes(later, 3, 4, f, last, ms));
+    CHECK(!ReadyTimes(nullptr, 3, 3, f, last, ms));
+    uint64_t backwards[kTimestampsPerEntry] { 50'000'000, 50'500'000, 49'000'000, 51'000'000 };
+    CHECK(!ReadyTimes(backwards, 3, 3, f, last, ms));
+    uint64_t huge[kTimestampsPerEntry] { 60'000'000, 60'500'000, 60'900'000, 1'061'000'000 };
+    CHECK(!ReadyTimes(huge, 3, 3, f, last, ms));
+    uint64_t zero[kTimestampsPerEntry] { 0, 1, 2, 3 };
+    uint64_t none = 0;
+    CHECK(!ReadyTimes(zero, 3, 3, f, none, ms));
+    CHECK(last == 30'000'000); // nothing refused moved it
+    CHECK(ReadyTimes(later, 3, 3, f, last, ms));
+    CHECK(last == 40'000'000);
+}
+
+static void Latency()
+{
+    PresentWindow w;
+    CHECK(w.ListsPerEntry() == 0.0);
+    for (int e = 0; e < 10; ++e)
+    {
+        w.AddLists(3);
+        for (uint32_t k = 0; k < 3; ++k)
+        {
+            w.AddReady(k, 0.5 + 0.4 * k);
+            w.AddShown(true, k, 1.0 + 8.0 * k);
+        }
+        w.AddShown(false, 3, 25.0);
+    }
+    w.AddLists(1); // a held frame: its one list
+    CHECK(std::fabs(w.ListsPerEntry() - 31.0 / 11.0) < 1e-9);
+    CHECK(w.readyMs[0].size() == 10 && w.readyMs[2].size() == 10);
+    CHECK(std::fabs(PresentWindow::PercentileOf(w.readyMs[1], 0.5) - 0.9) < 1e-9);
+    CHECK(std::fabs(PresentWindow::PercentileOf(w.shownGeneratedMs[2], 0.5) - 17.0) < 1e-9);
+    CHECK(w.shownRealMs.size() == 10 && PresentWindow::PercentileOf(w.shownRealMs, 0.99) == 25.0);
+    // out of range frames are dropped, never out of bounds
+    w.AddReady(kMaxGeneratedFrames, 1.0);
+    w.AddShown(true, kMaxGeneratedFrames, 1.0);
+    CHECK(w.readyMs[2].size() == 10 && w.shownGeneratedMs[2].size() == 10);
+    std::vector<double> empty;
+    CHECK(PresentWindow::PercentileOf(empty, 0.5) == 0.0);
+}
+
 int main()
 {
     Multipliers();
@@ -213,6 +311,9 @@ int main()
     OutputSets();
     Schedule();
     Window();
+    Lists();
+    Ready();
+    Latency();
 
     std::printf("lsfg-presenter: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

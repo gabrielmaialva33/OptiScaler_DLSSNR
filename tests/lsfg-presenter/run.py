@@ -131,7 +131,7 @@ if qi:
                          '__uuidof(MfgSwapChainDX12)'}, f'QueryInterface answers {sorted(set(guids))}')
 
 # The widened request: N outputs, numGeneratedFrames = N, and what came back is what is shown.
-dispatch = body(swapchain, 'uint32_t MfgSwapChainDX12::dispatchInterpolationCommands(')
+dispatch = body(swapchain, 'InterpolationResult MfgSwapChainDX12::dispatchInterpolationCommands()')
 check(dispatch is not None, 'dispatchInterpolationCommands not found')
 if dispatch:
     check('desc.numGeneratedFrames = wanted;' in dispatch, 'the callback is not asked for N frames')
@@ -164,8 +164,13 @@ if shutdown:
           'UI composition objects released while the presenter thread may run')
     check(shutdown.find('destroyReplacementResources();') < shutdown.find('presentInfo.uiComposition.release();'),
           'UI composition objects released before the presents are drained')
+    # The timestamp heap and readback: written by the interpolation lists, read by the presenter thread.
+    check(shutdown.find('killPresenterThread();') < shutdown.find('releaseTiming();') and
+          shutdown.find('waitForFenceValue(presentInfo.interpolationFence') < shutdown.find('releaseTiming();'),
+          'timing objects released while the presenter thread or an interpolation list may use them')
 check(swapchain.count('uiComposition.release()') == 1 and swapchain.count('debugPacing.release()') == 1,
       'the fork releases its GPU objects somewhere other than shutdown()')
+check(swapchain.count('releaseTiming();') == 1, 'timing objects released somewhere other than shutdown()')
 check(re.search(r'\bstatic\s+ID3D12', (presenter / 'MfgSwapChain_UiComposition.cpp').read_text() +
                 (presenter / 'MfgSwapChain_DebugPacing.cpp').read_text()) is None,
       'UI composition or debug pacing keeps D3D12 objects in statics again')
