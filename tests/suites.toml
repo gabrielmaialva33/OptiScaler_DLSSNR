@@ -53,6 +53,11 @@ tier = "host"
 timeout = 60
 summary = "D3D11 DLSS with NR on: dlss_12 chosen when Dx11Upscaler is unset, native D3D11 DLSS reported once and shown while it runs."
 
+[nr-present-boundary]
+tier = "host"
+timeout = 60
+summary = "The present pass under the game's own DLSS-G (DlssNr_PresentBoundary.h): HookMethod=2 declines on the entry below DLSS-G, Auto stays upscaled for the session, HookMethod=1 and OptiScaler's own FG untouched; source guards that both routes decide through it."
+
 [nr-present-sync]
 tier = "host"
 timeout = 60

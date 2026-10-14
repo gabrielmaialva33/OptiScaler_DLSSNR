@@ -14,6 +14,7 @@
 #include "retoque/dlssnr/DlssNr_PreUpscale.h"
 #include "retoque/dlssnr/DlssNr_Coverage.h"
 #include "retoque/dlssnr/DlssNr_Chain.h"
+#include "retoque/dlssnr/DlssNr_PresentBoundary.h"
 #define FMT_HEADER_ONLY
 #include "external/spdlog/include/spdlog/fmt/bundled/format.h"
 
@@ -246,6 +247,15 @@ inline std::atomic<bool> g_temporalValid { false };
 inline bool presentHookLive = false;
 inline bool PresentHookLive() { return presentHookLive; }
 inline void CaptureTemporal(ID3D12GraphicsCommandList*, NVSDK_NGX_Parameter*, const DlssNrFrameInfo&) {}
+// The production BoundaryInputs also reads State for the game's own DLSS-G. This harness has no frame generation, so
+// the route sees only the hook method, and the real decision header (DlssNr_PresentBoundary.h) decides.
+inline ::DlssNr::PresentBoundary::Inputs BoundaryInputs(uint32_t hookMethod, bool fgHook)
+{
+    ::DlssNr::PresentBoundary::Inputs in;
+    in.hookMethod = hookMethod;
+    in.fgHook = fgHook;
+    return in;
+}
 inline std::atomic<bool> g_sourceIsPresent { false };
 // The upscaled route's own render count and last outcome (DlssNr_Dx12.cpp keeps them beside
 // g_presentFlip); the status line reads them, this harness only needs them to exist.

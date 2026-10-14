@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Forty-six suites. All but `nr-invariants`, `repo-privacy` and `deploy-safety` build real production code with local fakes under
+**Host tier.** Forty-seven suites. All but `nr-invariants`, `repo-privacy` and `deploy-safety` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `lsfg-shader-library` — the LSFG runtime shader library (`retoque/lsfg/LsfgShaderLibrary.{h,cpp}`): DLL discovery (Windows Steam `libraryfolders.vdf`, registry, Wine/Proton `Z:` paths, `$HOME`, `$XDG_DATA_HOME`, override, `Lossless.dll` folder mapping), PE `RT_RCDATA` SPIR-V module extraction (99 modules), SPIR-V magic validation, Quality/Performance and FP32/FP16 resource ID resolution, real user DLL extraction when present, and content-hash-keyed DXIL cache storage/invalidation; plus `tools/lsfg-study/convert.py`'s Float16 detection (synthetic modules, and exactly ids 51..98 on the real DLL).
@@ -72,6 +72,10 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   late and non-finite readbacks breaking the pair, two-second windows, reset, the menu's words, the log line and
   its rate, and a synthetic cadence's pulse. Source guards on the pass and the renderer: off builds and records
   nothing, one sample per present. No GPU, no shader.
+- `nr-present-boundary` — the present pass under the game's own DLSS-G (`DlssNr_PresentBoundary.h`):
+  `HookMethod=2` declines on the wrapped entry below DLSS-G, Auto stays upscaled for the session once it has seen
+  it, `HookMethod=1` and OptiScaler's own frame generation are untouched; source guards that `RunPresentPass` and
+  the upscaled route decide through it. Not whether `State` reflects the game's DLSS-G in a given title.
 - `nr-present-sync` — what `[DlssNr] PresentSync=auto` means: the D3D12 present pass waits for its write-back
   only when frame generation could be involved (`DlssNr_PresentSync.h`). The wait itself is not exercised.
 - `nr-dx11-route` — a D3D11 game's DLSS with NR on (`docs/dlssnr/design/dx11-native-dlss-guides.md`, steps 1
