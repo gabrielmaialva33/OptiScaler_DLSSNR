@@ -29,6 +29,7 @@ def main():
     for sequence in ('translation', 'rotzoom'):
         for half, multiplier, performance, flow in [(True, 2, False, 1.), (False, 2, False, 1.),
                                                   (True, 3, False, 1.), (False, 3, False, 1.),
+                                                  (True, 4, False, 1.), (False, 4, False, 1.),
                                                   (True, 2, True, .5)]:
             name = f'{sequence}-fp{16 if half else 32}-m{multiplier}-{"perf" if performance else "quality"}-flow{flow:g}'
             case = root / name
