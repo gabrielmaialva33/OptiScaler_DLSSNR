@@ -1,7 +1,8 @@
 # NR before DLSS-G: the present pass at the game's Streamline real-frame boundary
 
-Status: 2026-10-14. **Steps 0, 0b and 1 (S1, H1) are built**, and the interim refusal; step 0 and 0b were measured
-in Crimson Desert (below). Step 1 has not run in a game yet. Written against `68c490d2` on
+Status: 2026-10-14. **Steps 0, 0b and 1 (S1, H1) are built and measured in Crimson Desert**, with the interim refusal
+for `HookMethod=2` set after start-up. Step 1 removed the flicker at no extra cost (below). Native Windows on an RTX 40
+or 50 is still to run. Written against `68c490d2` on
 `feat/neurotic-parity`; line numbers are into that tree. NeuRotic line numbers are into its clone at `7132a103`.
 This is the task [present-real-guides.md](present-real-guides.md) (D5) left open: "running at DLSS-G's real-frame
 boundary ... is a separate task with its own queue-ownership risk".
@@ -517,6 +518,17 @@ before the game started (the detours are installed with `sl.interposer.dll`); se
 applies. Not done: H2 for comparison, resize draining at the interposer (the real resize still passes the wrapped
 swapchain's own handling below it), the guide identity's two-presenter view of the proxy and the wrapped swapchain
 (log only).
+
+**Step 1 measured (2026-10-14, build `9f97f708`, Crimson Desert, same setup, the game's DLSS-G at 3x).** The boundary
+went live at the first frames and stayed live for the session ("present: at the game's own Present, ahead of its frame
+generation"); the wrapped entry kept seeing 3.00 presents per game present and stood down for all of them. The upscaled
+route deferred every evaluate to it (coverage `window_applied=0`, "deferred to present-time hook"), so the model ran
+once per game present. No device removal, no model fault, no new error. By eye (the user, on the 3440x1440 display):
+**no flicker**, NR steady on every frame; the HUD smears slightly and briefly in motion, "only seen by paying
+attention", and it does so in every mode, `HookMethod=1` included, so it is DLSS-G's own handling of the interface and
+not the boundary's: H1 stands and H2 is not needed. Cost, medians over the session: 24.5 game presents a second at the
+boundary against 23.0 on the upscaled route after the switch (five windows only), and the model's GPU dispatch 6.50 ms
+(324 samples) against 6.56 ms (6), at a 3440x1440 working size. So the boundary costs what the upscaled route costs.
 
 **Step 2, if earned.** H3, and with it hud-protection.md's mask (c).
 

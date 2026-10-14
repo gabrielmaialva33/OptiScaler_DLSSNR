@@ -236,7 +236,8 @@ entry down once the FG hook ran). With identity in place that has a precise mean
 - The visible consequence is the one already measured: with the game's DLSS-G on, `HookMethod=2` edits
   the real frames and the generated ones reach the screen unedited, which reads as flicker (Crimson
   Desert, 2026-10-04). Real-guide identity does not change that and this note does not try to. The
-  advice stays `HookMethod=1` under DLSS-G. Running at DLSS-G's real-frame boundary, which NeuRotic
+  advice stays `HookMethod=1` under DLSS-G (superseded 2026-10-14: with `HookMethod=2` set before start-up the pass
+  runs at the game's own Present, ahead of DLSS-G, measured flicker-free; nr-before-dlssg.md, step 1). Running at DLSS-G's real-frame boundary, which NeuRotic
   has (`623881ab`), is a separate task with its own queue-ownership risk.
 - The DLSS-G interlock (`menuOverlayIsVulkan`, the Vulkan present guards) is Vulkan-side and is not
   touched; the D3D12 present sync (`DlssNr_PresentSync.h`) is unchanged and still keys on whether
