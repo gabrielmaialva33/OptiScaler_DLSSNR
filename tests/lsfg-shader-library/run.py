@@ -36,6 +36,7 @@ with tempfile.TemporaryDirectory(prefix="optiscaler-lsfg-shader-lib-") as direct
         str(repo / "retoque"),
         str(root / "test.cpp"),
         str(repo / "retoque" / "lsfg" / "LsfgShaderLibrary.cpp"),
+        str(repo / "retoque" / "lsfg" / "LsfgShaderSource.cpp"),
         "-o",
         binary,
     ]
