@@ -156,8 +156,8 @@ which `VariantRid` already handles. The per-wave timing bounds what it could buy
 The harness (`tools/lsfg-study/harness`, now with `--shaders`) ran the 1920x1080 translation and rotzoom sequences
 with the FP16 variants and the native modules. References are lsfg-vk's own FP16 frames, from `lsfg-vk-cli debug`
 without `-a`: `Tmp/lsfg-study/ref` for x2, `ref_m3`, `ref_m4`, and the perf/flow 0.5 renders under
-`out/comparisons/`. `ref_m3/*/1_2.dds` is byte-identical to the FP16 x3 native render, and `ref/*/1.dds` to
-`ref_m4/*/1_2.dds`. PSNR in dB, max diff in levels out of 255. RGB, `compare.py`, threshold 2.
+`out/comparisons/`. `ref_m3/*/1_2.dds` is byte-identical to the FP16 x3 `lsfg-vk-cli` render in `out/comparisons/`,
+and `ref/*/1.dds` to `ref_m4/*/1_2.dds`. PSNR in dB, max diff in levels out of 255. RGB, `compare.py`, threshold 2.
 
 | Frame | translation native = min16 | -O3 -Gis | -Od | rotzoom native = min16 | -O3 -Gis | -Od |
 |---|---|---|---|---|---|---|
@@ -171,8 +171,8 @@ without `-a`: `Tmp/lsfg-study/ref` for x2, `ref_m3`, `ref_m4`, and the perf/flow
 | FP32 for context (x2 / x3 2/3) | 74.59 / 3, 73.80 / 4 | | | 71.91 / 7, 74.97 / 2 | | |
 
 - **Native and `min16float` give the same bytes** on all 14 frames, and in `ctxbench`'s 15-frame moving sequence at
-  both sizes and both modes (FNV hashes). The numbers in that column are the harness README's `min16float` numbers to
-  the second decimal.
+  both sizes and both modes (FNV hashes). The numbers in that column are the `min16float` numbers of the harness README
+  and `MFG_PRESENTER.md`.
 - **Why:** `VKD3D_SHADER_DUMP_PATH` shows both DXIL flavours becoming SPIR-V with `OpTypeFloat 16` and no
   `RelaxedPrecision`. vkd3d-proton lowers minimum precision to native 16-bit on a device that has it, so the GPU runs
   the same 16-bit arithmetic either way. Section 2's "the driver promotes `min16float` to 32-bit" does not happen here.
