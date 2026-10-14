@@ -77,6 +77,9 @@ the two schedules frame by frame, so both run at the same clocks.
   - Native Windows with the debug layer is still needed for the new barrier batches. vkd3d-proton does not
     validate them (CLAUDE.md, "Proton is not a D3D12 validator").
 
+**x3 and x4 (option a′) are built too**: `tools/lsfg-study/MFG_PRESENTER.md`, `retoque/lsfg/presenter/`, `[LSFG]
+Multiplier`. The "x2 only" and "no `Multiplier`" statements below describe FFX's swapchain, which `Multiplier=2` keeps.
+
 The rest of this note is the design as written before any of it existed.
 
 It is the third part of the study: the harness (`tools/lsfg-study/harness/`) runs LSFG's pass graph on D3D12, a
