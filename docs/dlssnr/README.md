@@ -8,6 +8,11 @@ shader rebuild). The forwarder DLL is explained in
 [retoque/dlssnr/forwarder/README.md](../../retoque/dlssnr/forwarder/README.md), and the evidence
 log of the attempt to drop it is [../history/FORWARDER_INVESTIGATION.md](../history/FORWARDER_INVESTIGATION.md).
 
+## Roadmap
+
+- [roadmap.md](roadmap.md): what NeuRotic has that this fork does not yet, in order, with each item's design note, where
+  it stands and the game run it needs.
+
 ## Rules and review
 
 - [DEVELOPMENT.md](design/DEVELOPMENT.md): the invariants, state specs and per-change-type review a change must pass before deploy.
