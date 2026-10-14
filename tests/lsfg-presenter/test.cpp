@@ -1,6 +1,8 @@
-// tests/lsfg-presenter: the arithmetic of the MFG presenter (retoque/lsfg/presenter/MfgPacing.h), compiled unmodified.
-// tools/lsfg-study/MFG_PRESENTER.md sections 3.2, 3.3 and 6.
+// tests/lsfg-presenter: the arithmetic of the MFG presenter (retoque/lsfg/presenter/MfgPacing.h) and what [LSFG]
+// Multiplier does in a running process (MfgLatch.h), compiled unmodified.
+// tools/lsfg-study/MFG_PRESENTER.md sections 1.4, 3.2, 3.3, 5 and 6.
 
+#include <lsfg/presenter/MfgLatch.h>
 #include <lsfg/presenter/MfgPacing.h>
 
 #include <cmath>
@@ -206,6 +208,88 @@ static void Window()
     CHECK(w.entriesByGenerated[3] == 101);
 }
 
+// The latch the router takes at the first FG swapchain (LsfgPresenter.cpp, Wanted: Enabled && Multiplier > 2).
+static Latch LatchAtStart(bool enabled, int multiplier)
+{
+    return enabled && MultiplierOrDefault(multiplier) > 2 ? Latch::Ours : Latch::Ffx;
+}
+
+// MFG_PRESENTER.md 1.4 and 5: the menu's matrix. Started at 2 (or with LSFG off), FFX's swapchain shows x2 for the
+// session and 3 or 4 wait for a restart; started at 3 or 4, ours shows whatever is chosen from the next real frame,
+// 2 included (N = 1). Undecided (no FG swapchain yet), the latch reads the choice.
+static void Latches()
+{
+    const int multipliers[] = { 2, 3, 4 };
+
+    struct Row
+    {
+        int start;
+        int choice;
+        bool live;
+        int active;
+    };
+    const Row matrix[] = {
+        { 2, 2, true, 2 }, { 2, 3, false, 2 }, { 2, 4, false, 2 }, //
+        { 3, 2, true, 2 }, { 3, 3, true, 3 },  { 3, 4, true, 4 },  //
+        { 4, 2, true, 2 }, { 4, 3, true, 3 },  { 4, 4, true, 4 },
+    };
+    for (const auto& row : matrix)
+    {
+        const Latch latch = LatchAtStart(true, row.start);
+        CHECK(latch == (row.start > 2 ? Latch::Ours : Latch::Ffx));
+        CHECK(AppliesLive(latch, row.choice) == row.live);
+        CHECK(ActiveMultiplier(latch, row.choice) == row.active);
+        // What the process started with always runs as it was chosen.
+        CHECK(AppliesLive(latch, row.start) && ActiveMultiplier(latch, row.start) == row.start);
+    }
+
+    // LSFG off at start: FFX's swapchain whatever the multiplier, so 3 and 4 wait for a restart once it is enabled.
+    for (int start : multipliers)
+    {
+        CHECK(LatchAtStart(false, start) == Latch::Ffx);
+        CHECK(!AppliesLive(LatchAtStart(false, start), 3) && !AppliesLive(LatchAtStart(false, start), 4));
+    }
+
+    for (int m : multipliers)
+    {
+        CHECK(AppliesLive(Latch::Undecided, m) && ActiveMultiplier(Latch::Undecided, m) == m);
+        CHECK(ActiveMultiplier(Latch::Ffx, m) == 2);
+        CHECK(MultiplierOrDefault(m) == m);
+    }
+
+    // Anything but 2, 3 or 4 is read as 2 (Config.cpp drops it at load; the code reads it as 2 anyway).
+    for (int bad : { -1, 0, 1, 5, 8, 1000 })
+    {
+        CHECK(MultiplierOrDefault(bad) == 2);
+        for (Latch latch : { Latch::Undecided, Latch::Ffx, Latch::Ours })
+        {
+            CHECK(AppliesLive(latch, bad));
+            CHECK(ActiveMultiplier(latch, bad) == 2);
+        }
+        CHECK(GeneratedFramesLive(true, bad) == 1);
+        CHECK(LatchAtStart(true, bad) == Latch::Ffx);
+    }
+
+    // What our swapchain is asked for at the next real frame: N = M - 1 with LSFG on, one with it off (FFX writes
+    // outputs[0] only). With LSFG on it is what the menu calls active, so the row and the presenter agree.
+    for (int m : multipliers)
+    {
+        CHECK(GeneratedFramesLive(true, m) == uint32_t(m - 1));
+        CHECK(GeneratedFramesLive(false, m) == 1);
+        CHECK(GeneratedFramesLive(true, m) + 1 == uint32_t(ActiveMultiplier(Latch::Ours, m)));
+        CHECK(GeneratedFramesLive(true, m) >= 1 && GeneratedFramesLive(true, m) <= kMaxGeneratedFrames);
+    }
+
+    // N = 1 through our swapchain paces as FFX's x2 does: two presents per entry, the same delta bit for bit.
+    const int64_t qpc = 10'000'000;
+    for (double fps : { 24.0, 30.0, 60.0, 82.5 })
+    {
+        const double avg = double(qpc) / fps;
+        const uint32_t frames = GeneratedFramesLive(true, 2) + 1;
+        CHECK(PresentDelta(avg, avg * 0.01, frames, 0.3, qpc / 10000) == FfxDelta(avg, avg * 0.01, 0.3, qpc / 10000));
+    }
+}
+
 int main()
 {
     Multipliers();
@@ -213,6 +297,7 @@ int main()
     OutputSets();
     Schedule();
     Window();
+    Latches();
 
     std::printf("lsfg-presenter: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

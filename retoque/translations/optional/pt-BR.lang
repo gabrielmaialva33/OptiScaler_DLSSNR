@@ -486,3 +486,23 @@ The two surfaces differ in shape; nothing was captured.	As duas superfícies tê
 Waiting for the next frame the pass writes...	Aguardando o próximo quadro que o passe escrever...
 Waiting for the GPU to finish the copies...	Aguardando a GPU terminar as cópias...
 Writing the files...	Gravando os arquivos...
+# 2026-10-13: the LSFG panel under FSR FG Settings (study branch; tools/lsfg-study/MFG_PRESENTER.md): its controls, the
+# multiplier and what it says about the swapchain the game started with, and the status line.
+LSFG 3.1 Interpolator (Lossless Scaling)	Interpolador LSFG 3.1 (Lossless Scaling)
+Replaces FSR-FG's internal optical flow interpolation with Lossless Scaling's LSFG 3.1.\nNeeds lsfg-vk.dll from Lossless Scaling (auto-detected or configured in [LSFG] DllPath).	Substitui a interpolação por fluxo óptico interna do FSR-FG pelo LSFG 3.1 do Lossless Scaling.\nPrecisa do lsfg-vk.dll do Lossless Scaling (detectado automaticamente ou definido em [LSFG] DllPath).
+Enable LSFG	Ativar LSFG
+Enable LSFG 3.1 frame interpolation under FSR-FG.\nWhen disabled or building, FSR-FG uses standard FFX interpolation.	Ativa a interpolação de quadros LSFG 3.1 sob o FSR-FG.\nDesligado ou enquanto prepara, o FSR-FG usa a interpolação padrão do FFX.
+Flow Scale	Escala do fluxo
+Internal optical flow pyramid resolution relative to display frame.\n1.00 = Native resolution (highest quality)\n0.85 = Balanced quality/performance\n0.50 = Half resolution (faster, lower VRAM)	Resolução das pirâmides internas de fluxo óptico em relação ao quadro exibido.\n1.00 = Resolução nativa (melhor qualidade)\n0.85 = Equilíbrio entre qualidade e desempenho\n0.50 = Metade da resolução (mais rápido, menos VRAM)
+Performance Mode	Modo desempenho
+Halves feature channels across motion pyramids.\nCheaper on GPU with slightly softer motion edges.	Reduz pela metade os canais de características nas pirâmides de movimento.\nMais leve na GPU, com bordas de movimento um pouco mais suaves.
+Multiplier	Multiplicador
+%dx (after a restart)	%dx (após reiniciar)
+Frames shown per real frame. 2x adds one generated frame; 3x and 4x add two or three,\npresented by OptiScaler's own frame-generation swapchain, a fork of FFX's.\n\nThe swapchain is chosen when the game creates it. Started at 3x or 4x, every choice\napplies at the next frame. Started at 2x, 3x and 4x are saved and need a restart.	Quadros exibidos por quadro real. 2x acrescenta um quadro gerado; 3x e 4x acrescentam dois ou três,\napresentados pelo swapchain de geração de quadros do próprio OptiScaler, um fork do swapchain do FFX.\n\nO swapchain é escolhido quando o jogo o cria. Iniciado em 3x ou 4x, toda escolha\nvale a partir do próximo quadro. Iniciado em 2x, 3x e 4x ficam salvos e precisam de reinicialização.
+Now %dx: the game started with FFX's swapchain, which shows one generated frame. Save Settings and restart the game for %dx.	Agora %dx: o jogo começou com o swapchain do FFX, que mostra um quadro gerado. Salve as configurações e reinicie o jogo para ter %dx.
+Now 2x, while FFX interpolates in LSFG's place (see Status).	Agora 2x, enquanto o FFX interpola no lugar do LSFG (veja o Status).
+Status: Disabled (using FFX interpolation)	Status: desligado (usando a interpolação do FFX)
+Status: Active at %ux%u (%.2f ms/frame)	Status: ativo em %ux%u (%.2f ms/quadro)
+Status: Active at %ux%u	Status: ativo em %ux%u
+Status: %s	Status: %s
+Status: Waiting for frames	Status: aguardando quadros

@@ -13,6 +13,8 @@ tools/lsfg-study/MFG_PRESENTER.md. Two parts:
      the swapchain alone when it is ours;
    - our swapchain answers no FFX interface, so AMD's signed DLL can never cast it to its ABI types;
    - Lsfg::TakesFrame lowers numGeneratedFrames to 1 whenever FFX interpolates instead of LSFG;
+   - the multiplier is read live through MfgLatch.h at every FG configure, and the menu row reads the latch from it
+     (test.cpp holds MfgLatch.h to MFG_PRESENTER.md's started-at x chosen table);
    - every file copied from the FidelityFX SDK keeps AMD's MIT notice, and the shader bytecode headers are the SDK's
      bytes (when external/FidelityFX-SDK-v2 is checked out);
    - the GPU objects the fork owns are released only in shutdown(), after the threads have stopped.
@@ -111,6 +113,37 @@ wanted = body(router, 'bool Wanted()')
 check(wanted is not None and 'compare_exchange_strong' in wanted, 'Wanted() is not latched')
 check(re.search(r'bool WantedNow\(\) \{ return Config::Instance\(\)->LsfgEnabled\.value_or_default\(\) && '
                 r'Multiplier\(\) > 2; \}', router), 'WantedNow is not Enabled && Multiplier > 2')
+
+# The multiplier is read at every FG configure (every real frame) through MfgLatch.h, so 2, 3 and 4 apply live with
+# our swapchain; the menu reads the latch and the same header (MFG_PRESENTER.md 1.4, 5).
+if configure:
+    check(re.search(r'const uint32_t generated =\s*\n\s*LsfgMfg::GeneratedFramesLive\('
+                    r'Config::Instance\(\)->LsfgEnabled\.value_or_default\(\), Multiplier\(\)\);', configure),
+          'the FG configure does not take the generated-frame count from GeneratedFramesLive')
+    check(configure.find('GeneratedFramesLive(') < configure.find('swapChain->setGeneratedFrames(generated);') and
+          'swapChain->setGeneratedFrames(generated);' in configure,
+          'the FG configure does not hand the live count to our swapchain')
+latch = body(router, 'LsfgMfg::Latch CurrentLatch()')
+check(latch is not None and re.search(r'case 0:\s*return LsfgMfg::Latch::Ffx;\s*case 1:\s*return LsfgMfg::Latch::Ours;'
+                                      r'\s*default:\s*return LsfgMfg::Latch::Undecided;', latch),
+      'CurrentLatch does not map g_latch 0/1/-1 to Ffx/Ours/Undecided')
+
+menu = (repo / 'retoque/lsfg/LsfgMenu.cpp').read_text()
+row = body(menu, 'void RenderMultiplier(Config* config, const Status& status, float menuResScale)')
+check(row is not None, 'LsfgMenu.cpp has no RenderMultiplier')
+if row:
+    check('Presenter::CurrentLatch()' in row and 'LsfgMfg::ActiveMultiplier(latch, configured)' in row,
+          'the Multiplier row does not read the latch and the active multiplier from MfgLatch.h')
+    check(menu.count('config->LsfgMultiplier =') == 1 and
+          re.search(r'if \(ImGui::Selectable\(item, multiplier == configured\) && multiplier != configured\)\s*\n\s*'
+                    r'config->LsfgMultiplier = multiplier;', row),
+          'LsfgMultiplier is written somewhere other than a changed selection (an untouched 2 must stay unset)')
+text = body(menu, 'void MultiplierText(LsfgMfg::Latch latch, int multiplier, char* text, size_t size)')
+check(text is not None and 'LsfgMfg::AppliesLive(latch, multiplier)' in text and 'after a restart' in text,
+      'the combo items do not say which choices wait for a restart')
+render = body(menu, 'void RenderMenu(float menuResScale)')
+check(render is not None and render.find('ImGui::BeginDisabled(!enabled);') < render.find('RenderMultiplier(') <
+      render.find('ImGui::EndDisabled();'), 'the Multiplier row is not disabled with LSFG off, as its siblings are')
 
 # 2c. Our swapchain answers no FFX interface or IID.
 def code_only(text):

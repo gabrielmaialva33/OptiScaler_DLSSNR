@@ -1,6 +1,7 @@
 # LSFG at x3 and x4: a presenter of our own (OPTI_INTEGRATION.md option a′)
 
-Status: **built and running at x3 and x4 in PCSX2** (2026-10-13, branch `study/lsfg-d3d12`; results in section 9). Study only, like everything under `tools/lsfg-study/`: nothing
+Status: **built and running at x3 and x4 in PCSX2** (2026-10-13, branch `study/lsfg-d3d12`; results in section 9);
+the multiplier is in the LSFG menu and changes live with our presenter, x2 included (2026-10-14; 1.4, 5, 9). Study only, like everything under `tools/lsfg-study/`: nothing
 here merges into `dlss-neural-rendering` (OPTI_INTEGRATION.md, "Read this first").
 
 Citations are `file:line` against this worktree. Two abbreviations, as in OPTI_INTEGRATION.md:
@@ -78,10 +79,34 @@ first time must not replace it. So `Multiplier=2`, the default, never constructs
 first FG swapchain is the one whose `Present`, `ResizeBuffers` and `Release` carry OptiScaler's FG logic for the rest
 of the process. A later swapchain of the other class would present with no `FGPresent` at all. So the choice is made
 at the first FG swapchain creation and kept: `Lsfg::Presenter::Wanted()` reads `[LSFG] Enabled` and `Multiplier` once
-and logs the decision. A later change across the 2/3 boundary is logged as "takes effect after a restart".
+and logs the decision. With FFX's swapchain latched, a later 3 or 4 is logged as taking effect after a restart.
 
-**Inside our presenter, the multiplier is live.** N is read every real frame, so 3 ↔ 4 (and 2, which our presenter
-also serves, as N = 1) apply at the next frame.
+**Inside our presenter, the multiplier is live, 2 included.** The router reads `Enabled` and `Multiplier` at every FG
+configure, which FSRFG's `Dispatch` makes once per real frame (`:530`), and hands the swapchain
+`GeneratedFramesLive(enabled, multiplier)` (`presenter/MfgLatch.h`): N = multiplier − 1 with LSFG on, 1 with it off.
+The swapchain reads N at its next present. Multiplier 2 is N = 1 through the fork, and that is FFX's x2 on every axis
+that matters:
+
+- **Pacing.** Two presents per entry, each `avg/2 − σ·vf − margin`: `PresentDelta` at two frames is FFX's formula bit
+  for bit (`tests/lsfg-presenter`, over a grid, and again for `GeneratedFramesLive(true, 2)`).
+- **The request.** One output, `numGeneratedFrames = 1`, LSFG's main pass at `Timestamp = 1/2`: what FFX's swapchain
+  asks for. LSFG reads N per call (`LsfgFrameGen_Dx12.cpp`, `TimestampFor(k + 1, io.generatedFrames)`), so nothing in
+  it is sized for the multiplier the process started with.
+- **UI composition and counting.** One composition per presented frame, generated or real, as at any N (3.5); the
+  presenter's summary and LSFG's count frames per entry.
+- **Not new code.** N = 1 is already what our presenter runs whenever FFX interpolates in LSFG's place (warm-up, a
+  refusal, LSFG switched off): `Lsfg::TakesFrame` lowers the request to 1 (4.1).
+
+What it does not have is what the fork dropped (1.2): AntiLag 2 frame-type marking. Outputs made for a higher N stay
+until the next resize or shutdown (3.3). After a restart with 2 saved, the process runs FFX's own swapchain again.
+
+| Started at (first FG swapchain) | Choose 2 | Choose 3 | Choose 4 |
+|---|---|---|---|
+| 2, or LSFG off: **FFX's swapchain** | runs (x2) | saved, x2 until a restart | saved, x2 until a restart |
+| 3 or 4: **ours** | x2 from the next frame (N = 1) | x3 from the next frame | x4 from the next frame |
+| no FG swapchain yet | the latch reads it | the latch reads it | the latch reads it |
+
+`tests/lsfg-presenter` holds `MfgLatch.h` to this table, and the menu (5) and the router read it from there.
 
 ## 2. How OptiScaler creates it instead of FFX's swapchain
 
@@ -308,8 +333,21 @@ The order, as in FISC, widened:
 range check in `Config.cpp`, `GetIntValue` on save, `Multiplier=auto` in `OptiScaler.ini`'s `[LSFG]` section, plus
 `Config.md`. `tests/lsfg-integration` round-trips it with the other LSFG keys.
 
-**No menu control yet.** A control that moves 2 → 3 would act on nothing until a restart (1.4), which is rule 2's
-dead control. When the menu exposes it, it shows the latched presenter and offers 2..4 only when ours is in use.
+**Menu.** A **Multiplier** combo in the LSFG block of the FSR FG card (`retoque/lsfg/LsfgMenu.cpp`), after
+Performance Mode and disabled with it while LSFG is off, as its siblings are. It writes `LsfgMultiplier` only when the
+selection changes, so an untouched 2 stays unset and saves as `auto`; OptiScaler's Save Settings writes it like any
+key. Each item says what choosing it does now, from the table in 1.4:
+
+- **Started at 3 or 4** (ours): `2x`, `3x`, `4x`; every choice applies at the next real frame.
+- **Started at 2, or with LSFG off** (FFX's): `2x`, `3x (after a restart)`, `4x (after a restart)`. With 3x or 4x
+  chosen, an amber note under the combo says what runs and what to do: "Now 2x: the game started with FFX's swapchain,
+  which shows one generated frame. Save Settings and restart the game for 3x."
+- **Ours, 3x or 4x chosen, LSFG not generating** (building its shaders, or refusing the frame): "Now 2x, while FFX
+  interpolates in LSFG's place (see Status)", because FFX writes one frame (4.1).
+
+Not a dead control (rule 2): with FFX's swapchain, a 3x or 4x is a choice for the next start, saved like any other
+key, and the item and the note say so instead of pretending it acted. The text goes through `Localization` with pt-BR
+entries, as the rest of the LSFG block now does (`tests/nr-localization` scans `LsfgMenu.cpp`).
 
 ## 6. Log lines
 
@@ -320,6 +358,12 @@ dead control. When the menu exposes it, it shows the latched presenter and offer
   t ms), share over 1.5 × target`. Intervals are QPC between consecutive `Present` calls on the presenter thread.
   This is the proof of N generated frames per real frame and the measured presented rate.
 - LSFG's own summary counts generated frames, not base frames, and names the multiplier.
+- When the multiplier changes with our presenter: `LSFG presenter: xM from frame F (N generated frame(s) per real
+  frame)`, at the configure that hands the swapchain the new N.
+- When the config asks for the other swapchain than the one latched, once per Enabled/Multiplier pair: with ours, `LSFG presenter:
+  [LSFG] Enabled true, Multiplier 2: x2 from the next frame through our presenter (one generated frame); FFX's own
+  swapchain only from the next start`; with FFX's, `LSFG presenter: [LSFG] Enabled true, Multiplier 3 asks for our
+  presenter, but this process runs FFX's swapchain (x2); x3 takes effect after a restart`.
 
 ## 7. Validation (phase 2)
 
@@ -350,8 +394,8 @@ forwarder has (`LSFG_MFG_UNFOLDABLE`); `tests/lsfg-presenter` checks it.
 3. **Proton against Windows.** vkd3d-proton does not validate D3D12 (CLAUDE.md, "Proton is not a D3D12 validator").
    The fork's D3D12 usage is FISC's, which runs on Windows as shipped, but the widened state (six outputs, more lists
    in flight) needs a run with the debug layer on native Windows before anyone else runs it.
-4. **Same-class latch.** If a game creates its FG swapchain before the ini is final (never, for an ini-only key), or
-   the user changes the multiplier across 2/3 in the ini mid-session, the change waits for a restart. Logged.
+4. **Same-class latch.** Started at 2 (or with LSFG off), a 3 or 4 chosen in the menu waits for a restart: FFX's
+   swapchain cannot show it. Logged, and the menu says so (5). Started at 3 or 4, every value applies live (1.4).
 5. **FFX fixes stop flowing in.** The fork is SDK 2.3.0's FISC; an FFX fix to its swapchain must be ported by hand.
    The file mapping in 1.1 keeps function names, so a diff per function is possible.
 6. **Reprojection** (`[FrameGen] ReprojectionEnabled`) assumes one generated frame at t = 0.5 (FSRFG `:798`). With
@@ -415,6 +459,27 @@ frames (`Tmp/lsfg-study/ref_m3`, `ref_m4`, `ref`; made without `-a`, so FP16 is 
   D3D12/Vulkan one (min16float, sampling), not anything multi-frame.
 - This is the harness's recording, not `LsfgFrameGen_Dx12`'s; `ctxbench` (OPTI_INTEGRATION.md, second step) holds
   the two to the same bytes at x2 and was not rerun at x3/x4 here.
+
+**The multiplier changed in a running process** (2026-10-14, same setup, the menu's code path). The menu cannot be
+clicked from a script, so a temporary hook in the router (never committed; removed before the build of the commit)
+did what the menu does on a selection, `Config::LsfgMultiplier = m`, every 30 s, and logged what the row would say:
+
+| Started at | Chosen | Row says | 10 s summaries after the change |
+|---|---|---|---|
+| 3 (ours) | 4 | `4x`, applies | `300 real + 885/900 generated (2.95/3.00 per real; 3:295/300)`, 118.4/119.9 fps, p50 8.25 ms (target 8.32/8.24) |
+| | 2 | `2x`, applies | `300 real + 300 generated (1.00 per real; 1:300)`, 59.9 fps, p50 16.60 ms p99 17.69 ms (target 16.55); FFX's x2 control was 59.9 fps, 16.60 / 17.75 ms |
+| | 3 | `3x`, applies | `1.96-1.99 per real; 2:292-299`, 88.1-89.5 fps, p50 11.03-11.06 ms (target 11.07-11.15) |
+| 2 (FFX's) | 3 | `3x (after a restart)`, now 2x | no presenter of ours; LSFG `300 generated (300 frames)` per window, as before; the restart line logged |
+| | 4 | `4x (after a restart)`, now 2x | the same; the restart line logged again for x4 |
+| | 2 | `2x` | unchanged |
+
+- The change lands at the next real frame: `LSFG presenter: x4 from frame 918`, `x2 from frame 1817`, `x3 from frame
+  2713`, each in the same millisecond as the choice. The window that straddles a change mixes the two (`2:253 3:47`).
+- N = 1 through the fork measured as FFX's x2 does: same presented rate, same p50, p99 within 0.1 ms. The second x2
+  window's p99 of 32.6 ms is six held entries (`0:6`, the synthesized input's resets), which present the real frame a
+  whole real frame after the previous present by design (3.2).
+- No `[E]` line from OptiScaler with our presenter (the FFX runs log AntiLag 2's `LowLatencyUpdateFail`, as the x2
+  control always did), no device removal, no D3D12 error from vkd3d-proton, clean `wineserver -k`.
 
 **Open problems.**
 

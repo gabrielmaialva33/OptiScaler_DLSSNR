@@ -668,8 +668,8 @@ class Config
 
     // --- LSFG study (retoque/lsfg, branch study/lsfg-d3d12) --- removable as one block --------------
     // Lossless Scaling's frame generation (LSFG 3.1) as FSR-FG's interpolator: with FGOutput=fsrfg, LSFG replaces
-    // FFX's interpolation and FFX keeps the swapchain, pacing and UI composition. x2 only. Off by default; off,
-    // FSR-FG runs exactly as before. tools/lsfg-study/OPTI_INTEGRATION.md, option (b).
+    // FFX's interpolation and FFX keeps the swapchain, pacing and UI composition: x2 (Multiplier below for x3/x4). Off
+    // by default; off, FSR-FG runs exactly as before. tools/lsfg-study/OPTI_INTEGRATION.md, option (b).
     CustomOptional<bool> LsfgEnabled { false };
     // LSFG's flow scale: the size of its internal pyramids relative to the frame. 0.25..1.0, clamped.
     CustomOptional<float> LsfgFlowScale { 1.0f };
@@ -682,8 +682,9 @@ class Config
     // library folders and Wine Z: drive paths.
     CustomOptional<std::wstring, NoDefault> LsfgDllPath;
     // 2 (x2, FFX's swapchain, as above), 3 or 4: one or two more generated frames per real frame, presented by our
-    // fork of FFX's swapchain (retoque/lsfg/presenter, tools/lsfg-study/MFG_PRESENTER.md). Read when the first FG
-    // swapchain is created: crossing 2/3 later takes a restart. Anything else is ignored.
+    // fork of FFX's swapchain (retoque/lsfg/presenter, tools/lsfg-study/MFG_PRESENTER.md). Which swapchain runs is
+    // decided when the first FG swapchain is created: started at 3 or 4, every value applies at the next frame (2 as
+    // N = 1 through the fork); started at 2, 3 and 4 take a restart. In the LSFG menu. Anything else is ignored.
     CustomOptional<int> LsfgMultiplier { 2 };
     // --- end LSFG study ----------------------------------------------------------------------------
 

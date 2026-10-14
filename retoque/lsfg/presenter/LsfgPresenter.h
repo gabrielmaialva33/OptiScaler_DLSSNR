@@ -15,6 +15,8 @@
 
 #include <ffx_api.h>
 
+#include "MfgLatch.h"
+
 namespace Lsfg::Presenter
 {
 
@@ -25,6 +27,10 @@ bool Wanted();
 
 // Whether our swapchain was latched (the LSFG summary names the presenter by it).
 bool InUse();
+
+// Which swapchain was latched, Undecided before the first FG swapchain. The menu reads it to tell a multiplier that
+// applies at the next frame from one that waits for a restart (MfgLatch.h).
+LsfgMfg::Latch CurrentLatch();
 
 // FSRFG_Dx12::CreateSwapchainInternal / CreateSwapchain1Internal, in place of FfxApiProxy::D3D12_CreateContext with
 // ffxCreateContextDescFrameGenerationSwapChainNewDX12 / ...ForHwndDX12. On success *swapChain is ours (refcount 1,
