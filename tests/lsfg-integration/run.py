@@ -48,6 +48,7 @@ keys = {  # ini key -> (member, read helper, default as declared)
     'FlowScale': ('LsfgFlowScale', 'readFloat', '1.0f'),
     'PerformanceMode': ('LsfgPerformanceMode', 'readBool', 'false'),
     'ShaderDir': ('LsfgShaderDir', 'readWString', None),
+    'DllPath': ('LsfgDllPath', 'readWString', None),
 }
 
 section = re.search(r'^\[LSFG\]\n(.*?)(?=^; -{20,}\n\[|\Z)', ini, re.M | re.S)

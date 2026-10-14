@@ -787,6 +787,9 @@ PerformanceMode=false
 
 ; Path - Default (auto) is unset
 ShaderDir=C:\lsfg\dxil
+
+; Path - Default (auto) is unset
+DllPath=auto
 ```
 
 ### Vulkan hooks under Wine/Proton

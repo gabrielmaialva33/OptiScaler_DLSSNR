@@ -593,6 +593,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             LsfgFlowScale.set_from_config(readFloat("LSFG", "FlowScale"));
             LsfgPerformanceMode.set_from_config(readBool("LSFG", "PerformanceMode"));
             LsfgShaderDir.set_from_config(readWString("LSFG", "ShaderDir"));
+            LsfgDllPath.set_from_config(readWString("LSFG", "DllPath"));
         }
 
         // Logging
@@ -1565,6 +1566,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->LsfgPerformanceMode.value_for_config()).c_str());
         ini.SetValue("LSFG", "ShaderDir",
                      wstring_to_string(Instance()->LsfgShaderDir.value_for_config_or(L"auto")).c_str());
+        ini.SetValue("LSFG", "DllPath",
+                     wstring_to_string(Instance()->LsfgDllPath.value_for_config_or(L"auto")).c_str());
     }
 
     // Sharpness
