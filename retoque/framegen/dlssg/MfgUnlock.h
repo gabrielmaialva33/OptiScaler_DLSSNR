@@ -22,6 +22,12 @@
 // Patched: the count immediates become 5, the cmovl becomes a nop, and the jl becomes two nops. The
 // result is a maximum of five generated frames -- 6X -- on any architecture.
 //
+// The two sites are one decision, so they are written as one: both are found first, then written
+// together through MfgPatch::Commit (MfgPatchPlan.h), read back, and put back as they were if any write
+// or read-back fails. A provider that advertises five and validates one is never left behind. A gate
+// that compares against another constant than 0x1b0 has been rewritten by another unlocker; the module
+// is then left alone and the log says so, rather than patched on top of someone else's patch.
+//
 // Memory only. The file on disk carries an Authenticode signature and is left alone.
 //
 // Not covered: nvngx_dlssg.dll's frame pacing assumes Blackwell's flip metering hardware, which Ada
@@ -30,10 +36,12 @@
 namespace MfgUnlock
 {
 // Applies the patches once per module. Silent and harmless when the config option is off, when no
-// DLSS-G provider is loaded, or when either signature does not match exactly once. Once a module has
-// been handled it logs a single "MFG unlock summary (<module>): ..." line naming every patch and
-// whether it applied (ok), missed (MISS) or was not attempted (skip), so a half-applied module is
-// one WARN rather than a lone warning buried in the log.
+// DLSS-G provider is loaded, or when either signature does not match. Once a module has been handled
+// it logs a single "MFG unlock summary (<module> <version>): ..." line naming every patch and whether
+// it applied (ok, or ok(already) when there was nothing to write), missed (MISS), was held back
+// because its partner gate missed (HELD), belongs to another unlocker (foreign), was undone after a
+// failed write (ROLLED-BACK, STALE), could not be undone (BROKEN, an ERROR) or was not attempted
+// (skip), so a half-applied module is one WARN rather than a lone warning buried in the log.
 //
 // provider: the DLSS-G snippet the load hook just mapped. Without one, the game's nvngx_dlssg.dll is
 // looked up by name -- which cannot find the driver's own copy, a <hash>.bin under

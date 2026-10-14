@@ -17,7 +17,7 @@ find_pattern = scanner[begin:scanner.index('uintptr_t scanner::GetAddress', begi
 # The real signature strings, byte-for-byte from the module under test.
 mfg = (repo / 'retoque/framegen/dlssg/MfgUnlock.cpp').read_text()
 patterns = re.findall(r'^constexpr std::string_view k\w+ = ".*?";', mfg, re.M)
-assert len(patterns) == 5, f'expected 5 MFG signature constants, sliced {len(patterns)}'
+assert len(patterns) == 10, f'expected 10 MFG signature constants, sliced {len(patterns)}'
 
 slice_block = find_pattern + '\n\n' + '\n'.join(patterns) + '\n'
 harness = (root / 'test.cpp').read_text()

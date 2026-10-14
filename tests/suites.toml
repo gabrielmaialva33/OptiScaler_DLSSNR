@@ -186,7 +186,12 @@ summary = "Synthesized FG's policy (fast-motion response on incoherent motion an
 [mfg-pattern]
 tier = "host"
 timeout = 300
-summary = "The real MFG byte signatures and the real scanner matcher against synthetic cmp/mov buffers: each architecture signature matches its cmp-against-0x1b0 site and rejects a mov of the same immediate. Runs no patcher and touches no DLL."
+summary = "The real MFG byte signatures and the real scanner matcher against synthetic cmp/mov buffers: each architecture signature matches its cmp-against-0x1b0 site and rejects a mov of the same immediate; both wrapper clamp shapes (r8d, and the edx one of Streamline 2.7.3 to 2.14) match; a gate rewritten to another constant falls through to the foreign patterns. Runs no patcher and touches no DLL."
+
+[mfg-patch-plan]
+tier = "host"
+timeout = 300
+summary = "The MFG unlock's write half (MfgPatchPlan.h) over a fake module with injected failures: a patch group commits whole or rolls back whole, a half-written site is restored, a wrong read-back rolls back, a site changed since planning writes nothing, a failed restore is reported and does not stop the others."
 
 [nr-model-loader]
 tier = "host"

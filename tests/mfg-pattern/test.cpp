@@ -113,6 +113,49 @@ int main()
                   kWrapperClampPattern),
           "matches the sl.dlss_g.dll min(published,3) clamp");
 
+    std::printf("kWrapperClampPattern with the ceiling already raised\n");
+    // The ceiling is a wildcard, so a wrapper that already carries five is recognised and left as a
+    // no-op site rather than reported as a miss.
+    check(matches(padded({ 0x41, 0xB8, 0x05, 0x00, 0x00, 0x00, 0x41, 0x3B, 0xC8, 0x44, 0x0F, 0x42, 0xC1 }),
+                  kWrapperClampPattern),
+          "matches the r8d clamp with a ceiling of five");
+
+    std::printf("kWrapperClampPatternEdx (mov edx,n / cmp ecx,edx / cmovb edx,ecx)\n");
+    // Streamline 2.7.3 to 2.9.1: BA 03 00 00 00 | 3B CA | 0F 42 D1. 2.14.1 carries BA 05.
+    check(matches(padded({ 0xBA, 0x03, 0x00, 0x00, 0x00, 0x3B, 0xCA, 0x0F, 0x42, 0xD1 }), kWrapperClampPatternEdx),
+          "matches the 2.7.3-2.9 edx clamp (ceiling three)");
+    check(matches(padded({ 0xBA, 0x05, 0x00, 0x00, 0x00, 0x3B, 0xCA, 0x0F, 0x42, 0xD1 }), kWrapperClampPatternEdx),
+          "matches the 2.14 edx clamp (ceiling five)");
+    // The r8d pattern must not be what finds it: that is the miss this pattern exists for.
+    check(!matches(padded({ 0xBA, 0x03, 0x00, 0x00, 0x00, 0x3B, 0xCA, 0x0F, 0x42, 0xD1 }), kWrapperClampPattern),
+          "the r8d pattern does not match the edx clamp");
+    // MFGAdaUnlock's wrapper edit (cmovb edx,ecx -> cmovb edx,edx) is not ours to raise again.
+    check(!matches(padded({ 0xBA, 0x03, 0x00, 0x00, 0x00, 0x3B, 0xCA, 0x0F, 0x42, 0xD2 }), kWrapperClampPatternEdx),
+          "rejects the edx clamp once its cmovb source was rewritten");
+
+    std::printf("foreign-gate patterns: the gate shape with another architecture constant\n");
+    // MFGAdaUnlock rewrites 0x1b0 to 0x190 in place. The exact patterns must miss such a module, so the
+    // search falls through to the foreign patterns, and those must find it.
+    const std::vector<uint8_t> validate190 = { 0x3D, 0x90, 0x01, 0x00, 0x00, 0x0F, 0x93, 0xC0 };
+    const std::vector<uint8_t> advertise190 = { 0x81, 0xFD, 0x90, 0x01, 0x00, 0x00, 0x0F, 0x8C, 0x11,
+                                                0x22, 0x33, 0x44, 0xBF, 0x05, 0x00, 0x00, 0x00 };
+    const std::vector<uint8_t> validateOld190 = { 0x3D, 0x90, 0x01, 0x00, 0x00, 0x7C, 0x40, 0x83, 0xFB, 0x03, 0x76 };
+    const std::vector<uint8_t> advertiseOld190 = { 0xBB, 0x01, 0x00, 0x00, 0x00, 0x41, 0xB8, 0x05, 0x00, 0x00, 0x00,
+                                                   0x81, 0xFE, 0x90, 0x01, 0x00, 0x00, 0x44, 0x0F, 0x4C, 0xC3 };
+    check(!matches(padded(validate190), kValidatePattern309) && matches(padded(validate190), kValidateForeignPattern309),
+          "a 310.9 validate gate at 0x190 is foreign, not ours");
+    check(!matches(padded(advertise190), kAdvertisePattern309) &&
+              matches(padded(advertise190), kAdvertiseForeignPattern309),
+          "a 310.9 advertise gate at 0x190 is foreign, not ours");
+    check(!matches(padded(validateOld190), kValidatePattern) && matches(padded(validateOld190), kValidateForeignPattern),
+          "a pre-310.9 validate gate at 0x190 is foreign, not ours");
+    check(!matches(padded(advertiseOld190), kAdvertisePattern) &&
+              matches(padded(advertiseOld190), kAdvertiseForeignPattern),
+          "a pre-310.9 advertise gate at 0x190 is foreign, not ours");
+    // The foreign patterns keep the cmp opcode: a mov of 0x190 in the same shape is still not a gate.
+    check(!matches(padded({ 0xB8, 0x90, 0x01, 0x00, 0x00, 0x0F, 0x93, 0xC0 }), kValidateForeignPattern309),
+          "the foreign validate pattern rejects mov eax,0x190 / setae al");
+
     std::printf("mov-of-0x1b0 sweep: no architecture signature may match any mov encoding\n");
     // Every mov-immediate encoding of 0x1b0 laid end to end: B8..BF <imm32>, then C7 C0..C7 <imm32>.
     std::vector<uint8_t> movs;
@@ -129,6 +172,10 @@ int main()
     check(!matches(movBuffer, kValidatePattern309), "kValidatePattern309 ignores every mov of 0x1b0");
     check(!matches(movBuffer, kAdvertisePattern), "kAdvertisePattern ignores every mov of 0x1b0");
     check(!matches(movBuffer, kAdvertisePattern309), "kAdvertisePattern309 ignores every mov of 0x1b0");
+    check(!matches(movBuffer, kValidateForeignPattern), "kValidateForeignPattern ignores every mov of 0x1b0");
+    check(!matches(movBuffer, kValidateForeignPattern309), "kValidateForeignPattern309 ignores every mov of 0x1b0");
+    check(!matches(movBuffer, kAdvertiseForeignPattern), "kAdvertiseForeignPattern ignores every mov of 0x1b0");
+    check(!matches(movBuffer, kAdvertiseForeignPattern309), "kAdvertiseForeignPattern309 ignores every mov of 0x1b0");
 
     if (g_failures != 0)
     {
