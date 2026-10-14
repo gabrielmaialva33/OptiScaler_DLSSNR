@@ -34,6 +34,16 @@ int main()
         assert(PresentSyncWanted(std::nullopt, in));
     }
 
+    // At the game's own Present, ahead of its DLSS-G, auto does not wait even with every sign of frame generation:
+    // the write-back is on the game's queue ahead of the fence DLSS-G waits on (nr-before-dlssg.md, step 0b).
+    {
+        PresentSyncInputs in;
+        in.dlssgSeen = in.dlssgLoaded = in.boundary = true;
+        assert(!PresentSyncWanted(std::nullopt, in));
+        // An explicit true still waits there.
+        assert(PresentSyncWanted(true, in));
+    }
+
     // An explicit setting wins either way.
     {
         PresentSyncInputs fg;
@@ -43,6 +53,6 @@ int main()
     }
 
     std::printf("PASS: present sync -- auto waits only with frame generation (hook, output, DLSS-G seen or loaded), "
-                "an explicit setting wins\n");
+                "never at the game's own Present, an explicit setting wins\n");
     return 0;
 }

@@ -489,7 +489,12 @@ PairCaptureStatus GetPairCaptureStatus();
 // upscaler evaluate handed over earlier in the same frame, pinned by EvaluateAfterUpscale; without
 // them the pass either waits (Require DLSS on) or runs on dummy temporals that treat the scene as static
 // (Require DLSS off).
-void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool fgHook);
+//
+// boundary: the call comes from the game's own Present on its Streamline swapchain, ahead of the game's DLSS-G
+// (DlssNr_SlBoundaryProbe.cpp; docs/dlssnr/design/nr-before-dlssg.md, step 1). The queue is then the game's native
+// queue, where Streamline signals the fence DLSS-G waits on before reading the backbuffer, so a pass submitted there
+// before the forward is ordered ahead of DLSS-G's read. While that entry is live the two below it stand down.
+void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool fgHook, bool boundary = false);
 
 // The source the pass is running from, for the overlay: the upscaler's output or the swapchain, and
 // whether the temporal inputs are in hand. Empty while nothing has run yet.

@@ -1,7 +1,7 @@
 # NR before DLSS-G: the present pass at the game's Streamline real-frame boundary
 
-Status: design for review, 2026-10-14. **Step 0 and the interim refusal are built** (see "Steps"); nothing run in a
-game yet. Written against `68c490d2` on
+Status: 2026-10-14. **Steps 0, 0b and 1 (S1, H1) are built**, and the interim refusal; step 0 and 0b were measured
+in Crimson Desert (below). Step 1 has not run in a game yet. Written against `68c490d2` on
 `feat/neurotic-parity`; line numbers are into that tree. NeuRotic line numbers are into its clone at `7132a103`.
 This is the task [present-real-guides.md](present-real-guides.md) (D5) left open: "running at DLSS-G's real-frame
 boundary ... is a separate task with its own queue-ownership risk".
@@ -497,6 +497,26 @@ The interim refusal ships with step 0, since it needs none of the boundary.
 
 **Step 1, the boundary.** Option A, the ordering step 0 allows (S1, else S2), and H1 and H2 built twice and compared on
 the same scenes. Correct the `FG_Hooks.cpp` comment and the ini text.
+
+**Step 0b measured (2026-10-14, build `9eb4f6e6`, same setup as step 0).** The game's queue is an interposer proxy
+(`0x33486b0`, native `0x5b3cd50`). Compared native to native, DLSS-G's evaluate lists still execute on neither the
+game's queue nor the wrapped entry's: DLSS-G has a queue of its own. Per game present at 3x, in every window: the
+game's native queue signals once and waits once inside the forwarded `Present`; DLSS-G's queue waits twice (one per
+evaluate), and one of those two waits is on the fence the game's queue signals inside the `Present`. So DLSS-G reads the
+backbuffer only after that fence, and anything submitted on the game's native queue before the forward precedes it:
+**S1 holds**, with no CPU wait. The match is by fence identity, not by value; one wait per game present on that fence
+is what the ordering needs.
+
+**Step 1 built (2026-10-14, H1, S1).** In the interposer `Present` detour, before forwarding, `RunPresentPass` runs
+with `boundary=true` on the game's native queue (the swapchain handed to it is the interposer's proxy, whose
+`GetBuffer` returns the native buffers DLSS-G reads, measured as `DLSSG.Backbuffer` matches). While that entry has run
+within half a second, the wrapped entry and the FG present hook return before counting anything, so the status line
+counts game presents and reads 1:1 at any multiplier. `PresentSync=auto` does not wait at the boundary (explicit
+`true` still does). The game's tags are left alone (H1). `HookMethod=2` reaches the boundary only when it was set
+before the game started (the detours are installed with `sl.interposer.dll`); set later, the interim refusal still
+applies. Not done: H2 for comparison, resize draining at the interposer (the real resize still passes the wrapped
+swapchain's own handling below it), the guide identity's two-presenter view of the proxy and the wrapped swapchain
+(log only).
 
 **Step 2, if earned.** H3, and with it hud-protection.md's mask (c).
 

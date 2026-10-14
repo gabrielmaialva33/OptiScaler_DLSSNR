@@ -7,18 +7,22 @@ struct ID3D12CommandList;
 struct ID3D12GraphicsCommandList;
 struct NVSDK_NGX_Parameter;
 
-// Step 0 of docs/dlssnr/design/nr-before-dlssg.md: watch the game's own Streamline swapchain, forward every call
-// untouched, and log what a pass running there, above the game's DLSS-G, would have to rely on.
+// The game's own Streamline swapchain, where the present pass runs ahead of the game's DLSS-G
+// (docs/dlssnr/design/nr-before-dlssg.md). It began as step 0's probe, which only watched and logged; its findings
+// (step 0b, Crimson Desert) are what step 1 stands on, and the probe keeps logging them.
 //
-// The present pass's only D3D12 entry under the game's DLSS-G is the wrapped swapchain, below DLSS-G. The design's
-// option A moves it up to the game's Present on the interposer's swapchain, where only real frames arrive. Before
-// building that, three things need measuring in a game, and nothing here changes a frame:
-//   - how many presents reach the wrapped entry per present the game makes, and whether they arrive nested inside
-//     the game's own Present on its thread or on another thread (DLSS-G's present thread);
-//   - which queue executes DLSS-G's FrameGeneration evaluate list: the one the game created its swapchain on, the
-//     wrapped entry's, or another, and whether it is submitted inside the game's Present. That decides whether queue
-//     order alone puts a pass ahead of DLSS-G (S1) or a wait is needed (S2, S3);
-//   - whether DLSSG.Backbuffer at that evaluate is the buffer the game's swapchain reported as current at its Present.
+// Step 1: at the game's Present, before forwarding it, the present pass runs on the game's native queue
+// (RunPresentPass with boundary=true). Streamline signals a fence on that queue inside the forwarded call and DLSS-G's
+// own queue waits on it before reading the backbuffer, so the pass is ordered ahead of DLSS-G's read with no CPU wait;
+// the entries below (the wrapped swapchain, which under DLSS-G also sees its generated presents, and the FG present
+// hook) stand down while this one is live. The HUD is edited with the rest of the frame and the game's tags are left
+// as they are (the note's H1).
+//
+// What step 0 measured, still logged once per window:
+//   - presents at the wrapped entry per game present, and whether they arrive nested inside the game's Present;
+//   - the queue DLSS-G's FrameGeneration evaluate lists execute on, native to native, and whether inside the Present;
+//   - whether DLSSG.Backbuffer is the buffer the game's swapchain reported current at its Present;
+//   - Signal and Wait on the game's native queue and on DLSS-G's (step 0b).
 //
 // Installed only when [DlssNr] Enabled is true with HookMethod=2 as sl.interposer.dll is hooked, so every other
 // configuration has no detour at all. It detours the interposer's CreateDXGIFactory/1/2 and slUpgradeInterface, then

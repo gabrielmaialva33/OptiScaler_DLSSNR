@@ -19,12 +19,19 @@ struct PresentSyncInputs
     bool fgOutput = false;    // OptiScaler's own frame generation output is selected
     bool dlssgSeen = false;   // the game set DLSS-G options or a DLSS-G frame count was detected
     bool dlssgLoaded = false; // Streamline's DLSS-G plugin or nvngx_dlssg.dll is loaded in the process
+    bool boundary = false;    // the pass ran at the game's own Present, ahead of its DLSS-G
 };
 
 inline bool PresentSyncWanted(std::optional<bool> configured, const PresentSyncInputs& in)
 {
     if (configured.has_value())
         return *configured;
+
+    // At the game's own Present the write-back is on the game's queue ahead of the fence Streamline signals there for
+    // DLSS-G, which waits on it before reading the buffer (nr-before-dlssg.md, step 0b, measured in Crimson Desert):
+    // the order the wait would enforce is already the queue's. Waiting would only hold the game's present thread.
+    if (in.boundary)
+        return false;
 
     return in.fgHook || in.fgOutput || in.dlssgSeen || in.dlssgLoaded;
 }

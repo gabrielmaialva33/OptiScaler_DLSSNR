@@ -58,12 +58,26 @@ for path, calls in sites.items():
         if text.count(call) != 1:
             failures.append(f'{path}: expected one {call}')
 
+# Step 1: the boundary runs the pass before forwarding, on the game's native queue, and the entries below it stand down
+# while it is live; at the boundary PresentSync=auto does not wait.
+enter = probe[probe.index('void Enter(IUnknown* swapchain, UINT flags)'):]
+enter = enter[:enter.index('\n}\n')]
+if enter.count('DlssNr::RunPresentPass(sc3, queue, false, true);') != 1:
+    failures.append('the boundary no longer runs the present pass (RunPresentPass(..., boundary=true)) in Enter')
+if 'g_gameQueueNative.load()' not in enter:
+    failures.append('the boundary pass is not submitted on the game\'s native queue')
+stand_down = 'else if (BoundaryLive())\n    {\n        return;\n    }'
+if stand_down not in run_present or run_present.index(stand_down) > run_present.index('++g_presentFlip;'):
+    failures.append('the entries below the boundary do not stand down, uncounted, while it is live')
+if 'syncInputs.boundary = boundary;' not in run_present:
+    failures.append('PresentSync is not told the pass ran at the boundary')
+
 if failures:
     for failure in failures:
         print(f'FAIL: {failure}')
     sys.exit(1)
-print('PASS: both routes decide through DlssNr_PresentBoundary.h; the step 0 probe only watches, and only '
-      'with HookMethod=2')
+print('PASS: both routes decide through DlssNr_PresentBoundary.h; the boundary installs only with HookMethod=2, '
+      'runs the pass before forwarding on the game\'s native queue, and the entries below stand down while it is live')
 
 with tempfile.TemporaryDirectory(prefix='optiscaler-nr-present-boundary-') as directory:
     binary = Path(directory) / 'cases'

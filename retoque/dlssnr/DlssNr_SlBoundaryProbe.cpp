@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "DlssNr_SlBoundaryProbe.h"
+#include "DlssNr.h"
 
 #include <Config.h>
 #include <State.h>
@@ -392,6 +393,13 @@ void Enter(IUnknown* swapchain, UINT flags)
             buffer->Release();
         }
 
+        // Step 1: the present pass here, before the forward, on the game's native queue. Streamline signals the fence
+        // DLSS-G waits on there inside the forwarded call (step 0b), so DLSS-G reads the edited buffer. The pass
+        // decides for itself whether to run (HookMethod, NR on, temporal inputs) and the entries below stand down
+        // while this one is live.
+        if (auto* queue = g_gameQueueNative.load(); queue != nullptr)
+            DlssNr::RunPresentPass(sc3, queue, false, true);
+
         sc3->Release();
     }
 }
@@ -550,7 +558,7 @@ void DlssNr::SlBoundaryProbe::Install(HMODULE interposer)
 
     g_installed = true;
     LOG_INFO("DLSS-NR boundary probe (nr-before-dlssg.md, step 0): watching the swapchain the game creates through "
-             "sl.interposer.dll. It forwards every call and only counts");
+             "sl.interposer.dll; the present pass runs at its Present, ahead of the game's frame generation");
 }
 
 void DlssNr::SlBoundaryProbe::Uninstall()
