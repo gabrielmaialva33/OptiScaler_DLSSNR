@@ -241,7 +241,7 @@ summary = "No home path, LAN or tailnet address, or token in any tracked file ou
 [lsfg-shader-library]
 tier = "host"
 timeout = 60
-summary = "Runtime LSFG shader library: DLL discovery (Steam VDF, Wine Z:, override), PE RT_RCDATA SPIR-V extraction, and hash-keyed cache."
+summary = "Runtime LSFG shader library: DLL discovery (Steam VDF, Wine Z:, override), PE RT_RCDATA SPIR-V extraction, and hash-keyed cache; convert.py Float16 detection (ids 51..98 on the real DLL)."
 
 [lsfg-integration]
 tier = "host"

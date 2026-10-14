@@ -38,7 +38,10 @@ without premultiplying or adding a color-space transform.
 
 `--fp16` selects resource IDs +48 for the 24 core shaders (base shaders stay 0/1).
 The supplied cs_6_0 conversions express these as `min16float`; this option does
-not claim forced native 16-bit arithmetic. Timing rows labeled FP16 measure
+not claim forced native 16-bit arithmetic. Under vkd3d-proton it is native anyway: an
+SM 6.2 `-enable-16bit-types` conversion (`convert.py --fp16-native`, run with
+`--shaders` pointing at a folder that holds it) renders the same bytes
+(`../FP16_NOTES.md`, section 7). `--shaders DIR` replaces `<artifacts>/dxil`. Timing rows labeled FP16 measure
 these variants. `--performance` adds 24 to core shader IDs and halves the
 feature-channel counts; `--flow-scale` scales the internal pyramids while
 source and output remain at full resolution.

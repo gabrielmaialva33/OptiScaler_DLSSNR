@@ -23,6 +23,10 @@ Host unit test suite for the runtime LSFG shader library (`retoque/lsfg/LsfgShad
 5. **Real DLL Test:**
    - When the user's actual `lsfg-vk.dll` is present at `~/.local/share/Steam/steamapps/common/Lossless Scaling/lsfg-vk.dll`, extracts and verifies all 99 modules (0..98) and content hash. Skipped gracefully if absent; never extracts or commits proprietary content.
 
+6. **convert.py Float16 detection** (`tools/lsfg-study/convert.py`, the `--fp16-native` study conversion):
+   `declares_float16` on synthetic SPIR-V (a Float16 capability, none, one after a non-capability instruction,
+   truncated input), and on the real DLL when present, exactly ids 51..98, so never base shader 2.
+
 ## What it does not cover
 
 - Offline conversion from SPIR-V to HLSL/DXIL (handled by tools/build scripts).
