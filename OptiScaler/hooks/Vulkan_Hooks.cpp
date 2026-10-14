@@ -532,8 +532,9 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
         }
     }
 
-    // dxvk/vkd3d-proton presents are handled by the DXGI swapchain
-    const bool dxgiBacked = IsDxgiBackedCaller(_ReturnAddress());
+    // dxvk/vkd3d-proton presents are handled by the DXGI swapchain (the caller is the application's even when the
+    // DLSS-NR Vulkan present host's detour runs above this one)
+    const bool dxgiBacked = IsDxgiBackedCaller(DlssNr::VkPresentHost::OriginalPresentCaller(_ReturnAddress()));
 
     if (!dxgiBacked)
     {
