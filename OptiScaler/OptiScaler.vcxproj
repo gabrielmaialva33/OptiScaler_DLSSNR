@@ -1045,6 +1045,16 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="..\retoque\lsfg\LsfgShaderSource.cpp" />
     <ClCompile Include="..\retoque\lsfg\LsfgShaderLibrary.cpp" />
     <ClCompile Include="..\retoque\lsfg\LsfgMenu.cpp" />
+    <ClInclude Include="..\retoque\lsfg\presenter\LsfgPresenter.h" />
+    <ClInclude Include="..\retoque\lsfg\presenter\MfgPacing.h" />
+    <ClInclude Include="..\retoque\lsfg\presenter\MfgSwapChain_Dx12.h" />
+    <ClInclude Include="..\retoque\lsfg\presenter\MfgSwapChain_Helpers.h" />
+    <ClInclude Include="..\retoque\lsfg\presenter\MfgSwapChain_UiComposition.h" />
+    <ClCompile Include="..\retoque\lsfg\presenter\LsfgPresenter.cpp" />
+    <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_Dx12.cpp" />
+    <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_Helpers.cpp" />
+    <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_UiComposition.cpp" />
+    <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_DebugPacing.cpp" />
   </ItemGroup>
   <ItemDefinitionGroup>
     <ClCompile>

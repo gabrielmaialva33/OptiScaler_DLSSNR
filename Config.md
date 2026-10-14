@@ -764,7 +764,8 @@ the emulator's own option (PCSX2: Skip Presenting Duplicate Frames).
 ### LSFG as FSR FG's interpolator (study build)
 Only on the `study/lsfg-d3d12` branch, never in a release. With `FGOutput=fsrfg`, `[LSFG] Enabled=true`
 replaces FFX's interpolation with Lossless Scaling's frame generation (LSFG 3.1); FFX keeps the swapchain,
-the frame pacing and the UI composition. FSR FG generates one frame per base frame, so it is x2 only.
+the frame pacing and the UI composition. FSR FG generates one frame per base frame, so that is x2; `Multiplier`
+below goes to x3 and x4.
 It reads only the presented frame, so it suits the `synthesized` input above; it needs no depth or
 motion vectors, and FFX's own prepare pass is skipped while LSFG interpolates.
 
@@ -790,7 +791,16 @@ ShaderDir=C:\lsfg\dxil
 
 ; Path - Default (auto) is unset
 DllPath=auto
+
+; 2, 3 or 4 - Default (auto) is 2
+Multiplier=3
 ```
+
+`Multiplier` 3 and 4 show two or three generated frames per real frame. FFX's swapchain cannot (it asks for one), so
+OptiScaler then presents through its own fork of it (`retoque/lsfg/presenter/`, design in
+`tools/lsfg-study/MFG_PRESENTER.md`): same pacing model, UI composition and resize handling, spacing every present by
+the real frame time over the frames it shows. The choice between FFX's swapchain and the fork is made when the game
+creates its swapchain, so moving between 2 and 3 or 4 needs a restart; 3 and 4 switch at once.
 
 ### Vulkan hooks under Wine/Proton
 `SkipHooks=true` keeps the whole vulkan-1.dll hook bundle out (Vulkan overlay, Vulkan spoofing and

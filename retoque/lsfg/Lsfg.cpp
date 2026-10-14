@@ -4,6 +4,8 @@
 
 #include <lsfg/LsfgFrameGen_Dx12.h>
 #include <lsfg/LsfgShaderSource.h>
+#include <lsfg/presenter/LsfgPresenter.h>
+#include <lsfg/presenter/MfgPacing.h>
 
 #include <State.h>
 #include <Util.h>
@@ -72,12 +74,13 @@ struct Parked
 
 struct Stats
 {
-    uint64_t generated = 0; // frames LSFG generated
-    uint64_t held = 0;      // LSFG frames without a generated frame: warm-up or reset
-    uint64_t notReady = 0;  // LSFG frames whose context was missing or being rebuilt
-    uint64_t cancelled = 0; // LSFG frames FSR-FG had already cancelled (numGeneratedFrames 0 on entry)
-    uint64_t refused = 0;   // LSFG frames refused (format, HDR, size)
-    uint64_t ffx = 0;       // frames FFX interpolated while LSFG was enabled
+    uint64_t generated = 0;       // base frames LSFG generated for
+    uint64_t generatedFrames = 0; // the frames it generated for them (N per base frame at xN+1)
+    uint64_t held = 0;            // LSFG frames without a generated frame: warm-up or reset
+    uint64_t notReady = 0;        // LSFG frames whose context was missing or being rebuilt
+    uint64_t cancelled = 0;       // LSFG frames FSR-FG had already cancelled (numGeneratedFrames 0 on entry)
+    uint64_t refused = 0;         // LSFG frames refused (format, HDR, size)
+    uint64_t ffx = 0;             // frames FFX interpolated while LSFG was enabled
     std::vector<double> gpuMs;
     std::vector<double> gpuMsPerPass; // OPTISCALER_LSFG_AB: the frames recorded with the harness's schedule
     double windowStartMs = 0.0;
@@ -411,10 +414,10 @@ void LogSummary()
         device = removed == S_OK ? std::string("device ok") : std::format("DEVICE REMOVED ({:X})", (UINT) removed);
     }
 
-    LOG_INFO("LSFG: last {:.0f} s: {} generated, {} held (warm-up/reset), {} not ready, {} cancelled, {} refused, "
-             "{} by FFX; {}; {}",
-             (now - g_stats.windowStartMs) / 1000.0, g_stats.generated, g_stats.held, g_stats.notReady,
-             g_stats.cancelled, g_stats.refused, g_stats.ffx, gpu, device);
+    LOG_INFO("LSFG: last {:.0f} s: {} generated ({} frames), {} held (warm-up/reset), {} not ready, {} cancelled, "
+             "{} refused, {} by FFX; {}; {}",
+             (now - g_stats.windowStartMs) / 1000.0, g_stats.generated, g_stats.generatedFrames, g_stats.held,
+             g_stats.notReady, g_stats.cancelled, g_stats.refused, g_stats.ffx, gpu, device);
 
     g_stats = {};
     g_stats.windowStartMs = now;
@@ -441,6 +444,18 @@ void LogFirstFrame(const ffxDispatchDescFrameGeneration* params, uint32_t asked)
              list->GetType() == D3D12_COMMAND_LIST_TYPE_COMPUTE ? "COMPUTE (async)" : "DIRECT",
              TransferText(params->backbufferTransferFunction), params->frameID);
 }
+
+// Who presents, and the multiplier it shows: FFX's swapchain asks for one generated frame whatever the key says.
+const char* PresenterText() { return Presenter::InUse() ? "our MFG presenter" : "FFX"; }
+
+int MultiplierShown()
+{
+    if (!Presenter::InUse())
+        return 2;
+    return int(LsfgMfg::GeneratedFramesFor(Config::Instance()->LsfgMultiplier.value_or_default())) + 1;
+}
+
+bool TakesFrameLatched(int fIndex, ffxDispatchDescFrameGeneration* params);
 } // namespace
 
 bool BeginFrame(int fIndex, uint64_t frameId)
@@ -462,9 +477,9 @@ bool BeginFrame(int fIndex, uint64_t frameId)
         g_announced = true;
         const auto s = ReadSettings();
         LOG_INFO("LSFG: [LSFG] Enabled: LSFG 3.1 replaces FSR-FG's interpolation once its shaders are built "
-                 "(ShaderDir {}, flow {:.2f}, {}); FFX keeps the swapchain, pacing and UI; x2",
+                 "(ShaderDir {}, flow {:.2f}, {}); {} keeps the swapchain, pacing and UI; x{}",
                  s.shaderDir.empty() ? std::string("unset") : wstring_to_string(s.shaderDir), s.flow,
-                 ModeText(s.performance));
+                 ModeText(s.performance), PresenterText(), MultiplierShown());
         if (AbTiming())
             LOG_INFO("LSFG: OPTISCALER_LSFG_AB=1: every other frame uses the harness's schedule (a barrier around "
                      "every dispatch, the copy-out), timed apart in the summary");
@@ -479,7 +494,7 @@ bool BeginFrame(int fIndex, uint64_t frameId)
 
     if (decision && !g_lastDecision)
     {
-        LOG_INFO("LSFG: takes over FSR-FG's interpolation: {}, x2", KeyText(O().context->Key()));
+        LOG_INFO("LSFG: takes over FSR-FG's interpolation: {}, x{}", KeyText(O().context->Key()), MultiplierShown());
         g_lastFallback.clear();
     }
     else if (!decision && reason != g_lastFallback)
@@ -493,6 +508,21 @@ bool BeginFrame(int fIndex, uint64_t frameId)
 }
 
 bool TakesFrame(int fIndex, ffxDispatchDescFrameGeneration* params)
+{
+    const bool lsfg = TakesFrameLatched(fIndex, params);
+
+    // FFX interpolates this frame instead: its dispatch writes outputs[0] only and leaves numGeneratedFrames as it
+    // found it, so a presenter that asked for more (ours, at x3/x4) would show stale outputs. Say one. FFX's own
+    // swapchain always asks for one, so nothing changes there (MFG_PRESENTER.md 4.1).
+    if (!lsfg && params != nullptr && params->numGeneratedFrames > 1)
+        params->numGeneratedFrames = 1;
+
+    return lsfg;
+}
+
+namespace
+{
+bool TakesFrameLatched(int fIndex, ffxDispatchDescFrameGeneration* params)
 {
     if (params == nullptr)
         return false;
@@ -530,6 +560,7 @@ bool TakesFrame(int fIndex, ffxDispatchDescFrameGeneration* params)
     LogSummary();
     return false;
 }
+} // namespace
 
 uint32_t FfxDispatch(ffxDispatchDescFrameGeneration* params)
 {
@@ -648,6 +679,7 @@ uint32_t FfxDispatch(ffxDispatchDescFrameGeneration* params)
     }
 
     params->numGeneratedFrames = io.generate;
+    g_stats.generatedFrames += io.generate;
     if (io.generate > 0)
         ++g_stats.generated;
     else
@@ -743,6 +775,7 @@ bool RecordGenerated(ID3D12GraphicsCommandList* list, ID3D12Resource* presentCol
     {
         history.Advance(isReset, frameId);
         ++g_stats.generated;
+        g_stats.generatedFrames += count;
     }
 
     return true;

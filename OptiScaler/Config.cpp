@@ -594,6 +594,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             LsfgPerformanceMode.set_from_config(readBool("LSFG", "PerformanceMode"));
             LsfgShaderDir.set_from_config(readWString("LSFG", "ShaderDir"));
             LsfgDllPath.set_from_config(readWString("LSFG", "DllPath"));
+            LsfgMultiplier.set_from_config(readInt("LSFG", "Multiplier"));
+            if (LsfgMultiplier.has_value() && (LsfgMultiplier.value() < 2 || LsfgMultiplier.value() > 4))
+                LsfgMultiplier.reset();
         }
 
         // Logging
@@ -1568,6 +1571,7 @@ bool Config::SaveIni()
                      wstring_to_string(Instance()->LsfgShaderDir.value_for_config_or(L"auto")).c_str());
         ini.SetValue("LSFG", "DllPath",
                      wstring_to_string(Instance()->LsfgDllPath.value_for_config_or(L"auto")).c_str());
+        ini.SetValue("LSFG", "Multiplier", GetIntValue(Instance()->LsfgMultiplier.value_for_config()).c_str());
     }
 
     // Sharpness

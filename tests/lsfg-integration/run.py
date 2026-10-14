@@ -50,6 +50,7 @@ keys = {  # ini key -> (member, read helper, default as declared)
     'PerformanceMode': ('LsfgPerformanceMode', 'readBool', 'false'),
     'ShaderDir': ('LsfgShaderDir', 'readWString', None),
     'DllPath': ('LsfgDllPath', 'readWString', None),
+    'Multiplier': ('LsfgMultiplier', 'readInt', '2'),
 }
 
 section = re.search(r'^\[LSFG\]\n(.*?)(?=^; -{20,}\n\[|\Z)', ini, re.M | re.S)
@@ -90,7 +91,9 @@ sites = {
 }
 found = {name: re.search(pattern, fsrfg) is not None for name, pattern in sites.items()}
 check(all(found.values()), f'FSRFG_Dx12.cpp call sites: {found}')
-check(fsrfg.count('Lsfg::') == 4, f'FSRFG_Dx12.cpp has {fsrfg.count("Lsfg::")} Lsfg:: calls, expected 4')
+# The interpolator's four, plus the presenter's routing (tests/lsfg-presenter checks those as a set).
+lsfg_calls = len(re.findall(r'Lsfg::(?!Presenter::)', fsrfg))
+check(lsfg_calls == 4, f'FSRFG_Dx12.cpp has {lsfg_calls} Lsfg:: interpolator calls, expected 4')
 check(fsrfg.count('FfxApiProxy::D3D12_Dispatch(&_fgContext, &params->header)') == 1,
       'the FFX hand-off appears more than once: a path that bypasses the latch')
 
@@ -102,8 +105,12 @@ if begin:
     body = begin.group(1)
     off = body.find('if (!Config::Instance()->LsfgEnabled.value_or_default())')
     check(0 <= off < body.find('std::lock_guard'), 'BeginFrame takes the lock before the Enabled check')
-takes = re.search(r'bool TakesFrame\(int fIndex, ffxDispatchDescFrameGeneration\* params\)\n\{(.*?)\n\}', lsfg, re.S)
-check(takes is not None, 'TakesFrame not found')
+# TakesFrame wraps TakesFrameLatched (the clamp for FFX's fallback, tests/lsfg-presenter); the latch takes the lock.
+wrapper = re.search(r'bool TakesFrame\(int fIndex, ffxDispatchDescFrameGeneration\* params\)\n\{(.*?)\n\}', lsfg, re.S)
+check(wrapper is not None and 'lock_guard' not in wrapper.group(1), 'TakesFrame takes a lock itself')
+takes = re.search(r'bool TakesFrameLatched\(int fIndex, ffxDispatchDescFrameGeneration\* params\)\n\{(.*?)\n\}', lsfg,
+                  re.S)
+check(takes is not None, 'TakesFrameLatched not found')
 if takes:
     body = takes.group(1)
     check(body.find('LsfgEnabled.value_or_default()') < body.find('std::lock_guard'),

@@ -681,6 +681,10 @@ class Config
     // Path to lsfg-vk.dll (or Lossless.dll, or the Lossless Scaling folder). Unset: auto-detects from Steam
     // library folders and Wine Z: drive paths.
     CustomOptional<std::wstring, NoDefault> LsfgDllPath;
+    // 2 (x2, FFX's swapchain, as above), 3 or 4: one or two more generated frames per real frame, presented by our
+    // fork of FFX's swapchain (retoque/lsfg/presenter, tools/lsfg-study/MFG_PRESENTER.md). Read when the first FG
+    // swapchain is created: crossing 2/3 later takes a restart. Anything else is ignored.
+    CustomOptional<int> LsfgMultiplier { 2 };
     // --- end LSFG study ----------------------------------------------------------------------------
 
     // DLSS

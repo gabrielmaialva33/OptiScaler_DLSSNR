@@ -1,0 +1,219 @@
+// tests/lsfg-presenter: the arithmetic of the MFG presenter (retoque/lsfg/presenter/MfgPacing.h), compiled unmodified.
+// tools/lsfg-study/MFG_PRESENTER.md sections 3.2, 3.3 and 6.
+
+#include <lsfg/presenter/MfgPacing.h>
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+
+static int g_checks = 0;
+static int g_failures = 0;
+
+#define CHECK(cond)                                                                                                    \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        ++g_checks;                                                                                                    \
+        if (!(cond))                                                                                                   \
+        {                                                                                                              \
+            ++g_failures;                                                                                              \
+            std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);                                                \
+        }                                                                                                              \
+    } while (0)
+
+using namespace LsfgMfg;
+
+// FrameInterpolationSwapchainDX12.cpp:882-884, as FFX computes it for its one generated frame.
+static int64_t FfxDelta(double avg, double stdDev, double varianceFactor, int64_t margin)
+{
+    const int64_t conservativeAvg = int64_t(avg * 0.5 - stdDev * varianceFactor);
+    return conservativeAvg > margin ? (conservativeAvg - margin) : 0;
+}
+
+static void Multipliers()
+{
+    CHECK(GeneratedFramesFor(2) == 1);
+    CHECK(GeneratedFramesFor(3) == 2);
+    CHECK(GeneratedFramesFor(4) == 3);
+    for (int bad : { -1, 0, 1, 5, 8, 1000 })
+    {
+        CHECK(GeneratedFramesFor(bad) == 1);
+        CHECK(!MultiplierValid(bad));
+    }
+    CHECK(MultiplierValid(2) && MultiplierValid(3) && MultiplierValid(4));
+    CHECK(kMaxGeneratedFrames == 3 && kMaxFramesPerEntry == 4);
+    // ffxDispatchDescFrameGeneration::outputs has four slots: the widest request fits.
+    CHECK(GeneratedFramesFor(4) <= 4);
+}
+
+static void Deltas()
+{
+    const int64_t qpc = 10'000'000; // QPC ticks per second on Windows
+
+    // x2 is FFX's formula exactly, over a spread of frame times, deviations, factors and margins.
+    for (double fps : { 20.0, 30.0, 59.94, 60.0, 82.5, 120.0, 240.0 })
+    {
+        for (double stdDevMs : { 0.0, 0.05, 0.4, 2.0, 9.0 })
+        {
+            for (double vf : { 0.0, 0.1, 0.3, 1.0 })
+            {
+                for (double marginMs : { 0.0, 0.01, 0.1, 1.0 })
+                {
+                    const double avg = double(qpc) / fps;
+                    const double sd = stdDevMs * double(qpc) / 1000.0;
+                    const int64_t margin = int64_t(double(qpc) * marginMs / 1000.0);
+                    CHECK(PresentDelta(avg, sd, 2, vf, margin) == FfxDelta(avg, sd, vf, margin));
+
+                    // Every entry fits inside one real frame: its presents never outrun the next real frame.
+                    for (uint32_t frames = 1; frames <= kMaxFramesPerEntry; ++frames)
+                    {
+                        const int64_t d = PresentDelta(avg, sd, frames, vf, margin);
+                        CHECK(d >= 0);
+                        CHECK(double(d) * frames <= avg + 1.0);
+                        // and with no deviation or margin, it is the even split
+                        if (stdDevMs == 0.0 && marginMs == 0.0)
+                            CHECK(std::llabs(d - int64_t(avg / frames)) <= 1);
+                    }
+                }
+            }
+        }
+    }
+
+    // x3 and x4 at 30 fps: a third and a quarter of 33.3 ms.
+    const double avg30 = double(qpc) / 30.0;
+    CHECK(std::llabs(PresentDelta(avg30, 0.0, 3, 0.3, 0) - int64_t(avg30 / 3)) <= 1);
+    CHECK(std::llabs(PresentDelta(avg30, 0.0, 4, 0.3, 0) - int64_t(avg30 / 4)) <= 1);
+
+    // An entry with its real frame only waits a whole frame from the previous present.
+    CHECK(std::llabs(PresentDelta(avg30, 0.0, 1, 0.3, 0) - int64_t(avg30)) <= 1);
+
+    // No average yet (FFX's SimpleMovingAverage returns 0 for its first 10 frames): present at once.
+    for (uint32_t frames = 0; frames <= kMaxFramesPerEntry; ++frames)
+        CHECK(PresentDelta(0.0, 0.0, frames, 0.3, 100) == 0);
+
+    // Zero frames is read as one, never a division by zero.
+    CHECK(PresentDelta(avg30, 0.0, 0, 0.0, 0) == PresentDelta(avg30, 0.0, 1, 0.0, 0));
+
+    // A deviation larger than the share clamps at 0 rather than going negative.
+    CHECK(PresentDelta(avg30, avg30, 4, 1.0, 0) == 0);
+}
+
+static void OutputSets()
+{
+    // Present p writes set p % 2: consecutive presents never write the same set.
+    for (uint64_t p = 0; p < 64; ++p)
+    {
+        CHECK(OutputSetFor(p) < kOutputSets);
+        CHECK(OutputSetFor(p) != OutputSetFor(p + 1));
+        CHECK(OutputSetFor(p) == OutputSetFor(p + 2));
+    }
+
+    // FFX's availability for its one output is base + doPresent (FrameInterpolationSwapchainDX12.cpp:2014).
+    CHECK(SetAvailableAfter(100, 1) == 101);
+    CHECK(SetAvailableAfter(100, 0) == 100);
+    // With three generated frames the set is free after the third one's composition, before the real frame's.
+    CHECK(SetAvailableAfter(100, 3) == 103);
+}
+
+// The presenter's timing model (FrameInterpolationSwapchainDX12.cpp presenterThread/interpolationThread with the
+// widened delta): entries arrive every real frame; each present happens at max(arrival, previous present + delta).
+// At a steady rate every frame of an entry is shown before the next entry arrives (no entry is overwritten), and the
+// presented rate is (N + 1) x the real rate.
+static void Schedule()
+{
+    for (uint32_t n = 1; n <= kMaxGeneratedFrames; ++n)
+    {
+        for (double fps : { 24.0, 30.0, 60.0, 82.5 })
+        {
+            const double frame = 1.0 / fps;
+            const double vf = 0.3, margin = 0.00001; // OptiScaler's FGFPTVarianceFactor / SafetyMarginInMs defaults
+            double previousPresent = 0.0;
+            int presents = 0;
+            double first = -1.0, last = 0.0;
+            double maxGap = 0.0, minGap = 1e9;
+            bool overrun = false;
+
+            for (int entry = 1; entry <= 300; ++entry)
+            {
+                const double arrival = entry * frame;
+                // after 10 entries the moving average is established (stdDev 0 at a steady rate)
+                const double delta =
+                    entry > 10 ? double(PresentDelta(frame * 1e7, 0.0, n + 1, vf, int64_t(margin * 1e7))) / 1e7 : 0.0;
+
+                for (uint32_t k = 0; k <= n; ++k)
+                {
+                    double t = previousPresent + delta;
+                    if (k == 0 && t < arrival)
+                        t = arrival;
+                    if (entry > 20 && presents > 0)
+                    {
+                        maxGap = std::max(maxGap, t - previousPresent);
+                        minGap = std::min(minGap, t - previousPresent);
+                    }
+                    previousPresent = t;
+                    if (first < 0.0)
+                        first = t;
+                    last = t;
+                    ++presents;
+                }
+
+                if (previousPresent > arrival + frame)
+                    overrun = true;
+            }
+
+            CHECK(!overrun);
+            const double rate = double(presents - 1) / (last - first);
+            CHECK(std::fabs(rate / (fps * (n + 1)) - 1.0) < 0.05);
+            // Steady state: every gap is the even split, within the margin's slack.
+            CHECK(maxGap - minGap < 0.0002);
+            CHECK(std::fabs(minGap - frame / (n + 1)) < 0.0002);
+        }
+    }
+}
+
+static void Window()
+{
+    PresentWindow w;
+    CHECK(w.Percentile(0.5) == 0.0);
+    CHECK(w.GeneratedPerReal() == 0.0);
+    CHECK(w.MeanTargetMs() == 0.0);
+
+    // 100 entries of three generated frames and the real one at x4, 30 fps: 8.33 ms apart.
+    for (int e = 0; e < 100; ++e)
+    {
+        w.AddEntry(3);
+        for (int k = 0; k < 4; ++k)
+            w.AddPresent(k < 3, e == 0 && k == 0 ? -1.0 : 8.33, 8.3);
+    }
+    CHECK(w.real == 100 && w.generated == 300);
+    CHECK(w.entriesByGenerated[3] == 100 && w.entriesByGenerated[0] == 0);
+    CHECK(std::fabs(w.GeneratedPerReal() - 3.0) < 1e-9);
+    CHECK(w.intervalsMs.size() == 399); // the first present of the window has no interval
+    CHECK(std::fabs(w.Percentile(0.5) - 8.33) < 1e-9);
+    CHECK(w.overTarget == 0);
+    CHECK(std::fabs(w.MeanTargetMs() - 8.3) < 1e-9);
+
+    // A late present counts over 1.5 x target; a zero target never does.
+    w.AddPresent(false, 13.0, 8.3);
+    w.AddPresent(true, 50.0, 0.0);
+    CHECK(w.overTarget == 1);
+    CHECK(w.Percentile(0.99) >= 8.33);
+    CHECK(w.Percentile(1.0) == 50.0);
+
+    // Entries beyond three generated frames are counted in the last bucket, never out of bounds.
+    w.AddEntry(7);
+    CHECK(w.entriesByGenerated[3] == 101);
+}
+
+int main()
+{
+    Multipliers();
+    Deltas();
+    OutputSets();
+    Schedule();
+    Window();
+
+    std::printf("lsfg-presenter: %d checks, %d failures\n", g_checks, g_failures);
+    return g_failures == 0 ? 0 : 1;
+}

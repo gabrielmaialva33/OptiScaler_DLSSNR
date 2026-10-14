@@ -1996,5 +1996,35 @@
     <ClCompile Include="..\retoque\lsfg\LsfgMenu.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="..\retoque\lsfg\presenter\LsfgPresenter.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\retoque\lsfg\presenter\MfgPacing.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\retoque\lsfg\presenter\MfgSwapChain_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\retoque\lsfg\presenter\MfgSwapChain_Helpers.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\retoque\lsfg\presenter\MfgSwapChain_UiComposition.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClCompile Include="..\retoque\lsfg\presenter\LsfgPresenter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_Helpers.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_UiComposition.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_DebugPacing.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

@@ -9,6 +9,7 @@
 #include <hudfix/Hudfix_Dx12.h>
 #include <menu/menu_overlay_dx.h>
 #include <lsfg/Lsfg.h>
+#include <lsfg/presenter/LsfgPresenter.h>
 
 #include <magic_enum.hpp>
 #include <DirectXMath.h>
@@ -291,7 +292,7 @@ void FSRFG_Dx12::ConfigureFramePaceTuning()
         cfgDesc.key = 2; // FfxSwapchainFramePacingTuning
         cfgDesc.ptr = &fpt;
 
-        auto result = FfxApiProxy::D3D12_Configure(&_swapChainContext, &cfgDesc.header);
+        auto result = Lsfg::Presenter::D3D12_Configure(&_swapChainContext, &cfgDesc.header);
         LOG_DEBUG("HybridSpin D3D12_Configure result: {}", FfxApiProxy::ReturnCodeToString(result));
     }
 }
@@ -427,7 +428,7 @@ bool FSRFG_Dx12::Dispatch()
         }
     }
 
-    FfxApiProxy::D3D12_Configure(&_swapChainContext, &uiDesc.header);
+    Lsfg::Presenter::D3D12_Configure(&_swapChainContext, &uiDesc.header);
 
     if (fgConfig.HUDLessColor.resource != nullptr)
     {
@@ -526,7 +527,7 @@ bool FSRFG_Dx12::Dispatch()
     fgConfig.frameID = willDispatchFrame;
     fgConfig.swapChain = _swapChain;
 
-    ffxReturnCode_t retCode = FfxApiProxy::D3D12_Configure(&_fgContext, &fgConfig.header);
+    ffxReturnCode_t retCode = Lsfg::Presenter::D3D12_Configure(&_fgContext, &fgConfig.header);
     LOG_DEBUG("D3D12_Configure result: {0:X}, frame: {1}, fIndex: {2}", retCode, willDispatchFrame, fIndex);
 
     ffxConfigureDescGlobalDebug1 fgLogging = {};
@@ -1152,7 +1153,10 @@ bool FSRFG_Dx12::CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQue
 
     createSwapChainDesc.header.pNext = &versionDesc.header;
 
-    auto result = FfxApiProxy::D3D12_CreateContext(&_swapChainContext, &createSwapChainDesc.header, nullptr);
+    // LSFG study (retoque/lsfg/presenter): at x3 and x4 our frame-generation swapchain replaces FFX's
+    auto result = Lsfg::Presenter::Wanted()
+                      ? Lsfg::Presenter::CreateSwapChain(realFactory, realQueue, desc, swapChain, &_swapChainContext)
+                      : FfxApiProxy::D3D12_CreateContext(&_swapChainContext, &createSwapChainDesc.header, nullptr);
 
     if (result == FFX_API_RETURN_OK)
     {
@@ -1196,7 +1200,11 @@ bool FSRFG_Dx12::CreateSwapchain1Internal(IDXGIFactory* factory, ID3D12CommandQu
 
     createSwapChainDesc.header.pNext = &versionDesc.header;
 
-    auto result = FfxApiProxy::D3D12_CreateContext(&_swapChainContext, &createSwapChainDesc.header, nullptr);
+    // LSFG study (retoque/lsfg/presenter): at x3 and x4 our frame-generation swapchain replaces FFX's
+    auto result = Lsfg::Presenter::Wanted()
+                      ? Lsfg::Presenter::CreateSwapChain1(realFactory, realQueue, hwnd, desc, pFullscreenDesc,
+                                                          swapChain, &_swapChainContext)
+                      : FfxApiProxy::D3D12_CreateContext(&_swapChainContext, &createSwapChainDesc.header, nullptr);
 
     if (result == FFX_API_RETURN_OK)
     {
@@ -1241,7 +1249,7 @@ bool FSRFG_Dx12::ReleaseSwapchain(HWND hwnd)
     {
         if (_swapChainContext != nullptr)
         {
-            auto result = FfxApiProxy::D3D12_DestroyContext(&_swapChainContext, nullptr);
+            auto result = Lsfg::Presenter::D3D12_DestroyContext(&_swapChainContext, nullptr);
             LOG_INFO("Destroy Ffx Swapchain Result: {}({})", result, FfxApiProxy::ReturnCodeToString(result));
         }
 
@@ -1283,7 +1291,7 @@ void FSRFG_Dx12::CreateContext(ID3D12Device* device, FG_Constants& fgConstants)
         m_FrameGenerationConfig.presentCallback = nullptr;
         m_FrameGenerationConfig.HUDLessColor = FfxApiResource({});
 
-        auto result = FfxApiProxy::D3D12_Configure(&_fgContext, &m_FrameGenerationConfig.header);
+        auto result = Lsfg::Presenter::D3D12_Configure(&_fgContext, &m_FrameGenerationConfig.header);
 
         _isActive = (result == FFX_API_RETURN_OK);
 
@@ -1425,7 +1433,7 @@ void FSRFG_Dx12::Activate()
         fgConfig.presentCallback = nullptr;
         fgConfig.HUDLessColor = FfxApiResource({});
 
-        auto result = FfxApiProxy::D3D12_Configure(&_fgContext, &fgConfig.header);
+        auto result = Lsfg::Presenter::D3D12_Configure(&_fgContext, &fgConfig.header);
 
         if (result == FFX_API_RETURN_OK)
         {
@@ -1469,7 +1477,7 @@ void FSRFG_Dx12::Deactivate()
             fgConfig.presentCallback = nullptr;
             fgConfig.HUDLessColor = FfxApiResource({});
 
-            result = FfxApiProxy::D3D12_Configure(&_fgContext, &fgConfig.header);
+            result = Lsfg::Presenter::D3D12_Configure(&_fgContext, &fgConfig.header);
 
             if (result == FFX_API_RETURN_OK)
                 _isActive = false;
