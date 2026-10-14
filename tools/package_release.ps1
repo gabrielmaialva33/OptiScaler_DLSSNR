@@ -6,7 +6,8 @@
 # refuses anything not on it.
 #
 # What is deliberately NOT here: nvngx_dlssnr.dll. That is NVIDIA's, it is not ours to redistribute,
-# and the user supplies their own copy per game folder. Only the ~115 KB forwarder ships.
+# and the user supplies their own copy per game folder. Only the ~115 KB forwarder ships, with
+# install-windows.ps1/.cmd from tools\ to put it, OptiScaler.dll and the OptiScaler\ folder in place.
 
 param(
     [string]$Version = "v0.1.0-dlssnr",
@@ -85,6 +86,23 @@ foreach ($d in @("Licenses", "OptiScaler")) {
 }
 
 Copy-Item $forwarder "$stage\nvngx.dll_dlssnr.dll" -Force
+
+# The Windows installer ships beside the DLLs it installs (tools\README.md). It is source, not build output,
+# so it comes from tools\ as checked out, and a release without it is refused rather than shipped. The .cmd
+# is written with CRLF whatever the checkout's line ends: cmd.exe can miss a label in a batch file with LF.
+foreach ($f in @("install-windows.ps1", "install-windows.cmd")) {
+    $from = "$root\tools\$f"
+    if (-not (Test-Path $from)) {
+        Write-Host "REFUSING: tools\$f is missing; the release would ship without its installer"
+        exit 1
+    }
+    if ($f -like "*.cmd") {
+        $text = [System.IO.File]::ReadAllText($from) -replace "`r?`n", "`r`n"
+        [System.IO.File]::WriteAllText("$stage\$f", $text, [System.Text.Encoding]::ASCII)
+    } else {
+        Copy-Item $from "$stage\$f" -Force
+    }
+}
 
 # Optional dictionaries are source assets, not build-output discoveries. Keep them inactive:
 # the loader only reads OptiScaler.lang immediately beside the DLL, never this subdirectory.
