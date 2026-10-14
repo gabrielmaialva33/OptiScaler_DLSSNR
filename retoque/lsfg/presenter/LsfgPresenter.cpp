@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "LsfgPresenter.h"
+#include "MfgLatch.h"
 #include "MfgSwapChain_Dx12.h"
 
 #include <Config.h>
@@ -39,7 +40,7 @@ Registry& R()
 
 // -1 undecided, 0 FFX's swapchain, 1 ours. Decided at the first FG swapchain FSR-FG creates.
 std::atomic<int> g_latch { -1 };
-std::atomic<bool> g_mismatchLogged { false };
+std::atomic<int> g_mismatchLoggedFor { 0 }; // the Enabled/Multiplier pair last said to mismatch the latch, 0 none
 std::atomic<uint32_t> g_lastGenerated { 0 };
 
 int Multiplier()
@@ -107,7 +108,8 @@ Record* FindSwapChain(const void* swapChain)
     return nullptr;
 }
 
-// A change across the 2/3 boundary after the latch: said once per mismatch.
+// A config that asks for the other swapchain than the latched one: said once per Enabled/Multiplier pair, so 3 then 4
+// chosen in the menu with FFX's swapchain are both said.
 void NoteLatchMismatch()
 {
     const int latch = g_latch.load(std::memory_order_relaxed);
@@ -115,16 +117,22 @@ void NoteLatchMismatch()
         return;
 
     const bool mismatch = (latch == 1) != WantedNow();
-    if (mismatch && !g_mismatchLogged.exchange(true))
+    const int pair = 1 + (Config::Instance()->LsfgEnabled.value_or_default() ? 8 : 0) + Multiplier();
+    if (mismatch && g_mismatchLoggedFor.exchange(pair, std::memory_order_relaxed) != pair)
     {
-        LOG_INFO("LSFG presenter: [LSFG] Enabled/Multiplier ({}, x{}) now asks for {} swapchain, but this process "
-                 "runs {}; that takes effect after a restart (MFG_PRESENTER.md 1.4)",
-                 Config::Instance()->LsfgEnabled.value_or_default(), Multiplier(), latch == 1 ? "FFX's" : "our MFG",
-                 latch == 1 ? "our MFG presenter" : "FFX's");
+        // Ours serves x2 too (N = 1), so only FFX's swapchain makes a choice wait for a restart.
+        if (latch == 1)
+            LOG_INFO("LSFG presenter: [LSFG] Enabled {}, Multiplier {}: x2 from the next frame through our presenter "
+                     "(one generated frame); FFX's own swapchain only from the next start (MFG_PRESENTER.md 1.4)",
+                     Config::Instance()->LsfgEnabled.value_or_default(), Multiplier());
+        else
+            LOG_INFO("LSFG presenter: [LSFG] Enabled {}, Multiplier {} asks for our presenter, but this process runs "
+                     "FFX's swapchain (x2); x{} takes effect after a restart (MFG_PRESENTER.md 1.4)",
+                     Config::Instance()->LsfgEnabled.value_or_default(), Multiplier(), Multiplier());
     }
     else if (!mismatch)
     {
-        g_mismatchLogged.store(false, std::memory_order_relaxed);
+        g_mismatchLoggedFor.store(0, std::memory_order_relaxed);
     }
 }
 
@@ -265,6 +273,19 @@ bool Wanted()
 
 bool InUse() { return g_latch.load(std::memory_order_relaxed) == 1; }
 
+LsfgMfg::Latch CurrentLatch()
+{
+    switch (g_latch.load(std::memory_order_relaxed))
+    {
+    case 0:
+        return LsfgMfg::Latch::Ffx;
+    case 1:
+        return LsfgMfg::Latch::Ours;
+    default:
+        return LsfgMfg::Latch::Undecided;
+    }
+}
+
 ffxReturnCode_t CreateSwapChain(IDXGIFactory* factory, ID3D12CommandQueue* gameQueue, DXGI_SWAP_CHAIN_DESC* desc,
                                 IDXGISwapChain** swapChain, ffxContext* context)
 {
@@ -333,8 +354,9 @@ ffxReturnCode_t D3D12_Configure(ffxContext* context, const ffxConfigureDescHeade
             if (result != FFX_API_RETURN_OK)
                 return result;
 
+            // Read at every real frame: 2, 3 and 4 all apply at the next one (MfgLatch.h).
             const uint32_t generated =
-                Config::Instance()->LsfgEnabled.value_or_default() ? LsfgMfg::GeneratedFramesFor(Multiplier()) : 1u;
+                LsfgMfg::GeneratedFramesLive(Config::Instance()->LsfgEnabled.value_or_default(), Multiplier());
             if (g_lastGenerated.exchange(generated, std::memory_order_relaxed) != generated)
                 LOG_INFO("LSFG presenter: x{} from frame {} ({} generated frame(s) per real frame)", generated + 1,
                          fg->frameID, generated);

@@ -1999,6 +1999,9 @@
     <ClInclude Include="..\retoque\lsfg\presenter\LsfgPresenter.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\retoque\lsfg\presenter\MfgLatch.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\retoque\lsfg\presenter\MfgPacing.h">
       <Filter>Header Files</Filter>
     </ClInclude>

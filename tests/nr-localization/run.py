@@ -7,6 +7,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
+# The menus whose text goes through Localization (the LSFG panel is the study branch's, retoque/lsfg/LsfgMenu.cpp).
+MENU_SOURCES = ("retoque/dlssnr/DlssNr_Menu.cpp", "OptiScaler/menu/menu_common.cpp", "retoque/lsfg/LsfgMenu.cpp")
 pack_text = (ROOT / "retoque/translations/optional/pt-BR.lang").read_text(encoding="utf-8")
 for line in pack_text.splitlines():
     if line and not line.startswith("#"):
@@ -15,7 +17,7 @@ with tempfile.TemporaryDirectory(prefix="nr-localization-") as temp:
     binary = Path(temp) / "cases"
     label_pattern = re.compile(r'Localization::Label\(((?:"(?:\\.|[^"\\])*"\s*)+)\)')
     labels = []
-    for relative in ("retoque/dlssnr/DlssNr_Menu.cpp", "OptiScaler/menu/menu_common.cpp"):
+    for relative in MENU_SOURCES:
         labels.extend(label_pattern.findall((ROOT / relative).read_text()))
     assert len(labels) >= 60, "ZERO/LOW COVERAGE: expected actual production menu label call sites"
 
@@ -49,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix="nr-localization-") as temp:
                                  line.split("\t")[0]))
     text_pattern = re.compile(r'(?:Localization::Tr|\bHelpMarker)\(((?:"(?:\\.|[^"\\])*"\s*)+)\)')
     missing = []
-    for relative in ("retoque/dlssnr/DlssNr_Menu.cpp", "OptiScaler/menu/menu_common.cpp"):
+    for relative in MENU_SOURCES:
         for literals in text_pattern.findall((ROOT / relative).read_text()):
             text = c_text(literals)
             if re.search(r"[A-Za-z]{2}", text) and text not in pack_keys:

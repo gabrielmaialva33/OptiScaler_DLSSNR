@@ -12,14 +12,16 @@ font configuration is changed.
 
 The suite compiles the real portable dictionary parser and the repository's complete
 `imgui.cpp`, linking its real `ImHashStr`. It extracts actual literal label call sites from
-both modified menu files and requires at least 60 to prevent silent zero coverage. It checks
+the menu files that route text through `Localization` (`MENU_SOURCES` in `run.py`: the NR panel,
+`menu_common.cpp` and, on the LSFG study branch, `retoque/lsfg/LsfgMenu.cpp`) and requires at least
+60 to prevent silent zero coverage. It checks
 each label's ImGui identity across four seeds (an existing `###` ID kept; a translated bare or
 `##` label identified by `###` plus its original text; untranslated text unchanged), that two
 labels share an ID after translation exactly when they did in English, that every production
 label has a pack entry, UTF-8, malformed files, transactional rejection, printf argument order,
 width/precision stars, lengths, percent literals and the shipped Portuguese pack.
 
-Before compiling, `run.py` also checks that every literal the two menus send through `Tr`, or
+Before compiling, `run.py` also checks that every literal those menus send through `Tr`, or
 through the NR menu's `HelpMarker`, has an entry, so text added to the menu cannot silently stay
 in English. The redesigned menu translates its shell centrally, so the literals passed to
 `SectionTitle`, `ScopedCard` and `SeparatorWithHelpMarker` and the names in the Custom tab picker

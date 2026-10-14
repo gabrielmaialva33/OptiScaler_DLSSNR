@@ -15,7 +15,8 @@ and restart to return to English. The optional directory can safely remain in pl
 
 The pack covers the DLSS Neural Rendering panel, synthesized frame generation's settings, the
 section headers and menu shell already routed through `Localization`, and the status and failure
-reasons the NR panel shows. Since upstream's menu redesign (merged 2026-10-04) the shell is translated
+reasons the NR panel shows. On the LSFG study branch it also covers the LSFG block under FSR FG
+Settings (`retoque/lsfg/LsfgMenu.cpp`); LSFG's own fallback reasons in its status line stay English. Since upstream's menu redesign (merged 2026-10-04) the shell is translated
 in a few central places rather than at each call site: `SectionTitle` and `ScopedCard` (every section
 and card title), the sidebar's tab and group names, and the Custom tab picker. The sidebar widens to
 fit the longest translated name. The rest of upstream's menu is untouched and stays in English: routing

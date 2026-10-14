@@ -800,7 +800,10 @@ Multiplier=3
 OptiScaler then presents through its own fork of it (`retoque/lsfg/presenter/`, design in
 `tools/lsfg-study/MFG_PRESENTER.md`): same pacing model, UI composition and resize handling, spacing every present by
 the real frame time over the frames it shows. The choice between FFX's swapchain and the fork is made when the game
-creates its swapchain, so moving between 2 and 3 or 4 needs a restart; 3 and 4 switch at once.
+creates its swapchain. Started at 3 or 4, every value applies at the next frame, 2 included (one generated frame
+through the fork, paced as FFX's). Started at 2, or with LSFG off, 3 and 4 are saved and take a restart. The LSFG
+block of the FSR FG settings has a Multiplier control that marks those choices "(after a restart)" and says what
+runs until then.
 
 ### Vulkan hooks under Wine/Proton
 `SkipHooks=true` keeps the whole vulkan-1.dll hook bundle out (Vulkan overlay, Vulkan spoofing and
