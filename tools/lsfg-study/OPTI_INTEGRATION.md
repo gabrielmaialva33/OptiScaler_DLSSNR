@@ -1,6 +1,23 @@
 # LSFG 3.1 inside OptiScaler: integration design
 
-Status: **design only, nothing built or measured here** (2026-10-13, branch `study/lsfg-d3d12`, on `05fb011e`).
+Status: **option (b) is built** on this branch (2026-10-13, `retoque/lsfg/Lsfg.{h,cpp}`,
+`LsfgFrameGen_Dx12.{h,cpp}`, `LsfgGraph.h`, `LsfgDxil.h`, `LsfgShaderSource.{h,cpp}`; host suite
+`tests/lsfg-integration`) and ran in PCSX2 on native D3D12 under vkd3d-proton (x2, SDR, quality, flow 1.0, NR on).
+What differs from the design below, for this step:
+
+- Shaders are precompiled DXIL read from `[LSFG] ShaderDir` (`<rid>.cso`, made by `convert.py`) behind
+  `IShaderSource`; the run-time converter (`LsfgShaderLibrary`) is meant to plug in behind it. No `DllPath` and no
+  cache yet.
+- Root signatures come from each module's PSV0 part (`LsfgDxil.h`): no dxcompiler.dll, no pinned register. PSV0 has
+  no names, so `LsfgGraph.h` `CbuffersOf` says whether a lone `b0` is `cb` or the push constants, and a module whose
+  CBV count disagrees is refused.
+- Keys are `Enabled`, `FlowScale`, `PerformanceMode`, `ShaderDir`; no `HalfPrecision` (FP32 only) and no menu rows.
+- HDR10 and scRGB are refused (FFX interpolates), so section 6 is not implemented.
+- FFX keeps interpolating while LSFG builds on a worker thread (the decision is latched per base frame in
+  `FSRFG_Dx12::Dispatch`), instead of showing only real frames.
+
+The rest of this note is the design as written before any of it existed.
+
 It is the third part of the study: the harness (`tools/lsfg-study/harness/`) runs LSFG's pass graph on D3D12, a
 companion spec documents that graph with reference frames, and this note says how the harness becomes a frame
 generator inside OptiScaler. Every number below names where it came from. Code citations are `file:line` against

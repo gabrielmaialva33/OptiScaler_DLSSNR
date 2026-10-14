@@ -8,6 +8,7 @@
 #include <hudfix/Hudfix_Dx11.h>
 #include <hudfix/Hudfix_Dx12.h>
 #include <menu/menu_overlay_dx.h>
+#include <lsfg/Lsfg.h>
 
 #include <magic_enum.hpp>
 #include <DirectXMath.h>
@@ -352,10 +353,13 @@ bool FSRFG_Dx12::Dispatch()
 
     LOG_DEBUG("_frameCount: {}, willDispatchFrame: {}, fIndex: {}", _frameCount, willDispatchFrame, fIndex);
 
-    if (!_resourceReady[fIndex].contains(FG_ResourceType::Depth) ||
-        !_resourceReady[fIndex].at(FG_ResourceType::Depth) ||
-        !_resourceReady[fIndex].contains(FG_ResourceType::Velocity) ||
-        !_resourceReady[fIndex].at(FG_ResourceType::Velocity))
+    // LSFG study (retoque/lsfg/Lsfg.h): LSFG interpolates this frame, so FFX's depth/velocity gate and prepare go
+    const bool lsfgFrame = Lsfg::BeginFrame(fIndex, willDispatchFrame);
+
+    if (!lsfgFrame && (!_resourceReady[fIndex].contains(FG_ResourceType::Depth) ||
+                       !_resourceReady[fIndex].at(FG_ResourceType::Depth) ||
+                       !_resourceReady[fIndex].contains(FG_ResourceType::Velocity) ||
+                       !_resourceReady[fIndex].at(FG_ResourceType::Velocity)))
     {
         LOG_WARN("Depth or Velocity is not ready, skipping");
         return false;
@@ -532,7 +536,9 @@ bool FSRFG_Dx12::Dispatch()
     ffxReturnCode_t loggingRetCode = FfxApiProxy::D3D12_Configure(&_fgContext, &fgLogging.header);
 
     bool dispatchResult = false;
-    if (retCode == FFX_API_RETURN_OK && _isActive)
+    if (retCode == FFX_API_RETURN_OK && _isActive && lsfgFrame)
+        dispatchResult = true; // LSFG study: no FFX prepare, LSFG interpolates in DispatchCallback
+    else if (retCode == FFX_API_RETURN_OK && _isActive)
     {
         ffxCreateBackendDX12Desc backendDesc {};
         backendDesc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
@@ -1048,7 +1054,8 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
         }
     }
 
-    auto dispatchResult = FfxApiProxy::D3D12_Dispatch(&_fgContext, &params->header);
+    auto dispatchResult = Lsfg::TakesFrame(fIndex, params) ? Lsfg::FfxDispatch(params) // LSFG study
+                                                           : FfxApiProxy::D3D12_Dispatch(&_fgContext, &params->header);
     LOG_DEBUG("D3D12_Dispatch result: {}, fIndex: {}", (UINT) dispatchResult, fIndex);
 
     _lastFrameId = params->frameID;
@@ -1240,6 +1247,7 @@ bool FSRFG_Dx12::ReleaseSwapchain(HWND hwnd)
 
         _swapChainContext = nullptr;
         State::Instance().currentFGSwapchain = nullptr;
+        Lsfg::OnSwapchainReleased(); // LSFG study: FFX has drained its queues
     }
 
     if (Config::Instance()->FGUseMutexForSwapchain.value_or_default())

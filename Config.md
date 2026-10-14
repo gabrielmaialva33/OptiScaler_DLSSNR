@@ -761,6 +761,34 @@ available with it. An emulator that presents every frame twice cannot be smoothe
 either: with `SynthesizedMotion` on, OptiScaler logs once when it sees that cadence, and the fix is
 the emulator's own option (PCSX2: Skip Presenting Duplicate Frames).
 
+### LSFG as FSR FG's interpolator (study build)
+Only on the `study/lsfg-d3d12` branch, never in a release. With `FGOutput=fsrfg`, `[LSFG] Enabled=true`
+replaces FFX's interpolation with Lossless Scaling's frame generation (LSFG 3.1); FFX keeps the swapchain,
+the frame pacing and the UI composition. FSR FG generates one frame per base frame, so it is x2 only.
+It reads only the presented frame, so it suits the `synthesized` input above; it needs no depth or
+motion vectors, and FFX's own prepare pass is skipped while LSFG interpolates.
+
+The shaders are Lossless Scaling's and are not shipped: `ShaderDir` names a folder of precompiled DXIL,
+one `<resource id>.cso` per shader, converted on the user's machine from their own `lsfg-vk.dll`
+(`tools/lsfg-study/convert.py`). Until they are built on a worker thread, and whenever LSFG refuses a
+frame (no shaders, an HDR10 or scRGB swapchain, a format other than 8-bit RGBA/BGRA or 10-bit RGB10A2),
+FFX interpolates as before and the log says why. Design: `tools/lsfg-study/OPTI_INTEGRATION.md`.
+
+```ini
+[LSFG]
+; true or false - Default (auto) is false
+Enabled=true
+
+; 0.25 to 1.0 - Default (auto) is 1.0
+FlowScale=1.0
+
+; true or false - Default (auto) is false
+PerformanceMode=false
+
+; Path - Default (auto) is unset
+ShaderDir=C:\lsfg\dxil
+```
+
 ### Vulkan hooks under Wine/Proton
 `SkipHooks=true` keeps the whole vulkan-1.dll hook bundle out (Vulkan overlay, Vulkan spoofing and
 the Vulkan_wDx12 hooks), at startup and on any later load of vulkan-1.dll, and draws the menu

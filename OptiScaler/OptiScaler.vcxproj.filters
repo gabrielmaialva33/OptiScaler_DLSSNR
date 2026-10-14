@@ -1957,5 +1957,29 @@
     <ClCompile Include="..\retoque\dlssnr\DlssNr_SwapchainColour.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="..\retoque\lsfg\Lsfg.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\retoque\lsfg\LsfgDxil.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\retoque\lsfg\LsfgGraph.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\retoque\lsfg\LsfgFrameGen_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\retoque\lsfg\LsfgShaderSource.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClCompile Include="..\retoque\lsfg\Lsfg.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\retoque\lsfg\LsfgFrameGen_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\retoque\lsfg\LsfgShaderSource.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

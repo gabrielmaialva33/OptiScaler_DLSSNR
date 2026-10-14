@@ -666,6 +666,20 @@ class Config
 
     // --- end DLSS 5 Neural Rendering -------------------------------------------------------------
 
+    // --- LSFG study (retoque/lsfg, branch study/lsfg-d3d12) --- removable as one block --------------
+    // Lossless Scaling's frame generation (LSFG 3.1) as FSR-FG's interpolator: with FGOutput=fsrfg, LSFG replaces
+    // FFX's interpolation and FFX keeps the swapchain, pacing and UI composition. x2 only. Off by default; off,
+    // FSR-FG runs exactly as before. tools/lsfg-study/OPTI_INTEGRATION.md, option (b).
+    CustomOptional<bool> LsfgEnabled { false };
+    // LSFG's flow scale: the size of its internal pyramids relative to the frame. 0.25..1.0, clamped.
+    CustomOptional<float> LsfgFlowScale { 1.0f };
+    // The performance variants (half the feature channels): cheaper, softer motion.
+    CustomOptional<bool> LsfgPerformanceMode { false };
+    // Folder holding the precompiled DXIL, one <resource id>.cso per shader, converted on this machine from the
+    // user's own lsfg-vk.dll (tools/lsfg-study/convert.py). Unset: LSFG refuses and FFX interpolates.
+    CustomOptional<std::wstring, NoDefault> LsfgShaderDir;
+    // --- end LSFG study ----------------------------------------------------------------------------
+
     // DLSS
     CustomOptional<bool> DLSSEnabled { true };
     CustomOptional<bool> RenderPresetOverride { false };

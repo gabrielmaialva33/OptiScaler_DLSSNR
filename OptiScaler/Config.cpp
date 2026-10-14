@@ -587,6 +587,14 @@ bool Config::Reload(std::filesystem::path iniPath)
             NvngxFGDisableHudless.set_from_config(readBool("NvngxFG", "DisableHudless"));
         }
 
+        // --- LSFG study (retoque/lsfg) --- removable as one block
+        {
+            LsfgEnabled.set_from_config(readBool("LSFG", "Enabled"));
+            LsfgFlowScale.set_from_config(readFloat("LSFG", "FlowScale"));
+            LsfgPerformanceMode.set_from_config(readBool("LSFG", "PerformanceMode"));
+            LsfgShaderDir.set_from_config(readWString("LSFG", "ShaderDir"));
+        }
+
         // Logging
         {
             LogToFile.set_from_config(readBool("Log", "LogToFile"));
@@ -1547,6 +1555,16 @@ bool Config::SaveIni()
         ini.SetValue("NvngxFG", "ShowDebug", GetBoolValue(Instance()->NvngxFGShowDebug.value_for_config()).c_str());
         ini.SetValue("NvngxFG", "DisableHudless",
                      GetBoolValue(Instance()->NvngxFGDisableHudless.value_for_config()).c_str());
+    }
+
+    // --- LSFG study (retoque/lsfg) --- removable as one block
+    {
+        ini.SetValue("LSFG", "Enabled", GetBoolValue(Instance()->LsfgEnabled.value_for_config()).c_str());
+        ini.SetValue("LSFG", "FlowScale", GetFloatValue(Instance()->LsfgFlowScale.value_for_config()).c_str());
+        ini.SetValue("LSFG", "PerformanceMode",
+                     GetBoolValue(Instance()->LsfgPerformanceMode.value_for_config()).c_str());
+        ini.SetValue("LSFG", "ShaderDir",
+                     wstring_to_string(Instance()->LsfgShaderDir.value_for_config_or(L"auto")).c_str());
     }
 
     // Sharpness
