@@ -198,12 +198,15 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-vk-extensions` — the Vulkan device-extension merge the NR hook hands `vkCreateDevice`,
   compiled against the real Vulkan headers: `VK_KHR_` and `VK_EXT_buffer_device_address` never
   leave it together, and the one the game asked for is the one kept.
-- `nr-vk-present-host` — the Vulkan present host's stage 1 (`docs/dlssnr/design/nr-vulkan-present-host.md`): the
-  registry header (`DlssNr_VkPresentRegistry.h`) through its state machine -- records with ids of their own, a reused
-  handle as a new record, two devices with the same swapchain handle value, destroys taking their children, unknown
-  and internal objects, the observe line field for field and when it is written -- and source guards: one call site,
-  first in `VulkanHooks::Hook` and ahead of the marker check, gated before anything else; an observe-only host whose
-  hooks hand their own arguments down unchanged. No Vulkan or Wine.
+- `nr-vk-present-host` — the Vulkan present host's stages 1 and 2 (`docs/dlssnr/design/nr-vulkan-present-host.md`):
+  the registry header (`DlssNr_VkPresentRegistry.h`) through its state machine -- records with ids of their own, a
+  reused handle as a new record, two devices with the same swapchain handle value, destroys taking their children,
+  unknown and internal objects, the window, creation and destruction lines field for field -- and the transport's
+  decisions (`DlssNr_VkPresentTransport.h`): the usage plan at swapchain creation and every refusal's reason, the
+  route at present (same queue, cross-family, concurrent, none), the ring, the counters. Source guards: one call site,
+  first in `VulkanHooks::Hook` and ahead of the marker check, gated before anything else; only an eligible swapchain's
+  usage and a transported present's waits ever edited; no refusal after a wait is spent; locks in order; drains
+  before frees. No Vulkan or Wine.
 - `nr-zero-guides` — zero depth and motion for a host with no engine buffers, and the
   two-heap clear contract.
 
@@ -221,13 +224,17 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   when `nvofapi64.dll` or its shaders are unavailable. No NGX, no game.
 - `vulkan-overlay` — builds a real DLL and drives real Vulkan to exercise overlay
   lifetime.
-- `vulkan-present-host` — the production DLL from `build-local.sh`, uninstrumented, under a Win32 Vulkan application:
-  with `[DlssNr] VulkanPresentHost` on (under the marker, under `SkipHooks`, beside the bundle with its menu off and
-  on) every observe line is held against the application's own record of its windows, devices, queue families,
-  usages, waits and presents, a reused device handle included; with the key or the master off there is no host line,
-  and under the marker vulkan-1.dll's exports are byte-identical to before OptiScaler loaded. Validation on and
-  proved active. Plus a D3D11 and a D3D12 title through a local Proton's DXVK and vkd3d-proton, under the marker: their
-  own devices and presents reach the host and are named for the layer (SKIP without a local Proton). No game or FG.
+- `vulkan-present-host` — the production DLL from `build-local.sh`, uninstrumented, under a Win32 Vulkan application,
+  with core and synchronization validation on (proved active) and zero errors required: with `[DlssNr]
+  VulkanPresentHost` on (under the marker, under `SkipHooks`, beside the bundle with its menu off and on) every line
+  of the host is held against the application's own record -- which presents the round trip carried, by the same
+  queue or across families from a compute-only presenter, with zero, one and two waits, and which it refused when
+  more were in flight than its ring holds; usages edited at creation; retirements at recreation, resize and device
+  destruction -- and every presented image read back equals the pattern the application made. A surface that hides
+  TRANSFER_SRC (a native test layer) keeps every swapchain observe-only. With the key or the master off there is no
+  host line, and under the marker vulkan-1.dll's exports are byte-identical to before OptiScaler loaded. Plus a D3D11
+  and a D3D12 title through a local Proton's DXVK (validated) and vkd3d-proton: their swapchains get TRANSFER_SRC and
+  every present is carried (SKIP without a local Proton). No game, FG or NR.
 
 **Not a suite.** `nr-before-upscale/verify-invariants.py` is a one-shot evidence
 script pinned to baseline commit `660303ec`. `run.py` does not call it and

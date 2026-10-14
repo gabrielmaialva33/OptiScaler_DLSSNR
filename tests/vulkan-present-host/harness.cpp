@@ -1,16 +1,26 @@
-// A Win32 Vulkan application for the Vulkan present host's stage 1 (docs/dlssnr/design/nr-vulkan-present-host.md).
+// A Win32 Vulkan application for the Vulkan present host (docs/dlssnr/design/nr-vulkan-present-host.md, stages 1 and
+// 2).
 //
 // It loads the production OptiScaler.dll as dxgi.dll, uninstrumented, and drives real Vulkan under Wine through the
-// objects the host has to keep apart: two windows, three devices (the third created after the second is destroyed,
-// so a reused handle value is possible), a swapchain recreated through oldSwapchain, a present from a non-graphics
-// compute family when the surface allows one, presents with zero, one and two wait semaphores, vkGetDeviceQueue and
-// vkGetDeviceQueue2. It never calls NGX or an upscaler.
+// objects the host has to keep apart and the cases its round trip has to survive: two windows, three devices (the
+// third created after the second is destroyed, so a reused handle value is possible), a swapchain recreated through
+// oldSwapchain, presents from a non-graphics compute family (the round trip's cross-family route), presents with
+// zero, one and two wait semaphores, a batch of presents queued behind about a second of GPU work until more of them
+// are in flight than the host's ring holds, a resize, vkGetDeviceQueue and vkGetDeviceQueue2. It never calls NGX or
+// an upscaler.
 //
-// It asserts nothing about the host itself. It writes every fact it controls -- handles, families, usages, image
-// counts, the order of its presents and their waits -- to result.json, and whether vulkan-1.dll's exports were
-// patched, by comparing their first bytes before OptiScaler loaded with the same bytes after the first swapchain.
-// run.py holds OptiScaler.log against those facts. Its own checks are about the run being valid: validation active
-// (proved by a deliberately invalid fence the layer must reject), zero validation errors, every call succeeding.
+// Every frame uploads a pattern of its own into the image; when the same image comes round again, its content is read
+// back and compared with the pattern last presented in it. The host's round trip copies the image out and back at
+// present, so equality is the proof that it is lossless (and an image the host did not touch must compare equal too).
+// An image can only be read back with TRANSFER_SRC: on swapchains that ask for it, and with --host-adds-src on every
+// swapchain (the host adds the usage; the validation layer sits below it and sees the real usage).
+//
+// It asserts nothing about the host's log. It writes every fact it controls -- handles, families, usages, image
+// counts, the order of its presents and their waits, which of them were held back, the read-backs -- to result.json,
+// and whether vulkan-1.dll's exports were patched, by comparing their first bytes before OptiScaler loaded with the
+// same bytes after the first swapchain. run.py holds OptiScaler.log against those facts. Its own checks are about the
+// run being valid: validation active (proved by a deliberately invalid fence the layer must reject), zero validation
+// errors, every call succeeding, every read-back equal.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -52,7 +62,8 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessage(VkDebugUtilsMessageSeverityFl
                                                    const VkDebugUtilsMessengerCallbackDataEXT* data, void*)
 {
     const char* text = data->pMessage ? data->pMessage : "";
-    if (validationProbe && data->pMessageIdName && !strcmp(data->pMessageIdName, "VUID-VkFenceCreateInfo-flags-parameter"))
+    if (validationProbe && data->pMessageIdName &&
+        !strcmp(data->pMessageIdName, "VUID-VkFenceCreateInfo-flags-parameter"))
     {
         validationActive = true;
         std::fprintf(stderr, "VALIDATION PROBE (expected): %s\n", text);
@@ -60,10 +71,11 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessage(VkDebugUtilsMessageSeverityFl
     }
     // winevulkan (11.19) appends VK_EXT_external_memory_dma_buf to the host-side device it creates for every
     // vkCreateDevice, without VK_KHR_external_memory_fd, and the native layer sees Wine's list rather than ours: the
-    // index it names is past the one extension this application asks for. Counted and reported, not an error of
-    // the application or of OptiScaler, which passes the create info down unchanged.
+    // index it names is past the extensions this application asks for. Counted and reported, not an error of the
+    // application or of OptiScaler, which passes the create info down unchanged.
     if (data->pMessageIdName && !strcmp(data->pMessageIdName, "VUID-vkCreateDevice-ppEnabledExtensionNames-01387") &&
-        strstr(text, "VK_EXT_external_memory_dma_buf") != nullptr && strstr(text, "ppEnabledExtensionNames[0]") == nullptr)
+        strstr(text, "VK_EXT_external_memory_dma_buf") != nullptr &&
+        strstr(text, "ppEnabledExtensionNames[0]") == nullptr)
     {
         ++wineInjected;
         return VK_FALSE;
@@ -100,13 +112,44 @@ static std::string Hex(uint64_t value)
 
 template <typename T> static uint64_t H(T handle) { return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(handle)); }
 
+// A frame's pattern: every pixel a hash of the frame's seed and the pixel's position, all four bytes.
+static uint32_t Pixel(uint32_t seed, uint32_t i)
+{
+    uint32_t x = seed * 0x9E3779B1u ^ (i + 0x7F4A7C15u) * 0x85EBCA77u;
+    x ^= x >> 15;
+    x *= 0x2C1B3C6Du;
+    x ^= x >> 12;
+    x *= 0x297A2D39u;
+    x ^= x >> 15;
+    return x;
+}
+
+static void FillPattern(void* memory, uint32_t pixels, uint32_t seed)
+{
+    auto* out = static_cast<uint32_t*>(memory);
+    for (uint32_t i = 0; i < pixels; ++i)
+        out[i] = Pixel(seed, i);
+}
+
+// Pixels that differ from the pattern.
+static uint32_t Mismatches(const void* memory, uint32_t pixels, uint32_t seed)
+{
+    const auto* in = static_cast<const uint32_t*>(memory);
+    uint32_t wrong = 0;
+    for (uint32_t i = 0; i < pixels; ++i)
+        wrong += in[i] != Pixel(seed, i) ? 1 : 0;
+    return wrong;
+}
+
 // --- Export prologues ----------------------------------------------------------------------------------------------
 
 static const char* const kWatched[] = {
-    "vkCreateInstance",        "vkDestroyInstance",     "vkEnumeratePhysicalDevices", "vkCreateDevice",
-    "vkCreateWin32SurfaceKHR", "vkDestroySurfaceKHR",   "vkDestroyDevice",            "vkGetDeviceQueue",
-    "vkGetDeviceQueue2",       "vkCreateSwapchainKHR",  "vkDestroySwapchainKHR",      "vkGetSwapchainImagesKHR",
-    "vkAcquireNextImageKHR",   "vkQueuePresentKHR",     "vkQueueSubmit",              "vkCreateFence",
+    "vkCreateInstance",      "vkDestroyInstance",       "vkEnumeratePhysicalDevices",
+    "vkCreateDevice",        "vkCreateWin32SurfaceKHR", "vkDestroySurfaceKHR",
+    "vkDestroyDevice",       "vkGetDeviceQueue",        "vkGetDeviceQueue2",
+    "vkCreateSwapchainKHR",  "vkDestroySwapchainKHR",   "vkGetSwapchainImagesKHR",
+    "vkAcquireNextImageKHR", "vkQueuePresentKHR",       "vkQueueSubmit",
+    "vkQueueWaitIdle",       "vkCreateFence",
 };
 constexpr size_t kWatchedCount = sizeof(kWatched) / sizeof(kWatched[0]);
 
@@ -138,14 +181,20 @@ static void SnapshotPrologues(bool after)
 
 // --- The application -------------------------------------------------------------------------------------------
 
+constexpr uint32_t kUploadSlots = 12; // pattern uploads in flight at once: the held-back batch's
+constexpr uint32_t kDelayMax = 7;     // presents the held-back batch queues: three more than the host's ring of four
+
 struct Present
 {
     int window = 0; // 1 or 2
     uint64_t swapchain = 0;
     uint64_t queue = 0;
     uint64_t device = 0;
+    uint32_t family = 0;
     uint32_t waits = 0;
     uint32_t image = 0;
+    int delayed = -1;    // its position in the held-back batch, -1 outside it
+    bool gpuIdle = true; // every earlier GPU work of the application had completed when it was presented
     std::string swapchainName;
     std::string deviceName;
 };
@@ -164,6 +213,8 @@ struct SwapchainFacts
     uint32_t images = 0;
     uint32_t sharing = 0;
     uint32_t surfaceUsage = 0;
+    bool readback = false;
+    bool destroyed = false;
 };
 
 struct DeviceFacts
@@ -171,6 +222,14 @@ struct DeviceFacts
     std::string name;
     uint64_t handle = 0;
     std::vector<std::pair<uint32_t, uint32_t>> requested; // family, count
+    bool destroyed = false;
+};
+
+struct Buffer
+{
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    void* mapped = nullptr;
 };
 
 struct App
@@ -183,17 +242,28 @@ struct App
     VkSurfaceKHR surfaces[2] {};
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     std::vector<VkQueueFamilyProperties> families;
+    VkPhysicalDeviceMemoryProperties memory {};
     uint32_t graphicsFamily = UINT32_MAX;
     uint32_t computeFamily = UINT32_MAX; // non-graphics, compute, presents to window 1; UINT32_MAX when none
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkColorSpaceKHR colorSpace {};
     bool lateLoad = false;
-    bool oneWindow = false; // --one-window: window 1 and device 1 only
+    bool oneWindow = false;     // --one-window: window 1 and device 1 only
+    bool hostAddsSrc = false;   // --host-adds-src: every swapchain can be read back
+    bool noTransferSrc = false; // --no-transfer-src: the surface does not offer TRANSFER_SRC (a test layer hides it)
+    bool overlayDraws = false;  // --overlay-draws: the legacy Vulkan overlay draws its splash into presented images
 
     std::vector<Present> presents;
     std::vector<SwapchainFacts> swapchains;
     std::vector<DeviceFacts> devices;
     bool thirdReusedSecond = false;
+    uint32_t readbacks = 0;
+    uint32_t readbackMismatches = 0;
+    uint32_t overlayMismatches = 0; // with --overlay-draws: read-backs the overlay's splash changed, not failures
+    uint32_t delayQueued = 0;
+    double heldGpuMs = 0;      // the block of GPU work the batch queued behind: submit to completion
+    double heldPresentsMs = 0; // from that submit to the return of the batch's last present
+    std::string firstMismatch;
 
     struct Target
     {
@@ -203,18 +273,26 @@ struct App
         VkSwapchainKHR swapchain = VK_NULL_HANDLE;
         std::vector<VkImage> images;
         std::vector<bool> initialized;
+        std::vector<int64_t> expected; // per image: the seed of the pattern last presented, -1 when none
         int window = 0;
         std::string deviceName;
         std::string swapchainName;
+        VkExtent2D extent {};
+        bool readback = false;
+        Buffer upload;   // kUploadSlots patterns
+        Buffer download; // one image
     };
+
+    uint32_t nextSeed = 1;
 
     HWND MakeWindow(int index, int x, int y, int w, int h)
     {
         // An owned dialog, as in tests/vulkan-overlay: a tiling window manager floats it instead of re-tiling the
         // first window when the second appears, which would put an out-of-date swapchain under its next present.
-        HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, L"OptiScalerVkPresentHostHarness",
-                                      index == 0 ? L"OptiScaler present host test 1" : L"OptiScaler present host test 2",
-                                      WS_OVERLAPPEDWINDOW | WS_VISIBLE, x, y, w, h, owner, nullptr, module, nullptr);
+        HWND window =
+            CreateWindowExW(WS_EX_DLGMODALFRAME, L"OptiScalerVkPresentHostHarness",
+                            index == 0 ? L"OptiScaler present host test 1" : L"OptiScaler present host test 2",
+                            WS_OVERLAPPEDWINDOW | WS_VISIBLE, x, y, w, h, owner, nullptr, module, nullptr);
         Require(window != nullptr, "no Win32 window under Wine");
         ShowWindow(window, SW_SHOW);
         Pump();
@@ -254,8 +332,10 @@ struct App
         lateLoad = LoadLibraryW(L"vulkan-1.dll") != nullptr;
 
         VkDebugUtilsMessengerCreateInfoEXT debug { VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT };
-        debug.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-        debug.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT;
+        debug.messageSeverity =
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        debug.messageType =
+            VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT;
         debug.pfnUserCallback = DebugMessage;
         const char* extensions[] = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
                                      VK_EXT_DEBUG_UTILS_EXTENSION_NAME };
@@ -315,6 +395,7 @@ struct App
         Require(physical != VK_NULL_HANDLE, "no device with a graphics queue that presents to the window");
         VkPhysicalDeviceProperties properties {};
         vkGetPhysicalDeviceProperties(physical, &properties);
+        vkGetPhysicalDeviceMemoryProperties(physical, &memory);
         std::printf("GPU: %s; graphics family %u, compute-only present family %d\n", properties.deviceName,
                     graphicsFamily, computeFamily == UINT32_MAX ? -1 : static_cast<int>(computeFamily));
 
@@ -327,6 +408,9 @@ struct App
                 chosen = f;
         format = chosen.format;
         colorSpace = chosen.colorSpace;
+        Require(format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_R8G8B8A8_UNORM ||
+                    format == VK_FORMAT_B8G8R8A8_SRGB || format == VK_FORMAT_R8G8B8A8_SRGB,
+                "no four-byte surface format to upload patterns into");
     }
 
     VkDevice MakeDevice(const char* name, bool withCompute)
@@ -362,6 +446,14 @@ struct App
         return device;
     }
 
+    void DestroyDevice(VkDevice device, const std::string& name)
+    {
+        vkDestroyDevice(device, nullptr);
+        for (auto& d : devices)
+            if (d.name == name)
+                d.destroyed = true;
+    }
+
     void ProbeValidation(VkDevice device)
     {
         VkFenceCreateInfo invalid { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
@@ -376,7 +468,57 @@ struct App
                 "validation negative control failed: the invalid fence flag was not intercepted");
     }
 
-    void MakeSwapchain(Target& target, const char* name, VkSurfaceKHR surface, uint32_t usage)
+    Buffer MakeBuffer(VkDevice device, VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible = true)
+    {
+        Buffer b;
+        VkBufferCreateInfo info { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        info.size = size;
+        info.usage = usage;
+        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        Check(vkCreateBuffer(device, &info, nullptr, &b.buffer), "vkCreateBuffer");
+        VkMemoryRequirements requirements {};
+        vkGetBufferMemoryRequirements(device, b.buffer, &requirements);
+        const VkMemoryPropertyFlags wanted =
+            hostVisible ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                        : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        uint32_t type = UINT32_MAX;
+        for (uint32_t i = 0; i < memory.memoryTypeCount && type == UINT32_MAX; ++i)
+            if ((requirements.memoryTypeBits & (1u << i)) && (memory.memoryTypes[i].propertyFlags & wanted) == wanted)
+                type = i;
+        Require(type != UINT32_MAX, "no memory type for a buffer");
+        VkMemoryAllocateInfo allocate { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = type;
+        Check(vkAllocateMemory(device, &allocate, nullptr, &b.memory), "vkAllocateMemory");
+        Check(vkBindBufferMemory(device, b.buffer, b.memory, 0), "vkBindBufferMemory");
+        if (hostVisible)
+            Check(vkMapMemory(device, b.memory, 0, VK_WHOLE_SIZE, 0, &b.mapped), "vkMapMemory");
+        return b;
+    }
+
+    void FreeBuffer(VkDevice device, Buffer& b)
+    {
+        if (b.buffer != VK_NULL_HANDLE)
+            vkDestroyBuffer(device, b.buffer, nullptr);
+        if (b.memory != VK_NULL_HANDLE)
+            vkFreeMemory(device, b.memory, nullptr);
+        b = Buffer {};
+    }
+
+    uint32_t Pixels(const Target& t) const { return t.extent.width * t.extent.height; }
+
+    void DestroySwapchain(Target& target)
+    {
+        vkDestroySwapchainKHR(target.device, target.swapchain, nullptr);
+        for (auto& s : swapchains)
+            if (s.handle == H(target.swapchain) && s.device == H(target.device) && !s.destroyed)
+                s.destroyed = true;
+        target.swapchain = VK_NULL_HANDLE;
+        FreeBuffer(target.device, target.upload);
+        FreeBuffer(target.device, target.download);
+    }
+
+    void MakeSwapchain(Target& target, const char* name, VkSurfaceKHR surface, uint32_t usage, uint32_t extraImages = 1)
     {
         VkSurfaceCapabilitiesKHR caps {};
         Check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &caps), "surface capabilities");
@@ -391,7 +533,8 @@ struct App
         }
         VkSwapchainCreateInfoKHR info { VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
         info.surface = surface;
-        info.minImageCount = caps.maxImageCount ? std::min(caps.minImageCount + 1, caps.maxImageCount) : caps.minImageCount + 1;
+        info.minImageCount = caps.maxImageCount ? std::min(caps.minImageCount + extraImages, caps.maxImageCount)
+                                                : caps.minImageCount + extraImages;
         info.imageFormat = format;
         info.imageColorSpace = colorSpace;
         info.imageExtent = extent;
@@ -417,15 +560,21 @@ struct App
         if (old != VK_NULL_HANDLE)
         {
             Check(vkDeviceWaitIdle(target.device), "idle before destroying the old swapchain");
-            vkDestroySwapchainKHR(target.device, old, nullptr);
+            DestroySwapchain(target);
         }
         target.swapchain = swapchain;
         target.swapchainName = name;
+        target.extent = extent;
         uint32_t count = 0;
         Check(vkGetSwapchainImagesKHR(target.device, swapchain, &count, nullptr), "swapchain image count");
         target.images.resize(count);
         Check(vkGetSwapchainImagesKHR(target.device, swapchain, &count, target.images.data()), "swapchain images");
         target.initialized.assign(count, false);
+        target.expected.assign(count, -1);
+        target.readback = (usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0 || hostAddsSrc;
+        const VkDeviceSize bytes = VkDeviceSize(extent.width) * extent.height * 4;
+        target.upload = MakeBuffer(target.device, bytes * kUploadSlots, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        target.download = MakeBuffer(target.device, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
         SwapchainFacts facts;
         facts.name = name;
@@ -440,11 +589,98 @@ struct App
         facts.images = count;
         facts.sharing = info.imageSharingMode;
         facts.surfaceUsage = caps.supportedUsageFlags;
+        facts.readback = target.readback;
         swapchains.push_back(facts);
-        std::printf("SWAPCHAIN %s %ux%u images=%u usage=0x%X\n", name, extent.width, extent.height, count, usage);
+        std::printf("SWAPCHAIN %s %ux%u images=%u usage=0x%X readback=%d\n", name, extent.width, extent.height, count,
+                    usage, target.readback ? 1 : 0);
     }
 
-    // One frame: acquire, clear on the present queue, present with `waits` semaphores (0, 1 or 2).
+    uint32_t TransferUsage() const
+    {
+        return VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+               (noTransferSrc ? 0u : uint32_t(VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
+    }
+
+    // Record into `cmd`: read the image back when its last pattern is known (and it can be read), then upload pattern
+    // `seed` from upload slot `slot`, leaving the image in PRESENT_SRC. Returns whether a read-back was recorded.
+    bool RecordFrame(Target& target, VkCommandBuffer cmd, uint32_t index, uint32_t seed, uint32_t slot)
+    {
+        const VkImage image = target.images[index];
+        const bool readback = target.readback && target.expected[index] >= 0;
+        VkImageMemoryBarrier b { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = image;
+        b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        VkBufferImageCopy region {};
+        region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        region.imageExtent = { target.extent.width, target.extent.height, 1 };
+
+        if (readback)
+        {
+            b.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            // TRANSFER as the source stage, matching the acquire semaphore's wait stage (see tests/vulkan-overlay).
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                                 nullptr, 1, &b);
+            vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.download.buffer, 1,
+                                   &region);
+            b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        }
+        else
+        {
+            b.oldLayout = target.initialized[index] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED;
+        }
+        b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                             nullptr, 1, &b);
+
+        const VkDeviceSize bytes = VkDeviceSize(Pixels(target)) * 4;
+        FillPattern(static_cast<char*>(target.upload.mapped) + bytes * slot, Pixels(target), seed);
+        region.bufferOffset = bytes * slot;
+        vkCmdCopyBufferToImage(cmd, target.upload.buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask = 0;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr,
+                             0, nullptr, 1, &b);
+        return readback;
+    }
+
+    void CompareReadback(Target& target, uint32_t index)
+    {
+        const uint32_t wrong =
+            Mismatches(target.download.mapped, Pixels(target), static_cast<uint32_t>(target.expected[index]));
+        ++readbacks;
+        if (wrong != 0 && overlayDraws)
+        {
+            ++overlayMismatches;
+        }
+        else if (wrong != 0)
+        {
+            ++readbackMismatches;
+            if (firstMismatch.empty())
+                firstMismatch = target.swapchainName + " image " + std::to_string(index) + ": " +
+                                std::to_string(wrong) + " of " + std::to_string(Pixels(target)) +
+                                " pixels differ from pattern " + std::to_string(target.expected[index]);
+            std::fprintf(stderr, "READBACK MISMATCH: %s image %u: %u pixels differ\n", target.swapchainName.c_str(),
+                         index, wrong);
+        }
+    }
+
+    void Record(const Target& target, uint32_t waits, uint32_t index, int delayed, bool gpuIdle)
+    {
+        presents.push_back(Present { target.window, H(target.swapchain), H(target.queue), H(target.device),
+                                     target.family, waits, index, delayed, gpuIdle, target.swapchainName,
+                                     target.deviceName });
+    }
+
+    // One frame: acquire, read back and upload a pattern on the present queue, present with `waits` semaphores (0, 1
+    // or 2), then wait for all of it.
     void Frame(Target& target, uint32_t waits)
     {
         Pump();
@@ -455,7 +691,8 @@ struct App
         Check(vkCreateSemaphore(device, &si, nullptr, &rendered), "render semaphore");
         Check(vkCreateSemaphore(device, &si, nullptr, &extra), "extra semaphore");
         uint32_t index = 0;
-        const VkResult acquire = vkAcquireNextImageKHR(device, target.swapchain, UINT64_MAX, acquired, VK_NULL_HANDLE, &index);
+        const VkResult acquire =
+            vkAcquireNextImageKHR(device, target.swapchain, UINT64_MAX, acquired, VK_NULL_HANDLE, &index);
         Require(acquire == VK_SUCCESS || acquire == VK_SUBOPTIMAL_KHR, "acquire failed");
 
         VkCommandPoolCreateInfo poolInfo { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
@@ -470,25 +707,8 @@ struct App
         Check(vkAllocateCommandBuffers(device, &ai, &cmd), "command buffer");
         VkCommandBufferBeginInfo begin { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         Check(vkBeginCommandBuffer(cmd, &begin), "begin");
-        VkImageMemoryBarrier b { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-        b.oldLayout = target.initialized[index] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED;
-        b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b.image = target.images[index];
-        b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        // TRANSFER as the source stage, matching the acquire semaphore's wait stage (see tests/vulkan-overlay).
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                             nullptr, 1, &b);
-        VkClearColorValue color { { target.window == 1 ? 0.05f : 0.2f, 0.12f, 0.2f, 1.0f } };
-        vkCmdClearColorImage(cmd, target.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1,
-                             &b.subresourceRange);
-        b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        b.dstAccessMask = 0;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr,
-                             0, nullptr, 1, &b);
+        const uint32_t seed = nextSeed++;
+        const bool readback = RecordFrame(target, cmd, index, seed, 0);
         Check(vkEndCommandBuffer(cmd), "end");
 
         VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -500,12 +720,12 @@ struct App
         submit.pCommandBuffers = &cmd;
         submit.signalSemaphoreCount = waits > 0 ? 1 : 0;
         submit.pSignalSemaphores = &rendered;
-        Check(vkQueueSubmit(target.queue, 1, &submit, VK_NULL_HANDLE), "submit clear");
+        Check(vkQueueSubmit(target.queue, 1, &submit, VK_NULL_HANDLE), "submit frame");
 
         VkSemaphore waitList[2] = { rendered, extra };
         if (waits == 2)
         {
-            // A second, empty batch on the same queue, after the clear: its signal is the present's second wait.
+            // A second, empty batch on the same queue, after the frame: its signal is the present's second wait.
             VkSubmitInfo empty { VK_STRUCTURE_TYPE_SUBMIT_INFO };
             empty.signalSemaphoreCount = 1;
             empty.pSignalSemaphores = &extra;
@@ -513,8 +733,8 @@ struct App
         }
         else if (waits == 0)
         {
-            // No semaphore at all: the host has seen the clear complete before presenting.
-            Check(vkQueueWaitIdle(target.queue), "wait for the clear before a present with no waits");
+            // No semaphore at all: the host has seen the frame complete before presenting.
+            Check(vkQueueWaitIdle(target.queue), "wait for the frame before a present with no waits");
         }
 
         VkPresentInfoKHR present { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
@@ -525,15 +745,175 @@ struct App
         present.pImageIndices = &index;
         const VkResult result = vkQueuePresentKHR(target.queue, &present);
         Require(result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR, "present failed");
-        presents.push_back(Present { target.window, H(target.swapchain), H(target.queue), H(device), waits, index,
-                                     target.swapchainName, target.deviceName });
+        Record(target, waits, index, -1, true);
 
         Check(vkQueueWaitIdle(target.queue), "wait for presentation");
+        if (readback)
+            CompareReadback(target, index);
         vkDestroyCommandPool(device, pool, nullptr);
         vkDestroySemaphore(device, acquired, nullptr);
         vkDestroySemaphore(device, rendered, nullptr);
         vkDestroySemaphore(device, extra, nullptr);
         target.initialized[index] = true;
+        target.expected[index] = seed;
+    }
+
+    // A command buffer of `copies` copies between two large device-local buffers: GPU work that takes a while.
+    VkCommandBuffer RecordBusyWork(VkDevice device, VkCommandPool pool, const Buffer& from, const Buffer& to,
+                                   VkDeviceSize bytes, uint32_t copies)
+    {
+        VkCommandBufferAllocateInfo ai { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        ai.commandPool = pool;
+        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        ai.commandBufferCount = 1;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        Check(vkAllocateCommandBuffers(device, &ai, &cmd), "command buffer");
+        VkCommandBufferBeginInfo begin { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        Check(vkBeginCommandBuffer(cmd, &begin), "begin");
+        VkBufferCopy region { 0, 0, bytes };
+        VkMemoryBarrier barrier { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        for (uint32_t i = 0; i < copies; ++i)
+        {
+            vkCmdCopyBuffer(cmd, from.buffer, to.buffer, 1, &region);
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0,
+                                 nullptr, 0, nullptr);
+        }
+        Check(vkEndCommandBuffer(cmd), "end");
+        return cmd;
+    }
+
+    static double Ms(LARGE_INTEGER from, LARGE_INTEGER to)
+    {
+        LARGE_INTEGER frequency;
+        QueryPerformanceFrequency(&frequency);
+        return 1000.0 * double(to.QuadPart - from.QuadPart) / double(frequency.QuadPart);
+    }
+
+    // About 1.2 s of GPU work is submitted on the presenting queue, then presents are queued behind it one after
+    // another until no image is left to acquire: each of them reaches the host with every earlier one of the batch
+    // still in flight, more of them than the host's ring holds. Then everything drains.
+    void HeldBackBatch(Target& target)
+    {
+        VkDevice device = target.device;
+        VkCommandPoolCreateInfo poolInfo { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+        poolInfo.queueFamilyIndex = target.family;
+        VkCommandPool pool = VK_NULL_HANDLE;
+        Check(vkCreateCommandPool(device, &poolInfo, nullptr, &pool), "command pool");
+        VkFenceCreateInfo fi { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        VkFence fence = VK_NULL_HANDLE;
+        Check(vkCreateFence(device, &fi, nullptr, &fence), "fence");
+
+        // How long a copy takes here, to size the block.
+        const VkDeviceSize bytes = VkDeviceSize(64) << 20;
+        Buffer from = MakeBuffer(device, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false);
+        Buffer to = MakeBuffer(device, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
+        constexpr uint32_t kProbe = 100;
+        VkCommandBuffer probe = RecordBusyWork(device, pool, from, to, bytes, kProbe);
+        VkSubmitInfo submit { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &probe;
+        LARGE_INTEGER t0, t1;
+        QueryPerformanceCounter(&t0);
+        Check(vkQueueSubmit(target.queue, 1, &submit, fence), "submit the probe");
+        Check(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), "wait for the probe");
+        QueryPerformanceCounter(&t1);
+        Check(vkResetFences(device, 1, &fence), "reset fence");
+        const double perCopy = std::max(Ms(t0, t1) / kProbe, 0.001);
+        const uint32_t copies = static_cast<uint32_t>(std::clamp(1200.0 / perCopy, 100.0, 200000.0));
+
+        VkCommandBuffer busy = RecordBusyWork(device, pool, from, to, bytes, copies);
+        submit.pCommandBuffers = &busy;
+        LARGE_INTEGER start;
+        QueryPerformanceCounter(&start);
+        Check(vkQueueSubmit(target.queue, 1, &submit, fence), "submit the block of work");
+
+        std::vector<VkSemaphore> semaphores;
+        std::vector<std::pair<uint32_t, uint32_t>> queued; // image, seed
+        VkSemaphoreCreateInfo si { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+        LARGE_INTEGER lastPresent = start;
+
+        for (uint32_t k = 0; k < kDelayMax && k < kUploadSlots; ++k)
+        {
+            Pump();
+            VkSemaphore acquired = VK_NULL_HANDLE, rendered = VK_NULL_HANDLE;
+            Check(vkCreateSemaphore(device, &si, nullptr, &acquired), "acquire semaphore");
+            Check(vkCreateSemaphore(device, &si, nullptr, &rendered), "render semaphore");
+            semaphores.push_back(acquired);
+            semaphores.push_back(rendered);
+
+            uint32_t index = 0;
+            const VkResult acquire =
+                vkAcquireNextImageKHR(device, target.swapchain, 0, acquired, VK_NULL_HANDLE, &index);
+            if (acquire == VK_NOT_READY || acquire == VK_TIMEOUT)
+            {
+                // Never signalled: destroyable as it is.
+                break;
+            }
+            Require(acquire == VK_SUCCESS || acquire == VK_SUBOPTIMAL_KHR, "acquire failed in the held-back batch");
+
+            VkCommandBufferAllocateInfo ai { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+            ai.commandPool = pool;
+            ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            ai.commandBufferCount = 1;
+            VkCommandBuffer cmd = VK_NULL_HANDLE;
+            Check(vkAllocateCommandBuffers(device, &ai, &cmd), "command buffer");
+            VkCommandBufferBeginInfo begin { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+            Check(vkBeginCommandBuffer(cmd, &begin), "begin");
+            const uint32_t seed = nextSeed++;
+            const bool savedReadback = target.readback;
+            target.readback = false; // nothing is read back while frames are in flight
+            RecordFrame(target, cmd, index, seed, k);
+            target.readback = savedReadback;
+            Check(vkEndCommandBuffer(cmd), "end");
+
+            const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            VkSubmitInfo frame { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            frame.waitSemaphoreCount = 1;
+            frame.pWaitSemaphores = &acquired;
+            frame.pWaitDstStageMask = &stage;
+            frame.commandBufferCount = 1;
+            frame.pCommandBuffers = &cmd;
+            frame.signalSemaphoreCount = 1;
+            frame.pSignalSemaphores = &rendered;
+            Check(vkQueueSubmit(target.queue, 1, &frame, VK_NULL_HANDLE), "submit held-back frame");
+
+            VkPresentInfoKHR present { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+            present.waitSemaphoreCount = 1;
+            present.pWaitSemaphores = &rendered;
+            present.swapchainCount = 1;
+            present.pSwapchains = &target.swapchain;
+            present.pImageIndices = &index;
+            const VkResult result = vkQueuePresentKHR(target.queue, &present);
+            Require(result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR, "present failed in the held-back batch");
+            QueryPerformanceCounter(&lastPresent);
+            Record(target, 1, index, static_cast<int>(k), false);
+            queued.emplace_back(index, seed);
+        }
+
+        Check(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), "wait for the block of work");
+        LARGE_INTEGER done;
+        QueryPerformanceCounter(&done);
+        delayQueued = static_cast<uint32_t>(queued.size());
+        heldGpuMs = Ms(start, done);
+        heldPresentsMs = Ms(start, lastPresent);
+        std::printf("HELD BACK: %u presents queued behind %u copies (%.1f ms on the GPU; the last present returned at "
+                    "%.1f ms)\n",
+                    delayQueued, copies, heldGpuMs, heldPresentsMs);
+        Check(vkDeviceWaitIdle(device), "drain the held-back batch");
+
+        for (const auto& [index, seed] : queued)
+        {
+            target.initialized[index] = true;
+            target.expected[index] = seed;
+        }
+        vkDestroyCommandPool(device, pool, nullptr);
+        vkDestroyFence(device, fence, nullptr);
+        FreeBuffer(device, from);
+        FreeBuffer(device, to);
+        for (VkSemaphore s : semaphores)
+            vkDestroySemaphore(device, s, nullptr);
     }
 
     void Run()
@@ -550,6 +930,7 @@ struct App
         ProbeValidation(one.device);
         one.family = graphicsFamily;
         vkGetDeviceQueue(one.device, graphicsFamily, 0, &one.queue);
+        const VkQueue graphicsQueue = one.queue;
         VkDeviceQueueInfo2 second { VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2 };
         second.queueFamilyIndex = compute ? computeFamily : graphicsFamily;
         second.queueIndex = 0;
@@ -567,24 +948,38 @@ struct App
             }
         }
 
-        // Swapchain 1: no TRANSFER_SRC, so the line has to say the round trip needs it.
+        // Swapchain 1: no TRANSFER_SRC, as DXVK and vkd3d-proton ask (0x12): the host has to add it.
         MakeSwapchain(one, "sc1", surfaces[0], VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         SnapshotPrologues(true);
         for (int frame = 0; frame < 12; ++frame)
             Frame(one, 1);
 
-        // Swapchain 2 replaces it through oldSwapchain, with both transfer usages, presented from the second queue:
-        // two presents with no waits, then two waits each, to window 1's 100th present.
+        // Swapchain 2 replaces it through oldSwapchain, with both transfer usages (unless the surface hides
+        // TRANSFER_SRC), presented from the second queue -- the compute-only family, so the round trip crosses to the
+        // graphics family and back: two presents with no waits, then two waits each, to window 1's 100th present.
         VkSurfaceCapabilitiesKHR caps {};
         Check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surfaces[0], &caps), "surface capabilities");
-        Require(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT, "the surface offers no TRANSFER_SRC");
+        Require(noTransferSrc == !(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT),
+                noTransferSrc ? "the surface still offers TRANSFER_SRC: the test layer is not active"
+                              : "the surface offers no TRANSFER_SRC");
         one.queue = secondQueue;
         one.family = second.queueFamilyIndex;
-        MakeSwapchain(one, "sc2", surfaces[0],
-                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                          VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        MakeSwapchain(one, "sc2", surfaces[0], TransferUsage());
         for (int frame = 0; frame < 88; ++frame)
             Frame(one, frame < 2 ? 0 : 2);
+
+        // Swapchain 3 on window 1, from the graphics queue again, with as many images as the surface allows: a batch
+        // of presents queued behind a block of GPU work, more of them than the host's ring holds, then frames that read
+        // every image back.
+        one.queue = graphicsQueue;
+        one.family = graphicsFamily;
+        MakeSwapchain(one, "sc-held", surfaces[0], TransferUsage(), 7);
+        // Not under the legacy overlay: on a new swapchain its present waits for the GPU (it re-initialises its
+        // objects there), so presents never pile up behind the block of work.
+        if (!overlayDraws)
+            HeldBackBatch(one);
+        for (size_t frame = 0; frame < one.images.size() + 2; ++frame)
+            Frame(one, 1);
 
         if (oneWindow)
         {
@@ -595,7 +990,7 @@ struct App
             // test-only teardown export the production DLL does not have), so the device and the instance are left
             // to process exit here. See README.md.
             Check(vkDeviceWaitIdle(one.device), "final idle");
-            vkDestroySwapchainKHR(one.device, one.swapchain, nullptr);
+            DestroySwapchain(one);
             Write(compute, second.queueFamilyIndex, H(secondQueue));
             Require(validationErrors == 0, "Vulkan validation reported errors; see the run log");
             return;
@@ -605,7 +1000,8 @@ struct App
         windows[1] = MakeWindow(1, 760, 80, 480, 360);
         surfaces[1] = MakeSurface(windows[1]);
         VkBool32 supported = VK_FALSE;
-        Check(vkGetPhysicalDeviceSurfaceSupportKHR(physical, graphicsFamily, surfaces[1], &supported), "surface support");
+        Check(vkGetPhysicalDeviceSurfaceSupportKHR(physical, graphicsFamily, surfaces[1], &supported),
+              "surface support");
         Require(supported, "window 2's surface takes no presents from the graphics family");
         Target two;
         two.window = 2;
@@ -622,9 +1018,9 @@ struct App
 
         // Device 2 goes, device 3 comes, possibly with device 2's handle value.
         Check(vkDeviceWaitIdle(two.device), "idle device 2");
-        vkDestroySwapchainKHR(two.device, two.swapchain, nullptr);
+        DestroySwapchain(two);
         const uint64_t secondHandle = H(two.device);
-        vkDestroyDevice(two.device, nullptr);
+        DestroyDevice(two.device, "d2");
         Target three;
         three.window = 2;
         three.device = MakeDevice("d3", false);
@@ -636,11 +1032,22 @@ struct App
         for (int frame = 0; frame < 3; ++frame)
             Frame(three, 1);
 
+        // The window is resized and its swapchain recreated through oldSwapchain at the new extent.
+        SetWindowPos(windows[1], nullptr, 0, 0, 400, 300, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        for (int i = 0; i < 10; ++i)
+        {
+            Pump();
+            Sleep(20);
+        }
+        MakeSwapchain(three, "sc5", surfaces[1], VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        for (int frame = 0; frame < 6; ++frame)
+            Frame(three, 1);
+
         for (Target* target : { &one, &three })
         {
             Check(vkDeviceWaitIdle(target->device), "final idle");
-            vkDestroySwapchainKHR(target->device, target->swapchain, nullptr);
-            vkDestroyDevice(target->device, nullptr);
+            DestroySwapchain(*target);
+            DestroyDevice(target->device, target->deviceName);
         }
 
         Write(compute, second.queueFamilyIndex, H(secondQueue));
@@ -669,24 +1076,37 @@ struct App
 
     void Write(bool compute, uint32_t secondFamily, uint64_t secondQueue)
     {
+        Require(readbackMismatches == 0,
+                ("a presented image did not read back as it was made: " + firstMismatch).c_str());
         std::ostringstream out;
         out << "{\n  \"status\": \"PASS\",\n  \"validation_active\": " << (validationActive ? "true" : "false")
-            << ",\n  \"validation_errors\": " << validationErrors << ",\n  \"wine_injected_extension_messages\": " << wineInjected << ",\n  \"late_load\": " << (lateLoad ? "true" : "false")
-            << ",\n  \"windows\": [\"" << Hex(H(windows[0])) << "\", \"" << Hex(H(windows[1])) << "\"]"
+            << ",\n  \"validation_errors\": " << validationErrors
+            << ",\n  \"wine_injected_extension_messages\": " << wineInjected
+            << ",\n  \"late_load\": " << (lateLoad ? "true" : "false") << ",\n  \"windows\": [\"" << Hex(H(windows[0]))
+            << "\", \"" << Hex(H(windows[1])) << "\"]"
             << ",\n  \"instance\": \"" << Hex(H(instance)) << "\",\n  \"physical\": \"" << Hex(H(physical)) << "\""
-            << ",\n  \"graphics_family\": " << graphicsFamily << ",\n  \"compute_family\": "
-            << (compute ? static_cast<int>(computeFamily) : -1) << ",\n  \"second_queue_family\": " << secondFamily
-            << ",\n  \"second_queue\": \"" << Hex(secondQueue) << "\",\n  \"third_reused_second\": "
-            << (thirdReusedSecond ? "true" : "false") << ",\n  \"families\": [";
+            << ",\n  \"graphics_family\": " << graphicsFamily
+            << ",\n  \"compute_family\": " << (compute ? static_cast<int>(computeFamily) : -1)
+            << ",\n  \"second_queue_family\": " << secondFamily << ",\n  \"second_queue\": \"" << Hex(secondQueue)
+            << "\",\n  \"third_reused_second\": " << (thirdReusedSecond ? "true" : "false")
+            << ",\n  \"held_back_queued\": " << delayQueued << ",\n  \"held_back_gpu_ms\": " << heldGpuMs
+            << ",\n  \"held_back_presents_ms\": " << heldPresentsMs << ",\n  \"readbacks\": " << readbacks
+            << ",\n  \"readback_mismatches\": " << readbackMismatches
+            << ",\n  \"overlay_mismatches\": " << overlayMismatches
+            << ",\n  \"host_adds_src\": " << (hostAddsSrc ? "true" : "false")
+            << ",\n  \"no_transfer_src\": " << (noTransferSrc ? "true" : "false") << ",\n  \"families\": [";
         for (size_t i = 0; i < families.size(); ++i)
-            out << (i ? ", " : "") << "{\"flags\": " << families[i].queueFlags << ", \"count\": " << families[i].queueCount << "}";
+            out << (i ? ", " : "") << "{\"flags\": " << families[i].queueFlags
+                << ", \"count\": " << families[i].queueCount << "}";
         out << "],\n  \"devices\": [";
         for (size_t i = 0; i < devices.size(); ++i)
         {
-            out << (i ? ", " : "") << "{\"name\": \"" << devices[i].name << "\", \"handle\": \"" << Hex(devices[i].handle)
-                << "\", \"requested\": [";
+            out << (i ? ", " : "") << "{\"name\": \"" << devices[i].name << "\", \"handle\": \""
+                << Hex(devices[i].handle) << "\", \"destroyed\": " << (devices[i].destroyed ? "true" : "false")
+                << ", \"requested\": [";
             for (size_t r = 0; r < devices[i].requested.size(); ++r)
-                out << (r ? ", " : "") << "[" << devices[i].requested[r].first << ", " << devices[i].requested[r].second << "]";
+                out << (r ? ", " : "") << "[" << devices[i].requested[r].first << ", " << devices[i].requested[r].second
+                    << "]";
             out << "]}";
         }
         out << "],\n  \"swapchains\": [";
@@ -697,24 +1117,26 @@ struct App
                 << "\", \"device\": \"" << Hex(s.device) << "\", \"window\": " << s.window << ", \"usage\": " << s.usage
                 << ", \"format\": " << s.format << ", \"color_space\": " << s.colorSpace << ", \"width\": " << s.width
                 << ", \"height\": " << s.height << ", \"images\": " << s.images << ", \"sharing\": " << s.sharing
-                << ", \"surface_usage\": " << s.surfaceUsage << "}";
+                << ", \"surface_usage\": " << s.surfaceUsage << ", \"readback\": " << (s.readback ? "true" : "false")
+                << ", \"destroyed\": " << (s.destroyed ? "true" : "false") << "}";
         }
         out << "],\n  \"presents\": [";
         for (size_t i = 0; i < presents.size(); ++i)
         {
             const auto& p = presents[i];
-            out << (i ? ",\n    " : "\n    ") << "{\"window\": " << p.window << ", \"swapchain\": \"" << Hex(p.swapchain)
-                << "\", \"queue\": \"" << Hex(p.queue) << "\", \"device\": \"" << Hex(p.device) << "\", \"waits\": " << p.waits
-                << ", \"image\": " << p.image << ", \"swapchain_name\": \"" << p.swapchainName << "\", \"device_name\": \""
-                << p.deviceName << "\"}";
+            out << (i ? ",\n    " : "\n    ") << "{\"window\": " << p.window << ", \"swapchain\": \""
+                << Hex(p.swapchain) << "\", \"queue\": \"" << Hex(p.queue) << "\", \"device\": \"" << Hex(p.device)
+                << "\", \"family\": " << p.family << ", \"waits\": " << p.waits << ", \"image\": " << p.image
+                << ", \"held_back\": " << p.delayed << ", \"gpu_idle\": " << (p.gpuIdle ? "true" : "false")
+                << ", \"swapchain_name\": \"" << p.swapchainName << "\", \"device_name\": \"" << p.deviceName << "\"}";
         }
         out << "],\n  \"prologues\": {";
         for (size_t i = 0; i < kWatchedCount; ++i)
         {
-            out << (i ? ",\n    " : "\n    ") << "\"" << kWatched[i] << "\": {\"patched\": "
-                << (prologues[i].before != prologues[i].after ? "true" : "false") << ", \"device_proc_checked\": "
-                << (prologues[i].deviceProcChecked ? "true" : "false") << ", \"same_as_device_proc\": "
-                << (prologues[i].sameAsDeviceProc ? "true" : "false") << "}";
+            out << (i ? ",\n    " : "\n    ") << "\"" << kWatched[i]
+                << "\": {\"patched\": " << (prologues[i].before != prologues[i].after ? "true" : "false")
+                << ", \"device_proc_checked\": " << (prologues[i].deviceProcChecked ? "true" : "false")
+                << ", \"same_as_device_proc\": " << (prologues[i].sameAsDeviceProc ? "true" : "false") << "}";
         }
         out << "}\n}\n";
         // Written at the end of Run only after validation is known clean; main() rewrites FAIL on any exception.
@@ -730,12 +1152,24 @@ int main(int argc, char** argv)
     try
     {
         App app;
-        Require(argc == 1 || (argc == 2 && !strcmp(argv[1], "--one-window")), "unknown harness argument");
-        app.oneWindow = argc == 2;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (!strcmp(argv[i], "--one-window"))
+                app.oneWindow = true;
+            else if (!strcmp(argv[i], "--host-adds-src"))
+                app.hostAddsSrc = true;
+            else if (!strcmp(argv[i], "--no-transfer-src"))
+                app.noTransferSrc = true;
+            else if (!strcmp(argv[i], "--overlay-draws"))
+                app.overlayDraws = true;
+            else
+                Require(false, "unknown harness argument");
+        }
         app.Run();
         std::ofstream("result.json") << app.pending;
-        std::printf("PASS: %zu presents over %zu device(s) and %zu swapchain(s); validation clean\n", app.presents.size(),
-                    app.devices.size(), app.swapchains.size());
+        std::printf(
+            "PASS: %zu presents over %zu device(s) and %zu swapchain(s); %u read-backs equal; validation clean\n",
+            app.presents.size(), app.devices.size(), app.swapchains.size(), app.readbacks);
         return 0;
     }
     catch (const std::exception& error)

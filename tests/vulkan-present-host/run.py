@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""The Vulkan present host's stage 1 under Wine (docs/dlssnr/design/nr-vulkan-present-host.md): the production DLL,
-uninstrumented, loaded by a Win32 Vulkan application, with [DlssNr] VulkanPresentHost on and off, the skip marker
-present and absent, the Vulkan menu on and off. The observe lines in OptiScaler.log are held against the facts the
-application wrote about itself; with the key off, nothing of the host may appear and vulkan-1.dll's exports must be
-byte-for-byte untouched."""
+"""The Vulkan present host under Wine (docs/dlssnr/design/nr-vulkan-present-host.md, stages 1 and 2): the production
+DLL, uninstrumented, loaded by a Win32 Vulkan application, with [DlssNr] VulkanPresentHost on and off, the skip marker
+present and absent, the Vulkan menu on and off, and a surface that hides TRANSFER_SRC. Every line of the host in
+OptiScaler.log is held against the facts the application wrote about itself -- which presents the round trip must have
+carried, by which route, with how many waits and submits, and what it must have refused -- under the validation
+layer's core and synchronization checks, and every presented image the application reads back must equal what it
+made. With the key off, nothing of the host may appear and vulkan-1.dll's exports must be byte-for-byte untouched."""
 import argparse
 import hashlib
 import json
@@ -23,45 +25,71 @@ BUILD_PREFIX = OUT / 'build-prefix'
 EXE = 'vk-present-host-harness.exe'
 TRANSLATED_EXE = 'vk-present-host-translated.exe'
 MARKER = 'optiscaler_skip_vulkan_hooks'
-OBSERVE = 'DLSS-NR Vulkan present host (observe only): window '
+WINDOW_LINE = 'DLSS-NR Vulkan present host (round trip, no NR): window '
+INSTALL_LINE = 'DLSS-NR Vulkan present host (round trip, no NR; stage 2'
 HOST_TEXT = 'DLSS-NR Vulkan present host'
+HIDE_LAYER = 'VK_LAYER_RETOQUE_hide_transfer_src'
+LAYER_DIR = OUT / 'layer'
 
-# What the host detours. vkQueueSubmit and vkCreateFence are controls: the host never hooks them.
+# What the host detours: stage 1's creation, lifetime and present calls, and stage 2's queue calls (vkQueueSubmit,
+# vkQueueWaitIdle), whose lock keeps a borrowed queue externally synchronised. vkCreateFence is the control: never.
 HOST_HOOKED = ['vkCreateInstance', 'vkDestroyInstance', 'vkEnumeratePhysicalDevices', 'vkCreateDevice',
                'vkCreateWin32SurfaceKHR', 'vkDestroySurfaceKHR', 'vkDestroyDevice', 'vkGetDeviceQueue',
                'vkGetDeviceQueue2', 'vkCreateSwapchainKHR', 'vkDestroySwapchainKHR', 'vkGetSwapchainImagesKHR',
-               'vkAcquireNextImageKHR', 'vkQueuePresentKHR']
-NEVER_HOOKED = ['vkQueueSubmit', 'vkCreateFence']
+               'vkAcquireNextImageKHR', 'vkQueuePresentKHR', 'vkQueueSubmit', 'vkQueueWaitIdle']
+NEVER_HOOKED = ['vkCreateFence']
 DEVICE_LEVEL = {'vkDestroyDevice', 'vkGetDeviceQueue', 'vkGetDeviceQueue2', 'vkCreateSwapchainKHR',
-                'vkDestroySwapchainKHR', 'vkGetSwapchainImagesKHR', 'vkAcquireNextImageKHR', 'vkQueuePresentKHR'}
+                'vkDestroySwapchainKHR', 'vkGetSwapchainImagesKHR', 'vkAcquireNextImageKHR', 'vkQueuePresentKHR',
+                'vkQueueSubmit', 'vkQueueWaitIdle'}
 
-# name: (marker file, [Vulkan] SkipHooks, [DlssNr] Enabled, VulkanPresentHost, OverlayMenu, one window only)
+# The host's constants (retoque/dlssnr/DlssNr_VkPresentTransport.h): ring slots per swapchain, the bounded wait for
+# the oldest one.
+RING_MAX = 4
+SLOT_WAIT_MS = 100.0
+
+# name: (marker file, [Vulkan] SkipHooks, [DlssNr] Enabled, VulkanPresentHost, OverlayMenu, one window only,
+#        surfaces hide TRANSFER_SRC)
 #
-# The last two run the legacy bundle with its Vulkan menu. That overlay dies (a null read inside
+# menu-on and key-off run the legacy bundle with its Vulkan menu. That overlay dies (a null read inside
 # MenuOverlayVk::CreateSwapchain) when a second window's swapchain is created on a second device, with this host off
 # as well, so they stop after window 1 (--one-window). See README.md.
 CASES = {
-    'marker': (True, False, True, True, True, False),
-    'skiphooks': (False, True, True, True, True, False),
-    'marker-key-off': (True, False, True, False, True, False),
-    'marker-master-off': (True, False, False, True, True, False),
-    'menu-off': (False, False, True, True, False, False),
-    'menu-on': (False, False, True, True, True, True),
-    'key-off': (False, False, True, False, True, True),
+    'marker': (True, False, True, True, True, False, False),
+    'skiphooks': (False, True, True, True, True, False, False),
+    'surface-no-src': (True, False, True, True, True, False, True),
+    'marker-key-off': (True, False, True, False, True, False, False),
+    'marker-master-off': (True, False, False, True, True, False, False),
+    'menu-off': (False, False, True, True, False, False, False),
+    'menu-on': (False, False, True, True, True, True, False),
+    'key-off': (False, False, True, False, True, True, False),
 }
 
-# A D3D title under Proton's translation layers (translated.cpp), the marker present as deployed, OptiScaler as winmm.dll:
-# name: (API, VulkanPresentHost). DXVK and vkd3d-proton come from a local Proton build.
+# A D3D title under Proton's translation layers (translated.cpp), OptiScaler as winmm.dll: name: (API,
+# VulkanPresentHost, marker). DXVK and vkd3d-proton come from a local Proton build. The key-off cases are the
+# validation baseline: whatever the layers themselves trip is not the host's. The marker is present as deployed for
+# such titles, except in the dxvk-bundle cases, which run the whole bundle beside the host (its menu on, LogLevel 0) to
+# hold that the bundle still takes a DXVK present for a DXGI-backed one with the host's detour above its own.
 TRANSLATED_CASES = {
-    'dxvk': ('d3d11', True),
-    'vkd3d-proton': ('d3d12', True),
-    'dxvk-key-off': ('d3d11', False),
+    'dxvk': ('d3d11', True, True),
+    'vkd3d-proton': ('d3d12', True, True),
+    'dxvk-bundle': ('d3d11', True, False),
+    'dxvk-key-off': ('d3d11', False, True),
+    'vkd3d-proton-key-off': ('d3d12', False, True),
+    'dxvk-bundle-key-off': ('d3d11', False, False),
 }
 TRANSLATED_CALLER = {'d3d11': 'DXVK', 'd3d12': 'vkd3d-proton'}
+# Whether the validation layer runs under the layer. GE-Proton11-7's vkd3d-proton aborts (exit 3) in its device
+# initialisation under the Khronos layer 1.4.363, with core validation alone and with OptiScaler's host off as well,
+# so the D3D12 cases run without it, as stage 1's did; their transport is checked by the lines alone.
+TRANSLATED_VALIDATION = {'d3d11': True, 'd3d12': False}
 PROTON_LIBRARIES = {'dxvk': ['dxgi.dll', 'd3d11.dll', 'd3d10core.dll'], 'vkd3d-proton': ['d3d12.dll', 'd3d12core.dll']}
 
 USAGE_TRANSFER_SRC, USAGE_TRANSFER_DST, USAGE_STORAGE = 0x1, 0x2, 0x8
 QUEUE_GRAPHICS, QUEUE_COMPUTE, QUEUE_TRANSFER = 0x1, 0x2, 0x4
+SKIP_ORDER = ['observe only', 'device off', 'multi-swapchain present', 'image unknown', 'no acquire seen',
+              'too many waits', 'no route', 'work queue changed', 'ring busy', 'queue busy', 'setup failed',
+              'record failed', 'submit failed']
+ROUTE_ORDER = ['same queue', 'cross-family', 'concurrent']
 
 
 def sha(path):
@@ -96,8 +124,8 @@ def check_dll(dll):
     if not dll.exists():
         raise RuntimeError(f'{dll} does not exist; run ./build-local.sh Release first')
     data = dll.read_bytes()
-    if OBSERVE.encode() not in data:
-        raise RuntimeError(f'{dll} has no present host in it (stale build); run ./build-local.sh Release')
+    if WINDOW_LINE.encode() not in data:
+        raise RuntimeError(f'{dll} has no stage-2 present host in it (stale build); run ./build-local.sh Release')
     # A source newer than the DLL means the DLL is not what the tree says.
     sources = [ROOT / 'OptiScaler/hooks/Vulkan_Hooks.cpp', ROOT / 'OptiScaler/Config.h', ROOT / 'OptiScaler/Config.cpp',
                *sorted((ROOT / 'retoque/dlssnr').glob('DlssNr_VkPresent*'))]
@@ -125,12 +153,31 @@ def build_harness():
         subprocess.run(['wineserver', '-k'], env=env, stdin=subprocess.DEVNULL, capture_output=True)
 
 
-def runtime_env():
-    return dict(os.environ, WINEPREFIX=str(OUT / 'wineprefix'), WINEDEBUG='-all',
-                WINEDLLOVERRIDES='dxgi=n,b;vcruntime140=n;vcruntime140_1=n;msvcp140=n',
-                VK_INSTANCE_LAYERS='VK_LAYER_KHRONOS_validation',
-                VK_LAYER_ENABLES='VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT',
-                VK_LOADER_LAYERS_DISABLE='~implicit~', ENABLE_GAMESCOPE_WSI='0')
+def build_layer():
+    """The native test layer that hides TRANSFER_SRC from surfaces, and its manifest, in artifacts/layer/."""
+    LAYER_DIR.mkdir(parents=True, exist_ok=True)
+    library = LAYER_DIR / 'libVkLayer_retoque_hide_transfer_src.so'
+    run(['g++', '-std=c++20', '-shared', '-fPIC', '-O1', '-Wall', '-Wextra', '-Werror',
+         '-I', ROOT / 'external/vulkan/include', HERE / 'hide_transfer_src.cpp', '-o', library],
+        logfile=OUT / 'build-layer.log', timeout=300)
+    (LAYER_DIR / 'VkLayer_retoque_hide_transfer_src.json').write_text(json.dumps({
+        'file_format_version': '1.1.2',
+        'layer': {'name': HIDE_LAYER, 'type': 'INSTANCE', 'library_path': str(library), 'api_version': '1.4.309',
+                  'implementation_version': '1',
+                  'description': 'tests/vulkan-present-host: hides TRANSFER_SRC from surface capabilities'}}) + '\n')
+
+
+def runtime_env(hide=False):
+    # The validation layer first (nearest the application), the hiding layer after it (nearest the driver).
+    layers = 'VK_LAYER_KHRONOS_validation' + (f':{HIDE_LAYER}' if hide else '')
+    env = dict(os.environ, WINEPREFIX=str(OUT / 'wineprefix'), WINEDEBUG='-all',
+               WINEDLLOVERRIDES='dxgi=n,b;vcruntime140=n;vcruntime140_1=n;msvcp140=n',
+               VK_INSTANCE_LAYERS=layers,
+               VK_LAYER_ENABLES='VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT',
+               VK_LOADER_LAYERS_DISABLE='~implicit~', ENABLE_GAMESCOPE_WSI='0')
+    if hide:
+        env['VK_ADD_LAYER_PATH'] = str(LAYER_DIR)
+    return env
 
 
 def proton_libraries():
@@ -146,13 +193,18 @@ def proton_libraries():
     return None
 
 
-def translated_env():
-    # As Proton runs a D3D title: DXVK and vkd3d-proton are the system's dxgi/d3d11/d3d12, native first. No validation
-    # layer: these cases are about which hooks the translation layers reach, not about their own Vulkan usage.
-    return dict(os.environ, WINEPREFIX=str(OUT / 'wineprefix-translated'), WINEDEBUG='-all',
-                WINEDLLOVERRIDES='winmm=n,b;dxgi,d3d11,d3d10core,d3d12,d3d12core=n;'
-                                 'vcruntime140=n;vcruntime140_1=n;msvcp140=n',
-                VK_LOADER_LAYERS_DISABLE='~implicit~', ENABLE_GAMESCOPE_WSI='0', DXVK_LOG_LEVEL='info')
+def translated_env(validation=False):
+    # As Proton runs a D3D title: DXVK and vkd3d-proton are the system's dxgi/d3d11/d3d12, native first. With
+    # `validation`, the validation layer (core and synchronization) runs under them; with no messenger of the
+    # application's, it writes to stdout, which the run log holds.
+    env = dict(os.environ, WINEPREFIX=str(OUT / 'wineprefix-translated'), WINEDEBUG='-all',
+               WINEDLLOVERRIDES='winmm=n,b;dxgi,d3d11,d3d10core,d3d12,d3d12core=n;'
+                                'vcruntime140=n;vcruntime140_1=n;msvcp140=n',
+               VK_LOADER_LAYERS_DISABLE='~implicit~', ENABLE_GAMESCOPE_WSI='0', DXVK_LOG_LEVEL='info')
+    if validation:
+        env.update(VK_INSTANCE_LAYERS='VK_LAYER_KHRONOS_validation',
+                   VK_LAYER_ENABLES='VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT')
+    return env
 
 
 def prepare_translated_prefix(wine):
@@ -172,17 +224,21 @@ def prepare_translated_prefix(wine):
             shutil.copyfile(wine / layer / 'x86_64-windows' / dll, target)
 
 
-def ini_for(skiphooks, enabled, key, menu):
+def ini_for(skiphooks, enabled, key, menu, level=1):
     text = f'[Menu]\nOverlayMenu={str(menu).lower()}\nShortcutKey=0x2D\n'
     text += f'[DlssNr]\nEnabled={str(enabled).lower()}\nVulkanPresentHost={str(key).lower()}\n'
     if skiphooks:
         text += '[Vulkan]\nSkipHooks=true\n'
-    text += '[Log]\nLogToFile=true\nLogLevel=1\n'
+    text += f'[Log]\nLogToFile=true\nLogLevel={level}\n'
     return text
 
 
+def validation_ids(run_log):
+    return sorted(set(re.findall(r'\b(?:VUID|SYNC-HAZARD)-[\w-]+', run_log)) - {'VUID-VkFenceCreateInfo-flags-parameter'})
+
+
 def execute_case(name, dll, redist):
-    marker, skiphooks, enabled, key, menu, one_window = CASES[name]
+    marker, skiphooks, enabled, key, menu, one_window, hide = CASES[name]
     work = OUT / 'cases' / name
     if work.exists():
         shutil.rmtree(work)
@@ -194,19 +250,31 @@ def execute_case(name, dll, redist):
     (work / 'OptiScaler.ini').write_text(ini_for(skiphooks, enabled, key, menu))
     if marker:
         (work / MARKER).write_text('')
+    args = []
+    if one_window:
+        args.append('--one-window')
+    if menu and not (marker or skiphooks):
+        # The legacy Vulkan overlay draws its splash into the presented images (host on or off): the read-backs are
+        # counted, not compared. Its present hook then consumes the host's semaphore, which is the chain to validate.
+        args.append('--overlay-draws')
+    if hide:
+        args.append('--no-transfer-src')
+    elif enabled and key:
+        args.append('--host-adds-src')
     with (OUT / f'{name}.log').open('w') as log:
-        process = subprocess.run(['wine', str(work / EXE)] + (['--one-window'] if one_window else []), cwd=work, env=runtime_env(), stdin=subprocess.DEVNULL,
-                                 stdout=log, stderr=subprocess.STDOUT, timeout=180)
+        process = subprocess.run(['wine', str(work / EXE)] + args, cwd=work, env=runtime_env(hide),
+                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=300)
     run_log = (OUT / f'{name}.log').read_text(errors='replace')
     facts = json.loads((work / 'result.json').read_text())
     if not finished(process, facts, run_log, name) or facts.get('status') != 'PASS':
         reason = next((l for l in reversed(run_log.splitlines()) if l.startswith('FAIL: ')), 'no FAIL line')
-        ids = sorted(set(re.findall(r'\b(?:VUID|SYNC-HAZARD)-[\w-]+', run_log)) -
-                     {'VUID-VkFenceCreateInfo-flags-parameter'})
+        ids = validation_ids(run_log)
         raise RuntimeError(f'{name}: harness failed (exit {process.returncode}): {reason}'
                            + (f'; validation ids: {", ".join(ids)}' if ids else '') + f'; see {OUT / (name + ".log")}')
     if facts.get('validation_active') is not True or facts.get('validation_errors') != 0:
         raise RuntimeError(f'{name}: validation was not proved active and clean')
+    if facts.get('readback_mismatches') != 0:
+        raise RuntimeError(f'{name}: {facts.get("readback_mismatches")} read-backs differ from what was presented')
     log_path = work / 'OptiScaler.log'
     if not log_path.exists():
         raise RuntimeError(f'{name}: OptiScaler wrote no log; did the DLL load?')
@@ -219,25 +287,73 @@ def yes_no(flag):
     return 'yes' if flag else 'no'
 
 
-def round_trip(usage, surface_usage):
-    missing = (USAGE_TRANSFER_SRC | USAGE_TRANSFER_DST) & ~usage
-    if not missing:
-        return 'legal as created'
-    names = '+'.join(n for bit, n in ((USAGE_TRANSFER_SRC, 'TRANSFER_SRC'), (USAGE_TRANSFER_DST, 'TRANSFER_DST'))
-                     if missing & bit)
-    if surface_usage & missing == missing:
-        return f'needs {names} at creation, the surface offers it'
-    return f'not possible, the surface does not offer {names}'
+def usage_names(bits):
+    return '+'.join(n for bit, n in ((USAGE_TRANSFER_SRC, 'TRANSFER_SRC'), (USAGE_TRANSFER_DST, 'TRANSFER_DST'))
+                    if bits & bit)
 
 
-def expected_lines(facts, effective_usage):
-    """The observe lines the host must write, per window, from the order of the application's presents: one at a
-    window's first present, one whenever its swapchain, device, queue or caller changes, one at 10, 100, ... presents."""
+def new_stats():
+    return dict(presents=0, transported=0, skipped=0, skips={}, waits=0, submits=0, completions=0, ring=0,
+                max_wait_ms=0.0, routes={})
+
+
+def add(stats, outcome):
+    stats['presents'] += 1
+    stats['waits'] += outcome['waits']
+    stats['submits'] += outcome['submits']
+    stats['completions'] += outcome['completions']
+    stats['ring'] = max(stats['ring'], outcome['ring'])
+    stats['max_wait_ms'] = max(stats['max_wait_ms'], outcome['wait_ms'])
+    if outcome['transported']:
+        stats['transported'] += 1
+        stats['routes'][outcome['route']] = stats['routes'].get(outcome['route'], 0) + 1
+    else:
+        stats['skipped'] += 1
+        stats['skips'][outcome['skip']] = stats['skips'].get(outcome['skip'], 0) + 1
+
+
+def model(facts, plan_of):
+    """Every present's outcome and every window's lines, from the application's own record. `plan_of(swapchain)` gives
+    (given usage, final usage, transport on, round-trip words)."""
     swapchains = {s['name']: s for s in facts['swapchains']}
+    families = [f['flags'] for f in facts['families']]
     windows, acquires, lines = {}, {}, {1: [], 2: []}
+    pending, per_swapchain = {}, {}
     for p in facts['presents']:
+        s = swapchains[p['swapchain_name']]
+        _, usage, transport, round_trip = plan_of(s)
         w = windows.setdefault(p['window'], dict(presents=0, swapchains=[], devices=[], next=10, last=None,
-                                                 wmin=None, wmax=0))
+                                                 wmin=None, wmax=0, stats=new_stats(), previous=None))
+        stats = per_swapchain.setdefault(s['name'], new_stats())
+
+        # The swapchain this window presented before is gone by now (the application destroyed it before presenting
+        # the next one): its last round trips were observed complete when it was retired.
+        if w['previous'] is not None and w['previous'] != s['name'] and pending.get(w['previous']):
+            w['stats']['completions'] += pending[w['previous']]
+            per_swapchain[w['previous']]['completions'] += pending[w['previous']]
+            pending[w['previous']] = 0
+        w['previous'] = s['name']
+
+        outcome = dict(transported=False, skip=None, route=None, waits=0, submits=0, completions=0, ring=0,
+                       wait_ms=0.0)
+        # Every earlier round trip of this swapchain is complete when the application had drained its own work.
+        if p['gpu_idle']:
+            outcome['completions'] = pending.get(s['name'], 0)
+            pending[s['name']] = 0
+        if not transport:
+            outcome['skip'] = 'observe only'
+        elif p['held_back'] >= RING_MAX:
+            outcome.update(skip='ring busy', ring=RING_MAX, wait_ms=SLOT_WAIT_MS)
+        else:
+            graphics = families[p['family']] & QUEUE_GRAPHICS and families[p['family']] & QUEUE_COMPUTE
+            outcome.update(transported=True, route='same queue' if graphics else 'cross-family', waits=p['waits'],
+                           submits=1 if graphics else 3,
+                           ring=p['held_back'] + 1 if p['held_back'] >= 0 else max(1, stats['ring']))
+            pending[s['name']] = pending.get(s['name'], 0) + 1
+        add(w['stats'], outcome)
+        add(stats, outcome)
+        p['outcome'] = outcome
+
         acquires[p['swapchain_name']] = acquires.get(p['swapchain_name'], 0) + 1
         w['presents'] += 1
         for listing, item in (('swapchains', p['swapchain_name']), ('devices', p['device_name'])):
@@ -252,32 +368,35 @@ def expected_lines(facts, effective_usage):
             why = [reason for reason, changed in (('new swapchain', now[0] != w['last'][0]),
                                                   ('new device', now[1] != w['last'][1]),
                                                   ('new queue', now[2] != w['last'][2])) if changed]
-        decade = w['presents'] == w['next']
-        if decade:
+        if w['presents'] == w['next']:
             w['next'] *= 10
             if not why:
                 why = [f'{w["presents"]} presents']
         if not why:
             continue
-        s = swapchains[p['swapchain_name']]
-        usage = effective_usage(s)
         lines[p['window']].append(dict(
             why=', '.join(why), presents=w['presents'], swapchains=len(w['swapchains']), devices=len(w['devices']),
             swapchain=s['handle'], swapchain_name=s['name'], width=s['width'], height=s['height'], format=s['format'],
-            color_space=s['color_space'], images=s['images'], usage=usage, surface_usage=s['surface_usage'],
-            round_trip=round_trip(usage, s['surface_usage']), device=p['device'], device_name=p['device_name'],
-            queue=p['queue'], waits=f'{w["wmin"]}-{w["wmax"]}', acquires=acquires[p['swapchain_name']]))
+            color_space=s['color_space'], images=s['images'], usage=usage, given=plan_of(s)[0],
+            surface_usage=s['surface_usage'], round_trip=round_trip, device=p['device'], device_name=p['device_name'],
+            queue=p['queue'], waits=f'{w["wmin"]}-{w["wmax"]}', acquires=acquires[p['swapchain_name']],
+            stats=json.loads(json.dumps(w['stats']))))
         w['last'] = now
         w['wmin'], w['wmax'] = None, 0
-    return lines
+    # Retirement of what is left: every swapchain the application destroyed has all its round trips observed.
+    for name, count in pending.items():
+        if count and swapchains[name]['destroyed']:
+            per_swapchain[name]['completions'] += count
+    return lines, per_swapchain
 
 
 LINE = re.compile(
-    r'DLSS-NR Vulkan present host \(observe only\): window (?P<window>0x[0-9A-F]+|unknown) \((?P<why>[^)]*)\); '
+    r'DLSS-NR Vulkan present host \(round trip, no NR\): window (?P<window>0x[0-9A-F]+|unknown) \((?P<why>[^)]*)\); '
     r'presents (?P<presents>\d+), swapchains (?P<swapchains>\d+), devices (?P<devices>\d+); '
     r'swapchain (?P<swapchain>0x[0-9A-F]+) #(?P<swapchain_id>\d+) (?P<width>\d+)x(?P<height>\d+) '
     r'format (?P<format>\d+) colour-space (?P<color_space>\d+) images (?P<images>\d+) usage (?P<usage>0x[0-9A-F]+) '
     r'\(transfer-src (?P<src>yes|no), transfer-dst (?P<dst>yes|no), storage (?P<storage>yes|no)\)'
+    r'(?: asked (?P<asked>0x[0-9A-F]+))?'
     r'(?: surface-usage (?P<surface_usage>0x[0-9A-F]+))? sharing (?P<sharing>EXCLUSIVE|CONCURRENT\[[\d,]*\])'
     r'(?P<retired> retired)?; round-trip (?P<round_trip>[^;]+); '
     r'device (?P<device>0x[0-9A-F]+) #(?P<device_id>\d+) physical (?P<physical>0x[0-9A-F]+) '
@@ -285,19 +404,59 @@ LINE = re.compile(
     r'queue (?P<queue>0x[0-9A-F]+) family (?P<family>\d+) index (?P<index>\d+) flags (?P<flags>0x[0-9A-F]+) '
     r'\(graphics (?P<graphics>yes|no), compute (?P<compute>yes|no), transfer (?P<transfer>yes|no)\); '
     r'waits (?P<waits>\d+-\d+); acquires (?P<acquires>\d+)(?P<rest>.*?); '
-    r'caller (?P<caller>.+)$')
+    r'caller (?P<caller>.+?); transport: (?P<transport>.+)$')
+
+TRANSPORT = re.compile(
+    r'transported (?P<transported>\d+), skipped (?P<skipped>\d+)(?: \((?P<skips>[^)]*)\))?, '
+    r'waits taken over (?P<waits>\d+), submits (?P<submits>\d+), completions (?P<completions>\d+), '
+    r'ring (?P<ring>\d+), max CPU wait (?P<wait>[\d.]+) ms(?:, routes (?P<routes>[^;]+))?'
+    r'(?:; first no-route reason: (?P<noroute>.+?))?'
+    r'(?:; (?P<resources>.+))?$')
+
+
+def counts(text):
+    out = {}
+    for part in (text or '').split(', '):
+        if part:
+            name, _, count = part.rpartition(' ')
+            out[name] = int(count)
+    return out
+
+
+def transport_problems(where, text, expected):
+    """`text` is the transport part of a line; `expected` a model stats dict."""
+    m = TRANSPORT.match(text)
+    if not m:
+        return [f'{where}: transport text unparsed: {text!r}']
+    problems = []
+    for field, key in (('transported', 'transported'), ('skipped', 'skipped'), ('waits', 'waits'),
+                       ('submits', 'submits'), ('completions', 'completions'), ('ring', 'ring')):
+        if int(m.group(field)) != expected[key]:
+            problems.append(f'{where}: {field} {m.group(field)} != {expected[key]}')
+    if counts(m.group('skips')) != expected['skips']:
+        problems.append(f'{where}: skip reasons {m.group("skips")!r} != {expected["skips"]}')
+    if counts(m.group('routes')) != expected['routes']:
+        problems.append(f'{where}: routes {m.group("routes")!r} != {expected["routes"]}')
+    wait = float(m.group('wait'))
+    if expected['max_wait_ms'] == 0.0:
+        if wait > 5.0:
+            problems.append(f'{where}: a CPU wait of {wait} ms where the GPU was always done')
+    elif not expected['max_wait_ms'] * 0.95 <= wait <= expected['max_wait_ms'] * 5:
+        problems.append(f'{where}: max CPU wait {wait} ms, expected about {expected["max_wait_ms"]} ms')
+    return problems
 
 
 def check_host_on(name, facts, log, *, marker_off_bundle):
     """marker_off_bundle: the legacy bundle is installed too (no marker, no SkipHooks)."""
     problems = []
+    hide = CASES[name][6]
     lower = log.lower()
 
     def need(condition, message):
         if not condition:
             problems.append(message)
 
-    installs = [l for l in log.splitlines() if 'DLSS-NR Vulkan present host (observe only; stage 1' in l]
+    installs = [l for l in log.splitlines() if INSTALL_LINE in l]
     need(len(installs) == 1, f'expected one install line, found {len(installs)}')
     if installs:
         if marker_off_bundle:
@@ -322,7 +481,8 @@ def check_host_on(name, facts, log, *, marker_off_bundle):
 
     families = ' '.join(f'{i}:0x{f["flags"]:X}x{f["count"]}' for i, f in enumerate(facts['families']))
     device_ids = {}
-    device_lines = [l for l in log.splitlines() if 'DLSS-NR Vulkan present host: device 0x' in l]
+    device_lines = [l for l in log.splitlines() if re.search(r'DLSS-NR Vulkan present host: device 0x[0-9A-F]+ #\d+ '
+                                                             r'created by', l)]
     need(len(device_lines) == len(facts['devices']),
          f'expected {len(facts["devices"])} device lines, found {len(device_lines)}')
     for device, line in zip(facts['devices'], device_lines):
@@ -339,41 +499,76 @@ def check_host_on(name, facts, log, *, marker_off_bundle):
         need(m.group(6) == families, f'{device["name"]}: families {m.group(6)!r} != {families!r}')
         need(m.group(7) == requested, f'{device["name"]}: requested {m.group(7)!r} != {requested!r}')
         device_ids[device['name']] = m.group(2)
+        if device['destroyed']:
+            gone = [l for l in log.splitlines() if f'DLSS-NR Vulkan present host: device {device["handle"]} '
+                                                   f'#{m.group(2)} destroyed; ' in l]
+            need(len(gone) == 1, f'{device["name"]}: expected one destruction line, found {len(gone)}')
+            if gone:
+                need(re.search(r'destroyed; freed: 0 swapchain\(s\) the application left, \d+ retained present '
+                               r'semaphore\(s\), 0 slot\(s\) kept from earlier swapchains$', gone[0]) is not None,
+                     f'{device["name"]}: destruction line: {gone[0]}')
     need(len(set(device_ids.values())) == len(device_ids), f'device records alias: {device_ids}')
     if facts['third_reused_second']:
         need(device_ids.get('d2') != device_ids.get('d3'), 'd3 reused d2\'s handle and inherited its record')
 
-    # The observe lines, window by window, against the model of the presents.
-    swapchains = {s['name']: s for s in facts['swapchains']}
-
-    def effective_usage(s):
-        # With the bundle and its menu, the overlay adds TRANSFER_SRC (menu blur) before the call reaches this host,
-        # which sees the create info the driver gets.
-        usage = s['usage']
+    # The usage each swapchain was given, and what the round trip says about it.
+    def plan_of(s):
+        given = s['usage']
+        # With the bundle and its menu, the overlay adds TRANSFER_SRC (menu blur) before the call reaches this host.
         if marker_off_bundle and CASES[name][4] and s['surface_usage'] & USAGE_TRANSFER_SRC:
-            usage |= USAGE_TRANSFER_SRC
-        return usage
+            given |= USAGE_TRANSFER_SRC
+        wanted = given | USAGE_TRANSFER_SRC | USAGE_TRANSFER_DST
+        missing = wanted & ~given
+        if missing & ~s['surface_usage']:
+            return given, given, False, f'off, the surface does not offer {usage_names(missing & ~s["surface_usage"])}'
+        return given, wanted, True, ('on as created' if not missing else f'on, {usage_names(missing)} added at creation')
 
-    expected = expected_lines(facts, effective_usage)
+    # One creation line per swapchain.
+    swapchain_ids = {}
+    for s in facts['swapchains']:
+        given, usage, _, round_trip = plan_of(s)
+        created = [l for l in log.splitlines() if f'DLSS-NR Vulkan present host: swapchain {s["handle"]} #' in l and
+                   ' on device ' in l]
+        need(len(created) == 1, f'{s["name"]}: expected one creation line, found {len(created)}')
+        if created:
+            m = re.search(r'swapchain (0x[0-9A-F]+) #(\d+) on device (0x[0-9A-F]+) #(\d+), window (0x[0-9A-F]+), '
+                          r'(\d+)x(\d+) format (\d+): usage (0x[0-9A-F]+)(?: -> (0x[0-9A-F]+))? \(surface offers '
+                          r'(0x[0-9A-F]+)\); round trip (.+)$', created[0])
+            if not m:
+                problems.append(f'{s["name"]}: creation line unparsed: {created[0]}')
+                continue
+            swapchain_ids[s['name']] = m.group(2)
+            # By the presents, not the handle: d3 may have d2's handle value.
+            device_name = next(p['device_name'] for p in facts['presents'] if p['swapchain_name'] == s['name'])
+            need(m.group(4) == device_ids.get(device_name), f'{s["name"]}: device #{m.group(4)}')
+            need(m.group(5) == facts['windows'][s['window'] - 1], f'{s["name"]}: window {m.group(5)}')
+            need((int(m.group(6)), int(m.group(7))) == (s['width'], s['height']), f'{s["name"]}: extent')
+            need(int(m.group(9), 16) == given, f'{s["name"]}: asked {m.group(9)} != 0x{given:X}')
+            need(int(m.group(10) or m.group(9), 16) == usage, f'{s["name"]}: given {m.group(10)} != 0x{usage:X}')
+            need((m.group(10) is None) == (given == usage), f'{s["name"]}: "->" shown wrongly')
+            need(int(m.group(11), 16) == s['surface_usage'], f'{s["name"]}: surface {m.group(11)}')
+            need(m.group(12) == round_trip, f'{s["name"]}: round trip {m.group(12)!r} != {round_trip!r}')
+
+    # The window lines, window by window, against the model of the presents.
+    expected, per_swapchain = model(facts, plan_of)
     actual = {1: [], 2: []}
     for line in log.splitlines():
-        if OBSERVE not in line:
+        if WINDOW_LINE not in line:
             continue
         m = LINE.search(line)
         if not m:
-            problems.append(f'observe line unparsed: {line}')
+            problems.append(f'window line unparsed: {line}')
             continue
         window = m.group('window')
         index = 1 if window == facts['windows'][0] else 2 if window == facts['windows'][1] else None
         if index is None:
-            problems.append(f'observe line for a window the application does not have: {line}')
+            problems.append(f'window line for a window the application does not have: {line}')
             continue
         actual[index].append(m)
     families_flags = [f['flags'] for f in facts['families']]
-    swapchain_ids = {}
     for window in (1, 2):
         need(len(actual[window]) == len(expected[window]),
-             f'window {window}: {len(actual[window])} observe lines, expected {len(expected[window])} '
+             f'window {window}: {len(actual[window])} lines, expected {len(expected[window])} '
              f'({[e["why"] for e in expected[window]]} vs {[a.group("why") for a in actual[window]]})')
         for e, a in zip(expected[window], actual[window]):
             where = f'window {window} line "{e["why"]}"'
@@ -383,6 +578,8 @@ def check_host_on(name, facts, log, *, marker_off_bundle):
                           'acquires'):
                 need(int(a.group(field)) == e[field], f'{where}: {field} {a.group(field)} != {e[field]}')
             need(int(a.group('usage'), 16) == e['usage'], f'{where}: usage {a.group("usage")} != 0x{e["usage"]:X}')
+            need((a.group('asked') and int(a.group('asked'), 16)) == (e['given'] if e['given'] != e['usage'] else None),
+                 f'{where}: asked {a.group("asked")} (given 0x{e["given"]:X})')
             need((a.group('src'), a.group('dst'), a.group('storage')) ==
                  (yes_no(e['usage'] & USAGE_TRANSFER_SRC), yes_no(e['usage'] & USAGE_TRANSFER_DST),
                   yes_no(e['usage'] & USAGE_STORAGE)), f'{where}: usage words wrong')
@@ -393,8 +590,8 @@ def check_host_on(name, facts, log, *, marker_off_bundle):
             need(a.group('instance_id') == instance_id, f'{where}: instance #{a.group("instance_id")}')
             need(a.group('device_id') == device_ids.get(e['device_name']),
                  f'{where}: device #{a.group("device_id")} is not {e["device_name"]}\'s #{device_ids.get(e["device_name"])}')
-            previous = swapchain_ids.setdefault(e['swapchain_name'], a.group('swapchain_id'))
-            need(previous == a.group('swapchain_id'), f'{where}: swapchain record id changed')
+            need(a.group('swapchain_id') == swapchain_ids.get(e['swapchain_name']),
+                 f'{where}: swapchain record #{a.group("swapchain_id")} is not {e["swapchain_name"]}\'s')
             family = int(a.group('family'))
             expected_family = facts['second_queue_family'] if e['queue'] == facts['second_queue'] else facts['graphics_family']
             need(family == expected_family, f'{where}: family {family} != {expected_family}')
@@ -406,26 +603,74 @@ def check_host_on(name, facts, log, *, marker_off_bundle):
                  f'{where}: queue capability words wrong')
             need(a.group('rest') == '', f'{where}: unexpected extras {a.group("rest")!r}')
             need(a.group('caller') == f'{EXE} (native Vulkan)', f'{where}: caller {a.group("caller")!r}')
+            problems.extend(transport_problems(where, a.group('transport'), e['stats']))
     need(len(set(swapchain_ids.values())) == len(swapchain_ids), f'swapchain records alias: {swapchain_ids}')
     need('never saw created' not in log, 'a present of a swapchain the host never saw created')
     need('could not detour' not in log and 'not watched' not in lower, 'a detour failed or was refused')
+    need('round trip off for it' not in log and 'submit returned' not in log, 'a round trip failed at run time')
 
-    # The exports: the host's are patched, the controls are not.
+    # The last line of every swapchain the application destroyed: its presents, all of its round trips seen complete,
+    # its objects freed.
+    for s in facts['swapchains']:
+        if not s['destroyed'] or s['name'] not in per_swapchain:
+            continue
+        expect = per_swapchain[s['name']]
+        gone = [l for l in log.splitlines() if f'DLSS-NR Vulkan present host: swapchain {s["handle"]} #'
+                f'{swapchain_ids.get(s["name"])} destroyed after ' in l]
+        need(len(gone) == 1, f'{s["name"]}: expected one destruction line, found {len(gone)}')
+        if not gone:
+            continue
+        m = re.search(r'destroyed after (\d+) presents; (.+)$', gone[0])
+        need(m is not None and int(m.group(1)) == expect['presents'], f'{s["name"]}: destruction line: {gone[0]}')
+        if m:
+            problems.extend(transport_problems(f'{s["name"]} destruction', m.group(2), expect))
+            if expect['transported']:
+                need(expect['completions'] == expect['transported'], f'{s["name"]}: the model left round trips unseen')
+            need(re.search(r'; freed after a drain of [\d.]+ ms; present semaphores \d+ freed, \d+ kept until the '
+                           r'device goes', gone[0]) is not None or not expect['transported'],
+                 f'{s["name"]}: not freed: {gone[0]}')
+
+    # Every transported present's image read back equal (the harness fails the run on any difference); here, that
+    # there were read-backs at all where the host carried frames.
+    transported = sum(1 for p in facts['presents'] if p['outcome']['transported'])
+    if hide:
+        need(transported == 0, f'{transported} presents modelled as transported with TRANSFER_SRC hidden')
+        need(facts['readbacks'] == 0, 'read-backs on surfaces without TRANSFER_SRC')
+    else:
+        overlay = marker_off_bundle and CASES[name][4]
+        # Under the legacy overlay the batch does not run (its present waits for the GPU on a new swapchain).
+        need(overlay or facts['held_back_queued'] > RING_MAX,
+             f'the held-back batch queued {facts["held_back_queued"]} presents, not more than the ring\'s {RING_MAX}')
+        # The model has every batch present made while the block of GPU work ran: the run is only valid if it did.
+        need(overlay or facts['held_back_gpu_ms'] > facts['held_back_presents_ms'] + 50,
+             f'the block of GPU work ({facts["held_back_gpu_ms"]:.0f} ms) did not outlast the batch\'s presents '
+             f'({facts["held_back_presents_ms"]:.0f} ms)')
+        need(facts['readbacks'] >= transported // 2, f'only {facts["readbacks"]} read-backs for {transported} '
+                                                     'transported presents')
+        need(overlay or facts['overlay_mismatches'] == 0, 'read-backs set aside as the overlay\'s with no overlay')
+
+    # The exports: the host's are patched, the control is not.
     for function in HOST_HOOKED:
         state = facts['prologues'][function]
         # Under Wine the export and vkGetDeviceProcAddr's answer are one winevulkan function, so the export's bytes are
         # the detour's. Should that stop holding, the export check below would prove nothing for this function.
-        if function in DEVICE_LEVEL:
+        # With the bundle installed, its own vkGetDeviceProcAddr hands out its vkQueueSubmit hook (Vulkan_wDx12); the
+        # host detours the export, which that hook calls down to.
+        if function in DEVICE_LEVEL and not (marker_off_bundle and function.startswith('vkQueue') and
+                                             function != 'vkQueuePresentKHR'):
             need(state['same_as_device_proc'], f'{function}: vkGetDeviceProcAddr no longer returns the export')
         need(state['patched'], f'{function} was not patched')
     if not marker_off_bundle:
         for function in NEVER_HOOKED:
             need(not facts['prologues'][function]['patched'], f'{function} was patched with the bundle off')
-    return problems, expected
+    summary = dict(transported=transported, skipped=len(facts['presents']) - transported,
+                   readbacks=facts['readbacks'] - facts['overlay_mismatches'], overlay=facts['overlay_mismatches'],
+                   held_back=facts['held_back_queued'])
+    return problems, expected, summary
 
 
 def execute_translated(name, dll, redist):
-    api, key = TRANSLATED_CASES[name]
+    api, key, marker = TRANSLATED_CASES[name]
     work = OUT / 'cases' / name
     if work.exists():
         shutil.rmtree(work)
@@ -434,11 +679,13 @@ def execute_translated(name, dll, redist):
     shutil.copy2(OUT / TRANSLATED_EXE, work / TRANSLATED_EXE)
     for library in redist:
         shutil.copy2(library, work / library.name)
-    (work / 'OptiScaler.ini').write_text(ini_for(False, True, key, True))
-    (work / MARKER).write_text('')
+    (work / 'OptiScaler.ini').write_text(ini_for(False, True, key, True, level=1 if marker else 0))
+    if marker:
+        (work / MARKER).write_text('')
     with (OUT / f'{name}.log').open('w') as log:
-        process = subprocess.run(['wine', str(work / TRANSLATED_EXE), '--' + api], cwd=work, env=translated_env(),
-                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=180)
+        process = subprocess.run(['wine', str(work / TRANSLATED_EXE), '--' + api], cwd=work,
+                                 env=translated_env(TRANSLATED_VALIDATION[api]),
+                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=300)
     run_log = (OUT / f'{name}.log').read_text(errors='replace')
     facts = json.loads((work / 'result.json').read_text())
     if not finished(process, facts, run_log, name) or facts.get('status') != 'PASS':
@@ -451,10 +698,15 @@ def execute_translated(name, dll, redist):
     return facts, log_path.read_text(errors='replace'), run_log
 
 
+def validation_errors(run_log):
+    """The validation layer's own reports (it writes to stdout when no messenger of the application's exists)."""
+    return [l for l in run_log.splitlines() if 'Validation Error' in l]
+
+
 def check_translated(name, facts, log, run_log):
-    """The translation layer's own Vulkan device and presents reach the host's hooks, under the marker, and the line
-    names the layer."""
-    api, _ = TRANSLATED_CASES[name]
+    """The translation layer's own Vulkan device and presents reach the host's hooks, under the marker or beside the
+    bundle; its swapchain gets TRANSFER_SRC and every one of its presents is carried, under the validation layer."""
+    api, _, marker = TRANSLATED_CASES[name]
     layer = TRANSLATED_CALLER[api]
     problems = []
 
@@ -462,24 +714,44 @@ def check_translated(name, facts, log, run_log):
         if not condition:
             problems.append(message)
 
-    need(log.count('DLSS-NR Vulkan present host (observe only; stage 1') == 1, 'expected one install line')
-    need('this host is the one exception' in log, 'the install line does not name the skip')
-    need('Skipping vulkan-1.dll hooks, as [Vulkan] SkipHooks or the marker asks' in log, 'the bundle was not skipped')
+    need(log.count(INSTALL_LINE) == 1, 'expected one install line')
+    skipped = 'Skipping vulkan-1.dll hooks, as [Vulkan] SkipHooks or the marker asks' in log
+    if marker:
+        need('this host is the one exception' in log, 'the install line does not name the skip')
+        need(skipped, 'the bundle was not skipped')
+    else:
+        need('beside OptiScaler\'s own Vulkan hooks' in log, 'the install line does not say the bundle runs')
+        need(not skipped, 'the bundle was skipped')
+        # The bundle's present hook ran for every present, below the host's, and took each for a DXGI-backed one:
+        # never the Vulkan overlay, which it only reaches for a native present (LogLevel 0's function trace).
+        bundle = sum(1 for l in log.splitlines() if re.search(r'\bhkvkQueuePresentKHR\b', l))
+        overlay = sum(1 for l in log.splitlines() if 'MenuOverlayVk::QueuePresent' in l)
+        need(bundle >= facts['frames'], f'the bundle\'s present hook ran {bundle} times for {facts["frames"]} presents')
+        need(overlay == 0, f'the bundle took a {layer} present for a native one {overlay} times')
     need(layer != 'DXVK' or 'DXVK' in run_log, 'DXVK did not announce itself: is it the dxgi/d3d11 that ran?')
     # The layer's devices: the title's, and any OptiScaler made through the layer for itself under ScopedSkipVulkanHooks
     # (IdentifyGpu makes a throwaway D3D12 device to detect vkd3d-proton), which must say so and never present here.
     devices, internal = [], []
+    creator = re.escape(layer) if marker else r'OptiScaler\'s own Vulkan hook, called down to this one'
     for line in log.splitlines():
-        m = re.search(r'DLSS-NR Vulkan present host: device (0x[0-9A-F]+) #(\d+) created by (\S+) \(' + re.escape(layer) +
+        m = re.search(r'DLSS-NR Vulkan present host: device (0x[0-9A-F]+) #(\d+) created by (\S+) \(' + creator +
                       r'\)', line)
         if m:
             (internal if 'OptiScaler\'s own device' in line else devices).append(m.groups())
     need(len(devices) >= 1, f'no device line for a device the title created through {layer}')
-    lines = [LINE.search(l) for l in log.splitlines() if OBSERVE in l]
-    need(all(lines), 'an observe line did not parse')
+    # Its swapchains: TRANSFER_SRC added to what the layer asked for.
+    created = [l for l in log.splitlines() if re.search(r'DLSS-NR Vulkan present host: swapchain 0x[0-9A-F]+ #\d+ on '
+                                                        r'device', l)]
+    need(len(created) >= 1, 'no swapchain creation line')
+    for line in created:
+        need(re.search(r': usage 0x12 -> 0x13 \(surface offers 0x[0-9A-F]+\); round trip on, TRANSFER_SRC added at '
+                       r'creation$', line) is not None, f'swapchain not given TRANSFER_SRC: {line}')
+    lines = [LINE.search(l) for l in log.splitlines() if WINDOW_LINE in l]
+    need(all(lines), 'a window line did not parse')
     mine = [m for m in lines if m and m.group('window') == facts['window']]
     need(len(mine) >= 2, f'expected the first-present and 10-present lines for window {facts["window"]}, found '
                          f'{[m.group("why") for m in mine]}')
+    transported = 0
     if mine:
         need(mine[0].group('why') == 'first present', f'first line is {mine[0].group("why")!r}')
         need(any(m.group('why') == '10 presents' for m in mine), 'no line at 10 presents: fewer presents reached the host')
@@ -489,12 +761,38 @@ def check_translated(name, facts, log, run_log):
             need(any(m.group('device') == handle and m.group('device_id') == record for handle, record, _ in devices),
                  f'presenting device {m.group("device")} #{m.group("device_id")} is not one {layer} created')
             need(m.group('graphics') == 'yes' or m.group('compute') == 'yes', 'presenting family can run no work')
+            t = TRANSPORT.match(m.group('transport'))
+            need(t is not None, f'transport text unparsed: {m.group("transport")!r}')
+            if t:
+                need(int(t.group('transported')) == int(m.group('presents')) and int(t.group('skipped')) == 0,
+                     f'line "{m.group("why")}": transported {t.group("transported")} of {m.group("presents")} presents, '
+                     f'skipped {t.group("skipped")} ({t.group("skips")})')
+                transported = int(t.group('transported'))
     need('never saw created' not in log, 'a present of a swapchain the host never saw created')
+    need('round trip off for it' not in log and 'submit returned' not in log, 'a round trip failed at run time')
+    # Every swapchain the layer destroyed: all of its round trips complete, its objects freed.
+    destroyed_presents = carried = 0
+    for line in log.splitlines():
+        if re.search(r'DLSS-NR Vulkan present host: swapchain 0x[0-9A-F]+ #\d+ destroyed after', line):
+            t = re.search(r'destroyed after (\d+) presents; transported (\d+), .*?completions (\d+)', line)
+            need(t is not None and t.group(2) == t.group(3), f'not every round trip seen complete: {line}')
+            need(t is not None and t.group(1) == t.group(2), f'a present of it was not carried: {line}')
+            need('freed after a drain' in line or (t and t.group(2) == '0'), f'not freed: {line}')
+            if t:
+                destroyed_presents += int(t.group(1))
+                carried += int(t.group(2))
+    need(destroyed_presents == facts['frames'], f'the destroyed swapchains account for {destroyed_presents} presents, '
+                                                f'not the {facts["frames"]} the application made')
+    errors = validation_errors(run_log)
+    if TRANSLATED_VALIDATION[api]:
+        need('VALIDATION-SETTINGS' in run_log, 'the validation layer did not announce itself: was it loaded?')
     summary = (f'{layer}: device(s) {", ".join(f"{h} #{r} by {m}" for h, r, m in devices)}'
                + (f' (and {len(internal)} of OptiScaler\'s own, not reported)' if internal else '') + f'; {len(mine)} lines for '
                f'the window, caller {mine[0].group("caller") if mine else "?"}, family '
-               f'{mine[0].group("family") if mine else "?"} flags {mine[0].group("flags") if mine else "?"}')
-    return problems, summary
+               f'{mine[0].group("family") if mine else "?"} flags {mine[0].group("flags") if mine else "?"}; '
+               f'{carried} of {destroyed_presents} presents carried, ' +
+               (f'{len(errors)} validation errors' if TRANSLATED_VALIDATION[api] else 'no validation layer'))
+    return problems, summary, errors
 
 
 def check_host_off(name, facts, log, *, marker):
@@ -533,6 +831,7 @@ def main():
     redist = sorted(redists[-1].glob('*.dll'))
     if not (args.skip_build and (OUT / EXE).exists() and (OUT / TRANSLATED_EXE).exists()):
         build_harness()
+    build_layer()
 
     cases = args.only.split(',') if args.only else list(CASES) + list(TRANSLATED_CASES)
     unknown = [c for c in cases if c not in CASES and c not in TRANSLATED_CASES]
@@ -541,7 +840,8 @@ def main():
     results = {'dll': str(dll), 'dll_sha256': sha(dll), 'harness_sha256': sha(OUT / EXE), 'cases': {}}
     failures = []
     wine = proton_libraries() if any(c in TRANSLATED_CASES for c in cases) else None
-    for name in [c for c in cases if c in TRANSLATED_CASES]:
+    baseline = {}
+    for name in sorted([c for c in cases if c in TRANSLATED_CASES], key=lambda c: TRANSLATED_CASES[c][1]):
         if wine is None:
             results['cases'][name] = {'status': 'SKIP', 'problems': ['no local Proton with DXVK and vkd3d-proton']}
             print(f'SKIP: {name}: no local Proton with DXVK and vkd3d-proton (set PROTON_DIR)', flush=True)
@@ -549,13 +849,29 @@ def main():
         try:
             prepare_translated_prefix(wine)
             facts, log, run_log = execute_translated(name, dll, redist)
-            if TRANSLATED_CASES[name][1]:
-                problems, summary = check_translated(name, facts, log, run_log)
+            api, key, marker = TRANSLATED_CASES[name]
+            if key:
+                problems, summary, errors = check_translated(name, facts, log, run_log)
+                # The layers' own reports, in the key-off run of the same API, are not the host's.
+                own = baseline.get((api, marker))
+                ids = set(validation_ids('\n'.join(errors)))
+                if not TRANSLATED_VALIDATION[api]:
+                    pass
+                elif own is None:
+                    problems.append('no key-off baseline ran for the validation comparison')
+                elif ids - own:
+                    problems.append(f'validation errors only with the host: {sorted(ids - own)}')
+                if errors and own is not None and not ids - own:
+                    summary += ' (all of them the layer\'s own, also with the host off)'
             else:
-                problems = check_host_off(name, facts, log, marker=True)
-                summary = f'no host line ({TRANSLATED_CALLER[TRANSLATED_CASES[name][0]]} presented {facts["frames"]} frames)'
+                problems = check_host_off(name, facts, log, marker=marker)
+                errors = validation_errors(run_log)
+                baseline[(api, marker)] = set(validation_ids('\n'.join(errors)))
+                summary = (f'no host line ({TRANSLATED_CALLER[api]} presented {facts["frames"]} frames); ' +
+                           (f'{len(errors)} validation errors of the layer\'s own' if TRANSLATED_VALIDATION[api]
+                            else 'no validation layer'))
             results['cases'][name] = {'status': 'FAIL' if problems else 'PASS', 'problems': problems,
-                                      'proton': str(wine.parents[2])}
+                                      'proton': str(wine.parents[2]), 'validation_errors': len(errors)}
             if problems:
                 failures.append(name)
                 print(f'FAIL: {name}:', file=sys.stderr)
@@ -569,23 +885,31 @@ def main():
             results['cases'][name] = {'status': 'FAIL', 'problems': [str(error)]}
             print(f'FAIL: {name}: {error}', file=sys.stderr)
     for name in [c for c in cases if c in CASES]:
-        marker, skiphooks, enabled, key, menu, one_window = CASES[name]
+        marker, skiphooks, enabled, key, menu, one_window, hide = CASES[name]
         try:
             facts, log = execute_case(name, dll, redist)
             host_on = enabled and key
             if host_on:
-                problems, expected = check_host_on(name, facts, log, marker_off_bundle=not (marker or skiphooks))
-                summary = (f'{sum(len(v) for v in expected.values())} observe lines, '
-                           f'{len(facts["presents"])} presents, {len(facts["devices"])} device(s)'
+                problems, expected, s = check_host_on(name, facts, log, marker_off_bundle=not (marker or skiphooks))
+                summary = (f'{sum(len(v) for v in expected.values())} window lines, '
+                           f'{len(facts["presents"])} presents ({s["transported"]} carried, {s["skipped"]} not), '
+                           f'{s["readbacks"]} read-backs equal'
+                           + (f' ({s["overlay"]} more carrying the overlay\'s splash)' if s['overlay'] else '') +
+                           f', {s["held_back"]} held back, '
+                           f'{len(facts["devices"])} device(s)'
                            f'{" (d3 reused d2" + chr(39) + "s handle)" if facts["third_reused_second"] else ""}, '
-                           f'second queue family {facts["second_queue_family"]}, '
+                           f'second queue family {facts["second_queue_family"]}, 0 validation errors, '
                            f'{facts["wine_injected_extension_messages"]} Wine dma_buf messages set aside')
             else:
                 problems = check_host_off(name, facts, log, marker=marker or skiphooks)
-                summary = 'no host line' + (', every watched export byte-identical' if marker or skiphooks else '')
+                summary = ('no host line' + (', every watched export byte-identical' if marker or skiphooks else '') +
+                           f', {facts["readbacks"] - facts["overlay_mismatches"]} read-backs equal'
+                           + (f' ({facts["overlay_mismatches"]} more carrying the overlay\'s splash)'
+                              if facts['overlay_mismatches'] else '') + ', 0 validation errors')
             results['cases'][name] = {'status': 'FAIL' if problems else 'PASS', 'problems': problems,
                                       'third_reused_second': facts['third_reused_second'],
-                                      'compute_family': facts['compute_family']}
+                                      'compute_family': facts['compute_family'], 'readbacks': facts['readbacks'],
+                                      'held_back_queued': facts.get('held_back_queued')}
             if problems:
                 failures.append(name)
                 print(f'FAIL: {name}:', file=sys.stderr)
