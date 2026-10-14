@@ -882,7 +882,7 @@ uninstall() {
 # ------------------------------------------------------------------------------
 
 deploy() {
-    local custom_src=0 sha_opti='' sha_fwd='' f
+    local custom_src=0 sha_opti='' sha_fwd=''
 
     if [[ -n $SRC_DIR ]]; then
         custom_src=1
@@ -976,10 +976,13 @@ deploy() {
 
     echo ""
     echo "[✓] Deployment completed successfully!"
-    echo "    Files installed:"
-    for f in "$PROXY_NAME" "$FORWARDER_NAME" "$INI_NAME"; do
-        echo "      - ${TARGET_DIR}/${f}"
-    done
+    # From the receipt, so the list is what this deploy wrote and owns, not a fixed set of names (a preserved
+    # OptiScaler.ini is not one of them, and OptiScaler.dll beside the proxy is).
+    echo "    Files this deploy owns:"
+    local kind sha rel rest
+    while IFS=$'\t' read -r kind sha rel rest; do
+        [[ $kind == file ]] && echo "      - ${TARGET_DIR}/${rel}"
+    done < "${RECEIPT}"
     if (( RESHADE_ROUTE )); then
         echo "    ReShade is kept beside it and loaded by OptiScaler ([Plugins] LoadReshade=true)."
     fi
