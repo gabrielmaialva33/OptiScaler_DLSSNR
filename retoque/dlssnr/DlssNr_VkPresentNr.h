@@ -168,19 +168,51 @@ inline bool Listed(const std::vector<std::string>& list, const std::string& name
     return false;
 }
 
-// `asked`: the application's enabled extensions; `supported`: what the physical device offers; `properties2`: the
-// instance is Vulkan 1.1 or enabled VK_KHR_get_physical_device_properties2, which push_descriptor, the KHR buffer
-// device address and format_feature_flags2 depend on (asking for them without it makes the creation invalid);
-// `storageWithoutFormat`: the device already allows the composition pass's format-less storage writes (the feature is
-// enabled, or the instance is Vulkan 1.3).
+// What the host knows of the device being created, beside the extension lists.
+struct DeviceCreateFacts
+{
+    // The instance is Vulkan 1.1 or enabled VK_KHR_get_physical_device_properties2, which push_descriptor, the KHR
+    // buffer device address and format_feature_flags2 depend on (asking for them without it makes the creation
+    // invalid).
+    bool properties2 = false;
+    // The instance is Vulkan 1.1: the KHR buffer device address also depends on VK_KHR_device_group below it, which the
+    // host does not add.
+    bool vulkan11 = false;
+    // The device already allows the composition pass's format-less storage writes (the feature is enabled, or the
+    // instance is Vulkan 1.3).
+    bool storageWithoutFormat = true;
+    // The application's chain has VkPhysicalDeviceVulkan14Features, and whether its pushDescriptor is on: with it off,
+    // VK_KHR_push_descriptor may not be enabled beside it.
+    bool vulkan14Features = false;
+    bool pushDescriptorFeature = false;
+};
+
+// `asked`: the application's enabled extensions; `supported`: what the physical device offers. Without the two NVX
+// extensions the model cannot run on the device at all, so nothing is added to it then (an AMD or Intel device keeps
+// its create info as the application made it).
 inline ExtensionPlan PlanDeviceExtensions(const std::vector<std::string>& asked,
-                                          const std::vector<std::string>& supported, bool properties2,
-                                          bool storageWithoutFormat = true)
+                                          const std::vector<std::string>& supported, const DeviceCreateFacts& facts)
 {
     ExtensionPlan plan;
 
+    for (const char* nvx : { "VK_NVX_binary_import", "VK_NVX_image_view_handle" })
+    {
+        if (!Listed(asked, nvx) && !Listed(supported, nvx))
+            plan.missing.push_back(std::string(nvx) + " (the device does not offer it)");
+    }
+
+    if (!plan.missing.empty())
+    {
+        for (const char* name : kNrExtensions)
+        {
+            if (Listed(asked, name))
+                plan.already.push_back(name);
+        }
+        return plan;
+    }
+
     std::vector<std::string> wanted(std::begin(kNrExtensions), std::end(kNrExtensions));
-    if (!storageWithoutFormat)
+    if (!facts.storageWithoutFormat)
         wanted.push_back(kFormatFeatureFlags2);
 
     for (const std::string& want : wanted)
@@ -205,10 +237,23 @@ inline ExtensionPlan PlanDeviceExtensions(const std::vector<std::string>& asked,
             continue;
         }
 
-        if ((want == "VK_KHR_push_descriptor" || want == kBdaKhr || want == kFormatFeatureFlags2) && !properties2)
+        if ((want == "VK_KHR_push_descriptor" || want == kBdaKhr || want == kFormatFeatureFlags2) && !facts.properties2)
         {
             plan.missing.push_back(want + " (needs Vulkan 1.1 or VK_KHR_get_physical_device_properties2 on the "
                                           "instance)");
+            continue;
+        }
+
+        if (want == kBdaKhr && !facts.vulkan11)
+        {
+            plan.missing.push_back(want + " (needs a Vulkan 1.1 instance: VK_KHR_device_group is not added)");
+            continue;
+        }
+
+        if (want == "VK_KHR_push_descriptor" && facts.vulkan14Features && !facts.pushDescriptorFeature)
+        {
+            plan.missing.push_back(want + " (the application's VkPhysicalDeviceVulkan14Features has pushDescriptor "
+                                          "off)");
             continue;
         }
 

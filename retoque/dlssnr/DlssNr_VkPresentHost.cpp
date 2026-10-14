@@ -1021,16 +1021,31 @@ std::string MissingFormatFeatures(DeviceTransport& dev, uint32_t raw)
 // the token given back. Called on every frame that refuses for it until that happens.
 void StandDown(DeviceTransport& dev)
 {
-    if (dev.model == nullptr || dev.model->InFlight() != 0)
+    // On a lost device nothing is freed: the device's teardown abandons it.
+    if (dev.model == nullptr || dev.model->InFlight() != 0 || dev.lost)
         return;
 
-    dev.model->Release(false);
+    dev.model->Release();
     TakeModelLines(dev);
     dev.model.reset();
     dev.modelSwapchain = 0;
     DlssNr::ReleaseModelFromPresentHost(dev.device);
     dev.lines.push_back("DLSS-NR Vulkan present host: device " + Hex(H(dev.device)) + " #" + std::to_string(dev.id) +
                         ": the model stood down and was freed");
+}
+
+// On every present of the device, whatever becomes of it (a frame the transport refuses, a swapchain the model may not
+// see): with NR turned off live, or another route asking for the model, the model stands down. Otherwise a model that
+// once ran here would hold the token for as long as the device's presents never reached the model's decision -- an
+// HDR swapchain after an SDR menu, a swapchain gone observe-only -- and keep the game's own upscaler from it.
+void Housekeep(DeviceTransport& dev)
+{
+    if (dev.model == nullptr)
+        return;
+
+    if (!Config::Instance()->DlssNrEnabled.value_or_default() ||
+        DlssNr::PresentHostMustYield(dev.device).skip != NrSkip::None)
+        StandDown(dev);
 }
 
 struct NrDecision
@@ -1078,7 +1093,8 @@ NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workF
         return refuse(claim.skip, claim.text);
 
     // One swapchain at a time: the model's size and history are one picture's. A live one keeps it; a retired or
-    // destroyed one hands it over (a resize, a recreation), and the frame that takes it starts the history over.
+    // destroyed one hands it over (a resize, a recreation), and the frame that takes it starts the history over. Taken
+    // only once the model is admitted for this one, so a swapchain too small for it never holds it.
     if (dev.modelSwapchain != 0 && dev.modelSwapchain != sc.id)
     {
         for (const auto& [handle, other] : dev.swapchains)
@@ -1087,12 +1103,6 @@ NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workF
                 return refuse(NrSkip::OtherSwapchain,
                               "the model serves swapchain #" + std::to_string(dev.modelSwapchain) + " of this device");
         }
-    }
-
-    if (dev.modelSwapchain != sc.id)
-    {
-        dev.modelSwapchain = sc.id;
-        sc.nrCut = true;
     }
 
     if (dev.model == nullptr)
@@ -1105,23 +1115,38 @@ NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workF
         dev.model = std::make_unique<DlssNr::VkPresentModel>(device);
     }
 
+    // A model that cannot run here holds nothing once nothing of it is in flight: its objects are freed (its reason
+    // stays, so it is not brought up again every frame) and the token goes back, for another device or the
+    // after-upscale route.
+    const auto letGo = [&dev]()
+    {
+        if (dev.model->InFlight() == 0 && !dev.lost)
+        {
+            dev.model->Release();
+            DlssNr::ReleaseModelFromPresentHost(dev.device);
+        }
+    };
+
     const DlssNr::VkPresentAdmission admission = dev.model->Admit(sc.extent.width, sc.extent.height);
     TakeModelLines(dev);
     if (admission.skip != NrSkip::None)
     {
-        // A model that cannot run here, with nothing of it in flight, holds nothing: another device, or the
-        // after-upscale route, may try.
-        if (admission.skip == NrSkip::Unavailable && dev.model->InFlight() == 0)
-            DlssNr::ReleaseModelFromPresentHost(dev.device);
+        if (admission.skip == NrSkip::Unavailable)
+            letGo();
         return refuse(admission.skip, admission.text);
     }
 
     if (!EnsureWorkingImage(dev, sc))
     {
         sc.nrOff = "the working colour (" + FormatName(kWorkingFormat) + ") could not be made";
-        if (dev.model->InFlight() == 0)
-            DlssNr::ReleaseModelFromPresentHost(dev.device);
+        letGo();
         return refuse(NrSkip::Unavailable, sc.nrOff);
+    }
+
+    if (dev.modelSwapchain != sc.id)
+    {
+        dev.modelSwapchain = sc.id;
+        sc.nrCut = true;
     }
 
     return {};
@@ -1148,7 +1173,12 @@ struct NrRecording
     {
         if (dev != nullptr && dev->model != nullptr && ticket != 0)
         {
-            dev->model->Discarded(ticket);
+            // A submit that lost the device may have run in part: nothing of the model's is released on it (a feature
+            // built in this recording included), it is abandoned whole.
+            if (dev->lost)
+                dev->model->Abandon();
+            else
+                dev->model->Discarded(ticket);
             TakeModelLines(*dev);
         }
         ticket = 0;
@@ -1211,6 +1241,14 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
         flush();
         return prep;
     };
+
+    // Before any of the refusals below, which return before the transport is looked at: a model on this device stands
+    // down when NR is off or another route wants it, whatever becomes of this present.
+    {
+        std::lock_guard lock(g_transportMutex);
+        if (DeviceTransport* dev = FindDevice(prep.device))
+            Housekeep(*dev);
+    }
 
     if (info.swapchainCount != 1)
         return skip(Skip::MultiSwapchain);
@@ -1648,6 +1686,20 @@ Retired RetireSwapchain(DeviceTransport& dev, SwapchainTransport& sc, bool destr
     return retired;
 }
 
+// A lost device's model: every handle forgotten, nothing destroyed, the token given back, NGX on the device only
+// forgotten (nothing can be called on it).
+void AbandonModel(DeviceTransport& dev)
+{
+    if (dev.model != nullptr)
+    {
+        dev.model->Abandon();
+        TakeModelLines(dev);
+        dev.model.reset();
+    }
+    DlssNr::ReleaseModelFromPresentHost(dev.device);
+    DlssNr::ShutdownPresentNgx(dev.device, true, dev.lines);
+}
+
 // The device is going: whatever the application left, then everything the host kept. Returns the line.
 std::string TeardownDevice(DeviceTransport& dev)
 {
@@ -1665,8 +1717,7 @@ std::string TeardownDevice(DeviceTransport& dev)
 
     if (dev.lost)
     {
-        if (dev.model != nullptr)
-            dev.model->Abandon();
+        AbandonModel(dev);
         return "the device was lost: every object of the host's on it is abandoned, none destroyed";
     }
 
@@ -1707,31 +1758,34 @@ std::string TeardownDevice(DeviceTransport& dev)
 
     if (dev.lost)
     {
-        if (dev.model != nullptr)
-            dev.model->Abandon();
+        AbandonModel(dev);
         return "the device was lost during the last drain: every object of the host's on it is abandoned";
     }
 
-    // The model: freed, and NGX shut down on the device, when every frame it recorded was seen complete; abandoned
-    // (nothing destroyed) when one never was.
+    // The model: freed when every frame it recorded was seen complete, abandoned (nothing destroyed) when one never
+    // was. Then NGX on the device: shut down after a model freed (or one that stood down earlier, or never existed here
+    // -- the forwarder answers only for the device it initialised), only forgotten after one abandoned.
     std::string model;
+    bool forgetOnly = false;
     if (dev.model != nullptr)
     {
         const size_t inFlight = dev.model->InFlight();
         if (inFlight == 0)
         {
-            dev.model->Release(true);
+            dev.model->Release();
             model = "; the model freed";
         }
         else
         {
             dev.model->Abandon();
+            forgetOnly = true;
             model = "; the model abandoned (" + std::to_string(inFlight) + " of its frames never seen complete)";
         }
         TakeModelLines(dev);
         dev.model.reset();
-        DlssNr::ReleaseModelFromPresentHost(dev.device);
     }
+    DlssNr::ReleaseModelFromPresentHost(dev.device);
+    DlssNr::ShutdownPresentNgx(dev.device, forgetOnly, dev.lines);
 
     for (const VkSemaphore semaphore : dev.retained)
         dev.fn.destroySemaphore(dev.device, semaphore, nullptr);
@@ -2634,10 +2688,27 @@ VkResult VKAPI_CALL hkCreateDevice(VkPhysicalDevice physical, const VkDeviceCrea
             instanceOfPhysical = g_registry.InstanceOf(H(physical));
         }
 
-        const bool vulkan13 = VK_API_VERSION_MAJOR(apiVersion) > 1 ||
-                              (VK_API_VERSION_MAJOR(apiVersion) == 1 && VK_API_VERSION_MINOR(apiVersion) >= 3);
-        extensions = PlanDeviceExtensions(asked, SupportedDeviceExtensions(physical), properties2,
-                                          vulkan13 || StorageWithoutFormatEnabled(info));
+        const auto atLeast = [apiVersion](uint32_t minor)
+        {
+            return VK_API_VERSION_MAJOR(apiVersion) > 1 ||
+                   (VK_API_VERSION_MAJOR(apiVersion) == 1 && VK_API_VERSION_MINOR(apiVersion) >= minor);
+        };
+
+        DeviceCreateFacts facts;
+        facts.properties2 = properties2;
+        facts.vulkan11 = atLeast(1);
+        facts.storageWithoutFormat = atLeast(3) || StorageWithoutFormatEnabled(info);
+        for (auto node = static_cast<const VkBaseInStructure*>(info->pNext); node != nullptr; node = node->pNext)
+        {
+            if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES)
+            {
+                facts.vulkan14Features = true;
+                facts.pushDescriptorFeature =
+                    reinterpret_cast<const VkPhysicalDeviceVulkan14Features*>(node)->pushDescriptor == VK_TRUE;
+            }
+        }
+
+        extensions = PlanDeviceExtensions(asked, SupportedDeviceExtensions(physical), facts);
 
         // The feature the model's allocations need, only where its extension will be there: on a device the model
         // cannot use anyway, nothing is added for it.

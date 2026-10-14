@@ -96,10 +96,9 @@ class VkPresentModel
     // What the model has to say (built, initialised, off and why), for the host to log once its lock is released.
     std::vector<std::string> TakeLines();
 
-    // Free everything, on a live device with nothing in flight. With `deviceGoing` (vkDestroyDevice, before the call
-    // down), also shut NGX down on the device through the forwarder, so a later device with this handle value is
-    // initialised again.
-    void Release(bool deviceGoing);
+    // Free everything of the model's, on a live device with nothing in flight (otherwise it abandons). NGX and the
+    // driver's core stay up on the device (ShutdownPresentNgx takes them down with it), and a latched failure stays.
+    void Release();
 
     // The device was lost, or frames will never be seen complete: forget every handle, destroy nothing.
     void Abandon();
@@ -121,4 +120,11 @@ VkPresentAdmission PresentHostMustYield(VkDevice device);
 
 // The present host gave the model up on `device`: released or abandoned, nothing of its in flight.
 void ReleaseModelFromPresentHost(VkDevice device);
+
+// At vkDestroyDevice, before the call down, with the device's model released or abandoned: the driver's NGX core the
+// host brought up on it shut down, and NGX through the forwarder (which answers only for the device it initialised, so
+// one the after-upscale route initialised goes too), so neither answers "initialised" for a later device that gets this
+// handle value back. NGX's device-specific shutdown is called with the out count it takes. With `forgetOnly` (a lost
+// device, or frames on it never seen complete) nothing is called into: both only forget the device. Lines for the log.
+void ShutdownPresentNgx(VkDevice device, bool forgetOnly, std::vector<std::string>& lines);
 } // namespace DlssNr

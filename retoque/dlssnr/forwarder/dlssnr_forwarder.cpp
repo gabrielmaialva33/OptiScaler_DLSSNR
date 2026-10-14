@@ -951,6 +951,20 @@ extern "C"
         return (int) result;
     }
 
+    // The device NGX was initialised on is forgotten without any call into NGX: for a device that is lost, or has
+    // frames that never completed, where a shutdown would reach the device. A later device with the same handle value
+    // is then initialised again. Returns 1 when it was the initialised device, 0 otherwise.
+    __declspec(dllexport) int dlssnr_vk_forget(void* device)
+    {
+        if (device == nullptr || device != g_vk.initialisedDevice)
+        {
+            return 0;
+        }
+
+        g_vk.initialisedDevice = nullptr;
+        return 1;
+    }
+
     // Creates a persistent Neural Rendering feature. The handle records initialisation work into cmd, so it
     // must outlive that command list's execution; releasing it early loses the device.
     __declspec(dllexport) void* dlssnr_call_create(const wchar_t* snippetPath, const wchar_t* dataPath,

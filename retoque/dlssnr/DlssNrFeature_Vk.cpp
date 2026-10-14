@@ -1701,9 +1701,15 @@ using VkPresentHost::NrSkip;
 // Timestamp pairs for the pass's GPU time: more than the frames that can be in flight, so a frame finds one free.
 constexpr uint32_t kPresentQueryPairs = 8;
 
+// DlssNr_Vk's constant/descriptor slots (kSlotsPerFrame 6 x kFramesInFlight 3), handed out in order.
+constexpr uint64_t kPresentPassSlots = 18;
+
 // The device the present host brought the driver's NGX core up on (NVNGXProxy holds one), if it did. Read and written
 // only under the host's transport lock, as every present-model call is.
 VkDevice g_presentCoreDevice = VK_NULL_HANDLE;
+
+// The device the present host last initialised NGX on through the forwarder, if it did. Under the same lock.
+VkDevice g_presentForwarderDevice = VK_NULL_HANDLE;
 
 // A feature and images replaced while frames that used them were in flight: freed once every one of those frames is
 // seen complete, never before.
@@ -1792,6 +1798,14 @@ struct VkPresentModel::Impl
     std::array<uint64_t, kPresentQueryPairs> queryTicket {}; // 0: free
 
     std::vector<uint64_t> pending; // submitted, not yet seen complete
+
+    // The pass's descriptor/constant ring: DlssNr_Vk hands out its eighteen slots in order, one per dispatch, with no
+    // completion test. Every dispatch recorded is counted here, discarded recordings' included (they advanced the
+    // ring too), and each submitted frame keeps the count at its first, so a frame is admitted only while the oldest
+    // frame in flight is less than a ring behind it.
+    uint64_t dispatches = 0;
+    uint64_t recordFirst = 0;
+    std::vector<std::pair<uint64_t, uint64_t>> firstDispatch; // ticket, the dispatch count at its first
     std::vector<RetiredSet> retired;
     bool adapterNoted = false;
     uint64_t submitted = 0;
@@ -1908,6 +1922,16 @@ VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height)
     if (m.pending.size() >= VkPresentHost::kNrInFlightMax)
         return { NrSkip::Busy, "the model already has " + std::to_string(m.pending.size()) + " frames in flight" };
 
+    // A frame takes at most three slots (encode, downsample, resolve): it may not reach one of the oldest frame's.
+    if (!m.firstDispatch.empty())
+    {
+        uint64_t oldest = m.firstDispatch.front().second;
+        for (const auto& [ticket, first] : m.firstDispatch)
+            oldest = std::min(oldest, first);
+        if (m.dispatches + 3 - oldest > kPresentPassSlots)
+            return { NrSkip::Busy, "the pass's descriptor ring would reach a frame still in flight" };
+    }
+
     if (const char* why = LoadForwarderShared())
         return m.Latch(NrSkip::Unavailable, why);
 
@@ -1945,6 +1969,7 @@ VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height)
         }
 
         m.ngxInitialised = true;
+        g_presentForwarderDevice = m.dev.device;
         char device[24];
         std::snprintf(device, sizeof(device), "0x%llX",
                       static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(m.dev.device)));
@@ -2095,6 +2120,7 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
         return false;
 
     const bool reduced = m.workWidth != m.width || m.workHeight != m.height;
+    m.recordFirst = m.dispatches;
 
     // Every image the pass rewrites starts the frame discarded, so no layout is carried over from a recording that may
     // have been thrown away. Earlier frames' use of them is ordered before by Transition's ALL_COMMANDS dependency.
@@ -2191,6 +2217,7 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
     Transition(cmd, m.proxy, VK_IMAGE_LAYOUT_GENERAL);
     Transition(cmd, m.keep, VK_IMAGE_LAYOUT_GENERAL);
 
+    ++m.dispatches;
     if (!m.pass->Dispatch(cmd, encode, m.width, m.height, frame.view, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE,
                           m.proxy.view, m.keep.view, VK_IMAGE_LAYOUT_GENERAL))
         return fail("the encode dispatch failed");
@@ -2207,6 +2234,7 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
         Transition(cmd, m.proxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         Transition(cmd, m.proxySmall, VK_IMAGE_LAYOUT_GENERAL);
 
+        ++m.dispatches;
         if (!m.pass->Dispatch(cmd, down, m.workWidth, m.workHeight, m.proxy.view, VK_NULL_HANDLE, VK_NULL_HANDLE,
                               VK_NULL_HANDLE, m.proxySmall.view, VK_NULL_HANDLE,
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
@@ -2262,6 +2290,7 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
     Transition(cmd, m.output, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     Transition(cmd, m.keep, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
+    ++m.dispatches;
     if (!m.pass->Dispatch(cmd, resolve, m.width, m.height, modelInput->view, m.output.view, m.keep.view, VK_NULL_HANDLE,
                           frame.view, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
         return fail("the resolve dispatch failed");
@@ -2277,6 +2306,7 @@ void VkPresentModel::Submitted(uint64_t ticket)
     Impl& m = *_impl;
 
     m.pending.push_back(ticket);
+    m.firstDispatch.emplace_back(ticket, m.recordFirst);
     m.everSubmitted = true;
 
     if (m.guidesTicket == ticket)
@@ -2338,6 +2368,7 @@ std::optional<double> VkPresentModel::Completed(uint64_t ticket)
         return std::nullopt;
 
     m.pending.erase(found);
+    std::erase_if(m.firstDispatch, [ticket](const auto& entry) { return entry.first == ticket; });
 
     std::optional<double> ms;
     for (uint32_t i = 0; i < kPresentQueryPairs; ++i)
@@ -2371,7 +2402,7 @@ std::optional<double> VkPresentModel::Completed(uint64_t ticket)
     return ms;
 }
 
-void VkPresentModel::Release(bool deviceGoing)
+void VkPresentModel::Release()
 {
     Impl& m = *_impl;
 
@@ -2408,39 +2439,22 @@ void VkPresentModel::Release(bool deviceGoing)
         m.queryPool = VK_NULL_HANDLE;
     }
 
-    // The device is going: the core the host brought up on it shut down, and NGX through the forwarder, so neither
-    // answers "initialised" for a later device that gets this handle value back.
-    if (deviceGoing && g_presentCoreDevice == m.dev.device)
-    {
-        ShutdownPresentCore(m.dev.device);
-        NVNGXProxy::SetVulkanInited(false);
-        g_presentCoreDevice = VK_NULL_HANDLE;
-    }
-
+    // NGX and the driver's core stay up on the device: they are the device's, not this model's, and go with it
+    // (ShutdownPresentNgx, at vkDestroyDevice). A model made again on this device finds them up.
     m.coreReady = false;
-
-    if (deviceGoing && m.ngxInitialised)
-    {
-        if (g_fwd.shutdown != nullptr)
-        {
-            const int result = g_fwd.shutdown((void*) m.dev.device);
-            m.Say("NGX shut down on the device before it goes (returned " + std::to_string(result) + ")");
-        }
-        else
-        {
-            m.Say("this forwarder cannot shut NGX down on a device (no dlssnr_vk_shutdown); a later device with this "
-                  "handle value would not be initialised again");
-        }
-    }
 
     if (m.ngxInitialised)
         SessionGuardOff();
 
+    // A latched failure stays: a model that could not run here keeps saying why, without holding anything.
     m.ngxInitialised = false;
     m.width = m.height = m.workWidth = m.workHeight = 0;
     m.guidesCleared = false;
     m.reset = true;
     m.everSubmitted = false;
+    m.dispatches = 0;
+    m.recordFirst = 0;
+    m.firstDispatch.clear();
 }
 
 void VkPresentModel::Abandon()
@@ -2461,14 +2475,57 @@ void VkPresentModel::Abandon()
     m.width = m.height = m.workWidth = m.workHeight = 0;
     m.ngxInitialised = false;
 
-    // The core the host brought up on this device is forgotten, not shut down (that would reach the device): a later
-    // device brings it up again rather than reusing one initialised on a device that is gone.
-    if (g_presentCoreDevice == m.dev.device)
+    m.coreReady = false;
+    m.firstDispatch.clear();
+}
+
+void ShutdownPresentNgx(VkDevice device, bool forgetOnly, std::vector<std::string>& lines)
+{
+    if (g_presentCoreDevice == device)
     {
+        if (!forgetOnly)
+            ShutdownPresentCore(device);
         NVNGXProxy::SetVulkanInited(false);
         g_presentCoreDevice = VK_NULL_HANDLE;
+        lines.push_back(forgetOnly
+                            ? "DLSS-NR Vulkan present host: the driver's NGX core on the device is forgotten, "
+                              "not shut down (it is lost, or frames on it never completed)"
+                            : "DLSS-NR Vulkan present host: the driver's NGX core shut down on the device before "
+                              "it goes");
     }
-    m.coreReady = false;
+
+    // The forwarder answers only for the device it initialised (-1 otherwise), so this is asked for every device: one
+    // the after-upscale route initialised NGX on goes the same way.
+    if (g_fwd.module == nullptr)
+        return;
+
+    const bool ours = g_presentForwarderDevice == device;
+    if (ours)
+        g_presentForwarderDevice = VK_NULL_HANDLE;
+
+    if (forgetOnly)
+    {
+        if (const auto forget = (int(__cdecl*)(void*)) GetProcAddress(g_fwd.module, "dlssnr_vk_forget"))
+        {
+            if (forget((void*) device) == 1)
+                lines.push_back("DLSS-NR Vulkan present host: NGX on the device forgotten by the forwarder, not shut "
+                                "down");
+        }
+        return;
+    }
+
+    if (g_fwd.shutdown != nullptr)
+    {
+        const int result = g_fwd.shutdown((void*) device);
+        if (result != -1)
+            lines.push_back("DLSS-NR Vulkan present host: NGX shut down on the device before it goes (returned " +
+                            std::to_string(result) + ")");
+    }
+    else if (ours)
+    {
+        lines.push_back("DLSS-NR Vulkan present host: this forwarder cannot shut NGX down on a device (no "
+                        "dlssnr_vk_shutdown); a later device with this handle value would not be initialised again");
+    }
 }
 
 VkPresentAdmission ClaimModelForPresentHost(VkDevice device)
