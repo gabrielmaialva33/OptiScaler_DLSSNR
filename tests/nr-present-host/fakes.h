@@ -92,12 +92,86 @@ enum D3D12_COMMAND_LIST_TYPE
 };
 constexpr UINT D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES = 0xffffffff;
 
+enum D3D12_RESOURCE_FLAGS
+{
+    D3D12_RESOURCE_FLAG_NONE = 0,
+};
+enum D3D12_HEAP_TYPE
+{
+    D3D12_HEAP_TYPE_DEFAULT = 1,
+};
+enum D3D12_HEAP_FLAGS
+{
+    D3D12_HEAP_FLAG_NONE = 0,
+};
+struct D3D12_HEAP_PROPERTIES
+{
+    D3D12_HEAP_TYPE Type {};
+};
+enum D3D12_FEATURE
+{
+    D3D12_FEATURE_FORMAT_SUPPORT = 2,
+};
+enum D3D12_FORMAT_SUPPORT1
+{
+    D3D12_FORMAT_SUPPORT1_SHADER_LOAD = 0x100,
+    D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW = 0x40000000,
+};
+enum D3D12_FORMAT_SUPPORT2
+{
+    D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE = 0x80,
+};
+struct D3D12_FEATURE_DATA_FORMAT_SUPPORT
+{
+    DXGI_FORMAT Format {};
+    UINT Support1 {};
+    UINT Support2 {};
+};
+
+enum D3D12_TEXTURE_LAYOUT
+{
+    D3D12_TEXTURE_LAYOUT_UNKNOWN = 0,
+};
 struct D3D12_RESOURCE_DESC
 {
     UINT64 Width {};
     UINT Height {};
     DXGI_FORMAT Format {};
+    D3D12_RESOURCE_FLAGS Flags {};
+    UINT64 Alignment {};
+    D3D12_TEXTURE_LAYOUT Layout {};
 };
+
+// The D3D12 rules the host's formats are held to. An sRGB format takes no unordered-access view, so no buffer that
+// carries one may be made in it; CopyResource moves bytes only within one typeless group.
+inline bool IsSrgb(DXGI_FORMAT format)
+{
+    return format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+           format == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
+}
+inline int TypelessGroup(DXGI_FORMAT format)
+{
+    switch (format)
+    {
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        return 1;
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        return 2;
+    case DXGI_FORMAT_B8G8R8X8_UNORM:
+    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+        return 3;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+        return 4;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        return 5;
+    default:
+        return 100 + (int) format;
+    }
+}
 
 struct ID3D12Resource
 {
@@ -106,12 +180,23 @@ struct ID3D12Resource
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     int refs = 1;
     D3D12_RESOURCE_DESC GetDesc() const { return desc; }
+    void SetName(const wchar_t*) {}
     void Release()
     {
         assert(refs > 0 && "resource released twice");
         --refs;
     }
 };
+
+// What the frame's list carried, in order: copies ('c', destination then source) and transfer dispatches ('t', input
+// then output). A case reads it to see what the conversion in read, and what was copied before it.
+struct ListEvent
+{
+    char kind;
+    ID3D12Resource* first;
+    ID3D12Resource* second;
+};
+inline std::vector<ListEvent> g_listEvents;
 
 struct D3D12_RESOURCE_BARRIER
 {
@@ -168,6 +253,18 @@ struct ID3D12GraphicsCommandList : ID3D12CommandList
         }
         recorded += count;
     }
+    void CopyResource(ID3D12Resource* destination, ID3D12Resource* source)
+    {
+        assert(!closed && "copy on a closed list");
+        assert(destination != nullptr && source != nullptr && destination != source);
+        assert(destination->state == D3D12_RESOURCE_STATE_COPY_DEST && "a copy into a resource not in COPY_DEST");
+        assert(source->state == D3D12_RESOURCE_STATE_COPY_SOURCE && "a copy from a resource not in COPY_SOURCE");
+        assert(TypelessGroup(destination->desc.Format) == TypelessGroup(source->desc.Format) &&
+               "CopyResource across typeless groups");
+        assert(destination->desc.Width == source->desc.Width && destination->desc.Height == source->desc.Height);
+        g_listEvents.push_back({ 'c', destination, source });
+        ++recorded;
+    }
     HRESULT Close()
     {
         closed = true;
@@ -176,11 +273,55 @@ struct ID3D12GraphicsCommandList : ID3D12CommandList
     void Release() { --refs; }
 };
 
+// The device's format answers. Every typed format the swapchain can carry is loadable; a typed store is the hardware's
+// answer for the UNORM, ten-bit and FP16 formats, never for sRGB or B8G8R8X8, and a case can take it away from more.
+inline std::vector<DXGI_FORMAT> g_formatsWithoutStore;
+inline unsigned g_formatQueries = 0;
+inline unsigned g_committedMade = 0;
+
 struct ID3D12Device
 {
     // Every allocator and list the host creates is owned here, so a case can count them and nothing leaks.
     std::vector<std::unique_ptr<ID3D12CommandAllocator>> allocators;
     std::vector<std::unique_ptr<ID3D12GraphicsCommandList>> lists;
+    std::vector<std::unique_ptr<ID3D12Resource>> resources;
+
+    HRESULT CheckFeatureSupport(D3D12_FEATURE feature, void* data, UINT size)
+    {
+        assert(feature == D3D12_FEATURE_FORMAT_SUPPORT && size == sizeof(D3D12_FEATURE_DATA_FORMAT_SUPPORT));
+        auto* support = static_cast<D3D12_FEATURE_DATA_FORMAT_SUPPORT*>(data);
+        ++g_formatQueries;
+        const auto format = support->Format;
+        const bool typeless = format == DXGI_FORMAT_R10G10B10A2_TYPELESS || format == DXGI_FORMAT_R16G16B16A16_TYPELESS ||
+                              format == DXGI_FORMAT_UNKNOWN;
+        const bool store = !typeless && !IsSrgb(format) && format != DXGI_FORMAT_B8G8R8X8_UNORM &&
+                           std::find(g_formatsWithoutStore.begin(), g_formatsWithoutStore.end(), format) ==
+                               g_formatsWithoutStore.end();
+        support->Support1 = (typeless ? 0u : (UINT) D3D12_FORMAT_SUPPORT1_SHADER_LOAD) |
+                            (store ? (UINT) D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW : 0u);
+        support->Support2 = store ? (UINT) D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE : 0u;
+        return S_OK;
+    }
+
+    HRESULT CreateCommittedResource(const D3D12_HEAP_PROPERTIES* heap, D3D12_HEAP_FLAGS, const D3D12_RESOURCE_DESC* desc,
+                                    D3D12_RESOURCE_STATES state, const void*, ID3D12Resource** out)
+    {
+        assert(heap != nullptr && heap->Type == D3D12_HEAP_TYPE_DEFAULT && desc != nullptr && out != nullptr);
+        resources.push_back(std::make_unique<ID3D12Resource>());
+        auto* resource = resources.back().get();
+        resource->desc = *desc;
+        resource->state = state;
+        ++g_committedMade;
+        *out = resource;
+        return S_OK;
+    }
+    unsigned LiveResources() const
+    {
+        unsigned live = 0;
+        for (const auto& resource : resources)
+            live += resource->refs > 0 ? 1 : 0;
+        return live;
+    }
 
     HRESULT CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE, ID3D12CommandAllocator** out)
     {
@@ -236,6 +377,8 @@ class FT_Dx12
     bool CreateBufferResource(ID3D12Device*, ID3D12Resource* source, D3D12_RESOURCE_STATES state)
     {
         assert(_buffer == nullptr);
+        // Production's buffer carries ALLOW_UNORDERED_ACCESS and gets an unordered-access view in its own format.
+        assert(!IsSrgb(_format) && "a transfer buffer in an sRGB format, which takes no unordered-access view");
         _buffer = new ID3D12Resource();
         _buffer->desc = source->GetDesc();
         _buffer->desc.Format = _format;
@@ -246,8 +389,13 @@ class FT_Dx12
     }
     bool CanRender() const { return _buffer != nullptr; }
     ID3D12Resource* Buffer() { return _buffer; }
-    bool Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource*, ID3D12Resource*)
+    bool Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* input, ID3D12Resource* output)
     {
+        assert(!list->closed && input != nullptr && output != nullptr);
+        assert(input->state == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE && "the transfer reads through an SRV");
+        assert(output->state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS && "the transfer writes through a UAV");
+        assert(!IsSrgb(output->desc.Format) && "an unordered-access view of an sRGB format");
+        g_listEvents.push_back({ 't', input, output });
         ++list->recorded;
         return true;
     }

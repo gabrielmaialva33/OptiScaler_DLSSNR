@@ -57,6 +57,17 @@ model's creation there, and the model ran on none of the frames that followed. T
     says so; a format change after the colour space was set declines until it is set again; back to eight
     bits is exactly the SDR path; switched off mid-session declines with the old text.
 
+- An sRGB swapchain (Metal: Hellsinger on native Windows, 2026-10-14): the output conversion wrote through an
+  unordered-access view in `R8G8B8A8_UNORM_SRGB`, which D3D12 has no typed UAV for, and the device was removed at the
+  first composition. The cases: an sRGB frame gets its output in the UNORM sibling and a flagless UNORM stage, its bytes
+  are copied into the stage and the conversion in reads the stage, not the sRGB source, every frame, with no rebuild and
+  one format question; a UNORM or ten-bit frame takes exactly the old path, with no stage and no copy; a resize to
+  B8G8R8A8 sRGB and back builds and releases the stage; an abandoned recording rebuilds it; B8G8R8X8 sRGB, whose sibling
+  has no typed store, and a device without a typed store for B8G8R8A8 are declined before anything is built and said
+  once, and a resize back runs on the first frame with its reset. The fakes refuse a transfer buffer or an
+  unordered-access view in an sRGB format, a copy across typeless groups, and a copy from or into the wrong state, so
+  the code from before the fix fails at the first sRGB case.
+
   The fakes track every resource's state: a transition must start from the state the resource is in, the
   source must come back as the copy source it arrived as, and the conversion pass's fake holds each
   dispatch to the states its header documents. The conversion pass and its timing sample are fakes

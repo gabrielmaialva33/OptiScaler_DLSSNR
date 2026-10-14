@@ -48,6 +48,9 @@ class PresentHost
 
     // What Record produced, in D3D12_RESOURCE_STATE_COPY_SOURCE, or null if this frame has none.
     // Valid only for the recording it came from.
+    //
+    // In the source's format, except that an sRGB source gets its UNORM sibling: the same bytes, in the same
+    // typeless group, so a CopyResource into either is legal, and the one an unordered-access view can be made of.
     ID3D12Resource* Output() const;
 
     // Whether the list carrying the last Record actually executed. Initialization that was recorded
@@ -89,6 +92,11 @@ class PresentHost
   private:
     bool _Ensure(ID3D12Device* device, ID3D12Resource* source);
 
+    // Whether the device can read the frame's format in a shader and store it through a typed unordered-access
+    // view -- for an sRGB format, its UNORM sibling's, which is what the conversions use. Asked of the device
+    // once per format, not assumed: native Windows removes the device over a view that vkd3d-proton accepts.
+    bool _FormatUsable(ID3D12Device* device, DXGI_FORMAT format);
+
     // Everything Release() drops except the synthesized motion. An abandoned recording rebuilds the
     // host's own resources at the same size; the estimator settles its own abandon and keeps going.
     void _ReleaseBuilt();
@@ -124,8 +132,20 @@ class PresentHost
     // avoids asking.
     std::unique_ptr<FT_Dx12> _toWorking;
 
-    // Back to whatever the caller's frame is in, so the caller's transfer is the copy it already did.
+    // Back to whatever the caller's frame is in, so the caller's transfer is the copy it already did. For an sRGB
+    // frame, its UNORM sibling: an unordered-access view of an sRGB texture is not legal.
     std::unique_ptr<FT_Dx12> _fromWorking;
+
+    // An sRGB frame's bytes, copied unchanged into the UNORM sibling before the conversion in reads them. A shader
+    // resource view of the sRGB texture itself would decode them to linear, and the pass expects the encoded
+    // values a UNORM backbuffer reads as. Null for every other format, which is read where it is, as before.
+    ID3D12Resource* _stage = nullptr;
+    D3D12_RESOURCE_STATES _stageState = D3D12_RESOURCE_STATE_COMMON;
+
+    // _FormatUsable's last answer, and what it was asked about.
+    ID3D12Device* _formatDevice = nullptr;
+    DXGI_FORMAT _formatAsked = DXGI_FORMAT_UNKNOWN;
+    bool _formatUsable = false;
 
     // HDR10 and scRGB ([DlssNr] HdrPresent): the decode and encode that take the two conversions' place on an
     // HDR frame, into and out of the same two buffers, with the caller's source as the encode's reference.

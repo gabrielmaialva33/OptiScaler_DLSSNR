@@ -25,6 +25,52 @@ namespace
 // format the cold-start harness proved feature 18 accepts.
 constexpr DXGI_FORMAT kWorkingFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
+// Said once when the device cannot read and store a frame's format (PresentHost::_FormatUsable).
+constexpr const char* kFormatRefusal =
+    "the device cannot read this frame's format in a shader and store it through a typed unordered-access view; the "
+    "frame is shown as the game rendered it";
+
+// The format the frame's bytes are read and written in by the two conversions.
+//
+// An sRGB format is the same bytes as its UNORM sibling -- CopyResource moves them between the two unchanged --
+// but neither of its views can stand in for the sibling's. A shader resource view decodes them to linear, where the
+// pass expects the display-encoded values a UNORM backbuffer reads as; an unordered-access view of one is not legal
+// at all. vkd3d-proton accepted the second, and native Windows removed the device with DXGI_ERROR_INVALID_CALL 4 ms
+// after the first composition (Metal: Hellsinger, R8G8B8A8_UNORM_SRGB, on Rafael's RTX 3060, 2026-10-14).
+//
+// B8G8R8X8 maps to its own sibling and is then asked of the device like any other: no typed store there declines
+// it, rather than a mapping into another group being invented for it.
+DXGI_FORMAT EncodedFormat(DXGI_FORMAT format)
+{
+    switch (format)
+    {
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+        return DXGI_FORMAT_B8G8R8X8_UNORM;
+    default:
+        return format;
+    }
+}
+
+// What the device says of one format: loadable through a shader resource view, and storable through a typed
+// unordered-access view. Both conversions need both: the one in reads the frame in this format, the one out
+// writes it. A typeless format answers no to both, which is right: it has no view to give.
+bool DeviceCanTransfer(ID3D12Device* device, DXGI_FORMAT format)
+{
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT support {};
+    support.Format = format;
+    if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))))
+        return false;
+
+    const bool load = (support.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_LOAD) != 0;
+    const bool store = (support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) != 0 &&
+                       (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0;
+    return load && store;
+}
+
 void Transition(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource, D3D12_RESOURCE_STATES& from,
                 D3D12_RESOURCE_STATES to)
 {
@@ -92,6 +138,13 @@ void PresentHost::_ReleaseBuilt()
     _fromWorking.reset();
     _guides.Release();
 
+    if (_stage != nullptr)
+    {
+        _stage->Release();
+        _stage = nullptr;
+    }
+    _stageState = D3D12_RESOURCE_STATE_COMMON;
+
     for (auto*& list : _setupLists)
     {
         if (list != nullptr)
@@ -147,8 +200,12 @@ bool PresentHost::_Ensure(ID3D12Device* device, ID3D12Resource* source)
     // gets here, so this is a teardown of idle objects, not of work in flight.
     Release();
 
+    // The frame's own format, or for an sRGB one its UNORM sibling (EncodedFormat): the output is written through
+    // an unordered-access view, and the frame is read through the sibling from a copy of its bytes.
+    const DXGI_FORMAT encoded = EncodedFormat(desc.Format);
+
     _toWorking = std::make_unique<FT_Dx12>("DLSS-NR present working", device, kWorkingFormat);
-    _fromWorking = std::make_unique<FT_Dx12>("DLSS-NR present output", device, desc.Format);
+    _fromWorking = std::make_unique<FT_Dx12>("DLSS-NR present output", device, encoded);
 
     if (_toWorking == nullptr || _fromWorking == nullptr)
     {
@@ -173,6 +230,33 @@ bool PresentHost::_Ensure(ID3D12Device* device, ID3D12Resource* source)
         return false;
     }
 
+    // An sRGB frame's stage: copied into, then read. No render-target or unordered-access use, so no flag for one,
+    // and the runtime's own placement rather than whatever an opened shared resource reports.
+    if (encoded != desc.Format)
+    {
+        D3D12_RESOURCE_DESC stageDesc = desc;
+        stageDesc.Format = encoded;
+        stageDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+        stageDesc.Alignment = 0;
+        stageDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+        D3D12_HEAP_PROPERTIES heap {};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &stageDesc,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&_stage))) ||
+            _stage == nullptr)
+        {
+            LOG_ERROR("DLSS-NR present host: {}x{} stage for the sRGB frame failed", width, height);
+            _stage = nullptr;
+            Release();
+            return false;
+        }
+
+        _stage->SetName(L"DLSS-NR present stage");
+        _stageState = D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+
     if (!_guides.Ensure(device, width, height))
     {
         Release();
@@ -190,7 +274,30 @@ bool PresentHost::_Ensure(ID3D12Device* device, ID3D12Resource* source)
     _motionResetOwed = true;
 
     LOG_INFO("DLSS-NR present host: {}x{} built", width, height);
+    if (_stage != nullptr)
+        LOG_INFO("DLSS-NR present host: the frame is sRGB (format {}); its bytes are read through a copy in format {} "
+                 "and the output is written in that format",
+                 (int) desc.Format, (int) encoded);
     return true;
+}
+
+bool PresentHost::_FormatUsable(ID3D12Device* device, DXGI_FORMAT format)
+{
+    if (device == _formatDevice && format == _formatAsked)
+        return _formatUsable;
+
+    _formatDevice = device;
+    _formatAsked = format;
+
+    const DXGI_FORMAT encoded = EncodedFormat(format);
+    _formatUsable = DeviceCanTransfer(device, encoded);
+
+    if (!_formatUsable)
+        LOG_WARN("DLSS-NR present host: the device cannot load format {} in a shader and store it through a typed "
+                 "unordered-access view (the frame's format is {}); the frame is shown as the game rendered it",
+                 (int) encoded, (int) format);
+
+    return _formatUsable;
 }
 
 bool PresentHost::_EnsureFeature(ID3D12Device* device, ID3D12CommandQueue* queue)
@@ -403,6 +510,15 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         return false;
     }
 
+    // A format the conversions cannot read and write is declined the same way, before anything is built for it
+    // and without a view the device would be removed over. What was built stays.
+    if (!_FormatUsable(device, sourceDesc.Format))
+    {
+        _resetOwed = true;
+        ReportFrameSkip(kFormatRefusal);
+        return false;
+    }
+
     if (!_Ensure(device, source))
     {
         // Built once or not at all. Retrying every frame would mean allocating and failing at sixty
@@ -459,8 +575,23 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     // about whether it executed is an answer we need. Every exit below leaves _recorded true.
     _recorded = true;
 
+    // What the conversion in reads: the source itself, or for an sRGB one its bytes copied unchanged into the UNORM
+    // stage, so the working colour holds exactly what a UNORM backbuffer would have put there. One copy within one
+    // typeless group; every other format takes the transitions it always did and nothing more.
     auto sourceStateNow = sourceState;
-    Transition(cmdList, source, sourceStateNow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    ID3D12Resource* readable = source;
+    if (_stage != nullptr && !hdr)
+    {
+        Transition(cmdList, source, sourceStateNow, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Transition(cmdList, _stage, _stageState, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmdList->CopyResource(_stage, source);
+        Transition(cmdList, _stage, _stageState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        readable = _stage;
+    }
+    else
+    {
+        Transition(cmdList, source, sourceStateNow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
     Transition(cmdList, _toWorking->Buffer(), _workingState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // HDR: the source decoded into the working colour as linear Rec.709 in scRGB units, in place of the plain
@@ -484,7 +615,7 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     }
     else
     {
-        convertedIn = _toWorking->Dispatch(cmdList, source, _toWorking->Buffer());
+        convertedIn = _toWorking->Dispatch(cmdList, readable, _toWorking->Buffer());
     }
 
     if (!convertedIn)

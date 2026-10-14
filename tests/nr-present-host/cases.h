@@ -56,10 +56,20 @@ void Fresh(bool enabled = true)
     g_hdrDispatches.clear();
     g_hdrAvailable = true;
     g_hdrSupports = true;
+    g_listEvents.clear();
+    g_formatsWithoutStore.clear();
+    g_formatQueries = 0;
+    g_committedMade = 0;
     Config::Instance()->DlssNrEnabled.value = enabled;
     Config::Instance()->DlssNrZeroGuideReset.value = false;
     Config::Instance()->DlssNrSynthMotion.value = false;
     Config::Instance()->DlssNrHdrPresent.value = false;
+}
+
+// The list events recorded since `before` entries, i.e. the frame just recorded.
+std::vector<ListEvent> EventsSince(size_t before)
+{
+    return std::vector<ListEvent>(g_listEvents.begin() + (std::ptrdiff_t) before, g_listEvents.end());
 }
 
 bool CreatedOnEmptyListAt(size_t index, uint32_t width, uint32_t height)
@@ -522,6 +532,133 @@ int main()
         const auto beforeOff = g_hdrDispatches.size();
         assert(!r.Frame() && g_hdrDispatches.size() == beforeOff);
         CASE("switched off mid-session: the next frame is declined with the old text and nothing HDR is dispatched");
+    }
+
+    // --- an sRGB swapchain (Metal: Hellsinger on native Windows, 2026-10-14) -------------------------------------
+    // The output conversion wrote through an unordered-access view in R8G8B8A8_UNORM_SRGB, which D3D12 does not
+    // allow. vkd3d-proton accepted it; native Windows removed the device with DXGI_ERROR_INVALID_CALL 4 ms after the
+    // first composition. The fakes refuse an sRGB transfer buffer and an sRGB UAV outright, so the code from before
+    // the fix fails here.
+    {
+        Fresh();
+        Rig r;
+        r.Size(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+        const auto before = g_listEvents.size();
+        assert(r.Frame());
+        assert(r.lastOutput != nullptr && r.lastOutput->desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM);
+        assert(g_committedMade == 1 && r.device.resources.size() == 1);
+        ID3D12Resource* stage = r.device.resources.front().get();
+        assert(stage->desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM && stage->desc.Flags == D3D12_RESOURCE_FLAG_NONE &&
+               stage->desc.Width == 1920 && stage->desc.Height == 1080);
+        CASE("an sRGB frame: the output is its UNORM sibling, and a plain UNORM stage is made for the frame's bytes");
+
+        // On the frame's list: the source's bytes copied into the stage, then the conversion in reading the stage --
+        // never the sRGB source through a view that would decode it to linear -- then the conversion out.
+        const auto events = EventsSince(before);
+        assert(events.size() == 3);
+        assert(events[0].kind == 'c' && events[0].first == stage && events[0].second == &r.source);
+        assert(events[1].kind == 't' && events[1].first == stage && events[1].second == DlssNr::g_lastPassColour);
+        assert(events[2].kind == 't' && events[2].first == DlssNr::g_lastPassColour &&
+               events[2].second == r.lastOutput);
+        CASE("the frame's bytes are copied into the stage, and the conversion in reads the stage, not the source");
+
+        const auto made = g_transferBuffersMade;
+        const auto beforeSecond = g_listEvents.size();
+        assert(r.Frame());
+        const auto second = EventsSince(beforeSecond);
+        assert(second.size() == 3 && second[0].kind == 'c' && second[1].first == stage);
+        assert(g_committedMade == 1 && g_transferBuffersMade == made && g_formatQueries == 1);
+        assert(LogCount("the frame is sRGB") == 1);
+        CASE("every frame copies again into the same stage; nothing is rebuilt and the device is asked once");
+    }
+
+    {
+        Fresh();
+        Rig r;
+        r.Size(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM);
+        const auto before = g_listEvents.size();
+        assert(r.Frame());
+        const auto events = EventsSince(before);
+        assert(g_committedMade == 0 && r.device.resources.empty());
+        assert(events.size() == 2 && events[0].kind == 't' && events[0].first == &r.source);
+        assert(r.lastOutput->desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM && LogCount("the frame is sRGB") == 0);
+        CASE("a UNORM frame takes exactly the old path: no stage, no copy, the conversion reads the source");
+
+        r.Size(1920, 1080, DXGI_FORMAT_R10G10B10A2_UNORM);
+        const auto beforeTen = g_listEvents.size();
+        assert(r.Frame());
+        const auto ten = EventsSince(beforeTen);
+        assert(g_committedMade == 0 && ten.size() == 2 && ten[0].first == &r.source);
+        assert(r.lastOutput->desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM);
+        CASE("and so does a ten-bit SDR frame");
+
+        r.Size(1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+        assert(r.Frame());
+        assert(g_committedMade == 1 && r.device.LiveResources() == 1);
+        assert(r.lastOutput->desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM);
+        assert(r.device.resources.back()->desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM);
+        CASE("a resize to B8G8R8A8 sRGB builds the stage and output in B8G8R8A8_UNORM");
+
+        r.Size(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM);
+        assert(r.Frame());
+        assert(r.device.LiveResources() == 0 && g_committedMade == 1);
+        CASE("and back to UNORM releases the stage and builds none");
+    }
+
+    {
+        Fresh();
+        Rig r;
+        r.Size(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+        assert(r.Frame());
+
+        // A list the caller could not close: everything is rebuilt, the stage included, and the next frame's
+        // transitions start from where the rebuilt objects really are (the fakes hold every StateBefore to it).
+        r.frameLists.push_back(std::make_unique<ID3D12GraphicsCommandList>());
+        r.source.state = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        assert(r.host.Record(&r.device, r.frameLists.back().get(), &r.source, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                             &r.queue));
+        r.host.AbandonRecording();
+        assert(r.device.LiveResources() == 0);
+        assert(r.Frame());
+        assert(g_committedMade == 2 && r.device.LiveResources() == 1);
+        CASE("an abandoned recording releases the stage with everything else, and the next frame rebuilds it");
+    }
+
+    {
+        Fresh();
+        Rig r;
+        r.Size(1920, 1080, DXGI_FORMAT_B8G8R8X8_UNORM_SRGB);
+        assert(!r.Frame() && !r.Frame() && !r.Frame());
+        assert(g_transferBuffersMade == 0 && g_committedMade == 0 && r.device.lists.empty());
+        assert(DlssNr::g_creations.empty() && LogCount("built") == 0);
+        assert(g_formatQueries == 1 && LogCount("cannot load format") == 1);
+        CASE("B8G8R8X8 sRGB: its sibling has no typed store, so nothing is built and it is said once");
+
+        r.Size(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM);
+        assert(r.Frame());
+        assert(g_formatQueries == 2 && DlssNr::g_creations.size() == 1);
+        CASE("a resize to a format the device can store builds and runs at once");
+    }
+
+    {
+        Fresh();
+        g_formatsWithoutStore = { DXGI_FORMAT_B8G8R8A8_UNORM };
+        Rig r;
+        r.Size(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM);
+        assert(r.Frame());
+        const auto made = g_transferBuffersMade;
+        const auto passes = DlssNr::g_passesRun;
+
+        r.Size(1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM);
+        assert(!r.Frame() && !r.Frame());
+        assert(g_transferBuffersMade == made && g_transferBuffersLive == 2 && DlssNr::g_passesRun == passes);
+        assert(LogCount("cannot load format") == 1);
+        CASE("a device without a typed store for B8G8R8A8: declined before anything is built, what was built stays");
+
+        r.Size(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM);
+        assert(r.Frame());
+        assert(DlssNr::g_lastPassReset);
+        CASE("and back to a format it can store, the model runs on the first frame, with the reset it is owed");
     }
 
     assert(g_transferBuffersLive == 0);

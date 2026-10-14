@@ -768,3 +768,59 @@ each fail a case; the list is in that suite's README.
   every NR-only bridge: `_OwnsFgPresenter` needs one, and `currentFGSwapchain` names the plain presenter. So neither a
   resize (`_ReleaseOverlayForResize`) nor a release (`_FinishRelease`) lets go of the overlay's render targets there.
   On native Windows, `ResizeBuffers` refuses a presenter whose buffers are still referenced.
+
+## An sRGB backbuffer on native Windows (2026-10-14)
+
+### What broke
+
+Metal: Hellsinger on Rafael's RTX 3060 under Windows (driver 617.14, no D3D12 SDK layers), after the takeover above
+let the bridge live: the pass composed its first frame and, 4 ms later, the bridge's D3D12 device was removed with
+`DXGI_ERROR_INVALID_CALL` (`fg Present failed: 887A0005`, then `Device removed reason: DXGI_ERROR_INVALID_CALL`).
+The game's backbuffer is `R8G8B8A8_UNORM_SRGB`. Divinity, whose backbuffer is `R10G10B10A2_UNORM`, ran on the same PC.
+
+### Cause
+
+`PresentHost::_Ensure` built the output conversion in the source's own format, so `_fromWorking` was an
+`R8G8B8A8_UNORM_SRGB` texture with `ALLOW_UNORDERED_ACCESS`, and `FT_Dx12::Dispatch` wrote it through an
+unordered-access view in that format. D3D12 has no typed UAV for an sRGB format. vkd3d-proton accepts the view; the
+retail runtime accepted the resource and then removed the device. This is the class of the 48-byte constant-buffer
+view in "Native Windows, 2026-09-28" of `reduced-scale-guides.md`: what Proton runs is no evidence of legality.
+
+There was a colour error under it as well. The conversion in read the source through a shader resource view in its
+own format, which for an sRGB texture decodes to linear, while the pass is told an SDR present frame holds
+display-encoded values (`ColourIsLinearHdr = false`), the values a UNORM backbuffer reads as.
+
+### What changed
+
+`retoque/dlssnr/DlssNr_PresentHost.cpp`, the bridge route only:
+
+- **The UNORM sibling.** For `R8G8B8A8_UNORM_SRGB`, `B8G8R8A8_UNORM_SRGB` and `B8G8R8X8_UNORM_SRGB` the conversions use
+  `R8G8B8A8_UNORM`, `B8G8R8A8_UNORM` and `B8G8R8X8_UNORM` (`EncodedFormat`). The output is built in that format, so its
+  unordered-access view is legal, and it holds the same bytes the sRGB frame would: the bridge's
+  `CopyResource(presenter, output)` stays within one typeless group, and the presenter is the UNORM sibling already
+  (`PrepareDx12FlipFormat`).
+- **A stage for the frame's bytes.** An sRGB frame is copied unchanged (`CopyResource`, same group) into a UNORM texture
+  with no flags at the start of the recording, and the conversion in reads that, so the working colour holds exactly
+  what a UNORM backbuffer would have put there. Nothing else reads the stage; the motion estimator reads the working
+  colour, as before.
+- **The device is asked.** Before anything is built, `CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT)` must report
+  shader load, a typed UAV and typed UAV store for the format the conversions use, once per format. A format that fails
+  is declined like an HDR frame, what was built stays, and it is said once: `the device cannot load format ... the frame
+  is shown as the game rendered it`. B8G8R8X8 has no typed store and is declined that way, not mapped into another
+  group. A typeless format answers no to all three.
+- **A UNORM, ten-bit or FP16 frame takes exactly the old path**: no stage, no copy, the same transitions. With the pass
+  off nothing is asked or built, as before.
+
+Test: `nr-present-host`. The fakes refuse a transfer buffer or a UAV in an sRGB format and a copy across typeless
+groups; the code from before this fails there, at the first sRGB case.
+
+### Found on the way
+
+- **Left open, colour only:** the synthesized frame-generation inputs read the bridge's sRGB source through its own
+  view, so linear values. The HUD layer (`SynthOverlay_Dx12::RecordLayer`) is then linear, composed by FFX over the
+  UNORM presenter: darker in generated frames. When the pass runs, the layer now reads the host's UNORM output and is
+  right; with the pass off, or declining, it is not. The motion estimators' luma is computed from linear light too,
+  with `transferFunction = 0` (sRGB) declared to FFX. Neither creates an illegal view.
+- **Left open, latent:** the D3D12 route's own present pass (`EnsureBbCopy` in `DlssNr_Dx12.cpp`) builds its copy of the
+  backbuffer with `ALLOW_UNORDERED_ACCESS` in the backbuffer's format without asking the device. An sRGB backbuffer
+  cannot reach it (flip model refuses sRGB), but a `B8G8R8A8_UNORM` one on hardware without that typed store would.
