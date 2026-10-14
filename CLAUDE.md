@@ -250,11 +250,11 @@ before committing C++, because nothing local enforces it and it had drifted by 5
 
 ### Tests
 
-`tests/README.md` is the index; read it before adding or changing a suite. Forty-seven directories under
+`tests/README.md` is the index; read it before adding or changing a suite. Fifty directories under
 `tests/`, each self-contained with its own `run.py` and README, registered in `tests/suites.toml`.
 
 ```bash
-python3 tests/run_all.py            # host tier, the default; 43 suites, ~60 s
+python3 tests/run_all.py            # host tier, the default; 46 suites, ~60 s
 python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
 python3 tests/run_all.py --tier all # adds the four wine suites
 python3 tests/<name>/run.py         # one suite, unchanged
@@ -262,8 +262,9 @@ python3 tests/<name>/run.py         # one suite, unchanged
 
 Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the thirty-four
 `nr-*` suites plus `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`,
-`fg-synth-policy`, `sl-log-repeat`, `repo-privacy` (no home path, LAN/tailnet address or token in a
-tracked file; the tree is public), `lsfg-shader-library` and `lsfg-integration`. One of them,
+`mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy` (no home path, LAN/tailnet address or token in
+a tracked file; the tree is public), `deploy-safety` (`tools/deploy-to-game.sh` on fake game directories),
+`lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter`. One of them,
 `nr-invariants`, is the `docs/dlssnr/design/DEVELOPMENT.md` §4 mechanical guard (config round-trip for every `DlssNr`
 key, struct equals cbuffer, precompiled headers equal the committed bytecode, retired identifiers);
 it is pure Python and the one to run after touching `Config.*`, `OptiScaler.ini` or the shader. **wine** needs the msvc-wine prefix and runs serially, because these suites contend for the
