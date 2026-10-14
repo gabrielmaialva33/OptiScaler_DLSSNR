@@ -21,7 +21,7 @@ and only then the change, as [nr-before-dlssg.md](design/nr-before-dlssg.md) did
 | 2 | Present route on Vulkan | [nr-vulkan-present-host.md](design/nr-vulkan-present-host.md) | design audited 2026-09-12, not built | re-read against today's tree; step 0 | a Vulkan title with the NR-only hook path |
 | 3 | Present route on native D3D11 | [dx11-native-dlss-guides.md](design/dx11-native-dlss-guides.md) | steps 1-2 built 2026-10-13 | the note's next step | a D3D11 title that calls NGX itself |
 | 4 | NR before the upscaler (`Stage=1`) by default | [nr-before-upscale.md](design/nr-before-upscale.md) | experimental, built 2026-09-05, never measured here | measure A/B against `Stage=0` | Crimson Desert (RR off), Cyberpunk |
-| 5 | MFG on RTX 20/30 | to write | NeuRotic's is untested on hardware by its own logs | design note, behind a flag, on the transactional base | Rafael's RTX 3060 |
+| 5 | MFG on RTX 20/30 | [mfg-rtx20-30.md](design/mfg-rtx20-30.md) | design written 2026-10-14; offline inventory done: every 310.x provider ships its networks as sm_86 SASS, its 31 frame kernels as sm_89/sm_120 only; NeuRotic's is untested on hardware by its own logs | step 0, a log-only probe; then the kernel half forward-compiled on the 4090 | Rafael's RTX 3060 on Windows, `dlssg_for_sm86` removed first |
 | 6 | Windows users: package and install path, languages, a route advisor | to write | `tools/package_release.ps1` exists; pt-BR only | design note | a Windows machine |
 | - | Native Windows validation | - | DRED and the DLSS-G boundary never ran on Windows | - | Rafael (RTX 3060: DRED, off paths); an RTX 40/50 tester for the boundary |
 
