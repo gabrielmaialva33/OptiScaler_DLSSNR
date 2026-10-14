@@ -41,6 +41,7 @@ signatures = [
     'HRESULT Dx11wDx12SC::_ResizePresenter(',
     'void Dx11wDx12SC::_RetryRefusedPresenterResize()',
     'bool Dx11wDx12SC::_PresenterDrawsOverlay()',
+    'bool Dx11wDx12SC::_DrawsOwnOverlay()',
     'void Dx11wDx12SC::_ReleaseOverlayForResize()',
     'HRESULT Dx11wDx12SC::_WaitForCopyAllocator(',
     'HRESULT Dx11wDx12SC::_WaitForCopyQueueIdle(',
@@ -70,6 +71,7 @@ predicates = 'namespace Dx11wDx12\n{\n' + ''.join(map(function, [
     'void ResolveZeroExtent(HWND gameWindow,',
     'bool PresenterExtent(IDXGISwapChain1* presenter,',
     'UINT PresenterResizeFlags(IDXGISwapChain1* presenter,',
+    'UINT PresenterResizeBufferCount(UINT gameCount)',
     'DXGI_FORMAT PresenterResizeFormat(DXGI_FORMAT gameFormat)',
     'void MatchHiddenToPresenter(IDXGISwapChain* hidden,',
 ])) + '} // namespace Dx11wDx12\n'

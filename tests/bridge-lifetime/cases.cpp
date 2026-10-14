@@ -19,6 +19,7 @@ struct Fixture
         wakes.clear();
         waitDurations.clear();
         MenuOverlayDx::cleanups = 0;
+        MenuOverlayDx::heldTarget = nullptr;
         sc->_real = &real;
         sc->_fgSwapChain = &presenter;
         sc->_dx11Device = &dx11;
@@ -1107,6 +1108,180 @@ void refusedResizeCases()
     assert(Dx11wDx12::PresenterResizeFormat(DXGI_FORMAT_R8G8B8A8_UNORM) == DXGI_FORMAT_R8G8B8A8_UNORM);
 }
 
+// Metal: Hellsinger on native Windows, second run (Rafael's RTX 3060, driver 617.14, build b1ab84bc, 2026-10-14). NR
+// only, so the plain presenter and no frame generation object. With the sRGB format already mapped, the presenter
+// still refused the game's first resize with 80070057, took one resize at its own size from Present before the overlay
+// had drawn, and then refused the game's next resize (80070057) and the three resizes at its own size after it, the
+// last with 887A0001, twice over. Two causes: most likely the game's buffer count of one, which flip model cannot take
+// (that run logged at level 2, without the arguments), and the overlay's render targets, the presenter's own buffers,
+// which the resize never let go on a bridge with no frame generation object. These fakes refuse both the way DXGI
+// does (Swapchain::flipModel, refuseWhileReferenced).
+void nativeResizeCases()
+{
+    const UINT kRetries = Dx11wDx12SC::kRefusedResizeRetries;
+    const auto nrOnly = [](Fixture& f)
+    {
+        f.sc->_fg = nullptr;
+        State::Instance().currentFG = nullptr;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+    };
+    // The overlay drew on the presenter: CreateRenderTargetDx12 holds a reference to its buffers until a cleanup.
+    const auto overlayDraws = [](Swapchain& presenter)
+    {
+        if (MenuOverlayDx::heldTarget == nullptr)
+            presenter.GetBuffer(0, &MenuOverlayDx::heldTarget);
+    };
+    const auto presenterAt = [](Swapchain& presenter, UINT width, UINT height)
+    {
+        presenter.descResult = S_OK;
+        presenter.desc.BufferCount = 2;
+        presenter.desc.BufferDesc.Width = width;
+        presenter.desc.BufferDesc.Height = height;
+        presenter.desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    };
+
+    // A blt-model game with one buffer names that count in its resizes. The presenter, flip model, was created with two
+    // and is resized with two; the hidden swapchain, the game's own, keeps the one it asked for. The same size named
+    // again is what the presenter already holds, so IsSame skips it, which a raw count of one never let it do. Zero
+    // keeps the presenter's count. Through both entry points.
+    for (bool resize1 : { false, true })
+    {
+        Fixture f;
+        nrOnly(f);
+        if (resize1)
+        {
+            f.sc->_real3 = &f.real;
+            f.real.AddRef();
+        }
+        f.presenter.flipModel = true;
+        presenterAt(f.presenter, 1920, 1080);
+        const auto resize = [&](UINT count, UINT width, UINT height)
+        {
+            return resize1 ? f.sc->ResizeBuffers1(count, width, height, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 0, nullptr,
+                                                  nullptr)
+                           : f.sc->ResizeBuffers(count, width, height, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 0);
+        };
+        assert(resize(1, 1920, 1080) == S_OK);
+        assert(f.presenter.resizes == 0 && f.real.resizes == 1 && f.real.lastResizeCount == 1);
+        assert(resize(1, 1280, 720) == S_OK);
+        assert(f.presenter.resizes == 1 && f.presenter.lastResizeCount == 2 && f.presenter.desc.BufferCount == 2);
+        assert(f.presenter.lastResizeWidth == 1280 && f.presenter.lastResizeFormat == DXGI_FORMAT_R8G8B8A8_UNORM);
+        assert(f.real.resizes == 2 && f.real.lastResizeCount == 1 && f.real.lastResizeWidth == 1280);
+        assert(!f.sc->_presenterResizeRefused && !f.sc->_presenterResizeOwed && !f.sc->_resizeIncomplete);
+        assert(resize(0, 1920, 1080) == S_OK);
+        assert(f.presenter.resizes == 2 && f.presenter.lastResizeCount == 0 && f.real.lastResizeCount == 0);
+    }
+    assert(Dx11wDx12::PresenterResizeBufferCount(0) == 0 && Dx11wDx12::PresenterResizeBufferCount(1) == 2);
+    assert(Dx11wDx12::PresenterResizeBufferCount(2) == 2 && Dx11wDx12::PresenterResizeBufferCount(3) == 3);
+    assert(Dx11wDx12::PresenterResizeBufferCount(16) == 16);
+
+    // An NR-only bridge whose overlay has drawn: a game resize lets the overlay's render targets go before the
+    // presenter's own resize, which then goes through at the first attempt. Through both entry points.
+    for (bool resize1 : { false, true })
+    {
+        Fixture f;
+        nrOnly(f);
+        if (resize1)
+        {
+            f.sc->_real3 = &f.real;
+            f.real.AddRef();
+        }
+        f.presenter.flipModel = true;
+        f.presenter.refuseWhileReferenced = true;
+        overlayDraws(f.presenter);
+        assert(f.presenter.buffer.refs == 2);
+        assert(!f.sc->_OwnsOverlay() && !f.sc->_PresenterDrawsOverlay() && f.sc->_DrawsOwnOverlay());
+        const auto result = resize1 ? f.sc->ResizeBuffers1(1, 1280, 720, 0, 0, nullptr, nullptr)
+                                    : f.sc->ResizeBuffers(1, 1280, 720, 0, 0);
+        assert(result == S_OK);
+        assert(MenuOverlayDx::cleanups == 1 && MenuOverlayDx::heldTarget == nullptr && f.presenter.buffer.refs == 1);
+        assert(f.presenter.resizes == 1 && f.real.resizes == 1 && !f.sc->_presenterResizeRefused);
+    }
+
+    // The log's sequence on that bridge. The game's resize is refused (scripted here: the count no longer is), which
+    // arms the resizes at the presenter's own size. The overlay draws before the next present. That present's resize
+    // lets it go first, and the presenter takes it, at its own size; nothing more is tried.
+    {
+        Fixture f;
+        nrOnly(f);
+        f.presenter.flipModel = true;
+        f.presenter.refuseWhileReferenced = true;
+        presenterAt(f.presenter, 1920, 1080);
+        f.presenter.resizeResults = { E_INVALIDARG };
+        assert(f.sc->ResizeBuffers(1, 1280, 720, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 0) == E_INVALIDARG);
+        assert(f.presenter.resizes == 1 && f.real.resizes == 0);
+        assert(f.sc->_presenterResizeRefused && f.sc->_refusedResizeRetriesLeft == kRetries);
+        overlayDraws(f.presenter);
+        const int cleanups = MenuOverlayDx::cleanups;
+        f.sc->_RetryRefusedPresenterResize();
+        assert(MenuOverlayDx::cleanups == cleanups + 1 && f.presenter.buffer.refs == 1);
+        assert(f.presenter.resizes == 2 && f.presenter.lastResizeCount == 0);
+        assert(f.presenter.lastResizeWidth == 1920 && f.presenter.lastResizeHeight == 1080);
+        assert(!f.sc->_presenterResizeRefused && !f.sc->_presenterResizeOwed && f.real.resizes == 0);
+        f.sc->_RetryRefusedPresenterResize();
+        assert(f.presenter.resizes == 2);
+    }
+
+    // Frame generation's presenter keeps the old behaviour, a neural host riding along or not. Its overlay is drawn
+    // from frame generation's present path and let go inside the backend's own resize (the race in refusedResizeCases),
+    // so neither a game resize nor a resize at the presenter's own size cleans it from here; frame generation is
+    // paused.
+    {
+        FGHooks::interopPresenter = false;
+        Fixture f;
+        f.sc->_nrHost = std::make_unique<DlssNr::PresentHost>();
+        f.fg.active = true;
+        presenterAt(f.presenter, 1920, 1080);
+        overlayDraws(f.presenter);
+        assert(f.sc->_PresenterDrawsOverlay() && !f.sc->_DrawsOwnOverlay());
+        f.presenter.resizeResults = { E_INVALIDARG };
+        assert(f.sc->ResizeBuffers(2, 1280, 720, 0, 0) == E_INVALIDARG);
+        assert(MenuOverlayDx::cleanups == 0 && f.fg.deactivations == 1 && f.fg.targetUpdates == 1);
+        f.sc->_RetryRefusedPresenterResize();
+        assert(MenuOverlayDx::cleanups == 0 && MenuOverlayDx::heldTarget == &f.presenter.buffer);
+        assert(f.fg.deactivations == 2 && !f.sc->_presenterResizeRefused);
+        SafeRelease(MenuOverlayDx::heldTarget);
+        FGHooks::interopPresenter = true;
+    }
+
+    // An NR-only bridge with another presenter current for frame generation, or a frame generation object that is not
+    // its own: CleanupRenderTarget would race that presenter's thread, or pause that object. Left alone.
+    {
+        Swapchain other;
+        FG otherFg;
+        otherFg.active = true;
+        for (bool otherPresenter : { true, false })
+        {
+            Fixture f;
+            nrOnly(f);
+            if (otherPresenter)
+                State::Instance().currentFGSwapchain = &other;
+            else
+                State::Instance().currentFG = &otherFg;
+            assert(!f.sc->_DrawsOwnOverlay() && !f.sc->_OwnsOverlay());
+            assert(f.sc->ResizeBuffers(2, 1280, 720, 0, 0) == S_OK);
+            assert(MenuOverlayDx::cleanups == 0 && otherFg.deactivations == 0);
+            State::Instance().currentFG = nullptr;
+        }
+    }
+
+    // A newer wrapper holds the same presenter (FGPreserveSwapChain): the newest owns it, and the older one's resize
+    // leaves the overlay to it.
+    {
+        Fixture f;
+        nrOnly(f);
+        auto newer = new Dx11wDx12SC;
+        newer->_fgSwapChain = &f.presenter;
+        f.presenter.AddRef();
+        newer->_nextLive = Dx11wDx12SC::_live;
+        Dx11wDx12SC::_live = newer;
+        assert(!f.sc->_DrawsOwnOverlay() && newer->_DrawsOwnOverlay());
+        assert(f.sc->ResizeBuffers(2, 1280, 720, 0, 0) == S_OK);
+        assert(MenuOverlayDx::cleanups == 0);
+        assert(newer->Release() == 0);
+    }
+}
+
 // A second swapchain on the same window (docs/dlssnr/design/nr-dx11-bridge-host.md, "A second swapchain on the same
 // window"): Metal: Hellsinger on Rafael's RTX 3060, 2026-10-13. The game made another swapchain on its window while the
 // first lived, DXGI refused the second presenter with E_ACCESSDENIED, and the title lost its bridge for good. The
@@ -1388,6 +1563,7 @@ void takeoverCases()
         state.currentSwapchain = f.sc;
         state.currentFGSwapchain = nullptr;
         assert(!f.sc->_OwnsPresenter() && !f.sc->_OwnsFgPresenter() && !f.sc->_OwnsOverlay());
+        assert(!f.sc->_DrawsOwnOverlay());
         const int cleanups = MenuOverlayDx::cleanups;
         assert(f.sc->Release() == 0);
         f.sc = nullptr;
@@ -1413,9 +1589,10 @@ int main()
     coexistenceCases();
     fullscreenCases();
     refusedResizeCases();
+    nativeResizeCases();
     predicateCases();
     takeoverCases();
     assert(Dx11wDx12SC::_retired == nullptr);
     std::cout << "bridge lifetime: production wait, copy, resize, release, retirement, neural host, synthesized input, "
-                 "coexistence, fullscreen, refused-resize, predicate and window takeover cases passed\n";
+                 "coexistence, fullscreen, refused-resize, native-resize, predicate and window takeover cases passed\n";
 }

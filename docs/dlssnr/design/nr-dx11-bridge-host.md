@@ -767,7 +767,8 @@ each fail a case; the list is in that suite's README.
 - **Found on the way, not changed here.** `_OwnsOverlay` is false on a bridge with no frame-generation object, which is
   every NR-only bridge: `_OwnsFgPresenter` needs one, and `currentFGSwapchain` names the plain presenter. So neither a
   resize (`_ReleaseOverlayForResize`) nor a release (`_FinishRelease`) lets go of the overlay's render targets there.
-  On native Windows, `ResizeBuffers` refuses a presenter whose buffers are still referenced.
+  On native Windows, `ResizeBuffers` refuses a presenter whose buffers are still referenced. The resize half was then
+  seen in a game and fixed: "The presenter's resize on native Windows" below. The release half is still open.
 
 ## An sRGB backbuffer on native Windows (2026-10-14)
 
@@ -817,10 +818,10 @@ groups; the code from before this fails there, at the first sRGB case.
 ### Found on the way
 
 - **The presenter refused the game's first resize.** The same log has `the presenter refused ResizeBuffers: 80070057`
-  at startup: the game named `R8G8B8A8_UNORM_SRGB` in `ResizeBuffers`, which a flip-model swapchain refuses, and only
-  the retry at the presenter's own size, which passes `DXGI_FORMAT_UNKNOWN`, got through. The resize now hands the
-  presenter the UNORM sibling it was created with (`Dx11wDx12::PresenterResizeFormat`); test:
-  `bridge-lifetime`, `refusedResizeCases`.
+  at startup, and only the retry at the presenter's own size, which passes `DXGI_FORMAT_UNKNOWN`, got through. The game
+  names `R8G8B8A8_UNORM_SRGB`, which a flip-model swapchain cannot take, so the resize now hands the presenter the UNORM
+  sibling it was created with (`Dx11wDx12::PresenterResizeFormat`); test: `bridge-lifetime`, `refusedResizeCases`.
+  That was not the refusal's cause, though: the next run refused it the same way (next section).
 - **Left open, colour only:** the synthesized frame-generation inputs read the bridge's sRGB source through its own
   view, so linear values. The HUD layer (`SynthOverlay_Dx12::RecordLayer`) is then linear, composed by FFX over the
   UNORM presenter: darker in generated frames. When the pass runs, the layer now reads the host's UNORM output and is
@@ -829,3 +830,76 @@ groups; the code from before this fails there, at the first sRGB case.
 - **Left open, latent:** the D3D12 route's own present pass (`EnsureBbCopy` in `DlssNr_Dx12.cpp`) builds its copy of the
   backbuffer with `ALLOW_UNORDERED_ACCESS` in the backbuffer's format without asking the device. An sRGB backbuffer
   cannot reach it (flip model refuses sRGB), but a `B8G8R8A8_UNORM` one on hardware without that typed store would.
+
+## The presenter's resize on native Windows (2026-10-14, second run)
+
+### What broke
+
+Metal: Hellsinger on Rafael's RTX 3060 under Windows (driver 617.14), build `b1ab84bc`, NR only: the plain presenter, no
+frame-generation object. Log level 2.
+
+- `16:12:33.160` — `the presenter refused ResizeBuffers: 80070057`, at the game's first resize, with the sRGB format
+  already mapped to UNORM.
+- `16:12:37.022` — `the presenter took a resize at its own size after refusing the game's`. The present host was built
+  right after, and the overlay set itself up on the first presents.
+- `16:12:38.482` — the game's next resize: `80070057` again. Then `refused 3 more resizes at its own size, the last with
+  887A0001`. The same pair again at `16:13:05`.
+
+Proton showed neither.
+
+### Cause
+
+Two, one per HRESULT.
+
+- **`887A0001`: the overlay's render targets.** On the plain presenter they are the presenter's own buffers
+  (`CreateRenderTargetDx12` holds a reference to each), and a flip-model presenter refuses `ResizeBuffers` while one is
+  out. `_ReleaseOverlayForResize` let them go only when `_OwnsOverlay` was true, and it is false on every NR-only bridge
+  (the open item under "A second swapchain on the same window"). The first retry succeeded because the overlay had not
+  drawn yet. Under Proton, a resize at an unchanged size is skipped (`IsSame`) unless one is owed (after a refusal or a
+  fullscreen transition), so only a real size change would have shown it there.
+- **`80070057`: most likely the buffer count.** The game's swapchain is blt model: an `R8G8B8A8_UNORM_SRGB` one can be
+  nothing else. A blt-model swapchain may have one buffer. Creation raises the presenter's count to two
+  (`PrepareDx12InteropDesc`), since flip model needs at least two. The resizes handed the game's count over unchanged,
+  and the presenter cannot take one. The format was already mapped, and `PresenterResizeFlags` keeps the flags to what
+  the presenter was created with. The arguments themselves are not in a level-2 log, so this is inferred, not read.
+  The `16:12:38` refusal also shows that the arguments are checked before the references: the overlay held a buffer by
+  then (the retries right after it got `887A0001`), and the answer was `80070057`.
+
+### What changed
+
+`OptiScaler/with_dx12/dx11_with_dx12_sc.cpp`:
+
+- **`Dx11wDx12::PresenterResizeBufferCount`.** One becomes two; zero ("keep the count") and every other count are handed
+  over. It is used for the presenter's resize and for the `IsSame` skip in both `ResizeBuffers` and `ResizeBuffers1`, so
+  the same size named again with a count of one is skipped, as at any other count.
+- **The hidden swapchain keeps the game's count.** Every creation site makes it from the game's own description, not from
+  the presenter's, so its swap effect and count are the game's, and so is what it takes in a resize. The exception is
+  `[V-Sync] OverrideVsync`. It makes that description flip model with tearing before both swapchains exist, and is
+  not handled.
+- **`_DrawsOwnOverlay`.** True when this wrapper's `Present` draws the overlay onto the plain presenter it owns, and no
+  other presenter is current for frame generation. Any frame-generation object must be the wrapper's own, because
+  `CleanupRenderTarget` pauses whichever is current. `_ReleaseOverlayForResize` cleans the overlay when that holds, or as
+  before. The frame-generation presenter's path is unchanged: its overlay is let go inside the backend's own resize
+  (Generation Zero, 2026-09-29).
+- **The refusal line names its arguments**, for example
+  `the presenter refused ResizeBuffers (count 2, 1920x1080, format 28, flags 2): 80070057`.
+
+The neural present host holds nothing of the presenter's. It is handed the bridge's shadow of the game's frame, and
+builds and keeps only textures of its own. The one presenter buffer the bridge pins, its copy destination, is released
+before every resize (`_ReleaseInteropBackBuffers`).
+
+Test: `bridge-lifetime`, `nativeResizeCases`. The fakes refuse a count of one and a referenced buffer the way DXGI does.
+Ten mutations each fail a case.
+
+### What to look for in the log
+
+- **Fixed.** No `refused ResizeBuffers` at all.
+- **Still `80070057`.** The line now has the arguments. If the count it prints is two or zero, the count was not the
+  cause, and the other arguments are the place to look.
+- **Still `887A0001` at its own size.** Something else holds a buffer of the presenter.
+
+### Left open
+
+- **The release half.** `_FinishRelease` still keys the overlay cleanup on `_OwnsOverlay`. An NR-only bridge released by
+  the game, rather than taken over, leaves the overlay holding its presenter's buffers.
+- **`OverrideVsync` on the bridge**, as above.

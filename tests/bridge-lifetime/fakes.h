@@ -313,8 +313,14 @@ struct Swapchain : Ref
         return S_OK;
     }
     UINT lastResizeWidth = 0, lastResizeHeight = 0, lastResizeFlags = 0;
-    int lastResizeFormat = -1;
+    int lastResizeFormat = -1, lastResizeCount = -1;
     int resizedAt = 0;
+    // DXGI's rules for a flip-model swapchain, which the presenter is, off unless a case asks for them. The arguments
+    // are checked first: fewer than two buffers is invalid. Then a public reference to a buffer refuses the resize with
+    // 887A0001, on native Windows and vkd3d-proton alike. That order is Metal: Hellsinger's (native Windows,
+    // 2026-10-14): its game resize at 16:12:38 got 80070057 while the overlay held a buffer, and the retries right
+    // after it 887A0001.
+    bool flipModel = false, refuseWhileReferenced = false;
     // DXGI resolves a zero against the swapchain's own window when it resizes: the game's client area
     // unless a case gives this swapchain a window of another size -- the output, say, once a
     // borderless placement has landed that the client rect sampled earlier did not see.
@@ -329,9 +335,14 @@ struct Swapchain : Ref
         lastResizeHeight = height;
         lastResizeFlags = flags;
         lastResizeFormat = format;
+        lastResizeCount = (int) count;
         resizedAt = ++g_resizeClock;
         HRESULT result = resizeResult;
-        if (!resizeResults.empty())
+        if (flipModel && count == 1)
+            result = E_INVALIDARG;
+        else if (refuseWhileReferenced && buffer.refs > 1)
+            result = DXGI_ERROR_INVALID_CALL;
+        else if (!resizeResults.empty())
         {
             result = resizeResults.front();
             resizeResults.pop_front();
@@ -348,11 +359,13 @@ struct Swapchain : Ref
         }
         return result;
     }
-    HRESULT ResizeBuffers1(UINT, UINT width, UINT height, int, UINT, const UINT*, IUnknown* const*)
+    HRESULT ResizeBuffers1(UINT count, UINT width, UINT height, int format, UINT, const UINT*, IUnknown* const*)
     {
         ++resizes;
         lastResizeWidth = width;
         lastResizeHeight = height;
+        lastResizeFormat = format;
+        lastResizeCount = (int) count;
         resizedAt = ++g_resizeClock;
         return resizeResult;
     }
@@ -509,7 +522,14 @@ bool IsDx12InteropPresentSC(Swapchain*) { return interopPresenter; }
 namespace MenuOverlayDx
 {
 int cleanups = 0, presents = 0;
-void CleanupRenderTarget(bool, HWND) { ++cleanups; }
+// The overlay's render targets: a reference to a buffer of the swapchain it drew on (CreateRenderTargetDx12), which a
+// cleanup lets go (CleanupRenderTargetDx12). Null unless a case has the overlay draw.
+ID3D12Resource* heldTarget = nullptr;
+void CleanupRenderTarget(bool, HWND)
+{
+    ++cleanups;
+    SafeRelease(heldTarget);
+}
 void Present(Swapchain*, UINT, UINT, const void*, ID3D12CommandQueue*, HWND, bool) { ++presents; }
 } // namespace MenuOverlayDx
 int deaths = 0;
@@ -724,6 +744,7 @@ class Dx11wDx12SC
     bool _presenterResizeRefused = false;
     UINT _refusedResizeRetriesLeft = 0;
     bool _PresenterDrawsOverlay() const;
+    bool _DrawsOwnOverlay() const;
     void _ReleaseOverlayForResize();
     HRESULT _ResizePresenter(UINT, UINT, UINT, DXGI_FORMAT, UINT);
     void _RetryRefusedPresenterResize();

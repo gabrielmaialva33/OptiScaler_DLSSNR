@@ -153,11 +153,22 @@ UINT PresenterResizeFlags(IDXGISwapChain1* presenter, UINT gameFlags)
     return (flags & ~fixedAtCreation) | (desc.Flags & fixedAtCreation);
 }
 
+UINT PresenterResizeBufferCount(UINT gameCount)
+{
+    // Flip model takes no fewer than two buffers, in ResizeBuffers as at creation, where PrepareDx12InteropDesc already
+    // raises the game's count to two. A blt-model game with one buffer may name that count again when it resizes,
+    // which the hidden swapchain, the game's own, takes and the presenter cannot. Zero keeps the count it has.
+    return gameCount == 1 ? 2 : gameCount;
+}
+
 DXGI_FORMAT PresenterResizeFormat(DXGI_FORMAT gameFormat)
 {
-    // Metal: Hellsinger names R8G8B8A8_UNORM_SRGB in its first resize. On native Windows the presenter refused it
-    // (80070057), and only the retry at the presenter's own size, which passes DXGI_FORMAT_UNKNOWN, got through
-    // (Rafael's RTX 3060, 2026-10-14). A resize to another size would have left the presenter at the old one.
+    // Metal: Hellsinger names R8G8B8A8_UNORM_SRGB in its resizes. Flip model has no sRGB buffer, so the presenter was
+    // created with the UNORM sibling and is resized with it too. That was not what the presenter refused, though: with
+    // this in place (b1ab84bc) it still answered the game's first resize with 80070057 (Rafael's RTX 3060, 2026-10-14,
+    // second run). The likeliest argument left is the buffer count: an sRGB swapchain can only be blt model, whose
+    // count may be one (PresenterResizeBufferCount). That run logged at level 2, so the arguments were not in it; the
+    // refusal line in _ResizePresenter now names every one the presenter was given.
     switch (gameFormat)
     {
     case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
@@ -567,29 +578,47 @@ bool Dx11wDx12SC::_PresenterDrawsOverlay() const
            !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
 }
 
+// Whether this wrapper's Present draws the overlay onto the plain presenter it owns, with no other presenter current
+// for frame generation and no frame generation object but its own (or none): the overlay's render targets are then
+// this presenter's buffers, and the frame generation object CleanupRenderTarget pauses is this wrapper's.
+//
+// _OwnsOverlay is false on an NR-only bridge: _OwnsFgPresenter needs a frame generation object, and currentFGSwapchain
+// names the plain presenter rather than nothing. So the overlay kept its references through every resize there, and
+// a flip-model presenter refuses ResizeBuffers while one is out. Metal: Hellsinger on native Windows (Rafael's RTX
+// 3060, build b1ab84bc, 2026-10-14): the presenter took one resize at its own size before the overlay had drawn; once
+// it had, the resizes at its own size were refused, the last with 887A0001. vkd3d-proton refuses the same, but there
+// the game's resizes at an unchanged size are skipped (IsSame) unless one is owed, so only a real size change would
+// have shown it.
+bool Dx11wDx12SC::_DrawsOwnOverlay() const
+{
+    const auto& state = State::Instance();
+    return state.currentFGSwapchain == _fgSwapChain && state.currentFG == _fg && !_PresenterDrawsOverlay() &&
+           _OwnsPresenter();
+}
+
 // What a resize owes the overlay and frame generation before the presenter's buffers change.
 //
 // On the plain presenter the overlay's render targets are the presenter's own buffers and only this thread draws
-// them, so they are let go here. On a frame generation presenter they belong to the real swapchain inside the
-// backend, and the backend draws them from its own present path -- DLSS-G from a present thread of its own, while
-// interpolating. Letting them go from here raced that thread: Generation Zero with DLSS-G on this bridge
-// (2026-09-29) re-created them on Streamline's present thread in the middle of this cleanup, the cleanup then
-// cleared the overlay's init state over them, and the cleanup inside the real swapchain's resize, which checks
-// that state, kept them. vkd3d-proton refuses a ResizeBuffers while any buffer is referenced, so the backend's
-// resize failed and DLSS-G was left with no buffers. That cleanup in WrappedIDXGISwapChain4::ResizeBuffers runs
-// inside the backend's resize, after the backend has stopped presenting (Streamline flushes first), which is
-// where upstream's native D3D12 path lets them go too. Frame generation is still paused here, as the overlay
-// cleanup did.
+// them, so they are let go here (_DrawsOwnOverlay, which an NR-only bridge needs: _OwnsOverlay is false there). On a
+// frame generation presenter they belong to the real swapchain inside the backend, and the backend draws them from
+// its own present path -- DLSS-G from a present thread of its own, while interpolating. Letting them go from here
+// raced that thread: Generation Zero with DLSS-G on this bridge (2026-09-29) re-created them on Streamline's present
+// thread in the middle of this cleanup, the cleanup then cleared the overlay's init state over them, and the cleanup
+// inside the real swapchain's resize, which checks that state, kept them. vkd3d-proton refuses a ResizeBuffers while
+// any buffer is referenced, so the backend's resize failed and DLSS-G was left with no buffers. That cleanup in
+// WrappedIDXGISwapChain4::ResizeBuffers runs inside the backend's resize, after the backend has stopped presenting
+// (Streamline flushes first), which is where upstream's native D3D12 path lets them go too. Frame generation is still
+// paused here, as the overlay cleanup did.
 void Dx11wDx12SC::_ReleaseOverlayForResize()
 {
-    if (!_OwnsOverlay())
-        return;
-
-    if (!_PresenterDrawsOverlay())
+    if (_DrawsOwnOverlay() || (_OwnsOverlay() && !_PresenterDrawsOverlay()))
     {
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
         return;
     }
+
+    if (!_OwnsOverlay())
+        return;
 
     auto fg = State::Instance().currentFG;
     if (fg != nullptr && fg->FrameGenerationContext() != nullptr && fg->IsActive())
@@ -824,8 +853,9 @@ Dx11wDx12::Window::Surrender Dx11wDx12SC::_SurrenderPresenter()
         _id, (size_t) _handle);
 
     // The overlay's render targets are this presenter's buffers, and on the plain presenter only this wrapper's Present
-    // draws them. Not through _ReleaseOverlayForResize: _OwnsOverlay is false for a bridge without a frame generation
-    // object, which is every NR-only bridge, and these must go before the presenter can.
+    // draws them. Not through _ReleaseOverlayForResize: its plain-presenter test (_DrawsOwnOverlay) wants the presenter
+    // FGHooks names, and a wrapper with no frame generation object is taken over without it. These must go before the
+    // presenter can.
     if (!deviceLost)
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
 
@@ -1273,9 +1303,11 @@ HRESULT Dx11wDx12SC::_ResizePresenter(UINT bufferCount, UINT width, UINT height,
         return result;
     }
 
-    LOG_ERROR("Dx11wDx12SC {}: the presenter refused ResizeBuffers: {:X}. Its size is unchanged and the hidden "
-              "swapchain is left to match it; up to {} resizes at its own size follow from Present",
-              _id, (UINT) result, kRefusedResizeRetries);
+    // Every argument, so a refusal names its cause at the default log level.
+    LOG_ERROR("Dx11wDx12SC {}: the presenter refused ResizeBuffers (count {}, {}x{}, format {}, flags {:X}): {:X}. Its "
+              "size is unchanged and the hidden swapchain is left to match it; up to {} resizes at its own size follow "
+              "from Present",
+              _id, bufferCount, width, height, (UINT) format, flags, (UINT) result, kRefusedResizeRetries);
 
     _presenterResizeOwed = true;
     _presenterResizeRefused = true;
@@ -1434,6 +1466,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     Dx11wDx12::ResolveZeroExtent(_handle, hiddenWidth, hiddenHeight, _fgSwapChain != nullptr ? _fgSwapChain : _real);
     const UINT presenterFlags = Dx11wDx12::PresenterResizeFlags(_fgSwapChain, SwapChainFlags);
     const DXGI_FORMAT presenterFormat = Dx11wDx12::PresenterResizeFormat(NewFormat);
+    const UINT presenterCount = Dx11wDx12::PresenterResizeBufferCount(BufferCount);
 
     // If Width and Height were 0x0 and the window is tiny (< 16), ResolveZeroExtent kept the current buffer
     // size in hiddenWidth/hiddenHeight. Hand those to the presenter as well so DXGI does not collapse it to 1x1.
@@ -1447,7 +1480,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         presenterHeight = hiddenHeight;
     }
 
-    const bool skipFgResize = !_presenterResizeOwed && IsSame(_fgSwapChain, BufferCount, hiddenWidth, hiddenHeight,
+    const bool skipFgResize = !_presenterResizeOwed && IsSame(_fgSwapChain, presenterCount, hiddenWidth, hiddenHeight,
                                                               presenterFormat, presenterFlags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
@@ -1497,12 +1530,20 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         }
         else
         {
-            fgResult = _ResizePresenter(BufferCount, presenterWidth, presenterHeight, presenterFormat, presenterFlags);
+            fgResult =
+                _ResizePresenter(presenterCount, presenterWidth, presenterHeight, presenterFormat, presenterFlags);
         }
     }
 
     // A presenter that refused leaves both swapchains as they were, still agreeing, so the hidden one is
     // not touched; the game has the error.
+    //
+    // The hidden swapchain takes the game's count, format and flags as given. Every creation site makes it from the
+    // game's own description (realDesc = localDesc), not from the presenter's (PrepareDx12InteropDesc), so it has the
+    // game's swap effect and the game's count, and what the game names in a resize is what its own swapchain would
+    // take: a blt-model one with a single buffer resizes to one buffer. The exception is [V-Sync] OverrideVsync, which
+    // makes that description flip model with tearing before both swapchains exist; there the hidden swapchain can
+    // refuse the game's count and flags as it did before, and that is not handled here.
     HRESULT realResult = fgResult;
     if (SUCCEEDED(fgResult))
     {
@@ -1750,6 +1791,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     Dx11wDx12::ResolveZeroExtent(_handle, hiddenWidth, hiddenHeight, _fgSwapChain != nullptr ? _fgSwapChain : _real);
     const UINT presenterFlags = Dx11wDx12::PresenterResizeFlags(_fgSwapChain, SwapChainFlags);
     const DXGI_FORMAT presenterFormat = Dx11wDx12::PresenterResizeFormat(Format);
+    const UINT presenterCount = Dx11wDx12::PresenterResizeBufferCount(BufferCount);
 
     // If Width and Height were 0x0 and the window is tiny (< 16), ResolveZeroExtent kept the current buffer
     // size in hiddenWidth/hiddenHeight. Hand those to the presenter as well so DXGI does not collapse it to 1x1.
@@ -1763,7 +1805,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         presenterHeight = hiddenHeight;
     }
 
-    const bool skipFgResize = !_presenterResizeOwed && IsSame(_fgSwapChain, BufferCount, hiddenWidth, hiddenHeight,
+    const bool skipFgResize = !_presenterResizeOwed && IsSame(_fgSwapChain, presenterCount, hiddenWidth, hiddenHeight,
                                                               presenterFormat, presenterFlags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
@@ -1812,10 +1854,12 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         }
         else
         {
-            fgResult = _ResizePresenter(BufferCount, presenterWidth, presenterHeight, presenterFormat, presenterFlags);
+            fgResult =
+                _ResizePresenter(presenterCount, presenterWidth, presenterHeight, presenterFormat, presenterFlags);
         }
     }
 
+    // The hidden swapchain takes the game's arguments as given, as in ResizeBuffers.
     HRESULT realResult = fgResult;
     if (SUCCEEDED(fgResult))
     {

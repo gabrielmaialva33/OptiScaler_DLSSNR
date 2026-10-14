@@ -256,6 +256,43 @@ What these fakes cannot show: that Streamline recreates its proxy buffers on the
 DLSS-G's present thread is really idle when the real swapchain's cleanup runs. The log supports the second
 (`flushAll` precedes the real swapchain's `ResizeBuffers` in both resizes); the first needs a game.
 
+## A flip-model presenter on native Windows (2026-10-14, second run)
+
+Metal: Hellsinger on Rafael's RTX 3060 under Windows, build `b1ab84bc`: NR only, so the plain presenter and no frame
+generation object. With the sRGB format already mapped, the presenter refused the game's first resize with `80070057`. It
+took one resize at its own size from `Present` before the overlay had drawn. It then refused the game's next resize
+(`80070057`) and the three resizes at its own size after it, the last with `887A0001`. Proton showed neither. The fix and the log are in
+`docs/dlssnr/design/nr-dx11-bridge-host.md`, "The presenter's resize on native Windows".
+
+The fake swapchain can now refuse the way DXGI does, off unless a case asks: `flipModel` answers `E_INVALIDARG` to a
+count of one, then `refuseWhileReferenced` answers `887A0001` while a buffer holds a public reference. The fake overlay
+holds one when a case has it draw (`MenuOverlayDx::heldTarget`) and lets it go in `CleanupRenderTarget`.
+
+`nativeResizeCases` compiles the production `PresenterResizeBufferCount` and `_DrawsOwnOverlay` with everything above:
+
+- **A count of one**, through both entry points. The presenter gets two, the hidden swapchain the game's one. The same
+  size named again is skipped by `IsSame`, which a raw count of one never allowed. Zero stays zero.
+- **The overlay on an NR-only bridge**, through both entry points. A game resize lets the overlay's render targets go
+  before the presenter's resize, which goes through at the first attempt.
+- **The log's sequence.** A refused game resize arms the retries, and the overlay draws. The next present's resize at the
+  presenter's own size lets it go first and succeeds; nothing more is tried.
+- **Frame generation's presenter** keeps the old behaviour with a neural host riding along. Neither a game resize nor a
+  retry cleans its overlay from here, and frame generation is paused.
+- **Left alone.** Another presenter current for frame generation; a frame generation object that is not the wrapper's;
+  an older wrapper whose presenter a newer one holds (FGPreserveSwapChain); a wrapper that gave its presenter up.
+
+Ten mutations were each confirmed to fail a case:
+
+- the count handed over unchanged;
+- `IsSame` given the raw count, in both entry points or in `ResizeBuffers1` alone;
+- the presenter given the raw count in `ResizeBuffers1` alone;
+- the hidden swapchain given the presenter's count;
+- `_ReleaseOverlayForResize` as before;
+- `_DrawsOwnOverlay` without each of its four conditions.
+
+What these fakes cannot show: that `80070057` came from the count. That run logged at level 2, so the game's arguments
+are not in it. The refusal line now prints the count, size, format and flags the presenter was given.
+
 ## A second swapchain on the same window (2026-10-13)
 
 Metal: Hellsinger on Rafael's RTX 3060 under Windows: a D3D11 Unity title with NR at `HookMethod=2` on this bridge.
