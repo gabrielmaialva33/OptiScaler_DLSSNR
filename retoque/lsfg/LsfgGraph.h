@@ -239,6 +239,21 @@ inline bool BuildGraph(uint32_t width, uint32_t height, float flow, bool perform
         return false;
     }
 
+    // Each image has one writer per frame: the wave schedule below and the direct output rely on it.
+    std::vector<uint32_t> writers(g.images.size(), 0);
+    for (const auto* passes : { &g.pre, &g.main })
+        for (const auto& p : *passes)
+            for (auto w : p.writes)
+                ++writers[w];
+    for (size_t i = 0; i < writers.size(); ++i)
+    {
+        if (writers[i] != (i == g.source ? 0u : 1u))
+        {
+            error = "an image without exactly one writer";
+            return false;
+        }
+    }
+
     for (const auto* passes : { &g.pre, &g.main })
     {
         for (const auto& p : *passes)
@@ -255,6 +270,62 @@ inline bool BuildGraph(uint32_t width, uint32_t height, float flow, bool perform
     }
 
     return true;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Waves
+//
+// The harness orders the graph with a barrier around every dispatch: 100 serialization points per generated
+// frame, most of them in front of dispatches of a few dozen thread groups that cannot fill the GPU alone. Most
+// passes do not depend on the one before them: the seven pyramid levels of the alpha pre-pass are independent of
+// each other, the delta chains need only the previous level's delta, and at levels 4-6 the gamma, delta and
+// epsilon chains run side by side. A wave is a set of passes with no hazard between them, so one barrier batch in
+// front of each wave orders everything: every pass goes in the earliest wave after the last writer of what it
+// reads (read after write) and after the last reader and writer of what it writes (write after read, write after
+// write), in program order. Reordering independent dispatches changes no input of any of them, so the output is
+// the same bytes.
+
+struct WaveStep
+{
+    bool main = false;  // from Graph::main (else Graph::pre)
+    uint32_t index = 0; // index in that list
+};
+
+using Waves = std::vector<std::vector<WaveStep>>;
+
+// The waves of the pre-pass, the main pass, or both as one sequence (a base frame that also generates: the main
+// pass's coarse levels then start while the pre-pass still finishes its own).
+inline Waves ScheduleWaves(const Graph& g, bool pre, bool main)
+{
+    std::vector<uint32_t> lastWrite(g.images.size(), 0);
+    std::vector<uint32_t> lastRead(g.images.size(), 0);
+    Waves waves;
+
+    auto place = [&](bool isMain, uint32_t index)
+    {
+        const GraphPass& p = isMain ? g.main[index] : g.pre[index];
+        uint32_t wave = 1;
+        for (auto r : p.reads)
+            wave = std::max(wave, lastWrite[r] + 1);
+        for (auto w : p.writes)
+            wave = std::max({ wave, lastWrite[w] + 1, lastRead[w] + 1 });
+        for (auto r : p.reads)
+            lastRead[r] = std::max(lastRead[r], wave);
+        for (auto w : p.writes)
+            lastWrite[w] = wave;
+        if (waves.size() < wave)
+            waves.resize(wave);
+        waves[wave - 1].push_back({ isMain, index });
+    };
+
+    if (pre)
+        for (uint32_t i = 0; i < uint32_t(g.pre.size()); ++i)
+            place(false, i);
+    if (main)
+        for (uint32_t i = 0; i < uint32_t(g.main.size()); ++i)
+            place(true, i);
+
+    return waves;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -395,6 +466,29 @@ inline uint32_t WorkingFormat(uint32_t dxgiFormat)
     default:
         return 0;
     }
+}
+
+// The format of a UAV through which generate can write FFX's output itself (no copy-out), or 0 when it cannot:
+// the output must be of the working format, or the typeless format of its family, which the working format then
+// views. Any other typed member of the family (the _SRGB ones) cannot take a UNORM view, and _SRGB has no typed
+// UAV store; those keep the copy, which is legal across a family.
+inline uint32_t DirectOutputFormat(uint32_t outputFormat, uint32_t workingFormat)
+{
+    if (workingFormat == 0)
+        return 0;
+    if (outputFormat == workingFormat)
+        return workingFormat;
+
+    switch (workingFormat)
+    {
+    case Format::Rgba8:
+        return outputFormat == Format::Rgba8Typeless ? workingFormat : 0;
+    case Format::Bgra8:
+        return outputFormat == Format::Bgra8Typeless ? workingFormat : 0;
+    case Format::Rgb10A2:
+        return outputFormat == Format::Rgb10A2Typeless ? workingFormat : 0;
+    }
+    return 0;
 }
 
 // FfxApiBackbufferTransferFunction: 0 SRGB, 1 PQ, 2 SCRGB.

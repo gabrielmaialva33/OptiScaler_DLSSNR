@@ -1,6 +1,7 @@
 // LSFG inside FSR-FG (study branch): the host-testable half of retoque/lsfg/ -- the DXIL PSV0 reader the root
-// signatures are built from, the pass graph, the constant-buffer table, which frames LSFG takes, and the
-// history schedule. The headers under test are included unmodified; nothing here touches D3D12.
+// signatures are built from, the pass graph and its barrier waves, the constant-buffer table, which frames LSFG
+// takes and which FFX outputs it may write itself, and the history schedule. The headers under test are included
+// unmodified; nothing here touches D3D12.
 //
 // argv[1], optional: a folder of the user's own converted DXIL (<rid>.cso, Tmp/lsfg-study/dxil). When given,
 // all 99 modules are read and held against the graph the way ProgramSet_Dx12 / Context_Dx12 hold them.
@@ -16,6 +17,7 @@
 #include <fstream>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace Lsfg;
@@ -390,6 +392,124 @@ static void TestCbuffers()
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// Waves: the barrier schedule Context_Dx12 records (one barrier batch per wave)
+
+static void CheckWaves(const Graph& g, bool pre, bool main, size_t expectedWaves)
+{
+    const Waves waves = ScheduleWaves(g, pre, main);
+    CHECK(waves.size() == expectedWaves);
+
+    // Program order of the sequence, and each step's wave.
+    std::vector<WaveStep> order;
+    if (pre)
+        for (uint32_t i = 0; i < g.pre.size(); ++i)
+            order.push_back({ false, i });
+    if (main)
+        for (uint32_t i = 0; i < g.main.size(); ++i)
+            order.push_back({ true, i });
+    auto slot = [&](const WaveStep& s) { return (s.main ? g.pre.size() : 0) + s.index; };
+    std::vector<int> waveOf(g.pre.size() + g.main.size(), -1);
+
+    size_t placed = 0;
+    for (size_t w = 0; w < waves.size(); ++w)
+    {
+        CHECK(!waves[w].empty());
+        std::set<uint32_t> reads, writes;
+        size_t last = 0;
+        for (size_t k = 0; k < waves[w].size(); ++k)
+        {
+            const auto& s = waves[w][k];
+            CHECK(waveOf[slot(s)] == -1); // once
+            waveOf[slot(s)] = int(w);
+            ++placed;
+            if (k > 0)
+                CHECK(slot(s) > last); // program order inside a wave
+            last = slot(s);
+
+            const GraphPass& p = s.main ? g.main[s.index] : g.pre[s.index];
+            for (auto r : p.reads)
+                reads.insert(r);
+            for (auto x : p.writes)
+            {
+                CHECK(writes.count(x) == 0); // never two writers in a wave
+                writes.insert(x);
+            }
+        }
+        for (auto x : writes)
+            CHECK(reads.count(x) == 0); // never read and written in one wave (SRV and UAV at once)
+    }
+    CHECK(placed == order.size());
+
+    // Every hazard between two passes of the sequence keeps its order: read after write, write after read,
+    // write after write.
+    auto passOf = [&](const WaveStep& s) -> const GraphPass& { return s.main ? g.main[s.index] : g.pre[s.index]; };
+    auto touches = [](const std::vector<uint32_t>& a, const std::vector<uint32_t>& b)
+    {
+        for (auto x : a)
+            for (auto y : b)
+                if (x == y)
+                    return true;
+        return false;
+    };
+    for (size_t a = 0; a < order.size(); ++a)
+    {
+        for (size_t b = a + 1; b < order.size(); ++b)
+        {
+            const auto& pa = passOf(order[a]);
+            const auto& pb = passOf(order[b]);
+            if (touches(pa.writes, pb.reads) || touches(pa.reads, pb.writes) || touches(pa.writes, pb.writes))
+                CHECK(waveOf[slot(order[a])] < waveOf[slot(order[b])]);
+        }
+    }
+}
+
+static void TestWaves()
+{
+    Graph g;
+    std::string error;
+
+    // 1920x1080 quality: the pre-pass is mipmaps, the seven alpha levels side by side (4 waves) and the beta
+    // chain; the main pass is bounded by the gamma chain (7 levels x 5) plus generate; together, the main pass's
+    // first levels start under the pre-pass's beta chain.
+    CHECK(BuildGraph(1920, 1080, 1.0f, false, false, g, error));
+    CheckWaves(g, true, false, 10);
+    CheckWaves(g, false, true, 36);
+    CheckWaves(g, true, true, 42);
+
+    // The schedule depends only on the graph's shape: the same at every size, flow and variant.
+    for (auto [w, h, flow, perf, fp16] :
+         { std::tuple { 1691u, 1312u, 1.0f, false, false }, std::tuple { 3440u, 1440u, 0.5f, true, false },
+           std::tuple { 257u, 193u, 1.0f, false, true }, std::tuple { 2560u, 1440u, 0.25f, true, true } })
+    {
+        Graph v;
+        CHECK(BuildGraph(w, h, flow, perf, fp16, v, error));
+        CheckWaves(v, true, false, 10);
+        CheckWaves(v, false, true, 36);
+        CheckWaves(v, true, true, 42);
+    }
+
+    // Generate is the last wave, and nothing else is in it.
+    const Waves both = ScheduleWaves(g, true, true);
+    CHECK(both.back().size() == 1 && both.back()[0].main && g.main[both.back()[0].index].rid == 1);
+
+    // Direct output: the working format or its family's typeless format; never an _SRGB or another family.
+    using namespace Format;
+    CHECK(DirectOutputFormat(Rgba8, Rgba8) == Rgba8);
+    CHECK(DirectOutputFormat(Rgba8Typeless, Rgba8) == Rgba8);
+    CHECK(DirectOutputFormat(Rgba8Srgb, Rgba8) == 0);
+    CHECK(DirectOutputFormat(Bgra8, Bgra8) == Bgra8);
+    CHECK(DirectOutputFormat(Bgra8Typeless, Bgra8) == Bgra8);
+    CHECK(DirectOutputFormat(Bgra8Srgb, Bgra8) == 0);
+    CHECK(DirectOutputFormat(Rgb10A2Typeless, Rgb10A2) == Rgb10A2);
+    CHECK(DirectOutputFormat(Rgb10A2, Rgb10A2) == Rgb10A2);
+    CHECK(DirectOutputFormat(Rgba8, Bgra8) == 0 && DirectOutputFormat(Bgra8Typeless, Rgba8) == 0);
+    CHECK(DirectOutputFormat(Rgba16F, 0) == 0 && DirectOutputFormat(0, 0) == 0);
+    // Every frame format LSFG takes has a working format that takes the direct route on its own resource.
+    for (uint32_t f : { Rgba8, Rgba8Srgb, Rgba8Typeless, Bgra8, Bgra8Srgb, Bgra8Typeless, Rgb10A2, Rgb10A2Typeless })
+        CHECK(DirectOutputFormat(WorkingFormat(f), WorkingFormat(f)) == WorkingFormat(f));
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // Which frames LSFG takes, and the history schedule
 
 static void TestPolicy()
@@ -513,6 +633,7 @@ int main(int argc, char** argv)
     TestDxil();
     TestGraph();
     TestCbuffers();
+    TestWaves();
     TestPolicy();
     if (argc > 1 && argv[1][0] != '\0')
         TestRealModules(argv[1]);

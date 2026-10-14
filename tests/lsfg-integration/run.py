@@ -4,8 +4,9 @@
 1. test.cpp, under ASan/UBSan: the DXIL PSV0 reader the root signatures come from (synthetic containers,
    every truncation and single-byte corruption), the pass graph (pass counts, dispatch extents against
    PIPELINE_V3_1.md, pools, one writer per image, variants, flow scale, refusals), the constant-buffer
-   table, which frames LSFG takes, and the history schedule. With LSFG_DXIL_DIR set to a folder of the
-   user's own converted modules (<rid>.cso), all 99 are read and held against the graph as well.
+   table, which frames LSFG takes, the history schedule, the barrier waves and which FFX outputs generate
+   may write itself. With LSFG_DXIL_DIR set to a folder of the user's own converted modules (<rid>.cso),
+   all 99 are read and held against the graph as well.
 2. [LSFG] round trip, the four points (DEVELOPMENT.md rule 4; nr-invariants checks only DlssNr keys):
    declared in Config.h, read and saved in Config.cpp, present in OptiScaler.ini, documented in Config.md.
 3. The FSRFG_Dx12.cpp call sites come as a set: a latch without the prepare skip, or a prepare skip without

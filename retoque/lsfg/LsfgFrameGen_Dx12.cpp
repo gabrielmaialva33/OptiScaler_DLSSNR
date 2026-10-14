@@ -14,6 +14,16 @@ namespace Lsfg
 {
 namespace
 {
+#ifdef LSFG_WAVE_TIMING
+void StudyTimestamp(ID3D12GraphicsCommandList* list)
+{
+    if (Study::waveQueries != nullptr)
+        list->EndQuery(Study::waveQueries, D3D12_QUERY_TYPE_TIMESTAMP, Study::waveQueryNext++);
+}
+#else
+void StudyTimestamp(ID3D12GraphicsCommandList*) {}
+#endif
+
 // Every shader the graph dispatches, as base resource ids: mipmaps, generate, the 24 core shaders.
 // generate_16bit (2) is byte-identical HLSL to generate_8bit (1) once converted (OPTI_INTEGRATION.md 6):
 // precision is the bound view's, so the graph only ever uses 1.
@@ -431,7 +441,8 @@ bool Context_Dx12::_Create(std::string& error)
         return false;
 
     const uint32_t tableDescriptors = _descriptorCount;
-    _descriptorCount += clears;
+    _descriptorCount += clears + kOutputRing;
+    _ringBase = tableDescriptors + clears;
 
     D3D12_DESCRIPTOR_HEAP_DESC heapDesc {};
     heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -533,6 +544,8 @@ bool Context_Dx12::_Create(std::string& error)
                 const uint32_t start = next;
                 next += param.count;
                 p.tables[i] = gpuAt(start);
+                if (param.uav && param.space == kOutputBinding)
+                    p.outputParam = int(i);
 
                 for (uint32_t j = 0; j < param.count; ++j)
                 {
@@ -617,7 +630,23 @@ bool Context_Dx12::_Create(std::string& error)
         }
     }
 
-    _barriers.reserve(16);
+    // The pass schedules, and a check that every generate pass found its output parameter (the direct output
+    // needs it; a module whose output is not where the graph says is refused here, not mis-bound later).
+    _wavesPre = ScheduleWaves(_graph, true, false);
+    _wavesPreMain = ScheduleWaves(_graph, true, true);
+    _wavesMain = ScheduleWaves(_graph, false, true);
+    for (const auto& p : _main)
+    {
+        const bool writesOutput =
+            std::find(p.graph->writes.begin(), p.graph->writes.end(), _graph.output) != p.graph->writes.end();
+        if (writesOutput != (p.outputParam >= 0))
+        {
+            error = std::format("shader {}: its output binding is not where the graph says", p.graph->rid);
+            return false;
+        }
+    }
+
+    _barriers.reserve(64);
     return true;
 }
 
@@ -634,69 +663,263 @@ void Context_Dx12::_Transition(std::vector<D3D12_RESOURCE_BARRIER>& barriers, Te
     b.Transition.StateAfter = next;
     barriers.push_back(b);
     t.state = next;
+    t.dirty = false; // a transition orders every earlier access, the UAV writes included
 }
 
-void Context_Dx12::_Execute(ID3D12GraphicsCommandList* list, std::vector<Pass>& passes, const FrameConstants& frame)
+void Context_Dx12::_UavBarrier(std::vector<D3D12_RESOURCE_BARRIER>& barriers, ID3D12Resource* resource)
+{
+    D3D12_RESOURCE_BARRIER b {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    b.UAV.pResource = resource;
+    barriers.push_back(b);
+}
+
+void Context_Dx12::_Flush(ID3D12GraphicsCommandList* list)
+{
+    if (_barriers.empty())
+        return;
+    list->ResourceBarrier(UINT(_barriers.size()), _barriers.data());
+    _barriers.clear();
+}
+
+void Context_Dx12::_Dispatch(ID3D12GraphicsCommandList* list, const Pass& p, const uint32_t* frameWords,
+                             D3D12_GPU_DESCRIPTOR_HANDLE outputTable)
+{
+    // Passes of one shader often follow each other inside a wave (the seven alpha levels): same root signature
+    // and pipeline, so neither is set again. Every root argument is still set for every dispatch.
+    if (p.program->pso.Get() != _boundPso)
+    {
+        list->SetComputeRootSignature(p.program->root.Get());
+        list->SetPipelineState(p.program->pso.Get());
+        _boundPso = p.program->pso.Get();
+    }
+
+    for (UINT i = 0; i < UINT(p.program->params.size()); ++i)
+    {
+        switch (p.program->params[i].kind)
+        {
+        case ProgramSet_Dx12::ParamKind::Table:
+            list->SetComputeRootDescriptorTable(i, (int(i) == p.outputParam && outputTable.ptr != 0) ? outputTable
+                                                                                                     : p.tables[i]);
+            break;
+        case ProgramSet_Dx12::ParamKind::FrameValues:
+            list->SetComputeRoot32BitConstants(i, kCbWords, frameWords, 0);
+            break;
+        case ProgramSet_Dx12::ParamKind::PushValues:
+        {
+            const uint32_t push[kPcWords] { p.graph->special, p.graph->index, 0, 0 };
+            list->SetComputeRoot32BitConstants(i, kPcWords, push, 0);
+            break;
+        }
+        }
+    }
+
+    list->Dispatch(p.graph->groupsX, p.graph->groupsY, 1);
+}
+
+void Context_Dx12::_ExecutePerPass(ID3D12GraphicsCommandList* list, std::vector<Pass>& passes,
+                                   const FrameConstants& frame)
 {
     uint32_t frameWords[kCbWords] {};
     std::memcpy(frameWords, &frame, sizeof(frame));
 
     for (auto& p : passes)
     {
-        _barriers.clear();
         for (auto r : p.graph->reads)
             _Transition(_barriers, _textures[r], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         for (auto w : p.graph->writes)
-            _Transition(_barriers, _textures[w], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        if (!_barriers.empty())
-            list->ResourceBarrier(UINT(_barriers.size()), _barriers.data());
-
-        list->SetComputeRootSignature(p.program->root.Get());
-        list->SetPipelineState(p.program->pso.Get());
-
-        for (UINT i = 0; i < UINT(p.program->params.size()); ++i)
         {
-            switch (p.program->params[i].kind)
+            auto& t = _textures[w];
+            if (t.state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
             {
-            case ProgramSet_Dx12::ParamKind::Table:
-                list->SetComputeRootDescriptorTable(i, p.tables[i]);
-                break;
-            case ProgramSet_Dx12::ParamKind::FrameValues:
-                list->SetComputeRoot32BitConstants(i, kCbWords, frameWords, 0);
-                break;
-            case ProgramSet_Dx12::ParamKind::PushValues:
-            {
-                const uint32_t push[kPcWords] { p.graph->special, p.graph->index, 0, 0 };
-                list->SetComputeRoot32BitConstants(i, kPcWords, push, 0);
-                break;
+                _Transition(_barriers, t, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
+            else if (t.dirty)
+            {
+                // A write still unordered: the first-use clear, or a frame recorded with the waves that left it.
+                _UavBarrier(_barriers, t.resource.Get());
+                t.dirty = false;
             }
         }
+        _Flush(list);
 
-        list->Dispatch(p.graph->groupsX, p.graph->groupsY, 1);
+        _Dispatch(list, p, frameWords, {});
 
-        // As the harness: every write is followed by a UAV barrier, which also orders it against the next
-        // base frame's accesses on the same queue.
-        _barriers.clear();
+        // As the harness: every write is followed by a UAV barrier.
         for (auto w : p.graph->writes)
         {
-            D3D12_RESOURCE_BARRIER b {};
-            b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-            b.UAV.pResource = _textures[w].resource.Get();
-            _barriers.push_back(b);
+            _UavBarrier(_barriers, _textures[w].resource.Get());
+            _textures[w].dirty = false;
         }
-        if (!_barriers.empty())
-            list->ResourceBarrier(UINT(_barriers.size()), _barriers.data());
+        _Flush(list);
     }
 }
 
-void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, const FrameConstants& frame)
+void Context_Dx12::_ExecuteWaves(ID3D12GraphicsCommandList* list, const Waves& waves, const FrameConstants& pre,
+                                 const FrameConstants& main, DirectTarget* target)
+{
+    uint32_t preWords[kCbWords] {};
+    uint32_t mainWords[kCbWords] {};
+    std::memcpy(preWords, &pre, sizeof(pre));
+    std::memcpy(mainWords, &main, sizeof(main));
+
+    for (const auto& wave : waves)
+    {
+        // One batch for the whole wave: what it reads becomes a shader resource (ordering the writes of earlier
+        // waves), what it writes becomes a UAV, or gets a UAV barrier when it already is one and an earlier write
+        // is still unordered. Nothing in a wave reads what another pass of the wave writes (ScheduleWaves).
+        for (const auto& step : wave)
+        {
+            const Pass& p = step.main ? _main[step.index] : _pre[step.index];
+            for (auto r : p.graph->reads)
+                _Transition(_barriers, _textures[r], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            for (auto w : p.graph->writes)
+            {
+                if (target != nullptr && w == _graph.output)
+                {
+                    if (target->state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+                    {
+                        // Last written by an earlier list and read since on FFX's present queue, both behind FFX's
+                        // fences; the barrier costs nothing inside this batch.
+                        _UavBarrier(_barriers, target->resource);
+                    }
+                    else
+                    {
+                        D3D12_RESOURCE_BARRIER b {};
+                        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                        b.Transition.pResource = target->resource;
+                        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                        b.Transition.StateBefore = target->state;
+                        b.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                        _barriers.push_back(b);
+                    }
+                    continue;
+                }
+
+                auto& t = _textures[w];
+                if (t.state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+                {
+                    _Transition(_barriers, t, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                }
+                else if (t.dirty)
+                {
+                    _UavBarrier(_barriers, t.resource.Get());
+                    t.dirty = false;
+                }
+            }
+        }
+        _Flush(list);
+
+        for (const auto& step : wave)
+        {
+            const Pass& p = step.main ? _main[step.index] : _pre[step.index];
+            const bool direct = target != nullptr && p.outputParam >= 0;
+            _Dispatch(list, p, step.main ? mainWords : preWords,
+                      direct ? target->table : D3D12_GPU_DESCRIPTOR_HANDLE {});
+            for (auto w : p.graph->writes)
+            {
+                if (!(target != nullptr && w == _graph.output))
+                    _textures[w].dirty = true;
+            }
+        }
+        StudyTimestamp(list);
+    }
+}
+
+bool Context_Dx12::_BindDirect(ID3D12Resource* target, D3D12_RESOURCE_STATES state, DirectTarget& out)
+{
+    const auto d = target->GetDesc();
+    uint32_t viewFormat = 0;
+
+    if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || d.SampleDesc.Count != 1 || d.DepthOrArraySize != 1)
+        _routeReason = "it is not a single-sample, single-slice 2D texture";
+    else if (d.Width != _key.width || d.Height != _key.height)
+        _routeReason = "its size is not the frame's";
+    else if (!(d.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
+        _routeReason = "it was created without ALLOW_UNORDERED_ACCESS";
+    else if ((viewFormat = DirectOutputFormat((uint32_t) d.Format, (uint32_t) _key.format)) == 0)
+        _routeReason = "its format takes no UAV of the working format (an _SRGB format)";
+    else
+        _routeReason = "";
+
+    if (*_routeReason != '\0')
+    {
+        _route = OutputRoute::Copy;
+        return false;
+    }
+
+    // The working format was checked for typed UAV stores when the context was built (LSFG's own output needs
+    // them too), and it is the view's format here.
+    const uint32_t slot = _ringBase + uint32_t(_ringNext++ % kOutputRing);
+    auto cpu = _heap->GetCPUDescriptorHandleForHeapStart();
+    cpu.ptr += SIZE_T(slot) * _descriptorSize;
+    auto gpu = _heap->GetGPUDescriptorHandleForHeapStart();
+    gpu.ptr += UINT64(slot) * _descriptorSize;
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC v {};
+    v.Format = (DXGI_FORMAT) viewFormat;
+    v.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    v.Texture2D.MipSlice = 0;
+    _key.device->CreateUnorderedAccessView(target, nullptr, &v, cpu);
+
+    out.resource = target;
+    out.state = state;
+    out.table = gpu;
+    _route = OutputRoute::Direct;
+    return true;
+}
+
+void Context_Dx12::_CopyOut(ID3D12GraphicsCommandList* list, ID3D12Resource* target, D3D12_RESOURCE_STATES targetState)
+{
+    auto& output = _textures[_graph.output];
+
+    _Transition(_barriers, output, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    if (targetState != D3D12_RESOURCE_STATE_COPY_DEST)
+    {
+        D3D12_RESOURCE_BARRIER b {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = target;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = targetState;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        _barriers.push_back(b);
+    }
+    _Flush(list);
+
+    D3D12_TEXTURE_COPY_LOCATION dst {};
+    dst.pResource = target;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION src {};
+    src.pResource = output.resource.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    // Left pending: issued with the next batch, or by Record's last flush.
+    if (targetState != D3D12_RESOURCE_STATE_COPY_DEST)
+    {
+        D3D12_RESOURCE_BARRIER b {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = target;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.StateAfter = targetState;
+        _barriers.push_back(b);
+    }
+}
+
+void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, const FrameConstants& frame,
+                          Schedule schedule)
 {
     const bool timed = _queries != nullptr;
     const uint32_t slot = uint32_t(_timedFrames % kTimingSlots);
+    const bool perPass = schedule == Schedule::PerPass;
 
     ID3D12DescriptorHeap* heaps[] = { _heap.Get() };
     list->SetDescriptorHeaps(1, heaps);
+    _boundPso = nullptr; // the list is FFX's: whatever it had bound is not ours
+    _barriers.clear();
 
     if (timed)
         list->EndQuery(_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2);
@@ -708,16 +931,13 @@ void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, co
         const auto clearCpuBase = _clearHeap->GetCPUDescriptorHandleForHeapStart();
         const auto gpuBase = _heap->GetGPUDescriptorHandleForHeapStart();
 
-        _barriers.clear();
         for (auto& t : _textures)
         {
             if (t.clear)
                 _Transition(_barriers, t, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
-        if (!_barriers.empty())
-            list->ResourceBarrier(UINT(_barriers.size()), _barriers.data());
+        _Flush(list);
 
-        _barriers.clear();
         for (auto& t : _textures)
         {
             if (!t.clear)
@@ -727,22 +947,16 @@ void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, co
             auto cpu = clearCpuBase;
             cpu.ptr += SIZE_T(t.clearSlot) * _descriptorSize;
             list->ClearUnorderedAccessViewFloat(gpu, cpu, t.resource.Get(), zero, 0, nullptr);
-
-            D3D12_RESOURCE_BARRIER b {};
-            b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-            b.UAV.pResource = t.resource.Get();
-            _barriers.push_back(b);
+            t.dirty = true; // ordered by the barrier in front of its first use
         }
-        if (!_barriers.empty())
-            list->ResourceBarrier(UINT(_barriers.size()), _barriers.data());
 
         _recorded = true;
     }
 
-    // Ingest: FFX's copy of the backbuffer into this base frame's source slot.
+    // Ingest: FFX's backbuffer into this base frame's source slot.
     {
         auto& source = _textures[_graph.source];
-        _barriers.clear();
+        _Transition(_barriers, source, D3D12_RESOURCE_STATE_COPY_DEST);
         if (io.presentState != D3D12_RESOURCE_STATE_COPY_SOURCE)
         {
             D3D12_RESOURCE_BARRIER b {};
@@ -753,9 +967,7 @@ void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, co
             b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
             _barriers.push_back(b);
         }
-        _Transition(_barriers, source, D3D12_RESOURCE_STATE_COPY_DEST);
-        if (!_barriers.empty())
-            list->ResourceBarrier(UINT(_barriers.size()), _barriers.data());
+        _Flush(list);
 
         D3D12_TEXTURE_COPY_LOCATION dst {};
         dst.pResource = source.resource.Get();
@@ -768,6 +980,7 @@ void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, co
         D3D12_BOX box { 0, 0, 0, _key.width, _key.height, 1 };
         list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
 
+        // Pending: the first wave's batch carries it (and the source's move to a shader resource).
         if (io.presentState != D3D12_RESOURCE_STATE_COPY_SOURCE)
         {
             D3D12_RESOURCE_BARRIER b {};
@@ -776,73 +989,86 @@ void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, co
             b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
             b.Transition.StateAfter = io.presentState;
-            list->ResourceBarrier(1, &b);
-        }
-    }
-
-    // Pre-pass: once per base frame.
-    _Execute(list, _pre, frame);
-
-    // Main pass and copy-out, once per generated frame.
-    for (uint32_t k = 0; k < io.generate && k < io.outputs.size(); ++k)
-    {
-        ID3D12Resource* target = io.outputs[k];
-        if (target == nullptr)
-            break;
-
-        FrameConstants f = frame;
-        f.timestamp = TimestampFor(k + 1, io.generatedFrames);
-        _Execute(list, _main, f);
-
-        auto& output = _textures[_graph.output];
-        const auto targetState = io.outputStates[k];
-
-        _barriers.clear();
-        _Transition(_barriers, output, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        if (targetState != D3D12_RESOURCE_STATE_COPY_DEST)
-        {
-            D3D12_RESOURCE_BARRIER b {};
-            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            b.Transition.pResource = target;
-            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            b.Transition.StateBefore = targetState;
-            b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
             _barriers.push_back(b);
         }
-        list->ResourceBarrier(UINT(_barriers.size()), _barriers.data());
+    }
 
-        D3D12_TEXTURE_COPY_LOCATION dst {};
-        dst.pResource = target;
-        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        dst.SubresourceIndex = 0;
-        D3D12_TEXTURE_COPY_LOCATION src {};
-        src.pResource = output.resource.Get();
-        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        src.SubresourceIndex = 0;
-        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    StudyTimestamp(list);
 
-        if (targetState != D3D12_RESOURCE_STATE_COPY_DEST)
+    uint32_t generate = std::min<uint32_t>(io.generate, uint32_t(io.outputs.size()));
+    for (uint32_t k = 0; k < generate; ++k)
+    {
+        if (io.outputs[k] == nullptr)
         {
-            D3D12_RESOURCE_BARRIER b {};
-            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            b.Transition.pResource = target;
-            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-            b.Transition.StateAfter = targetState;
-            list->ResourceBarrier(1, &b);
+            generate = k;
+            break;
         }
     }
+
+    if (perPass)
+    {
+        // The harness's schedule, for the study's A/B timing: barriers around every dispatch, the copy-out.
+        _Flush(list);
+        _ExecutePerPass(list, _pre, frame);
+        for (uint32_t k = 0; k < generate; ++k)
+        {
+            FrameConstants f = frame;
+            f.timestamp = TimestampFor(k + 1, io.generatedFrames);
+            _ExecutePerPass(list, _main, f);
+            _CopyOut(list, io.outputs[k], io.outputStates[k]);
+            _Flush(list);
+        }
+    }
+    else if (generate == 0)
+    {
+        _ExecuteWaves(list, _wavesPre, frame, frame, nullptr);
+    }
+    else
+    {
+        for (uint32_t k = 0; k < generate; ++k)
+        {
+            FrameConstants f = frame;
+            f.timestamp = TimestampFor(k + 1, io.generatedFrames);
+
+            DirectTarget direct;
+            const bool isDirect = _BindDirect(io.outputs[k], io.outputStates[k], direct);
+            _ExecuteWaves(list, k == 0 ? _wavesPreMain : _wavesMain, frame, f, isDirect ? &direct : nullptr);
+
+            if (!isDirect)
+            {
+                _CopyOut(list, io.outputs[k], io.outputStates[k]);
+            }
+            else if (direct.state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+            {
+                // FFX's state stays; order the writes before whatever reads them next on this queue.
+                _UavBarrier(_barriers, direct.resource);
+            }
+            else
+            {
+                D3D12_RESOURCE_BARRIER b {};
+                b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                b.Transition.pResource = direct.resource;
+                b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                b.Transition.StateAfter = direct.state;
+                _barriers.push_back(b);
+            }
+        }
+    }
+    _Flush(list);
+    StudyTimestamp(list);
 
     if (timed)
     {
         list->EndQuery(_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2 + 1);
         list->ResolveQueryData(_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2, 2, _readback.Get(),
                                UINT64(slot) * 2 * sizeof(uint64_t));
+        _slotPerPass[slot] = perPass;
         ++_timedFrames;
     }
 }
 
-void Context_Dx12::CollectGpuTimes(std::vector<double>& out)
+void Context_Dx12::CollectGpuTimes(std::vector<double>& out, std::vector<double>* perPass)
 {
     if (_readbackData == nullptr || _timestampFrequency == 0 || _timedFrames <= kTimingLag)
         return;
@@ -867,7 +1093,7 @@ void Context_Dx12::CollectGpuTimes(std::vector<double>& out)
             _lastCollectedBegin = begin;
             const double ms = double(end - begin) * 1000.0 / double(_timestampFrequency);
             if (ms < 1000.0)
-                out.push_back(ms);
+                (_slotPerPass[slot] && perPass != nullptr ? *perPass : out).push_back(ms);
         }
     }
 }

@@ -77,8 +77,24 @@ struct Stats
     uint64_t refused = 0;   // LSFG frames refused (format, HDR, size)
     uint64_t ffx = 0;       // frames FFX interpolated while LSFG was enabled
     std::vector<double> gpuMs;
+    std::vector<double> gpuMsPerPass; // OPTISCALER_LSFG_AB: the frames recorded with the harness's schedule
     double windowStartMs = 0.0;
 };
+
+// Study A/B, environment only (no ini key): OPTISCALER_LSFG_AB=1 records every other frame with the harness's
+// schedule (a barrier around every dispatch, the copy-out) and splits the GPU timing summary in two, so both
+// are measured at the same GPU clocks. A game that keeps the GPU half idle runs it at a fraction of its boost
+// clock, which moves from run to run far more than any change here. The images are the same bytes either way
+// (tools/lsfg-study/ctxbench).
+bool AbTiming()
+{
+    static const bool ab = []
+    {
+        char value[8] {};
+        return GetEnvironmentVariableA("OPTISCALER_LSFG_AB", value, sizeof(value)) > 0 && value[0] == '1';
+    }();
+    return ab;
+}
 
 // What owns D3D12 objects, and the lock. Never destroyed: at process exit a static destructor would release them under
 // the loader lock, possibly after the driver detached, and a detached build worker may still want the lock.
@@ -117,6 +133,8 @@ std::string g_lastFallback;
 bool g_firstFrameLogged = false;
 Surface g_lastRefusal = Surface::Ok;
 Stats g_stats;
+OutputRoute g_lastRoute = OutputRoute::None;
+bool g_abPerPass = false; // the schedule of the next frame under OPTISCALER_LSFG_AB
 
 // FfxApiResourceState is a bit set; COMMON and PRESENT are both D3D12's COMMON (0).
 D3D12_RESOURCE_STATES ToD3D12(uint32_t ffxState)
@@ -286,10 +304,11 @@ void BuildWorker(ContextKey key, ComPtr<ID3D12Device> device, Settings settings,
         return;
     }
 
-    LOG_INFO("LSFG: context {}: {} images, {} descriptors, {:.1f} MiB, GPU timestamps {}, built in {:.0f} ms{}",
+    LOG_INFO("LSFG: context {}: {} images, {} descriptors, {:.1f} MiB, {} barrier waves per generated frame ({} "
+             "without one), GPU timestamps {}, built in {:.0f} ms{}",
              KeyText(key), context->ImageCount(), context->DescriptorCount(),
-             double(context->VramBytes()) / (1024.0 * 1024.0), context->HasTimestamps() ? "on" : "off", ms,
-             compiled ? " (shaders compiled too)" : "");
+             double(context->VramBytes()) / (1024.0 * 1024.0), context->WaveCount(true), context->WaveCount(false),
+             context->HasTimestamps() ? "on" : "off", ms, compiled ? " (shaders compiled too)" : "");
 
     Park(std::move(O().context));
     O().context = std::move(context);
@@ -352,15 +371,19 @@ void LogSummary()
     if (now - g_stats.windowStartMs < kSummaryIntervalMs)
         return;
 
-    std::string gpu = "no GPU timings";
-    if (!g_stats.gpuMs.empty())
+    auto percentiles = [](std::vector<double>& v)
     {
-        auto& v = g_stats.gpuMs;
         std::sort(v.begin(), v.end());
         const double p50 = v[v.size() / 2];
         const double p99 = v[std::min(v.size() - 1, size_t(double(v.size()) * 0.99))];
-        gpu = std::format("GPU p50 {:.3f} ms p99 {:.3f} ms over {} frames", p50, p99, v.size());
-    }
+        return std::format("GPU p50 {:.3f} ms p99 {:.3f} ms over {} frames", p50, p99, v.size());
+    };
+
+    std::string gpu = "no GPU timings";
+    if (!g_stats.gpuMs.empty())
+        gpu = percentiles(g_stats.gpuMs);
+    if (!g_stats.gpuMsPerPass.empty())
+        gpu += "; A/B, the harness's schedule: " + percentiles(g_stats.gpuMsPerPass);
 
     std::string device = "no context";
     if (O().context != nullptr)
@@ -422,6 +445,9 @@ bool BeginFrame(int fIndex, uint64_t frameId)
                  "(ShaderDir {}, flow {:.2f}, {}); FFX keeps the swapchain, pacing and UI; x2",
                  s.shaderDir.empty() ? std::string("unset") : wstring_to_string(s.shaderDir), s.flow,
                  ModeText(s.performance));
+        if (AbTiming())
+            LOG_INFO("LSFG: OPTISCALER_LSFG_AB=1: every other frame uses the harness's schedule (a barrier around "
+                     "every dispatch, the copy-out), timed apart in the summary");
     }
 
     SweepParked();
@@ -577,8 +603,28 @@ uint32_t FfxDispatch(ffxDispatchDescFrameGeneration* params)
     frame.resolutionInvScale = 1.0f / s.key.flow;
     frame.uiThreshold = 0.5f;
 
-    O().context->Record(list, io, frame);
+    Schedule schedule = Schedule::Waves;
+    if (AbTiming())
+    {
+        schedule = g_abPerPass ? Schedule::PerPass : Schedule::Waves;
+        g_abPerPass = !g_abPerPass;
+    }
+
+    O().context->Record(list, io, frame, schedule);
     history.Advance(reset, params->frameID);
+
+    // Where generated frames go, said once and again whenever it changes (a new FFX output, a rebuilt context).
+    const OutputRoute route = O().context->LastOutputRoute();
+    if (route != OutputRoute::None && route != g_lastRoute)
+    {
+        if (route == OutputRoute::Direct)
+            LOG_INFO("LSFG: generate writes FFX's output itself (no copy-out); the presented frame is still copied in, "
+                     "because the shaders sample it as one slice of LSFG's two-slice source array");
+        else
+            LOG_INFO("LSFG: FFX's output cannot be written by generate ({}); generated frames are copied into it",
+                     O().context->OutputRouteReason());
+        g_lastRoute = route;
+    }
 
     params->numGeneratedFrames = io.generate;
     if (io.generate > 0)
@@ -586,7 +632,7 @@ uint32_t FfxDispatch(ffxDispatchDescFrameGeneration* params)
     else
         ++g_stats.held;
 
-    O().context->CollectGpuTimes(g_stats.gpuMs);
+    O().context->CollectGpuTimes(g_stats.gpuMs, AbTiming() ? &g_stats.gpuMsPerPass : nullptr);
     LogSummary();
     return FFX_API_RETURN_OK;
 }

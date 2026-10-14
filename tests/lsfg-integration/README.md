@@ -19,6 +19,11 @@ the source guards around the call sites in `OptiScaler/framegen/ffx/FSRFG_Dx12.c
    the converted modules, and the `cb` layout.
 4. Which frames LSFG takes (`ClassifySurface`: formats, `_SRGB` and typeless families, HDR10/scRGB, size and
    format mismatches with FFX's output, too small) and the history schedule (warm-up, reset, restart, slots).
+4a. The barrier waves `Context_Dx12` records (`ScheduleWaves`): every pass once, program order inside a wave,
+   never two writers or a reader and a writer of one image in a wave, every read-after-write, write-after-read
+   and write-after-write pair of the sequence in increasing waves; 10 / 36 / 42 waves for the pre-pass, the main
+   pass and both, at every size, flow and variant; generate alone in the last wave. And which FFX output formats
+   generate may write itself (`DirectOutputFormat`: the working format or its typeless family, never `_SRGB`).
 5. `[LSFG]` round trip at all four points: `Config.h` (with defaults), `Config.cpp` read and save,
    `OptiScaler.ini`, `Config.md`; and no fifth `Lsfg*` member outside it.
 6. The `FSRFG_Dx12.cpp` call sites (latch, gate, prepare, hand-off, release) as a set, the single FFX
@@ -34,6 +39,8 @@ Without it that part is skipped.
 D3D12 itself: root signature and PSO creation, descriptor tables, barriers, the recording on FFX's list, the
 build worker, parking and the lock (`Lsfg.cpp`, `LsfgFrameGen_Dx12.cpp`). Those were checked in PCSX2 under
 vkd3d-proton, which is not a D3D12 validator; native Windows with the debug layer is still open.
+`tools/lsfg-study/ctxbench` runs `Context_Dx12` on a real device outside any game and hashes every generated
+frame, which is how a change to the recording is shown to leave the images byte for byte as they were.
 
 ## Running
 
