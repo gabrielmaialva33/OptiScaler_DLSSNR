@@ -65,9 +65,14 @@ the two schedules frame by frame, so both run at the same clocks.
   however little it does, and 35 of the 42 waves sit on the gamma chain. The heavy items are the ingest copy
   15 µs, mipmaps 18, the alpha waves 63 together, the beta and level-0 waves 62, the level-6 waves ~80, and
   generate 31. Any further gain is inside the shaders (FP16, `FP16_NOTES.md`), not in the recording.
+- **A lighter frame can cost more.** Two later runs never left PCSX2's half-width mode (841x1356). The driver then
+  kept the GPU in P5 61% of the time, with memory at 810 MHz there: averages ~1270 MHz graphics and ~3.4 GHz memory.
+  At half the pixels, on the same frames (A/B), LSFG took p50 0.81-1.19 ms with the waves against 1.17-1.46 ms with
+  the old schedule.
 - **Open problems.**
-  - In game the GPU clock decides: 0.445 ms at full clock is ~0.7 ms at P3 clocks. That is the driver's DVFS, which
-    nothing in OptiScaler controls; pinning clocks would be a system setting, and was not changed for these runs.
+  - In game the GPU clock decides: 0.445 ms at full clock is ~0.7 ms at P3 clocks, and over 1 ms in P5. That is the
+    driver's DVFS, which nothing in OptiScaler controls. Pinning clocks, or the driver's "prefer maximum
+    performance" mode, would be a system setting, and neither was changed for these runs.
   - `OPTISCALER_LSFG_AB` is a study switch read from the environment, with no ini key.
   - Native Windows with the debug layer is still needed for the new barrier batches. vkd3d-proton does not
     validate them (CLAUDE.md, "Proton is not a D3D12 validator").
