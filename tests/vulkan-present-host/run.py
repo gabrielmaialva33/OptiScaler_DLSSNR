@@ -565,10 +565,12 @@ def check_host_on(name, facts, log, *, marker_off_bundle):
                                                    f'#{m.group(2)} destroyed; ' in l]
             need(len(gone) == 1, f'{device["name"]}: expected one destruction line, found {len(gone)}')
             if gone:
-                # Stage 3: the device's model (its forwarder missing here, so it never ran) is freed with it; and a
-                # destroyed swapchain's present semaphores went with it, so none is left to retain.
+                # Stage 3: the device's model (its forwarder missing here, so it never ran) is freed with it -- there is
+                # one only where the round trip carried a present; and a destroyed swapchain's present semaphores went
+                # with it, so none is left to retain.
+                freed = '' if hide else '; the model freed'
                 need(re.search(r'destroyed; freed: 0 swapchain\(s\) the application left, 0 retained present '
-                               r'semaphore\(s\), 0 slot\(s\) kept from earlier swapchains; the model freed$',
+                               r'semaphore\(s\), 0 slot\(s\) kept from earlier swapchains' + re.escape(freed) + '$',
                                gone[0]) is not None, f'{device["name"]}: destruction line: {gone[0]}')
     need(len(set(device_ids.values())) == len(device_ids), f'device records alias: {device_ids}')
     if facts['third_reused_second']:
@@ -966,7 +968,7 @@ def execute_nr(name, dll, redist, files):
 
 # What the validation layer reports of NVIDIA's model's own commands, recorded into the host's command buffer: an image of
 # its own (nv.ngx.dlssnr.resource) used in GENERAL at the first evaluate after each feature build without ever leaving
-# UNDEFINED. Measured 2026-10-14 with 310.8 and the 615.71 core: the only report of a whole run under synchronization
+# UNDEFINED. Measured 2026-10-14 with 310.8.SF and the 615.78.08 core: the only report of a whole run under synchronization
 # validation. Nothing else the model or the host does may be reported.
 MODEL_VUIDS = {'VUID-vkCmdDraw-None-09600'}
 

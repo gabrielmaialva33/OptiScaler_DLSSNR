@@ -189,7 +189,7 @@ first evaluate without ever leaving UNDEFINED. The application counts reports na
 (`model_messages`, `model_vuids`); the runner accepts that VUID alone, at most once per feature build, and nothing else
 from anyone. Every other report fails the case.
 
-What they showed on 2026-10-14 (GE-Proton11-7, RTX 4090, driver 615.71, model 310.8 from the kit): the pass at
+What they showed on 2026-10-14 (GE-Proton11-7, RTX 4090, driver 615.78.08, model 310.8.SF from the kit): the pass at
 632x446 costs about 2.4 ms on the GPU (first frames up to 9 ms), the model's edit moves a colour channel by about three
 eight-bit steps on average on this picture, and the cross-family route carries it from the compute-only family like
 any other frame.
