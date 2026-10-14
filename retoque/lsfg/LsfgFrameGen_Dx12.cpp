@@ -909,6 +909,144 @@ void Context_Dx12::_CopyOut(ID3D12GraphicsCommandList* list, ID3D12Resource* tar
     }
 }
 
+void Context_Dx12::_ClearHistory(ID3D12GraphicsCommandList* list)
+{
+    const float zero[4] {};
+    const auto clearCpuBase = _clearHeap->GetCPUDescriptorHandleForHeapStart();
+    const auto gpuBase = _heap->GetGPUDescriptorHandleForHeapStart();
+
+    for (auto& t : _textures)
+    {
+        if (t.clear)
+            _Transition(_barriers, t, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+    _Flush(list);
+
+    for (auto& t : _textures)
+    {
+        if (!t.clear)
+            continue;
+        auto gpu = gpuBase;
+        gpu.ptr += UINT64(_tableDescriptors + t.clearSlot) * _descriptorSize;
+        auto cpu = clearCpuBase;
+        cpu.ptr += SIZE_T(t.clearSlot) * _descriptorSize;
+        list->ClearUnorderedAccessViewFloat(gpu, cpu, t.resource.Get(), zero, 0, nullptr);
+        t.dirty = true;
+    }
+
+    _recorded = true;
+}
+
+void Context_Dx12::_Ingest(ID3D12GraphicsCommandList* list, ID3D12Resource* presentColor,
+                           D3D12_RESOURCE_STATES presentState)
+{
+    auto& source = _textures[_graph.source];
+    _Transition(_barriers, source, D3D12_RESOURCE_STATE_COPY_DEST);
+    if (presentState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+    {
+        D3D12_RESOURCE_BARRIER b {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = presentColor;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = presentState;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        _barriers.push_back(b);
+    }
+    _Flush(list);
+
+    D3D12_TEXTURE_COPY_LOCATION dst {};
+    dst.pResource = source.resource.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = _history.SourceSlot(); // mip 0 of array slice `slot`
+    D3D12_TEXTURE_COPY_LOCATION src {};
+    src.pResource = presentColor;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+    D3D12_BOX box { 0, 0, 0, _key.width, _key.height, 1 };
+    list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+
+    if (presentState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+    {
+        D3D12_RESOURCE_BARRIER b {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = presentColor;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        b.Transition.StateAfter = presentState;
+        _barriers.push_back(b);
+    }
+}
+
+bool Context_Dx12::RecordGenerated(ID3D12GraphicsCommandList* list, ID3D12Resource* presentColor,
+                                   D3D12_RESOURCE_STATES presentState, uint32_t index, uint32_t count,
+                                   ID3D12Resource* output, D3D12_RESOURCE_STATES outputState,
+                                   const FrameConstants& frame, Schedule schedule)
+{
+    if (list == nullptr || output == nullptr || count == 0 || index >= count)
+        return false;
+
+    const bool perPass = schedule == Schedule::PerPass;
+
+    ID3D12DescriptorHeap* heaps[] = { _heap.Get() };
+    list->SetDescriptorHeaps(1, heaps);
+    _boundPso = nullptr;
+    _barriers.clear();
+
+    if (!_recorded)
+    {
+        _ClearHistory(list);
+    }
+
+    if (index == 0)
+    {
+        if (presentColor == nullptr)
+            return false;
+        _Ingest(list, presentColor, presentState);
+    }
+
+    FrameConstants f = frame;
+    f.timestamp = TimestampFor(index + 1, count);
+
+    if (perPass)
+    {
+        _Flush(list);
+        if (index == 0)
+        {
+            _ExecutePerPass(list, _pre, frame);
+        }
+        _ExecutePerPass(list, _main, f);
+        _CopyOut(list, output, outputState);
+        _Flush(list);
+    }
+    else
+    {
+        DirectTarget direct;
+        const bool isDirect = _BindDirect(output, outputState, direct);
+        _ExecuteWaves(list, index == 0 ? _wavesPreMain : _wavesMain, frame, f, isDirect ? &direct : nullptr);
+
+        if (!isDirect)
+        {
+            _CopyOut(list, output, outputState);
+        }
+        else if (direct.state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            _UavBarrier(_barriers, direct.resource);
+        }
+        else
+        {
+            D3D12_RESOURCE_BARRIER b {};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition.pResource = direct.resource;
+            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            b.Transition.StateAfter = direct.state;
+            _barriers.push_back(b);
+        }
+    }
+    _Flush(list);
+    return true;
+}
+
 void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, const FrameConstants& frame,
                           Schedule schedule)
 {
@@ -927,71 +1065,11 @@ void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, co
     // First use: the feature history (and every other internal image) starts at zero, as in lsfg-vk.
     if (!_recorded)
     {
-        const float zero[4] {};
-        const auto clearCpuBase = _clearHeap->GetCPUDescriptorHandleForHeapStart();
-        const auto gpuBase = _heap->GetGPUDescriptorHandleForHeapStart();
-
-        for (auto& t : _textures)
-        {
-            if (t.clear)
-                _Transition(_barriers, t, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        }
-        _Flush(list);
-
-        for (auto& t : _textures)
-        {
-            if (!t.clear)
-                continue;
-            auto gpu = gpuBase;
-            gpu.ptr += UINT64(_tableDescriptors + t.clearSlot) * _descriptorSize;
-            auto cpu = clearCpuBase;
-            cpu.ptr += SIZE_T(t.clearSlot) * _descriptorSize;
-            list->ClearUnorderedAccessViewFloat(gpu, cpu, t.resource.Get(), zero, 0, nullptr);
-            t.dirty = true; // ordered by the barrier in front of its first use
-        }
-
-        _recorded = true;
+        _ClearHistory(list);
     }
 
     // Ingest: FFX's backbuffer into this base frame's source slot.
-    {
-        auto& source = _textures[_graph.source];
-        _Transition(_barriers, source, D3D12_RESOURCE_STATE_COPY_DEST);
-        if (io.presentState != D3D12_RESOURCE_STATE_COPY_SOURCE)
-        {
-            D3D12_RESOURCE_BARRIER b {};
-            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            b.Transition.pResource = io.presentColor;
-            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            b.Transition.StateBefore = io.presentState;
-            b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-            _barriers.push_back(b);
-        }
-        _Flush(list);
-
-        D3D12_TEXTURE_COPY_LOCATION dst {};
-        dst.pResource = source.resource.Get();
-        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        dst.SubresourceIndex = _history.SourceSlot(); // mip 0 of array slice `slot`
-        D3D12_TEXTURE_COPY_LOCATION src {};
-        src.pResource = io.presentColor;
-        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        src.SubresourceIndex = 0;
-        D3D12_BOX box { 0, 0, 0, _key.width, _key.height, 1 };
-        list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
-
-        // Pending: the first wave's batch carries it (and the source's move to a shader resource).
-        if (io.presentState != D3D12_RESOURCE_STATE_COPY_SOURCE)
-        {
-            D3D12_RESOURCE_BARRIER b {};
-            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            b.Transition.pResource = io.presentColor;
-            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-            b.Transition.StateAfter = io.presentState;
-            _barriers.push_back(b);
-        }
-    }
+    _Ingest(list, io.presentColor, io.presentState);
 
     StudyTimestamp(list);
 

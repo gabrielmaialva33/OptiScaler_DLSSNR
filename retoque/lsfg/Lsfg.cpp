@@ -688,6 +688,82 @@ void OnSwapchainReleased()
         LOG_INFO("LSFG: FFX's swapchain was released; LSFG's context is parked ({} parked)", O().parked.size());
 }
 
+bool RecordGenerated(ID3D12GraphicsCommandList* list, ID3D12Resource* presentColor, D3D12_RESOURCE_STATES presentState,
+                     uint32_t index, uint32_t count, ID3D12Resource* output, D3D12_RESOURCE_STATES outputState,
+                     bool reset, uint64_t frameId)
+{
+    if (list == nullptr || output == nullptr || count == 0 || index >= count)
+        return false;
+
+    if (!Config::Instance()->LsfgEnabled.value_or_default())
+        return false;
+
+    std::lock_guard lock(O().mutex);
+    if (O().context == nullptr)
+        return false;
+
+    auto& history = O().context->GetHistory();
+    const bool isReset = reset || !history.Follows(frameId);
+
+    if (!history.Generates(isReset))
+    {
+        if (index == 0 && presentColor != nullptr)
+        {
+            FrameIo io;
+            io.presentColor = presentColor;
+            io.presentState = presentState;
+            io.generate = 0;
+            io.generatedFrames = count;
+            FrameConstants frame;
+            frame.timestamp = 0.0f;
+            frame.sourceIndex = history.iteration;
+            frame.advancedColorKind = 0;
+            frame.hdrSupport = 0;
+            frame.resolutionInvScale = 1.0f / O().context->Key().flow;
+            frame.uiThreshold = 0.5f;
+            O().context->Record(list, io, frame);
+            history.Advance(isReset, frameId);
+        }
+        return false;
+    }
+
+    FrameConstants frame;
+    frame.timestamp = 0.0f;
+    frame.sourceIndex = history.iteration;
+    frame.advancedColorKind = 0;
+    frame.hdrSupport = 0;
+    frame.resolutionInvScale = 1.0f / O().context->Key().flow;
+    frame.uiThreshold = 0.5f;
+
+    bool ok = O().context->RecordGenerated(list, presentColor, presentState, index, count, output, outputState, frame);
+    if (!ok)
+        return false;
+
+    if (index == count - 1)
+    {
+        history.Advance(isReset, frameId);
+        ++g_stats.generated;
+    }
+
+    return true;
+}
+
+bool RecordBatch(ID3D12GraphicsCommandList* list, ID3D12Resource* presentColor, D3D12_RESOURCE_STATES presentState,
+                 uint32_t count, ID3D12Resource* const* outputs, const D3D12_RESOURCE_STATES* outputStates, bool reset,
+                 uint64_t frameId)
+{
+    if (list == nullptr || outputs == nullptr || count == 0)
+        return false;
+
+    for (uint32_t k = 0; k < count; ++k)
+    {
+        const D3D12_RESOURCE_STATES state = outputStates ? outputStates[k] : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        if (!RecordGenerated(list, presentColor, presentState, k, count, outputs[k], state, reset, frameId))
+            return false;
+    }
+    return true;
+}
+
 Status GetStatus()
 {
     std::lock_guard lock(O().mutex);

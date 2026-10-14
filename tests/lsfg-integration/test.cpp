@@ -540,8 +540,30 @@ static void TestPolicy()
     CHECK(ClampFlow(std::nanf("")) == 1.0f && ClampFlow(0.1f) == 0.25f && ClampFlow(2.0f) == 1.0f &&
           ClampFlow(0.5f) == 0.5f);
 
+    // Multi-frame generation timestamps: k in 1..count, t = k / (count + 1)
+    // Multiplier 2 (1 generated frame)
     CHECK(TimestampFor(1, 1) == 0.5f);
-    CHECK(std::fabs(TimestampFor(1, 2) - 1.0f / 3.0f) < 1e-6f && TimestampFor(2, 3) == 0.5f);
+
+    // Multiplier 3 (2 generated frames)
+    CHECK(std::fabs(TimestampFor(1, 2) - 1.0f / 3.0f) < 1e-6f);
+    CHECK(std::fabs(TimestampFor(2, 2) - 2.0f / 3.0f) < 1e-6f);
+
+    // Multiplier 4 (3 generated frames)
+    CHECK(TimestampFor(1, 3) == 0.25f);
+    CHECK(TimestampFor(2, 3) == 0.50f);
+    CHECK(TimestampFor(3, 3) == 0.75f);
+
+    // Strictly monotonic and bounded within (0, 1)
+    for (uint32_t count = 1; count <= 4; ++count)
+    {
+        float prev = 0.0f;
+        for (uint32_t k = 1; k <= count; ++k)
+        {
+            float t = TimestampFor(k, count);
+            CHECK(t > prev && t < 1.0f);
+            prev = t;
+        }
+    }
 
     // A fresh context ingests one frame before it generates; slots alternate; the counter never resets.
     History h;
