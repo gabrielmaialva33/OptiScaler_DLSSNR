@@ -34,11 +34,12 @@ struct Settings
     bool performance = false;
     bool fp16 = false; // no key: FP16 variants buy nothing measurable on D3D12 yet (harness README)
     std::wstring shaderDir;
+    std::wstring dllPath;
 
     // What compiled shaders depend on (not the flow scale, which only sizes the images).
     bool SamePrograms(const Settings& o) const
     {
-        return performance == o.performance && fp16 == o.fp16 && shaderDir == o.shaderDir;
+        return performance == o.performance && fp16 == o.fp16 && shaderDir == o.shaderDir && dllPath == o.dllPath;
     }
 };
 
@@ -49,6 +50,7 @@ Settings ReadSettings()
     s.flow = ClampFlow(config->LsfgFlowScale.value_or_default());
     s.performance = config->LsfgPerformanceMode.value_or_default();
     s.shaderDir = config->LsfgShaderDir.value_or(std::wstring());
+    s.dllPath = config->LsfgDllPath.value_or(std::wstring());
     return s;
 }
 
@@ -252,7 +254,17 @@ void BuildWorker(ContextKey key, ComPtr<ID3D12Device> device, Settings settings,
 
     if (programs == nullptr)
     {
-        auto source = MakeDirectoryShaderSource(settings.shaderDir);
+        const std::filesystem::path baseCacheDir = Util::DllPath().parent_path() / "lsfg-cache";
+        auto source = MakeShaderSource(settings.shaderDir, settings.dllPath, baseCacheDir, error);
+        if (source == nullptr)
+        {
+            LOG_WARN("LSFG: {}; FFX interpolates", error);
+            std::lock_guard lock(O().mutex);
+            g_building = false;
+            g_hardRefusal = error;
+            return;
+        }
+
         LOG_INFO("LSFG: compiling the {} shaders ({}) from {}", kShaderCount - 1, ModeText(settings.performance),
                  source->Describe());
         programs = ProgramSet_Dx12::Build(device.Get(), settings.performance, settings.fp16, *source, error);
@@ -318,6 +330,12 @@ void BuildWorker(ContextKey key, ComPtr<ID3D12Device> device, Settings settings,
 // Under O().mutex.
 void MaybeStartBuild(const Observed& s, const ComPtr<ID3D12Device>& device, const Settings& settings)
 {
+    if (!g_programsSettings.SamePrograms(settings))
+    {
+        g_hardRefusal.clear();
+        g_hasFailedKey = false;
+    }
+
     if (!g_hardRefusal.empty() || !s.valid || s.verdict != Surface::Ok || g_building)
         return;
     if (O().context != nullptr && O().context->Key() == s.key)
@@ -668,6 +686,27 @@ void OnSwapchainReleased()
 
     if (any)
         LOG_INFO("LSFG: FFX's swapchain was released; LSFG's context is parked ({} parked)", O().parked.size());
+}
+
+Status GetStatus()
+{
+    std::lock_guard lock(O().mutex);
+    Status s;
+    s.enabled = Config::Instance()->LsfgEnabled.value_or_default();
+    s.flow = ClampFlow(Config::Instance()->LsfgFlowScale.value_or_default());
+    s.performance = Config::Instance()->LsfgPerformanceMode.value_or_default();
+    if (g_observed.valid)
+    {
+        s.width = g_observed.key.width;
+        s.height = g_observed.key.height;
+    }
+    s.fallbackReason = FallbackReason();
+    s.active = s.enabled && s.fallbackReason.empty() && O().context != nullptr;
+    if (!g_stats.gpuMs.empty())
+    {
+        s.gpuMs = g_stats.gpuMs.back();
+    }
+    return s;
 }
 
 } // namespace Lsfg

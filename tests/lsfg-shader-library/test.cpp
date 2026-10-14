@@ -2,8 +2,10 @@
 
 #include "lsfg/LsfgEnvironment.h"
 #include "lsfg/LsfgShaderLibrary.h"
+#include "lsfg/LsfgShaderSource.h"
 
 #include <cassert>
+#include <cstring>
 #include <iostream>
 #include <map>
 #include <set>
@@ -248,6 +250,58 @@ void TestRealDllParsing()
     std::cout << "  PASS: TestRealDllParsing (99/99 SPIR-V modules validated from user DLL)\n";
 }
 
+void TestSelection_Logic()
+{
+    MockLsfgEnvironment env;
+    std::string refusal;
+
+    // Case 1: Override wins
+    env.existingDirectories.insert("C:/custom/dxil");
+    auto src1 = Lsfg::MakeShaderSource(L"C:/custom/dxil", L"", "C:/cache", refusal, &env);
+    assert(src1 != nullptr);
+    assert(src1->Describe().find("C:/custom/dxil") != std::string::npos);
+
+    // Case 2: Missing DLL -> clean refusal
+    auto src2 = Lsfg::MakeShaderSource(L"", L"", "C:/cache", refusal, &env);
+    assert(src2 == nullptr);
+    assert(refusal.find("lsfg-vk.dll not found") != std::string::npos);
+
+    // Case 3: DLL found, cache miss -> clean refusal with convert.py command
+    env.existingFiles.insert("C:/games/lsfg-vk.dll");
+    env.fileContents["C:/games/lsfg-vk.dll"] = "fake-dll-content-v1";
+    const std::string hashV1 = ComputeSha256Hex(std::span<const uint8_t>(
+        reinterpret_cast<const uint8_t*>("fake-dll-content-v1"), std::strlen("fake-dll-content-v1")));
+
+    auto src3 = Lsfg::MakeShaderSource(L"", L"C:/games/lsfg-vk.dll", "C:/cache", refusal, &env);
+    assert(src3 == nullptr);
+    assert(refusal.find("shader cache missing") != std::string::npos);
+    assert(refusal.find(hashV1.substr(0, 8)) != std::string::npos);
+    assert(refusal.find("convert.py") != std::string::npos);
+
+    // Case 4: Cache hit -> loads from cache
+    const std::string cacheDirV1 = "C:/cache/" + hashV1;
+    env.existingDirectories.insert(cacheDirV1);
+    env.existingFiles.insert(cacheDirV1 + "/0.cso");
+    env.existingFiles.insert(cacheDirV1 + "/1.cso");
+
+    auto src4 = Lsfg::MakeShaderSource(L"", L"C:/games/lsfg-vk.dll", "C:/cache", refusal, &env);
+    assert(src4 != nullptr);
+    assert(src4->Describe().find(hashV1.substr(0, 8)) != std::string::npos);
+
+    // Case 5: DLL changed -> new hash -> old cache invalidated (miss for new hash)
+    env.fileContents["C:/games/lsfg-vk.dll"] = "fake-dll-content-v2";
+    const std::string hashV2 = ComputeSha256Hex(std::span<const uint8_t>(
+        reinterpret_cast<const uint8_t*>("fake-dll-content-v2"), std::strlen("fake-dll-content-v2")));
+    assert(hashV1 != hashV2);
+
+    auto src5 = Lsfg::MakeShaderSource(L"", L"C:/games/lsfg-vk.dll", "C:/cache", refusal, &env);
+    assert(src5 == nullptr);
+    assert(refusal.find("shader cache missing") != std::string::npos);
+    assert(refusal.find(hashV2.substr(0, 8)) != std::string::npos);
+
+    std::cout << "  PASS: TestSelection_Logic\n";
+}
+
 int main(int argc, char** argv)
 {
     std::filesystem::path tmpDir = "/tmp";
@@ -263,6 +317,7 @@ int main(int argc, char** argv)
     TestDiscovery_OverrideAndFixPath();
     TestShaderIdResolution();
     TestCacheManagement(tmpDir);
+    TestSelection_Logic();
     TestRealDllParsing();
     std::cout << "All LsfgShaderLibrary tests passed successfully!\n";
     return 0;

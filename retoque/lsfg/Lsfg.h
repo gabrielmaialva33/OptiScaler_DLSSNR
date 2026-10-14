@@ -44,4 +44,18 @@ bool Interpolating();
 // swapchain object can outlive the context), so the current context is parked, like any retired one.
 void OnSwapchainReleased();
 
+struct Status
+{
+    bool enabled = false;
+    bool active = false;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    float flow = 1.0f;
+    bool performance = false;
+    std::string fallbackReason;
+    double gpuMs = 0.0;
+};
+
+Status GetStatus();
+
 } // namespace Lsfg

@@ -678,6 +678,9 @@ class Config
     // Folder holding the precompiled DXIL, one <resource id>.cso per shader, converted on this machine from the
     // user's own lsfg-vk.dll (tools/lsfg-study/convert.py). Unset: LSFG refuses and FFX interpolates.
     CustomOptional<std::wstring, NoDefault> LsfgShaderDir;
+    // Path to lsfg-vk.dll (or Lossless.dll, or the Lossless Scaling folder). Unset: auto-detects from Steam
+    // library folders and Wine Z: drive paths.
+    CustomOptional<std::wstring, NoDefault> LsfgDllPath;
     // --- end LSFG study ----------------------------------------------------------------------------
 
     // DLSS
