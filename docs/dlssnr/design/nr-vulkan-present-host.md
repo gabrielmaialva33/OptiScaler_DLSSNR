@@ -817,6 +817,19 @@ image the harness reads back equals the pattern it made, through the host or not
 - Native Windows (the loader's trampolines; there the export and `vkGetDeviceProcAddr`'s answer differ, and both are
   detoured for the queue calls).
 
+### First game run (2026-10-14, DOOM Eternal)
+
+Build `3144c8dc`, DOOM Eternal (native Vulkan, `winmm.dll`, Vulkan hooks not skipped, the Vulkan overlay menu on),
+GE-Proton11-7, RTX 4090, `[DlssNr] VulkanPresentHost=true`. About three and a half minutes, menu opened and an Alt-Tab:
+
+- 49,143 presents, every one transported, none skipped; 132,313 submits, 49,142 completions observed.
+- Ring depth 2, max CPU wait 0.000 ms: the round trip never held the present thread.
+- Routes: 41,585 cross-family (id Tech 7 presents from compute family 2; the copy ran on graphics family 0 with the
+  ownership transfers and the three-submit chain), 7,558 on the presenting queue itself.
+- The Vulkan overlay's menu drew as before ("drawing the menu on graphics family 0 with a queue-family transfer
+  around it") beside the host: the bundle-lock-then-host-lock order the review reasoned held in a game.
+- No new warning or error in the log. Frame pacing was judged by eye only.
+
 ### What stage 3 needs
 
 - **The model where the comment says**, between the two copies, on the work queue: the work image becomes NR's input
