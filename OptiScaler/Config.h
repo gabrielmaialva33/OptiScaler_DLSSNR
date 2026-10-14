@@ -803,7 +803,7 @@ class Config
     CustomOptional<float> MenuBGColorG { 0.0f };
     CustomOptional<float> MenuBGColorB { 0.0f };
     CustomOptional<float> MenuBGColorA { 0.93f };
-    CustomOptional<bool> MenuBlur { true };
+    CustomOptional<bool> MenuBlur { false };
     CustomOptional<float> MenuBlurStrength { 1.0f };
     CustomOptional<bool> CustomTabEnabled { true };
     CustomOptional<std::string> CustomTabCards { "upscaler,sharpness,fg_selection,fg_fsrfg,fg_xefg,fg_dlssg,fg_"
