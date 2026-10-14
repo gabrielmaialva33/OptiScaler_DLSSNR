@@ -1,4 +1,4 @@
-# Vulkan present host, stages 1 and 2 (wine tier)
+# Vulkan present host, stages 1 to 3 (wine tier)
 
 Run from the repository root on Linux with Wine, a graphical session, working Vulkan, the native Khronos validation
 layer, a host `g++` and the repository's msvc-wine toolchain, after `./build-local.sh Release`:
@@ -9,8 +9,15 @@ python3 tests/vulkan-present-host/run.py --only marker # one case
 python3 tests/vulkan-present-host/run.py --dll PATH    # another build (default x64/out/OptiScaler.dll)
 ```
 
-Design: `docs/dlssnr/design/nr-vulkan-present-host.md`, "Stage 1 as built" and "Stage 2 as built". The host-tier
-half is `tests/nr-vk-present-host`.
+Design: `docs/dlssnr/design/nr-vulkan-present-host.md`, "Stage 1 as built", "Stage 2 as built" and "Stage 3 as
+built". The host-tier half is `tests/nr-vk-present-host`.
+
+The stage-1 and stage-2 cases below run with `[DlssNr] Enabled` on and no model files beside the DLL, so on stage 3's
+build every carried present is refused by the model (`model unavailable`, `nvngx.dll_dlssnr.dll was not found beside
+OptiScaler or the game`) and the read-backs stay exact; the runner holds the window and destruction lines' NR part to
+that, and the device lines to the model's extensions the host adds (`VK_KHR_format_feature_flags2` too, the harness's
+devices being Vulkan 1.1 without format-less storage writes) and `bufferDeviceAddress enabled by the host`. Stage 3's
+own cases are in "Cold NR" below.
 
 ## How it works
 
@@ -147,10 +154,55 @@ installed): a kill at exit cannot make a check pass, since a log cut short only 
 A passing run exits 0, prints one PASS line per case and writes `artifacts/results.json` with `status: PASS`; logs
 are `artifacts/<case>.log` (the application) and `artifacts/cases/<case>/OptiScaler.log`.
 
+## Cold NR (stage 3)
+
+`nr.cpp` is a third application, `vk-present-host-nr.exe`: one device asking for `VK_KHR_swapchain` alone (the model's
+extensions are the host's to add), one window (an owned dialog, so a tiling window manager does not resize it under
+the swapchain), and a picture -- gradients, a flat patch, fine stripes, a square that moves five pixels a frame, opaque
+-- presented through a swapchain of every SDR format the surface offers in sRGB non-linear (here, under winevulkan on
+the RTX 4090, B8G8R8A8_UNORM and B8G8R8A8_SRGB only), a four-byte non-SDR format when offered (none was), the same
+format presented from the compute-only family (`--cross`, the cross-family route), and a swapchain recreated through
+`oldSwapchain` at 517x389, not a multiple of eight. Every image is read back when it comes round again and compared
+with what was presented: exactly, by mean and largest change of a colour channel, alpha, and whether it came back
+black. It writes the facts and its validation reports (`validation.txt`) itself: Proton does not pass its output on.
+
+The cases run under Proton (`proton run`; PROTON_DIR, else the newest GE-Proton, else Valve's), in a prefix of their own
+(`artifacts/protonprefix-nr`), with the validation layer as in every other case. Under plain Wine the snippet comes up
+but the driver's NGX core answers FAIL_PlatformError (0xBAD00002), even with the prefix set up by hand as Proton sets
+it up (the core in system32, the NGXCore key, dxvk-nvapi): the D3D12 loopback found the same. Beside the DLL: the
+forwarder built with it (`x64/out`), and NVIDIA's `nvngx_dlssnr.dll` from `~/.local/opt/dlssnr-kit` (`DLSSNR_KIT`),
+symlinked, never copied; the driver's core comes from `/usr/lib/nvidia/wine` through Proton. Without the kit, the
+driver's core or a Proton the cases print SKIP.
+
+| Case | `ApplyModel` | `WorkingScale` | Cross-family | Forwarder | Model | Must hold |
+|---|---|---|---|---|---|---|
+| `nr-control` | false | auto | yes | built | yes | every carried SDR present evaluated, every read-back byte-exact (the conversion out, the pass and the conversion back are lossless when the model's edit is not applied), the model's lifecycle in the log (initialised with the core brought up, images and feature built, rebuilt at 517x389, freed at device destruction with NGX shut down), pass GPU times measured |
+| `nr` | true | auto | yes | built | yes | the same, and every SDR read-back changed but close: at most half exact, mean change above 0 and at most 25 eight-bit steps per frame, alpha untouched, never black |
+| `nr-working-scale` | true | 0.5 | no | built | yes | as `nr`, with the model's images at half size (`working 259x195` for 517x389) |
+| `nr-no-extensions` | true | auto | no | built | yes | the test layer hides `VK_NVX_binary_import`: the device line says it is not possible, every present refused for `device extensions`, every read-back exact |
+| `nr-old-forwarder` | true | auto | no | the kit's (2026-09-03, no `dlssnr_abi_version`) | yes | refused, `nvngx.dll_dlssnr.dll is from a different build`; every read-back exact |
+| `nr-no-model` | true | auto | no | built | no | refused, `nvngx_dlssnr.dll was not found beside OptiScaler or the game`; every read-back exact |
+
+What NVIDIA's model records into the host's command buffer is validated too. One report comes from it, once per
+feature build: `VUID-vkCmdDraw-None-09600`, an image of its own named `nv.ngx.dlssnr.resource` used in GENERAL at its
+first evaluate without ever leaving UNDEFINED. The application counts reports naming an `nv.ngx.*` object apart
+(`model_messages`, `model_vuids`); the runner accepts that VUID alone, at most once per feature build, and nothing else
+from anyone. Every other report fails the case.
+
+What they showed on 2026-10-14 (GE-Proton11-7, RTX 4090, driver 615.71, model 310.8 from the kit): the pass at
+632x446 costs about 2.4 ms on the GPU (first frames up to 9 ms), the model's edit moves a colour channel by about three
+eight-bit steps on average on this picture, and the cross-family route carries it from the compute-only family like
+any other frame.
+
 ## What this does not cover
 
-- No real game, no Streamline or DLSS-G pacer, no FG, no NR. The translated cases are one minimal title each, with no
-  menu opened, no upscaler and no Streamline.
+- No real game, no Streamline or DLSS-G pacer, no FG. The translated cases are one minimal title each, with no
+  menu opened, no upscaler and no Streamline; NR runs only in the cold-NR cases, on a synthetic picture, so nothing
+  here judges image quality or motion (the guides are zeros: a moving camera smears).
+- Cold NR: no RGBA8 or non-SDR swapchain (the surface offers none here; the colour plan is held on the host tier), no
+  CONCURRENT image, no device lost mid-frame, no failed submit with a model frame in it, no live toggle of NR or the
+  working scale, no after-upscale route or D3D12 route beside the host (the arbiter is held on the host tier), no
+  translated title with the model.
 - No concurrent presents from two threads, no application thread submitting to a borrowed graphics queue while the
   cross-family route runs (the queue lock exists for it; nothing here contends), no device loss, no failed submit in
   the middle of the cross-family chain, no late installation (the host is installed before the application creates

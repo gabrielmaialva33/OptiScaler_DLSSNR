@@ -126,7 +126,7 @@ summary = "The NR Vulkan device-extension merge, compiled against the real Vulka
 [nr-vk-present-host]
 tier = "host"
 timeout = 120
-summary = "The Vulkan present host, stages 1 and 2: the registry and transport headers (records with ids of their own, reused handles, devices side by side, the lines; the usage plan, the route, the ring, the counters) under ASan/UBSan, plus source guards: one gated call site ahead of the marker check; only an eligible swapchain's usage and a transported present's waits edited; no refusal after a wait is spent; locks in order; drains before frees."
+summary = "The Vulkan present host, stages 1 to 3: the registry, transport and cold-NR headers (records with ids of their own, reused handles, devices side by side, the lines; the usage plan, the route, the ring, the counters; the colour plan, the device extensions and bufferDeviceAddress, the model's counters) and the one-owner arbiter under ASan/UBSan, plus source guards: one gated call site ahead of the marker check; only a swapchain's usage, a present's waits and a device's extensions edited; no refusal after a wait is spent; locks in order; a model frame counted on submit, seen complete on a fence, freed only idle; drains before frees."
 
 [nr-shutdown]
 tier = "host"
@@ -165,8 +165,8 @@ summary = "Builds a real DLL and drives real Vulkan to exercise overlay lifetime
 
 [vulkan-present-host]
 tier = "wine"
-timeout = 1800
-summary = "The production DLL (x64/out) under a Win32 Vulkan application and Wine, synchronization validation on with zero errors: with [DlssNr] VulkanPresentHost on, under the marker, SkipHooks, and beside the bundle with the Vulkan menu off and on, the round trip's lines are held against the application's own facts (same-queue and cross-family routes, 0/1/2 waits, a ring overfilled behind GPU work, usage edits, recreation, resize, device teardown) and every presented image reads back unchanged; a surface hiding TRANSFER_SRC keeps it observe-only; with the key or the master off, no host line and, under the marker, vulkan-1.dll's exports byte-identical. A D3D11 and a D3D12 title through a local Proton's DXVK and vkd3d-proton: every present carried."
+timeout = 3600
+summary = "The production DLL (x64/out) under a Win32 Vulkan application and Wine, synchronization validation on with zero errors: with [DlssNr] VulkanPresentHost on, under the marker, SkipHooks, and beside the bundle with the Vulkan menu off and on, the round trip's lines are held against the application's own facts (same-queue and cross-family routes, 0/1/2 waits, a ring overfilled behind GPU work, usage edits, recreation, resize, device teardown) and every presented image reads back unchanged; a surface hiding TRANSFER_SRC keeps it observe-only; with the key or the master off, no host line and, under the marker, vulkan-1.dll's exports byte-identical. A D3D11 and a D3D12 title through a local Proton's DXVK and vkd3d-proton: every present carried. Stage 3 under Proton with the real model: cold NR on every SDR present (BGRA8 UNORM and sRGB, cross-family, an unaligned extent, working scale 0.5), exact read-backs with ApplyModel off and changed ones with it on; refused for a device without the NVX extensions, an old forwarder, no model (SKIP without the kit or a local Proton)."
 
 [dlssnr-loopback]
 tier = "wine"

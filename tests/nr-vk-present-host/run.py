@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""The Vulkan present host, stages 1 and 2 (docs/dlssnr/design/nr-vulkan-present-host.md): the production registry and
-transport headers compiled on the host and driven through their state machines and decisions, and source guards that
-the host is inert when off and, when on, changes nothing but an eligible swapchain's usage and a transported present's
-waits. No Vulkan device, no Wine; tests/vulkan-present-host runs the real DLL."""
+"""The Vulkan present host, stages 1 to 3 (docs/dlssnr/design/nr-vulkan-present-host.md): the production registry,
+transport and cold-NR headers and the model's one-owner arbiter compiled on the host and driven through their state
+machines and decisions, and source guards that the host is inert when off and, when on, changes nothing but an
+eligible swapchain's usage, a transported present's waits and a carried device's extension list, and that the model's
+frames are counted, freed and handed over only on completion. No Vulkan device, no Wine; tests/vulkan-present-host runs
+the real DLL."""
 from pathlib import Path
 import re
 import subprocess
@@ -14,6 +16,11 @@ dlssnr = root / 'retoque/dlssnr'
 
 registry = (dlssnr / 'DlssNr_VkPresentRegistry.h').read_text()
 transport = (dlssnr / 'DlssNr_VkPresentTransport.h').read_text()
+nr = (dlssnr / 'DlssNr_VkPresentNr.h').read_text()
+owner = (dlssnr / 'DlssNr_VkModelOwner.h').read_text()
+model_h = (dlssnr / 'DlssNr_VkPresentModel.h').read_text()
+feature_vk = (dlssnr / 'DlssNrFeature_Vk.cpp').read_text()
+forwarder = (dlssnr / 'forwarder/dlssnr_forwarder.cpp').read_text()
 host = (dlssnr / 'DlssNr_VkPresentHost.cpp').read_text()
 hooks = (root / 'OptiScaler/hooks/Vulkan_Hooks.cpp').read_text()
 config_h = (root / 'OptiScaler/Config.h').read_text()
@@ -57,10 +64,14 @@ def flat(text):
 
 # --- Source guards ----------------------------------------------------------------------------------------------
 
-# The headers are standard library only (the registry includes the transport header), so this suite compiles them as
-# production does.
+# The headers are standard library only (the registry includes the transport header, the transport header the cold-NR
+# one), so this suite compiles them as production does.
+for text in (nr, owner):
+    includes = sorted(l.strip() for l in text.splitlines() if l.startswith('#include'))
+    assert all(re.fullmatch(r'#include <\w+>', l) for l in includes), includes
 includes = sorted(l.strip() for l in transport.splitlines() if l.startswith('#include'))
-assert all(re.fullmatch(r'#include <\w+>', l) for l in includes), includes
+assert includes[0] == '#include "DlssNr_VkPresentNr.h"', includes
+assert all(re.fullmatch(r'#include <\w+>', l) for l in includes[1:]), includes
 includes = sorted(l.strip() for l in registry.splitlines() if l.startswith('#include'))
 assert includes[0] == '#include "DlssNr_VkPresentTransport.h"', includes
 assert all(re.fullmatch(r'#include <\w+>', l) for l in includes[1:]), includes
@@ -94,12 +105,13 @@ assert host.count('vulkanHooksSkipped') == 1
 assert re.search(r'LOG_INFO\([^;]*State::Instance\(\)\.vulkanHooksSkipped', code(host), re.S)
 
 # What the host never does, on or off: none of the bundle's present work (Reflex, the frame limiter, the frozen-feature
-# tick, upscaler timing, the overlay, spoofing), no NR, no NGX, and no device-wide idle wait (DEVELOPMENT.md's drain is
+# tick, upscaler timing, the overlay, spoofing), no NGX of its own (the model is DlssNrFeature_Vk.cpp's, reached through
+# DlssNr_VkPresentModel.h), not the after-upscale route's state, and no device-wide idle wait (DEVELOPMENT.md's drain is
 # done on the host's own fences, which needs no queue).
 body = code(host)
 for forbidden in ('ReflexHooks', 'FrameLimit', 'TickFrozenCheck', 'ReadUpscalerTime', 'upscaleTimes', 'MenuOverlay',
-                  'VulkanSpoofing', 'InputCommon', 'EvaluateAfterUpscaleVk', 'DlssNr_Vk', 'ShutdownVk', 'swapchainApi',
-                  'NGX', 'NVSDK', 'DeviceWaitIdle', 'memcpy', 'localCreateInfo', 'imageUsage |='):
+                  'VulkanSpoofing', 'InputCommon', 'EvaluateAfterUpscaleVk', 'DlssNr_Vk(', 'ShutdownVk', 'swapchainApi',
+                  'NGX', 'NVSDK', 'DeviceWaitIdle', 'memcpy', 'localCreateInfo', 'imageUsage |=', 'g_vk'):
     assert forbidden not in body, f'the present host must not use {forbidden}'
 
 # Its own Vulkan calls are the five read-only queries resolved from vulkan-1.dll at install, and the device functions
@@ -115,17 +127,18 @@ assert re.search(r'bool Internal\(\) \{ return ScopedSkipVulkanHooks::Active\(\)
 
 own_calls = set(re.findall(r'\b(g_\w+)\(', body))
 assert own_calls == {'g_getDeviceProcAddr', 'g_getQueueFamilies', 'g_getSurfaceCapabilities', 'g_getMemoryProperties',
-                     'g_getImageFormatProperties'}, own_calls
+                     'g_getImageFormatProperties', 'g_getFormatProperties', 'g_enumerateDeviceExtensions',
+                     'g_getInstanceProcAddr'}, own_calls
 
 # Every hook hands its arguments down exactly once on each path, and only two things are ever edited on the way.
 for call, times in (('o_CreateInstance(info, allocator, instance)', 1), ('o_DestroyInstance(instance, allocator)', 1),
                     ('o_EnumeratePhysicalDevices(instance, count, devices)', 1),
-                    ('o_CreateDevice(physical, info, allocator, device)', 1),
+                    ('o_CreateDevice(physical, edited ? &withExtensions : info, allocator, device)', 1),
                     ('o_CreateWin32Surface(instance, info, allocator, surface)', 1),
                     ('o_DestroySurface(instance, surface, allocator)', 1), ('next(device, allocator)', 1),
                     ('next(device, family, index, queue)', 1), ('next(device, info, queue)', 1),
                     ('next(device, info, allocator, swapchain)', 1), ('next(device, down, allocator, swapchain)', 1),
-                    ('next(device, swapchain, allocator)', 1), ('next(device, swapchain, count, images)', 1),
+                    ('next(device, swapchain, allocator)', 2), ('next(device, swapchain, count, images)', 1),
                     ('next(device, swapchain, timeout, semaphore, fence, index)', 1), ('next(device, info, index)', 1),
                     ('next(queue, info)', 2), ('next(queue, &local)', 1), ('next(queue, args...)', 2)):
     assert body.count(call) == times, f'expected the pass-through {call} {times}x, found {body.count(call)}'
@@ -140,6 +153,21 @@ assert re.findall(r'\bedited\.(\w+)\s*=', swapchain_hook) == ['imageUsage'], swa
 assert 'edited.imageUsage = plan.usage;' in swapchain_hook
 assert 'const VkSwapchainCreateInfoKHR* down = plan.transport && plan.added != 0 ? &edited : info;' in swapchain_hook
 assert swapchain_hook.index('PlanUsage(query)') < swapchain_hook.index('next(device, down, allocator, swapchain)')
+
+# 3. The device (stage 3): the caller's create info unless the model's extensions were added; then a copy whose
+#    extension list, and nothing else, is the caller's plus those the device offers, decided before the call (never by
+#    retrying it), and only for a device the host will carry presents on.
+device_hook = code(function(host, 'VkResult VKAPI_CALL hkCreateDevice('))
+assert re.findall(r'\bwithExtensions\.(\w+)\s*=', device_hook) == ['enabledExtensionCount', 'ppEnabledExtensionNames',
+                                                                     'pNext', 'pNext']
+assert 'withExtensions = *info;' in device_hook
+# The pNext edit: one feature struct of the host's, prepended, the application's chain behind it unchanged; decided by
+# PlanBufferDeviceAddress (never beside a struct of the chain that could conflict), only where the extensions are ready.
+assert device_hook.count('.pNext = const_cast<void*>(info->pNext);') == 2
+assert device_hook.index('if (extensions.ready)') < device_hook.index('PlanBufferDeviceAddress(')
+assert device_hook.index('PlanDeviceExtensions(') < device_hook.index('o_CreateDevice(')
+assert device_hook.index('if (!internal && info != nullptr)') < device_hook.index('PlanDeviceExtensions(')
+assert device_hook.count('o_CreateDevice(') == 1
 
 # 2. The present: the caller's own pointer unless the round trip ran; then a copy whose waits, and nothing else, are
 #    the host's semaphore. The pNext chain (present fences, modes, ids) goes down by pointer.
@@ -173,7 +201,8 @@ assert prepare.index('RecordHandOver(') < prepare.index('submit(queue, info.wait
 assert prepare.count('info.pWaitSemaphores') == 2  # one submit per route takes them
 # No line written and nothing called down while the transport's lock is held.
 for name in ('Prepared Prepare(', 'void AfterPresent(', 'Retired RetireSwapchain(', 'std::string TeardownDevice(',
-             'uint32_t Poll(', 'bool WaitSlot('):
+             'uint32_t Poll(', 'bool WaitSlot(', 'NrDecision DecideNr(', 'void StandDown(', 'void TakeModelLines(',
+             'std::string MissingFormatFeatures(', 'void Observed('):
     held = code(function(host, name))
     assert 'LOG_' not in held and 'next(' not in held, name
 
@@ -211,6 +240,85 @@ assert len(blocks) == host.count('std::lock_guard lock(g_registryMutex);') >= 14
 for block in blocks:
     assert 'LOG_' not in block and 'next(' not in block and 'o_' not in block and 'g_get' not in block, block
 
+# --- Stage 3: the model inside the round trip ---------------------------------------------------------------------
+
+# Decided before anything is recorded and before any wait is spent: the decision, then the recording (the model's pass
+# inside the work buffer, between the blit in and the blit out), then the queue locks and the submits.
+assert prepare.index('DecideNr(') < prepare.index('RecordWork(') < prepare.index('try_lock_for')
+record = code(function(host, 'Recorded RecordWork('))
+assert record.index('cmdCopyImage(buffer, image,') < record.index('cmdBlitImage(buffer, work,') < \
+    record.index('dev.model->Record(*nr)') < record.index('cmdBlitImage(buffer, nr->image,') < \
+    record.index('cmdCopyImage(buffer, work,')
+# A model frame counts only once its work buffer was submitted: exactly the two submits that carry it, each on success.
+assert prepare.count('recording.Submitted(slot);') == 2
+same_queue = prepare[prepare.index('if (!cross)'):prepare.index('else', prepare.index('if (!cross)'))]
+assert same_queue.index('if (result != VK_SUCCESS)') < same_queue.index('recording.Submitted(slot);')
+assert re.search(r'if \(second == VK_SUCCESS\)\s*\{\s*chain = slot\.toPresent;\s*recording\.Submitted\(slot\);', prepare)
+# Anything else discards it (the recording's destructor), and a pass that failed while recording is replaced by the
+# plain round trip.
+assert '~NrRecording() { Discard(); }' in flat(code(host))
+assert re.search(r'if \(work == Recorded::NrFailed\)\s*\{\s*recording\.Discard\(\);', prepare)
+# A model frame is seen complete only where a slot's fence was: Observed, from Poll and WaitSlot.
+for name in ('uint32_t Poll(', 'bool WaitSlot('):
+    assert 'Observed(dev, slot, times);' in code(function(host, name)), name
+assert code(host).count('->Completed(') == 1
+# The model is freed only with nothing of it in flight, and abandoned (nothing destroyed) on a lost device or when
+# frames never completed; the owner token goes back after either.
+stand_down = code(function(host, 'void StandDown(DeviceTransport& dev)'))
+assert stand_down.index('InFlight() != 0') < stand_down.index('Release(false)') < \
+    stand_down.index('ReleaseModelFromPresentHost')
+teardown = code(function(host, 'std::string TeardownDevice('))
+assert teardown.index('InFlight()') < teardown.index('Release(true)')
+assert teardown.count('model->Abandon()') == 3
+# Live off, and another route asking: stand down. The claim comes after every cheap refusal.
+decide = code(function(host, 'NrDecision DecideNr('))
+assert decide.index('DlssNrEnabled') < decide.index('StandDown(dev)')
+assert decide.index('PresentHostMustYield') < decide.index('ClaimModelForPresentHost') < decide.index('->Admit(')
+for cheap in ('sc.colour.sdr', 'dev.nrReady', 'MissingFormatFeatures('):
+    assert decide.index(cheap) < decide.index('ClaimModelForPresentHost'), cheap
+# Present semaphores of a destroyed swapchain are freed after the destroy returned, never before it.
+destroy = host[host.index('void OnDestroySwapchain('):]
+destroy = destroy[:destroy.index('\n}\n')]
+assert destroy.index('next(device, swapchain, allocator);') < destroy.index('destroySemaphore(')
+
+# The model (DlssNrFeature_Vk.cpp): per owner, its own state, the forwarder shared; the after-upscale route asks the
+# arbiter where it commits to a frame; the present model's encode is passthrough everywhere it is reproduced.
+model = feature_vk[feature_vk.index('struct VkPresentModel::Impl'):]
+after_upscale = code(function(feature_vk, 'void EvaluateAfterUpscaleVk('))
+assert after_upscale.index('ClaimModelForAfterUpscale(device)') < after_upscale.index('g_vk.instance = instance;')
+assert after_upscale.index('colour == nullptr || depth == nullptr || motion == nullptr') < \
+    after_upscale.index('ClaimModelForAfterUpscale(device)')
+assert 'g_vk.' not in code(model), 'the present model must not touch the after-upscale route\'s state'
+record_model = code(function(feature_vk, 'bool VkPresentModel::Record(const VkPresentNrFrame& frame)'))
+assert 'encode.Passthrough = 1u;' in record_model and 'encode.HighlightRecovery = 0u;' in record_model
+# One set of constants, the encode's; the downsample and the resolve are copies of it, so the passthrough gate holds in
+# every place the shader reproduces the encode.
+assert re.findall(r'DlssNrConstants (\w+)', record_model) == ['encode', 'down', 'resolve'], record_model
+assert 'DlssNrConstants down = encode;' in record_model and 'DlssNrConstants resolve = encode;' in record_model
+admit = code(function(feature_vk, 'VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height)'))
+assert 'std::clamp(DlssNr::WorkingScale(), 0.25f, 1.0f)' in admit  # never above native on zero guides
+assert admit.index('pending.size() >= VkPresentHost::kNrInFlightMax') < admit.index('LoadForwarderShared()')
+assert 'old.waitFor = m.pending;' in admit and 'DeviceWaitIdle' not in code(model)
+completed = code(function(feature_vk, 'std::optional<double> VkPresentModel::Completed(uint64_t ticket)'))
+assert 'm.FreeRetired();' in completed and 'VK_QUERY_RESULT_WAIT_BIT' not in completed
+release = code(function(feature_vk, 'void VkPresentModel::Release(bool deviceGoing)'))
+assert release.index('if (!m.pending.empty())') < release.index('g_fwd.release(')
+abandon = code(function(feature_vk, 'void VkPresentModel::Abandon()'))
+assert not re.search(r'\bvk[A-Z]\w*\(|g_fwd\.|Destroy', abandon), abandon
+# The model's calls go through the forwarder (its __try isolation), and its fault ends it.
+assert 'FaultLatched()' in admit and 'FaultLatched()' in code(function(feature_vk, 'bool VkPresentModel::Record('))
+assert 'dlssnr_vk_shutdown(void* device)' in forwarder
+# NGX's device-specific shutdown takes an out count (as the D3D12 one does); called without one, the core wrote through a
+# null pointer at vkDestroyDevice (2026-10-14).
+assert 'Guarded(g_vk.shutdown1, device, &remaining)' in forwarder
+assert 'using PFN_NrVkShutdown1 = int(__cdecl*)(void*, unsigned int*);' in forwarder
+assert 'using PFN_Shutdown1 = NVSDK_NGX_Result (*)(VkDevice, unsigned int*);' in feature_vk
+assert 'VULKAN_Shutdown1()(' not in code(model) and 'shutdown(device, &remaining);' in feature_vk
+
+print('PASS: stage-3 guards (decided before recording, counted on submit, seen complete on a fence, freed only idle, '
+      'abandoned on loss; after-upscale route asks first; passthrough encode; semaphores freed after the destroy)',
+      flush=True)
+
 # The present hook goes in at a device's swapchain creation, after the bundle's own (installed in its vkCreateDevice),
 # so it runs first: application -> NR -> overlay -> present.
 assert 'HookPresent(device);' in code(function(host, 'VkResult OnCreateSwapchain('))
@@ -227,7 +335,7 @@ section = section[:following.start() + 1] if following else section
 assert re.search(r'^VulkanPresentHost=auto$', section, re.M)
 comment = section[:section.index('VulkanPresentHost=auto')]
 comment = comment[comment.rindex('\n\n'):]
-for words in ('Experiment', 'runs no NR', 'copies the presented image', 'back unchanged', 'TRANSFER_SRC',
+for words in ('Experiment', 'zero guides', 'copies the presented image', 'SDR', 'TRANSFER_SRC', 'extensions',
               'Default (auto) is false'):
     assert words in comment, f'the ini comment should say {words!r}'
 
@@ -235,7 +343,10 @@ for words in ('Experiment', 'runs no NR', 'copies the presented image', 'back un
 for item in (r'<ClCompile Include="..\retoque\dlssnr\DlssNr_VkPresentHost.cpp" />',
              r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentHost.h" />',
              r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentRegistry.h" />',
-             r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentTransport.h" />'):
+             r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentTransport.h" />',
+             r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentNr.h" />',
+             r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentModel.h" />',
+             r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkModelOwner.h" />'):
     assert item in project, item
 
 print('PASS: source guards (one gated call site ahead of the skip; only the usage and the waits edited, each where the '

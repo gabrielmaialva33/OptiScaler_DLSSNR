@@ -206,7 +206,7 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-vk-extensions` — the Vulkan device-extension merge the NR hook hands `vkCreateDevice`,
   compiled against the real Vulkan headers: `VK_KHR_` and `VK_EXT_buffer_device_address` never
   leave it together, and the one the game asked for is the one kept.
-- `nr-vk-present-host` — the Vulkan present host's stages 1 and 2 (`docs/dlssnr/design/nr-vulkan-present-host.md`):
+- `nr-vk-present-host` — the Vulkan present host's stages 1 to 3 (`docs/dlssnr/design/nr-vulkan-present-host.md`):
   the registry header (`DlssNr_VkPresentRegistry.h`) through its state machine -- records with ids of their own, a
   reused handle as a new record, two devices with the same swapchain handle value, destroys taking their children,
   unknown and internal objects, the window, creation and destruction lines field for field -- and the transport's
@@ -214,7 +214,9 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   route at present (same queue, cross-family, concurrent, none), the ring, the counters. Source guards: one call site,
   first in `VulkanHooks::Hook` and ahead of the marker check, gated before anything else; only an eligible swapchain's
   usage and a transported present's waits ever edited; no refusal after a wait is spent; locks in order; drains
-  before frees. No Vulkan or Wine.
+  before frees. Stage 3: the colour plan, the device's extensions and bufferDeviceAddress, the model's counters and
+  lines, the one-owner arbiter; guards that a model frame is decided before recording, counted on submit, seen
+  complete on a fence, freed only idle and abandoned on a lost device. No Vulkan or Wine.
 - `nr-zero-guides` — zero depth and motion for a host with no engine buffers, and the
   two-heap clear contract.
 
@@ -242,7 +244,12 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   TRANSFER_SRC (a native test layer) keeps every swapchain observe-only. With the key or the master off there is no
   host line, and under the marker vulkan-1.dll's exports are byte-identical to before OptiScaler loaded. Plus a D3D11
   and a D3D12 title through a local Proton's DXVK (validated) and vkd3d-proton: their swapchains get TRANSFER_SRC and
-  every present is carried (SKIP without a local Proton). No game, FG or NR.
+  every present is carried (SKIP without a local Proton). Stage 3 (`nr*` cases, `nr.cpp`), under Proton with the real
+  model from the local kit and the driver's NGX core: cold NR on every SDR present (BGRA8 UNORM and sRGB,
+  cross-family, an extent not a multiple of eight, working scale 0.5) -- every read-back exact with `ApplyModel` off,
+  changed by about three eight-bit steps with it on -- and refused, with every read-back exact, for a device without
+  `VK_NVX_binary_import` (the test layer hides it), the kit's old forwarder, and no model (SKIP without the kit or a
+  local Proton). No game or FG.
 
 **Not a suite.** `nr-before-upscale/verify-invariants.py` is a one-shot evidence
 script pinned to baseline commit `660303ec`. `run.py` does not call it and

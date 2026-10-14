@@ -5,14 +5,21 @@
 // VK_INSTANCE_LAYERS (nearer the driver), so the validation layer sees the hidden usage too and would report a
 // swapchain that asked for it anyway.
 //
+// With RETOQUE_HIDE_TRANSFER_SRC=0 it leaves the usage alone; with RETOQUE_HIDE_DEVICE_EXTENSIONS set to a
+// comma-separated list it also takes those names out of vkEnumerateDeviceExtensionProperties (stage 3's "the device
+// does not offer the model's extensions" case).
+//
 // Everything else passes through. Built by run.py with the host's g++ against external/vulkan's headers.
 
 #include <vulkan/vk_layer.h>
 #include <vulkan/vulkan.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace
 {
@@ -23,6 +30,7 @@ struct InstanceData
     PFN_vkDestroyInstance destroy = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR caps = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR caps2 = nullptr;
+    PFN_vkEnumerateDeviceExtensionProperties extensions = nullptr;
 };
 
 struct DeviceData
@@ -36,6 +44,21 @@ std::unordered_map<void*, InstanceData> g_instances; // by dispatch key: an inst
 std::unordered_map<void*, DeviceData> g_devices;
 
 template <typename T> void* Key(T handle) { return *reinterpret_cast<void**>(handle); }
+
+bool HideTransferSrc()
+{
+    const char* value = std::getenv("RETOQUE_HIDE_TRANSFER_SRC");
+    return value == nullptr || std::strcmp(value, "0") != 0;
+}
+
+bool Hidden(const char* name)
+{
+    const char* list = std::getenv("RETOQUE_HIDE_DEVICE_EXTENSIONS");
+    if (list == nullptr)
+        return false;
+    const std::string all = std::string(",") + list + ",";
+    return all.find(std::string(",") + name + ",") != std::string::npos;
+}
 
 InstanceData InstanceOf(void* key)
 {
@@ -70,6 +93,8 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* info, 
         next(*instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
     data.caps2 = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR>(
         next(*instance, "vkGetPhysicalDeviceSurfaceCapabilities2KHR"));
+    data.extensions = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+        next(*instance, "vkEnumerateDeviceExtensionProperties"));
 
     std::lock_guard lock(g_mutex);
     g_instances[Key(*instance)] = data;
@@ -131,7 +156,7 @@ VKAPI_ATTR VkResult VKAPI_CALL SurfaceCapabilities(VkPhysicalDevice physical, Vk
                                                    VkSurfaceCapabilitiesKHR* capabilities)
 {
     const VkResult result = InstanceOf(Key(physical)).caps(physical, surface, capabilities);
-    if (result == VK_SUCCESS && capabilities != nullptr)
+    if (result == VK_SUCCESS && capabilities != nullptr && HideTransferSrc())
         capabilities->supportedUsageFlags &= ~VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     return result;
 }
@@ -141,9 +166,43 @@ VKAPI_ATTR VkResult VKAPI_CALL SurfaceCapabilities2(VkPhysicalDevice physical,
                                                     VkSurfaceCapabilities2KHR* capabilities)
 {
     const VkResult result = InstanceOf(Key(physical)).caps2(physical, info, capabilities);
-    if (result == VK_SUCCESS && capabilities != nullptr)
+    if (result == VK_SUCCESS && capabilities != nullptr && HideTransferSrc())
         capabilities->surfaceCapabilities.supportedUsageFlags &= ~VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     return result;
+}
+
+// The device's own extensions (no layer name), less the hidden ones; the layer's own (a layer name) pass through.
+VKAPI_ATTR VkResult VKAPI_CALL DeviceExtensions(VkPhysicalDevice physical, const char* layer, uint32_t* count,
+                                                VkExtensionProperties* properties)
+{
+    const auto next = InstanceOf(Key(physical)).extensions;
+    if (layer != nullptr || std::getenv("RETOQUE_HIDE_DEVICE_EXTENSIONS") == nullptr)
+        return next(physical, layer, count, properties);
+
+    uint32_t all = 0;
+    VkResult result = next(physical, nullptr, &all, nullptr);
+    if (result != VK_SUCCESS)
+        return result;
+    std::vector<VkExtensionProperties> list(all);
+    result = next(physical, nullptr, &all, list.data());
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+        return result;
+    list.resize(all);
+    std::vector<VkExtensionProperties> kept;
+    for (const auto& extension : list)
+        if (!Hidden(extension.extensionName))
+            kept.push_back(extension);
+
+    if (properties == nullptr)
+    {
+        *count = static_cast<uint32_t>(kept.size());
+        return VK_SUCCESS;
+    }
+    const uint32_t n = *count < kept.size() ? *count : static_cast<uint32_t>(kept.size());
+    for (uint32_t i = 0; i < n; ++i)
+        properties[i] = kept[i];
+    *count = n;
+    return n < kept.size() ? VK_INCOMPLETE : VK_SUCCESS;
 }
 } // namespace
 
@@ -170,6 +229,8 @@ extern "C"
             return reinterpret_cast<PFN_vkVoidFunction>(SurfaceCapabilities);
         if (!strcmp(name, "vkGetPhysicalDeviceSurfaceCapabilities2KHR"))
             return reinterpret_cast<PFN_vkVoidFunction>(SurfaceCapabilities2);
+        if (!strcmp(name, "vkEnumerateDeviceExtensionProperties"))
+            return reinterpret_cast<PFN_vkVoidFunction>(DeviceExtensions);
         if (instance == VK_NULL_HANDLE)
             return nullptr;
         const InstanceData data = InstanceOf(Key(instance));
