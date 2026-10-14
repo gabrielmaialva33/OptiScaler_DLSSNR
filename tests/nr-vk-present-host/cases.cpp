@@ -817,6 +817,15 @@ static void ColourPlans()
 }
 
 // The model's device extensions at vkCreateDevice: what the device offers and the application did not ask for.
+static DeviceCreateFacts Facts(bool properties2 = true, bool vulkan11 = true, bool storage = true)
+{
+    DeviceCreateFacts f;
+    f.properties2 = properties2;
+    f.vulkan11 = vulkan11;
+    f.storageWithoutFormat = storage;
+    return f;
+}
+
 static void ExtensionPlans()
 {
     const std::vector<std::string> all = {
@@ -824,7 +833,7 @@ static void ExtensionPlans()
         "VK_KHR_push_descriptor", "VK_KHR_buffer_device_address", "VK_EXT_buffer_device_address"
     };
 
-    ExtensionPlan plan = PlanDeviceExtensions({ "VK_KHR_swapchain" }, all, true);
+    ExtensionPlan plan = PlanDeviceExtensions({ "VK_KHR_swapchain" }, all, Facts());
     CHECK(plan.ready && plan.missing.empty() && plan.already.empty());
     CHECK((plan.add == std::vector<std::string> { "VK_NVX_binary_import", "VK_NVX_image_view_handle",
                                                   "VK_KHR_push_descriptor", "VK_KHR_buffer_device_address" }));
@@ -835,35 +844,53 @@ static void ExtensionPlans()
     // DXVK asks for the NVX pair itself; the bundle has added everything before the host sees the list.
     plan = PlanDeviceExtensions({ "VK_NVX_binary_import", "VK_NVX_image_view_handle", "VK_KHR_push_descriptor",
                                   "VK_KHR_buffer_device_address" },
-                                all, true);
+                                all, Facts());
     CHECK(plan.ready && plan.add.empty() && plan.already.size() == 4);
 
     // The application's EXT buffer device address stands for the KHR one: never both (VUID-...-03328).
-    plan = PlanDeviceExtensions({ "VK_EXT_buffer_device_address" }, all, true);
+    plan = PlanDeviceExtensions({ "VK_EXT_buffer_device_address" }, all, Facts());
     CHECK(plan.ready && !Listed(plan.add, "VK_KHR_buffer_device_address") &&
           Listed(plan.already, "VK_EXT_buffer_device_address"));
 
-    // Not offered: not asked for (asking makes vkCreateDevice fail), and the device is not ready for the model.
-    plan = PlanDeviceExtensions({}, { "VK_KHR_push_descriptor", "VK_KHR_buffer_device_address" }, true);
-    CHECK(!plan.ready && plan.add.size() == 2 && plan.missing.size() == 2);
-    HAS(ExtensionText(plan), "not possible VK_NVX_binary_import (the device does not offer it), "
-                             "VK_NVX_image_view_handle (the device does not offer it)");
+    // Without the NVX pair the model cannot run on the device: nothing at all is added to it (another vendor's device
+    // keeps its create info), and it is not ready.
+    plan = PlanDeviceExtensions({}, { "VK_KHR_push_descriptor", "VK_KHR_buffer_device_address" }, Facts());
+    CHECK(!plan.ready && plan.add.empty() && plan.missing.size() == 2);
+    HAS(ExtensionText(plan), "added none; already enabled none; not possible VK_NVX_binary_import (the device does not "
+                             "offer it), VK_NVX_image_view_handle (the device does not offer it)");
+    plan = PlanDeviceExtensions({ "VK_NVX_binary_import" }, { "VK_KHR_push_descriptor" }, Facts());
+    CHECK(!plan.ready && plan.add.empty() && plan.missing.size() == 1 && plan.already.size() == 1);
 
     // Format-less storage writes not allowed yet (no feature, below Vulkan 1.3): format_feature_flags2 too.
     std::vector<std::string> withFlags2 = all;
     withFlags2.push_back("VK_KHR_format_feature_flags2");
-    plan = PlanDeviceExtensions({ "VK_KHR_swapchain" }, withFlags2, true, false);
+    plan = PlanDeviceExtensions({ "VK_KHR_swapchain" }, withFlags2, Facts(true, true, false));
     CHECK(plan.ready && plan.add.size() == 5 && plan.add.back() == "VK_KHR_format_feature_flags2");
-    plan = PlanDeviceExtensions({}, all, true, false); // not offered: the device is not ready for the model
+    plan = PlanDeviceExtensions({}, all, Facts(true, true, false)); // not offered: the device is not ready
     CHECK(!plan.ready && plan.missing.size() == 1);
     HAS(ExtensionText(plan), "not possible VK_KHR_format_feature_flags2 (the device does not offer it)");
-    CHECK(PlanDeviceExtensions({}, all, true, true).ready); // allowed already: not asked for
+    CHECK(PlanDeviceExtensions({}, all, Facts(true, true, true)).ready); // allowed already: not asked for
 
     // A Vulkan 1.0 instance without properties2: the two that depend on it are not asked for.
-    plan = PlanDeviceExtensions({}, all, false);
+    plan = PlanDeviceExtensions({}, all, Facts(false, false));
     CHECK(!plan.ready && plan.add.size() == 2);
     HAS(ExtensionText(plan), "VK_KHR_push_descriptor (needs Vulkan 1.1 or VK_KHR_get_physical_device_properties2 on "
                              "the instance)");
+    // With properties2 but still 1.0: the KHR buffer device address also needs VK_KHR_device_group, not added.
+    plan = PlanDeviceExtensions({}, all, Facts(true, false));
+    CHECK(!plan.ready && plan.add.size() == 3);
+    HAS(ExtensionText(plan), "VK_KHR_buffer_device_address (needs a Vulkan 1.1 instance: VK_KHR_device_group is not "
+                             "added)");
+
+    // A Vulkan 1.4 features struct with pushDescriptor off: VK_KHR_push_descriptor may not be enabled beside it.
+    DeviceCreateFacts v14 = Facts();
+    v14.vulkan14Features = true;
+    plan = PlanDeviceExtensions({}, all, v14);
+    CHECK(!plan.ready && !Listed(plan.add, "VK_KHR_push_descriptor"));
+    HAS(ExtensionText(plan), "VK_KHR_push_descriptor (the application's VkPhysicalDeviceVulkan14Features has "
+                             "pushDescriptor off)");
+    v14.pushDescriptorFeature = true;
+    CHECK(PlanDeviceExtensions({}, all, v14).ready);
 }
 
 // bufferDeviceAddress: prepended only where nothing in the application's chain could conflict.

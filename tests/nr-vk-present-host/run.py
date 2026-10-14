@@ -265,13 +265,27 @@ assert code(host).count('->Completed(') == 1
 # The model is freed only with nothing of it in flight, and abandoned (nothing destroyed) on a lost device or when
 # frames never completed; the owner token goes back after either.
 stand_down = code(function(host, 'void StandDown(DeviceTransport& dev)'))
-assert stand_down.index('InFlight() != 0') < stand_down.index('Release(false)') < \
-    stand_down.index('ReleaseModelFromPresentHost')
+assert stand_down.index('dev.lost') < stand_down.index('Release()') < stand_down.index('ReleaseModelFromPresentHost')
+assert stand_down.index('InFlight() != 0') < stand_down.index('Release()')
 teardown = code(function(host, 'std::string TeardownDevice('))
-assert teardown.index('InFlight()') < teardown.index('Release(true)')
-assert teardown.count('model->Abandon()') == 3
+assert teardown.index('InFlight()') < teardown.index('Release()') < teardown.index('ShutdownPresentNgx(')
+assert teardown.count('AbandonModel(dev);') == 2 and teardown.count('model->Abandon()') == 1
+# The token goes back and NGX on the device goes with it whatever became of the model (stood down earlier included);
+# on a lost device or with frames never completed, NGX is only forgotten.
+assert 'DlssNr::ShutdownPresentNgx(dev.device, forgetOnly, dev.lines);' in teardown
+abandon_model = code(function(host, 'void AbandonModel(DeviceTransport& dev)'))
+assert 'ShutdownPresentNgx(dev.device, true, dev.lines)' in abandon_model and 'ReleaseModelFromPresentHost' in abandon_model
+# Whatever becomes of a present, a model on its device stands down when NR is off or another route asks: before the
+# refusals that return without looking at the transport.
+assert prepare.index('Housekeep(*dev);') < prepare.index('return skip(Skip::MultiSwapchain)')
+housekeep = code(function(host, 'void Housekeep(DeviceTransport& dev)'))
+assert 'DlssNrEnabled' in housekeep and 'PresentHostMustYield' in housekeep and 'StandDown(dev)' in housekeep
+# A discard on a lost device abandons the model rather than releasing what the recording built.
+assert re.search(r'if \(dev->lost\)\s*dev->model->Abandon\(\);\s*else\s*dev->model->Discarded\(ticket\);', flat(code(host)))
 # Live off, and another route asking: stand down. The claim comes after every cheap refusal.
 decide = code(function(host, 'NrDecision DecideNr('))
+# A swapchain holds the model only once the model was admitted for it.
+assert decide.index('->Admit(') < decide.index('dev.modelSwapchain = sc.id;')
 assert decide.index('DlssNrEnabled') < decide.index('StandDown(dev)')
 assert decide.index('PresentHostMustYield') < decide.index('ClaimModelForPresentHost') < decide.index('->Admit(')
 for cheap in ('sc.colour.sdr', 'dev.nrReady', 'MissingFormatFeatures('):
@@ -301,7 +315,10 @@ assert admit.index('pending.size() >= VkPresentHost::kNrInFlightMax') < admit.in
 assert 'old.waitFor = m.pending;' in admit and 'DeviceWaitIdle' not in code(model)
 completed = code(function(feature_vk, 'std::optional<double> VkPresentModel::Completed(uint64_t ticket)'))
 assert 'm.FreeRetired();' in completed and 'VK_QUERY_RESULT_WAIT_BIT' not in completed
-release = code(function(feature_vk, 'void VkPresentModel::Release(bool deviceGoing)'))
+release = code(function(feature_vk, 'void VkPresentModel::Release()'))
+assert 'Shutdown' not in release, 'NGX goes with the device (ShutdownPresentNgx), not with the model'
+# The pass's slot ring: a frame is admitted only while the oldest one in flight is less than a ring behind it.
+assert 'm.dispatches + 3 - oldest > kPresentPassSlots' in admit
 assert release.index('if (!m.pending.empty())') < release.index('g_fwd.release(')
 abandon = code(function(feature_vk, 'void VkPresentModel::Abandon()'))
 assert not re.search(r'\bvk[A-Z]\w*\(|g_fwd\.|Destroy', abandon), abandon
