@@ -9,7 +9,7 @@ frame. Artifacts go to ~/.cache/lsfg-ctxbench/<name>/, never into the worktree.
   python3 tools/lsfg-study/ctxbench/run.py --name head -- --schedule ab
   # an older revision's retoque/lsfg, for an identity check against it (its Record has no schedule argument)
   python3 tools/lsfg-study/ctxbench/run.py --name base --baseline 0ba40b6a
-  # run only, extra arguments go to the bench: --width --height --flow --performance --frames --iterations
+  # run only, extra arguments go to the bench: --width --height --flow --performance --fp16 --frames --iterations
   # --warmup --schedule waves|perpass|ab --output-copy --bgra --dump N
   # where the time goes, wave by wave (a build of its own: the timestamps are compiled in only here)
   python3 tools/lsfg-study/ctxbench/run.py --name waves --wave-timing -- --frames 2 --iterations 500 --wave-timing
@@ -32,6 +32,8 @@ MSVC = Path.home() / '.local/opt/msvc/bin/x64'
 PREFIX = Path.home() / '.local/opt/msvc-wineprefix'
 LSFG_FILES = ('LsfgFrameGen_Dx12.cpp', 'LsfgFrameGen_Dx12.h', 'LsfgGraph.h', 'LsfgDxil.h', 'LsfgShaderSource.cpp',
               'LsfgShaderSource.h')
+# LsfgShaderSource.cpp calls into these since the hash-keyed cache; older revisions have neither.
+LSFG_OPTIONAL = ('LsfgShaderLibrary.cpp', 'LsfgShaderLibrary.h', 'LsfgEnvironment.h')
 
 
 def idle():
@@ -78,20 +80,23 @@ def main():
         if args.baseline:
             src = work / 'src'
             (src / 'lsfg').mkdir(parents=True, exist_ok=True)
-            for name in LSFG_FILES:
-                data = subprocess.run(['git', '-C', str(ROOT), 'show', f'{args.baseline}:retoque/lsfg/{name}'],
-                                      capture_output=True, check=True).stdout
-                (src / 'lsfg' / name).write_bytes(data)
+            for name in LSFG_FILES + LSFG_OPTIONAL:
+                shown = subprocess.run(['git', '-C', str(ROOT), 'show', f'{args.baseline}:retoque/lsfg/{name}'],
+                                       capture_output=True, check=name not in LSFG_OPTIONAL)
+                if shown.returncode == 0:
+                    (src / 'lsfg' / name).write_bytes(shown.stdout)
             include = src
             defines = ['/DLSFG_BASELINE']
         else:
             include = ROOT / 'retoque'
             defines = ['/DLSFG_WAVE_TIMING'] if args.wave_timing else []
         sources = [HERE / 'main.cpp', include / 'lsfg/LsfgFrameGen_Dx12.cpp', include / 'lsfg/LsfgShaderSource.cpp']
+        if (include / 'lsfg/LsfgShaderLibrary.cpp').exists():
+            sources.append(include / 'lsfg/LsfgShaderLibrary.cpp')
         command([MSVC / 'cl', '/nologo', '/std:c++latest', '/EHsc', '/MD', '/W3', '/O2', '/DUNICODE', '/D_UNICODE',
                  *defines, '/I' + win(HERE), '/I' + win(include), *map(win, sources), '/Fo' + win(work) + '\\',
                  '/Fe' + win(work / 'lsfg-ctxbench.exe'), '/link', 'd3d12.lib', 'dxgi.lib', 'dxguid.lib',
-                 'windowscodecs.lib', 'ole32.lib'], env, work / 'build.log', work, 300)
+                 'windowscodecs.lib', 'ole32.lib', 'advapi32.lib'], env, work / 'build.log', work, 300)
         candidates = [Path.home() / '.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/vkd3d-proton/x86_64-windows']
         runtime = next(p for p in candidates if (p / 'd3d12.dll').exists())
         files = [runtime / name for name in ('d3d12.dll', 'd3d12core.dll')]

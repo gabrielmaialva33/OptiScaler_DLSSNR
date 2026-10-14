@@ -197,7 +197,7 @@ int wmain(int argc, wchar_t** argv)
     fs::path shaders, out, input;
     UINT width = 1691, height = 1312, frames = 16, iterations = 600, warmup = 100;
     float flow = 1.0f;
-    bool performance = false, outputCopy = false, bgra = false, waveTiming = false;
+    bool performance = false, fp16 = false, outputCopy = false, bgra = false, waveTiming = false;
     std::wstring schedule = L"waves";
     int dump = -1;
 
@@ -230,6 +230,8 @@ int wmain(int argc, wchar_t** argv)
             flow = std::stof(next());
         else if (a == L"--performance")
             performance = true;
+        else if (a == L"--fp16")
+            fp16 = true;
         else if (a == L"--output-copy")
             outputCopy = true;
         else if (a == L"--bgra")
@@ -278,7 +280,7 @@ int wmain(int argc, wchar_t** argv)
     // The context, as Lsfg.cpp builds it.
     std::string error;
     auto source = Lsfg::MakeDirectoryShaderSource(shaders.wstring());
-    auto programs = Lsfg::ProgramSet_Dx12::Build(device, performance, false, *source, error);
+    auto programs = Lsfg::ProgramSet_Dx12::Build(device, performance, fp16, *source, error);
     if (programs == nullptr)
         Fail("programs: " + error);
     Lsfg::ContextKey key;
@@ -288,12 +290,13 @@ int wmain(int argc, wchar_t** argv)
     key.format = format;
     key.flow = flow;
     key.performance = performance;
+    key.fp16 = fp16;
     auto context = Lsfg::Context_Dx12::Build(programs, key, error);
     if (context == nullptr)
         Fail("context: " + error);
-    printf("context %ux%u flow %.2f %s, %u images, %u descriptors, %.1f MiB\n", width, height, flow,
-           performance ? "performance" : "quality", context->ImageCount(), context->DescriptorCount(),
-           double(context->VramBytes()) / 1048576.0);
+    printf("context %ux%u flow %.2f %s %s, %u images, %u descriptors, %.1f MiB\n", width, height, flow,
+           performance ? "performance" : "quality", fp16 ? "fp16" : "fp32", context->ImageCount(),
+           context->DescriptorCount(), double(context->VramBytes()) / 1048576.0);
 #ifndef LSFG_BASELINE
     printf("waves: %u (pre-pass alone), %u (pre-pass and a generated frame)\n", context->WaveCount(false),
            context->WaveCount(true));
@@ -540,7 +543,7 @@ int wmain(int argc, wchar_t** argv)
             // What each interval holds: the pre-pass and first generated frame's waves, as Record runs them.
             Lsfg::Graph g;
             std::string why;
-            Lsfg::BuildGraph(width, height, flow, performance, false, g, why);
+            Lsfg::BuildGraph(width, height, flow, performance, fp16, g, why);
             const auto schedule = Lsfg::ScheduleWaves(g, true, true);
             double total = 0;
             for (size_t i = 0; i < waveUs.size(); ++i)
