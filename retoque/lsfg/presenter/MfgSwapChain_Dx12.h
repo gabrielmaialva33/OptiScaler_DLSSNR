@@ -46,6 +46,12 @@ namespace LsfgMfg
 
 constexpr uint32_t kMaxBufferCount = DXGI_MAX_SWAP_CHAIN_BUFFERS;
 
+// GPU timestamps of the interpolation lists (MFG_PRESENTER.md 6): entries in the ring, kTimestampsPerEntry each. The
+// game is at most one entry ahead of the presenter thread (Present waits for the previous entry's compositions), so a
+// slot is read long before it is written again.
+constexpr uint32_t kTimingSlots = 8;
+constexpr uint32_t kNoTimingSlot = 0xFFFFFFFFu;
+
 // FFX's FfxFrameGenerationConfig (framegeneration/internal/ffx_framegeneration_internal.h), the fields this swapchain
 // reads. Filled by Lsfg::Presenter from the ffxConfigureDescFrameGeneration OptiScaler hands FFX's FG context, the way
 // FFX's provider fills its own (ffx_provider_fsr3framegeneration.cpp:216-436).
@@ -99,6 +105,14 @@ struct PacingData
     uint32_t generatedFrames; // how many of frames[] are generated; frames[generatedFrames] is the real one
     uint32_t frameCount;      // generatedFrames + 1
     FrameInfo frames[kMaxFramesPerEntry];
+
+    // MFG_PRESENTER.md 4.2 and 6: the interpolation lists the entry executed (generated frame k is complete at the end
+    // of list ListForFrame(k, interpolationLists)), where their GPU timestamps landed, and when the game handed the
+    // frame over (QPC, presentInterpolated).
+    uint32_t interpolationLists;
+    uint32_t timingSlot; // kNoTimingSlot: none written
+    UINT64 timestampFrequency;
+    int64_t handoffQpc;
 
     void invalidate() { memset(this, 0, sizeof(PacingData)); }
 };
@@ -156,6 +170,15 @@ struct PresentInfo
     UiCompositionGpu uiComposition;
     DebugPacingGpu debugPacing;
 
+    // GPU timestamps of the interpolation lists, kTimingSlots entries of kTimestampsPerEntry, resolved by each entry's
+    // last list into a persistently mapped readback buffer and read by the presenter thread once that entry's last
+    // generated frame has been composited (its composition waited for that list). Null when unavailable; released in
+    // shutdown(), after both threads.
+    ID3D12QueryHeap* timingQueries = nullptr;
+    ID3D12Resource* timingReadback = nullptr;
+    const uint64_t* timingData = nullptr;
+    uint64_t lastTimingBegin = 0; // presenter thread: the newest first-list start taken (MfgPacing.h ReadyTimes)
+
     // The presenter thread's 10 s summary (MfgPacing.h PresentWindow).
     PresentWindow window;
     int64_t windowStartQpc = 0;
@@ -179,6 +202,18 @@ struct OutputSet
 {
     ID3D12Resource* resource[kMaxGeneratedFrames] = {};
     UINT64 availabilityFenceValue = 0;
+};
+
+// What one real frame's interpolation produced (dispatchInterpolationCommands).
+struct InterpolationResult
+{
+    uint32_t produced = 0; // generated frames written: frames[0..produced-1], in display order
+    FfxApiResource frames[kMaxGeneratedFrames] = {};
+    FfxApiResource realFrame = {};
+    uint32_t lists = 0;                         // interpolation lists executed, in order, each followed by a signal
+    UINT64 listFence[kMaxGeneratedFrames] = {}; // the interpolationFence value signalled after list i
+    uint32_t timingSlot = kNoTimingSlot;
+    UINT64 timestampFrequency = 0;
 };
 
 // {6E0F3A27-9C51-4B8E-A3D4-1F7C2B5E8D90}: answered by QueryInterface so Lsfg::Presenter can tell its own swapchains
@@ -271,7 +306,9 @@ class DECLSPEC_UUID("6E0F3A27-9C51-4B8E-A3D4-1F7C2B5E8D90") MfgSwapChainDX12 : p
 
     void applyFrameGenerationConfig(const FrameGenerationConfig* config, bool applyChangesNow);
     void presentWithUiComposition(UINT SyncInterval, UINT Flags);
-    uint32_t dispatchInterpolationCommands(FfxApiResource* pInterpolatedFrames, FfxApiResource* pRealFrame);
+    InterpolationResult dispatchInterpolationCommands();
+    void createTiming();
+    void releaseTiming();
     void presentInterpolated(UINT SyncInterval, UINT Flags);
 
     bool verifyUiDuplicateResource();
@@ -324,6 +361,9 @@ class DECLSPEC_UUID("6E0F3A27-9C51-4B8E-A3D4-1F7C2B5E8D90") MfgSwapChainDX12 : p
 
     UINT64 framesSentForPresentation = 0;
     UINT64 nextPresentWaitValue = 0;
+    UINT64 timedEntries = 0;                      // entries that wrote GPU timestamps (the ring's write position)
+    ID3D12CommandQueue* timestampQueue = nullptr; // the queue timestampFrequency was read from
+    UINT64 timestampFrequency = 0;
     HANDLE interpolationThreadHandle = 0;
     ULONG refCount = 1;
 

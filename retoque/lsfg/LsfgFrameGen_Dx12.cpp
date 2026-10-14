@@ -1059,6 +1059,28 @@ void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, co
     _boundPso = nullptr; // the list is FFX's: whatever it had bound is not ours
     _barriers.clear();
 
+    // Generated frame k goes on io.lists[k] when our presenter gave it a list of its own (FrameIo::lists). Whatever
+    // frame k - 1 left pending (its output's restore or UAV barrier) is issued on frame k - 1's list first: the
+    // presenter composites a frame once its own list's fence is reached, so nothing that frame needs may sit on a later
+    // list. The next list starts with no heap and no pipeline of ours bound; every image's tracked state is where the
+    // previous list left it, because the lists run in order on one queue. With no lists given this is always `list`
+    // and the recording is the single-list one, command for command.
+    ID3D12GraphicsCommandList* current = list;
+    _listsUsed = 1;
+    auto listFor = [&](uint32_t k)
+    {
+        ID3D12GraphicsCommandList* next = (k < io.lists.size() && io.lists[k] != nullptr) ? io.lists[k] : current;
+        if (next != current)
+        {
+            _Flush(current);
+            current = next;
+            current->SetDescriptorHeaps(1, heaps);
+            _boundPso = nullptr;
+            ++_listsUsed;
+        }
+        return current;
+    };
+
     if (timed)
         list->EndQuery(_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2);
 
@@ -1092,9 +1114,10 @@ void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, co
         {
             FrameConstants f = frame;
             f.timestamp = TimestampFor(k + 1, io.generatedFrames);
-            _ExecutePerPass(list, _main, f);
-            _CopyOut(list, io.outputs[k], io.outputStates[k]);
-            _Flush(list);
+            ID3D12GraphicsCommandList* target = listFor(k);
+            _ExecutePerPass(target, _main, f);
+            _CopyOut(target, io.outputs[k], io.outputStates[k]);
+            _Flush(target);
         }
     }
     else if (generate == 0)
@@ -1107,14 +1130,15 @@ void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, co
         {
             FrameConstants f = frame;
             f.timestamp = TimestampFor(k + 1, io.generatedFrames);
+            ID3D12GraphicsCommandList* target = listFor(k);
 
             DirectTarget direct;
             const bool isDirect = _BindDirect(io.outputs[k], io.outputStates[k], direct);
-            _ExecuteWaves(list, k == 0 ? _wavesPreMain : _wavesMain, frame, f, isDirect ? &direct : nullptr);
+            _ExecuteWaves(target, k == 0 ? _wavesPreMain : _wavesMain, frame, f, isDirect ? &direct : nullptr);
 
             if (!isDirect)
             {
-                _CopyOut(list, io.outputs[k], io.outputStates[k]);
+                _CopyOut(target, io.outputs[k], io.outputStates[k]);
             }
             else if (direct.state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
             {
@@ -1133,14 +1157,15 @@ void Context_Dx12::Record(ID3D12GraphicsCommandList* list, const FrameIo& io, co
             }
         }
     }
-    _Flush(list);
-    StudyTimestamp(list);
+    _Flush(current);
+    StudyTimestamp(current);
 
+    // The frame's GPU time spans every list it was recorded on: begun on the first, ended and resolved on the last.
     if (timed)
     {
-        list->EndQuery(_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2 + 1);
-        list->ResolveQueryData(_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2, 2, _readback.Get(),
-                               UINT64(slot) * 2 * sizeof(uint64_t));
+        current->EndQuery(_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2 + 1);
+        current->ResolveQueryData(_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2, 2, _readback.Get(),
+                                  UINT64(slot) * 2 * sizeof(uint64_t));
         _slotPerPass[slot] = perPass;
         ++_timedFrames;
     }

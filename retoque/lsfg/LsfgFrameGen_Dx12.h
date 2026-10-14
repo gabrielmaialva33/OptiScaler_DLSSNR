@@ -117,6 +117,12 @@ struct FrameIo
     std::array<D3D12_RESOURCE_STATES, 4> outputStates {};
     uint32_t generate = 0;        // generated frames to record now (0: ingest and pre-pass only)
     uint32_t generatedFrames = 0; // how many FFX asked for, which sets the timestamps k / (n + 1)
+
+    // Where generated frame k is recorded, k >= 1: lists[k] when set, else the list of frame k - 1. Our MFG presenter
+    // hands one list per generated frame and executes each with a fence signal of its own (Lsfg.h
+    // DispatchDescFrameLists); everything shared by the frames (the clears, ingest, the pre-pass) and frame 0 stay on
+    // the list Record is given. Unset, as with FFX's swapchain, everything is recorded on that one list as before.
+    std::array<ID3D12GraphicsCommandList*, 4> lists {};
 };
 
 // How the last generated frame reached FFX's output.
@@ -142,10 +148,15 @@ class Context_Dx12
 
     ~Context_Dx12();
 
-    // Present thread, on the callback's list (DIRECT, or COMPUTE with FFX's async workloads). Every resource
-    // of ours is left where the tracked state says; presentColor and outputs[] are restored to their states.
+    // Present thread, on the callback's list (DIRECT, or COMPUTE with FFX's async workloads), and on io.lists for the
+    // generated frames that have one. Every resource of ours is left where the tracked state says, which is where the
+    // next list on the same queue finds it; presentColor is restored on the first list, and outputs[k] on the list that
+    // wrote it, before the next list starts.
     void Record(ID3D12GraphicsCommandList* list, const FrameIo& io, const FrameConstants& frame,
                 Schedule schedule = Schedule::Waves);
+
+    // How many lists the last Record recorded into (1 unless io.lists switched it to others).
+    uint32_t LastListsUsed() const { return _listsUsed; }
 
     // Multi-frame generation contract:
     // Records generated frame `index` (0-based: 0 .. count - 1) of `count` total generated frames
@@ -234,6 +245,7 @@ class Context_Dx12
     bool _recorded = false;
     std::vector<D3D12_RESOURCE_BARRIER> _barriers; // pending, issued as one batch by _Flush
     ID3D12PipelineState* _boundPso = nullptr;      // last set on the list during this Record
+    uint32_t _listsUsed = 1;                       // by the last Record
 
     Waves _wavesPre;     // a base frame that generates nothing
     Waves _wavesPreMain; // a base frame and its first generated frame, as one sequence

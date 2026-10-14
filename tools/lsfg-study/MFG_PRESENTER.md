@@ -1,6 +1,8 @@
 # LSFG at x3 and x4: a presenter of our own (OPTI_INTEGRATION.md option a′)
 
-Status: **built and running at x3 and x4 in PCSX2** (2026-10-13, branch `study/lsfg-d3d12`; results in section 9). Study only, like everything under `tools/lsfg-study/`: nothing
+Status: **built and running at x3 and x4 in PCSX2** (2026-10-13, branch `study/lsfg-d3d12`; results in section 9).
+Since 2026-10-14 (branch `study/lsfg-split-lists`) each generated frame has an interpolation list and a fence of its own
+(4.2, results in 9.1). Study only, like everything under `tools/lsfg-study/`: nothing
 here merges into `dlss-neural-rendering` (OPTI_INTEGRATION.md, "Read this first").
 
 Citations are `file:line` against this worktree. Two abbreviations, as in OPTI_INTEGRATION.md:
@@ -26,7 +28,9 @@ Citations are `file:line` against this worktree. Two abbreviations, as in OPTI_I
 - **How frames are asked for.** Exactly FFX's callback contract, widened: one `ffxDispatchDescFrameGeneration` per
   real frame with `numGeneratedFrames = N` and `outputs[0..N-1]`; the callback returns with `numGeneratedFrames` set
   to what it wrote. LSFG already loops `k = 1..N` at timestamps `k/(N+1)` (`retoque/lsfg/LsfgFrameGen_Dx12.cpp:1027-1035`,
-  `LsfgGraph.h:389`). That is the narrow interface; OpenCode's MFG work plugs in behind it.
+  `LsfgGraph.h:389`). That is the narrow interface; OpenCode's MFG work plugs in behind it. Since `9e94324d` the same
+  call carries one command list per generated frame (`Lsfg::DispatchDescFrameLists`), each executed with a fence of its
+  own, so frame k is composited when its own list is done (4.2).
 
 ## 1. Fork scope
 
@@ -216,8 +220,8 @@ them until the next resize or shutdown, so nothing is freed while the GPU may re
 - The real swapchain keeps FISC's three flip-discard buffers (`FISC.cpp:1262`): the presenter waits for each
   composition before it presents (`:773`), so with a 165 Hz display and tearing allowed, three are enough for four
   presents per real frame. Measured, not assumed (section 7).
-- The command pool grows from 32 to 64 entries per queue type: each real frame now takes one interpolation list,
-  up to N + 1 composition lists and as many debug-pacing lists, and the pool's DIRECT bucket is shared by the game
+- The command pool grows from 32 to 64 entries per queue type: each real frame now takes up to N interpolation lists
+  (one per generated frame, 4.2), up to N + 1 composition lists and as many debug-pacing lists, and the pool's DIRECT bucket is shared by the game
   queue and the present queue (`_Helpers.h:241-293`). FISC asserts on exhaustion; the fork waits for the oldest entry
   instead of dereferencing null.
 
@@ -253,7 +257,8 @@ ffx-api the build uses) per real frame:
 
 | Field | Value |
 |---|---|
-| `commandList` | an interpolation list from the pool, on the game queue, or on the async compute queue with `[FrameGen] FGAsync` |
+| `commandList` | an interpolation list from the pool, on the game queue, or on the async compute queue with `[FrameGen] FGAsync`: the first of one list per generated frame |
+| `header.pNext` | with N > 1, `Lsfg::DispatchDescFrameLists`: all N lists, and on return how many were recorded into (4.2) |
 | `presentColor` | the replacement backbuffer the game rendered, in `PRESENT` |
 | `outputs[0..N-1]` | this present's output set, in `UNORDERED_ACCESS` |
 | `numGeneratedFrames` | N on entry; **on return, how many of `outputs[]` were written** (0..N) |
@@ -263,7 +268,8 @@ The callback is FSRFG's `DispatchCallback` (`:849-1064`), unchanged: its reset p
 run as before, then `Lsfg::TakesFrame` decides who interpolates (`:1057`).
 
 - **LSFG takes the frame.** `Lsfg::FfxDispatch` records ingest, the pre-pass once, and for `k = 1..N` the main pass
-  with `Timestamp = k/(N+1)` writing `outputs[k-1]` (`LsfgFrameGen_Dx12.cpp:1022-1062`), and sets
+  with `Timestamp = k/(N+1)` writing `outputs[k-1]`, each on its own list from the second on (4.2;
+  `Context_Dx12::Record`), and sets
   `numGeneratedFrames` to N, or to 0 while warming up or after a reset. This loop exists since `3777af9b`; with FFX's
   swapchain it only ever ran with N = 1.
 - **FFX interpolates instead** (LSFG building, refused, or switched off). FFX's dispatch writes `outputs[0]` only and
@@ -272,34 +278,88 @@ run as before, then `Lsfg::TakesFrame` decides who interpolates (`:1057`).
   that frame instead of stale outputs. With FFX's swapchain the value is already 1, so nothing changes there.
 
 **OpenCode's MFG work** (`tools/lsfg-study/MFG_CONTRACT.md`, merged from `study/lsfg-mfg-gen` in `d3f1b108`) offers
-two modes. The presenter uses **Batch mode through `FfxDispatch`** (`numGeneratedFrames = K`, `outputs[0..K-1]`, one
-list), which that contract names as the alternative to `RecordBatch`, and which keeps FSR-FG's per-frame latch: the
-latch decides whether FFX's prepare ran, so a presenter that called `RecordBatch`/`RecordGenerated` directly would skip
-`DispatchCallback`'s reset policy and could leave FFX interpolating a frame it never prepared. Sequential mode
-(`RecordGenerated`, one list per frame) is the route to the per-frame fences of 4.2, if they are ever wanted; it
-records no GPU timestamps and does its own history keeping, so it would need the latch wired through it first.
+two modes. The presenter uses **Batch mode through `FfxDispatch`** (`numGeneratedFrames = K`, `outputs[0..K-1]`), which
+that contract names as the alternative to `RecordBatch`, and which keeps FSR-FG's per-frame latch: the latch decides
+whether FFX's prepare ran, so a presenter that called `RecordBatch`/`RecordGenerated` directly would skip
+`DispatchCallback`'s reset policy and could leave FFX interpolating a frame it never prepared. The per-frame lists of
+4.2 ride on the same call, in an extension descriptor, rather than on Sequential mode (`RecordGenerated`), which records
+no GPU timestamps and keeps its own history outside the latch.
 
 ### 4.2 Lists, queues, synchronisation
 
-All N frames are recorded into **one** list and signal **one** interpolation fence (FISC's model: `:1917-1939`). The
-first generated frame therefore waits for all N: about N × 0.8 ms on PCSX2 (OPTI_INTEGRATION.md, second step),
-inside a 33 ms real frame. Splitting would need one list per frame, which means a callback per frame and a contract
-LSFG does not have; it is an optimisation to measure later, not a correctness need.
+**One list and one fence per generated frame** (`study/lsfg-split-lists`). Until then all N frames were recorded into one
+list behind one interpolation fence (FISC's model, `:1917-1939`), so the first generated frame could be composited only
+once the last was done.
+
+**What the frames share, and what is per t.** From the converted HLSL (`Tmp/lsfg-study/hlsl`): `cb_Timestamp` is read by
+gamma0, gamma4, delta0, delta4, epsilon0 and generate (base shaders 3, 7, 8, 12, 17, 1). gamma0, delta0 and epsilon0
+are the first pass of every chain at every pyramid level, so all 66 main-pass dispatches depend on t; the mipmaps, alpha
+and beta passes declare `cb` but never read the timestamp. Shared per real frame, then: FSR-FG's own callback work
+(HUD cut-off copy, hudless compare, the reprojection copy, all recorded before the hand-off), LSFG's first-use clears,
+the ingest copy and the 34 pre-pass dispatches. Per generated frame: the 66 main-pass dispatches at
+`t = (k+1)/(N+1)`, and the copy-out where generate cannot write the output itself.
+
+**How the lists reach LSFG.** `dispatchInterpolationCommands` takes one list per generated frame asked from its pool,
+each with an allocator of its own that the pool resets only once that entry's fence says the GPU is past it (an
+allocator per list in flight; a pool that cannot give one more just stops the run, and the remaining frames go on the
+last list). It still makes **one** callback per real frame, through FSR-FG's `DispatchCallback`, with the first list as
+`commandList` and all of them in `Lsfg::DispatchDescFrameLists` (`retoque/lsfg/Lsfg.h`), a fork-owned descriptor type
+(`0x4C534601`, outside FFX's `0x0002xxxx`) chained to `header.pNext`. `Lsfg::FfxDispatch` records the shared work and
+frame 0 on the first list (the pre-pass and frame 0's main pass are one wave sequence, `ScheduleWaves(pre, main)`, so
+that is also the natural cut), frame k on list `LsfgMfg::ListForFrame(k, lists handed)`, and reports how many lists it
+used. Anything else leaves that at 1, everything on the first list: FFX interpolating (and `Lsfg::TakesFrame` unlinks
+the descriptor before FFX's dispatch, so the signed DLL never receives a type it does not know), LSFG holding a frame
+(warm-up, reset), a frame FSR-FG cancelled. FFX's own swapchain never attaches the descriptor, so x2 records exactly as
+before.
+
+**Submission.** The used lists are executed in order on the interpolation queue, each in its own
+`ExecuteCommandLists` followed by its own `interpolationFence` value; the unused ones are closed and dropped. Generated
+frame k carries the value of its own list (`ListForFrame(k, used)`, the same list the generator picked), and the
+entry's first wait, which covers the real frame's ingest, is the first list's.
+
+**D3D12 at the list boundaries.** What makes the split valid rather than just accepted by vkd3d-proton:
+
+- All lists of a real frame go to one queue and run in submission order, so the state LSFG tracks on the CPU for each of
+  its images is the state the next list finds. None of those textures has `ALLOW_SIMULTANEOUS_ACCESS` and every
+  transition is explicit (no implicit promotion), so nothing decays to `COMMON` at an `ExecuteCommandLists` boundary.
+- Whatever frame k-1 left pending in LSFG's barrier batch (its output's UAV barrier, or the transition back to the state
+  the presenter declared, and with the copy-out route the restore of the destination) is issued on frame k-1's own list
+  before the next list starts (`Context_Dx12::Record`, `listFor`): the presenter composites frame k-1 as soon as that
+  list's fence is reached, so nothing it needs may sit on a later list. The ingest's restore of `presentColor` is issued
+  by the first wave on the first list.
+- Each new list gets `SetDescriptorHeaps` with LSFG's heap and starts with no pipeline of LSFG's assumed bound; every root
+  argument is set per dispatch anyway.
+- Cross-queue: the present queue waits for frame k's fence before compositing frame k (`compositeSwapChainFrame`,
+  unchanged) and composites while lists k+1.. still run on the interpolation queue. They touch disjoint resources: list
+  j writes only output j and LSFG's own images; the composition reads output k, the UI surface and the swapchain buffer,
+  and restores output k to `UNORDERED_ACCESS` before its fence. The real frame (the replacement backbuffer that list 0
+  copies from) is composited after the last generated frame, whose composition waited for the last list, and after the
+  entry's first wait for list 0. The output set's availability wait is queued ahead of the first list, so it covers them
+  all.
+- The states involved (`COMMON`/`PRESENT`, `COPY_SOURCE`, `COPY_DEST`, `NON_PIXEL_SHADER_RESOURCE`, `UNORDERED_ACCESS`)
+  are all legal on a compute queue, so `[FrameGen] FGAsync` takes the same path.
+- `waitForPresents` (resize, shutdown, queue change) waits for the last value signalled, which is the last list's.
+
+**Back-pressure moved one list earlier.** The interpolation thread waits for the entry's first generated frame
+(`frames[0]`) before it hands the entry to the presenter thread and sets `interpolationEvent`, so the game's next
+`Present` can now record while lists 1..N-1 still run. Nothing LSFG writes on the CPU per frame is in their way: the
+direct-output UAV ring holds 8 slots for at most 3 per real frame, and the frame after next can only be recorded once
+the next frame's first list is done, which runs after these lists on the same queue. Its own GPU timing slots are read
+4 frames late. The pacing math is unchanged; the real-frame interval is now measured at the first list's completion.
 
 The order, as in FISC, widened:
 
-1. Game queue signals `gameFence`; the interpolation queue waits for it (`:1960-1961`): the list sees the game's
+1. Game queue signals `gameFence`; the interpolation queue waits for it (`:1960-1961`): the lists see the game's
    frame and NR's edit.
-2. The interpolation queue waits for `compositionFenceGPU ≥` the set's availability (3.3), runs the list, signals
-   `interpolationFence`.
-3. The interpolation thread waits for that fence on the CPU, measures the real interval, sets every frame's delta
+2. The interpolation queue waits for `compositionFenceGPU ≥` the set's availability (3.3), runs list 0 (shared work and
+   frame 0), signals `interpolationFence`, then each further list with its own signal.
+3. The interpolation thread waits for list 0's fence on the CPU, measures the real interval, sets every frame's delta
    (3.2) and hands the entry to the presenter thread.
-4. The present queue waits for `interpolationFence` before compositing a generated frame (`:624-625`); each
+4. The present queue waits for frame k's `interpolationFence` value before compositing it (`:624-625`); each
    composition signals `compositionFenceGPU`/`CPU` with its present index; the presenter waits for it, then for the
    pacing target, then presents.
 5. The game's next `Present` waits for the previous entry's compositions (`:2172-2174`) and for the previous
-   interpolation (`interpolationEvent`, `:2188`), so LSFG's per-frame descriptor writes never race a list still in
-   flight (its output ring, `LsfgFrameGen_Dx12.h:228-236`, is 8 slots for at most 3 per list).
+   interpolation's first list (`interpolationEvent`, `:2188`).
 
 ## 5. Config
 
@@ -319,6 +379,13 @@ dead control. When the menu exposes it, it shows the latched presenter and offer
   entries by generated count 0:a 1:b 2:c 3:d), P fps presented over R/10 fps real, present interval p50/p99 (target
   t ms), share over 1.5 × target`. Intervals are QPC between consecutive `Present` calls on the presenter thread.
   This is the proof of N generated frames per real frame and the measured presented rate.
+- Right after it: `LSFG presenter: last 10.0 s: L interpolation list(s) per real frame; generated frame done after its
+  interpolation started (GPU p50/p99): #1 a/b ms, #2 ...; presented after the game's Present (p50): #1 x ms, #2 ..., real
+  y ms`. GPU: timestamps the presenter writes at the start of each real frame's first interpolation list and at the end
+  of each list, resolved by the last list into a readback ring of 8 entries and read on the presenter thread once the
+  entry's last generated frame has been composited (that composition waited for the list that resolved them); frame k
+  is done at the end of its own list. CPU: QPC from the game's `Present` handing the frame over (`presentInterpolated`,
+  after its back-pressure waits) to each frame's `Present` on the real swapchain.
 - LSFG's own summary counts generated frames, not base frames, and names the multiplier.
 
 ## 7. Validation (phase 2)
@@ -345,7 +412,8 @@ forwarder has (`LSFG_MFG_UNFOLDABLE`); `tests/lsfg-presenter` checks it.
    the presenter sets `ALLOW_TEARING` when supported, `FISC.cpp:677-680`), the cadence follows the QPC pacer exactly
    and tears instead. Only the interval statistics in section 6 say which is better on this display.
 2. **Latency.** The real frame is shown about N/(N+1) of a real frame after it was rendered, plus the generation time
-   of all N frames: x2 holds it half a frame, x4 three quarters. Inherent to interpolation; the presenter adds no
+   of the first generated frame (each has its own list since 4.2; before, of all N): x2 holds it half a frame, x4 three
+   quarters. Inherent to interpolation; the presenter adds no
    queueing beyond FISC's.
 3. **Proton against Windows.** vkd3d-proton does not validate D3D12 (CLAUDE.md, "Proton is not a D3D12 validator").
    The fork's D3D12 usage is FISC's, which runs on Windows as shipped, but the widened state (six outputs, more lists
@@ -416,6 +484,43 @@ frames (`Tmp/lsfg-study/ref_m3`, `ref_m4`, `ref`; made without `-a`, so FP16 is 
 - This is the harness's recording, not `LsfgFrameGen_Dx12`'s; `ctxbench` (OPTI_INTEGRATION.md, second step) holds
   the two to the same bytes at x2 and was not rerun at x3/x4 here.
 
+### 9.1 One list per generated frame (2026-10-14, `study/lsfg-split-lists`)
+
+Same setup as above. "Before" is `532d4cf3`: `cd7c4f9c` plus only the latency line of section 6 (one list, one fence,
+behaviour unchanged); "after" is `9e94324d` (4.2). Each run about 85 s; the figures are the ranges of the 10 s windows
+after the first (5-6 per run), from `LSFG presenter: last 10.0 s:` and `LSFG: last 10 s:` lines (logs in the session
+scratchpad, not in git). GPU "done" is from the start of the real frame's first interpolation list to the end of the
+list that holds the frame; "presented" is QPC from the game's `Present` handing the frame over to that frame's present.
+
+| | lists per real frame | GPU done #1 / #2 / #3 (p50) | presented #1 / #2 / #3 / real (p50) | LSFG GPU per real frame (p50) | present interval p99, over 1.5x target |
+|---|---|---|---|---|---|
+| x3 before | 1.00 | 1.28-1.31 / same (one 0.83 window) | 1.68-2.21 / 12.69-13.21 / - / 23.64-24.09 ms | 1.27-1.30 ms (one 0.83) | 13.7-22.4 ms, 0.1-1.5% |
+| x3 after | 1.97-2.00 | 0.66-0.74 / 1.34-1.46 | 1.45-1.48 / 12.49-12.55 / - / 23.54-23.62 ms | 1.33-1.45 ms | 11.7-16.9 ms, 0.0-1.1% |
+| x4 before | 1.00 | 1.55-1.59 / same / same | 2.11-2.15 / 10.32-10.39 / 18.55-18.63 / 26.77-26.87 ms | 1.54-1.59 ms | 9.3-10.8 ms, 0.0-0.8% |
+| x4 after | 2.95-3.00 | 0.58-0.61 / 0.99-1.05 / 1.41-1.51 | 1.67-1.78 / 9.93-10.03 / 18.17-18.28 / 26.39-26.53 ms | 1.39-1.50 ms | 9.3-10.2 ms, 0.0% |
+
+- **On the GPU the first generated frame is done one main pass per extra frame earlier**: x4 #1 1.57 → 0.60 ms (−0.97),
+  #2 → 1.02 (−0.55); x3 #1 1.29 → 0.67 ms (−0.62). The last frame is done when the batch used to be, within the run-to-run
+  spread (x3 #2 1.29 → 1.36, x4 #3 1.58 → 1.46).
+- **On screen about 0.4 ms of it arrives**: medians x4 #1 2.13 → 1.75 ms, real frame 26.86 → 26.42 ms (−0.44); x3 #1
+  1.87 → 1.46 ms, real 23.78 → 23.57 ms (−0.21). Every present of an entry moves with its first, because the first is
+  gated by readiness and the rest by the pacer (3.2: the cycle ends short of a real frame). The rest of the GPU gain is
+  lost between list 0's completion and frame 0's composition: the interpolation thread learns of it on the CPU, and
+  frame 0's composition on the present queue then shares the GPU with lists 1..N-1 on the game queue (both DIRECT under
+  vkd3d-proton). With `[FSRFG] AllowAsync=true` (interpolation on the async compute queue; one x4 run, no "before"
+  counterpart) frame 0 is presented 1.48-1.52 ms after the hand-off and the real frame 26.20-26.29 ms, with GPU done
+  #1 0.60-0.65 ms, consistent with that contention.
+- **GPU cost: no measurable change.** LSFG's own begin-to-end time spans all lists; it moved +0.08 ms at x3 and −0.12 ms
+  at x4 (medians), inside the spread one run to the next shows at these clocks (the x3 "before" run has a 0.83 ms window).
+  The split costs one `ExecuteCommandLists` and one fence signal per extra frame on the CPU.
+- The pacing is unchanged: present interval p50 11.05-11.08 / 8.24-8.26 ms against 11.02-11.07 / 8.25 ms before, p99
+  no worse.
+- Lists per real frame below N are frames LSFG held after a reset (one list); the FFX fallback while LSFG builds ran in
+  every run (`by FFX` in the first window, `1:k` entries) with the descriptor unlinked. No `[E]` line from LSFG, `device
+  ok` throughout, no D3D12 error from vkd3d-proton; the x2 control (`Multiplier=2`, FFX's swapchain) with the same build
+  ran 70 s generating one frame per real frame (300 per window) with LSFG GPU 0.75-0.78 ms and no list descriptor
+  (its first-frame line names none); its one `[E]` is FFX's AntiLag 2 call on NVIDIA, as in section 9's control.
+
 **Open problems.**
 
 1. **PCSX2 makes a second swapchain on a new window** about 4 s in, without releasing the first. FSR-FG's
@@ -430,4 +535,10 @@ frames (`Tmp/lsfg-study/ref_m3`, `ref_m4`, `ref`; made without `-a`, so FP16 is 
    OptiScaler injects into the real swapchain whether each present is generated; ours does not, so OptiScaler's
    low-latency emulation sees every present as real at x3/x4. On this machine the call fails anyway in the x2 control
    (`AmdExtAntiLagApi ... LowLatencyUpdateFail`, NVIDIA); on AMD it would matter.
-5. **All N frames in one list**, so the first generated frame waits for the last: about 0.4 ms per extra frame here.
+5. ~~**All N frames in one list**~~: solved by one list and one fence per generated frame (4.2, 9.1). What is left:
+   about half of the GPU gain reaches the screen, because frame 0's composition is submitted only after the
+   interpolation thread has seen list 0's fence on the CPU and then shares the GPU with lists 1..N-1 on the same queue
+   type. Async compute (`AllowAsync`) recovers part of it; submitting the composition ahead, behind a GPU wait, would
+   move the pacer's measurement point, which this change deliberately left alone.
+6. **The per-frame lists are D3D12-reasoned, not validated.** Section 4.2 lists why each boundary is legal; a native
+   Windows run with the debug layer (8.3) is still the proof, as for the rest of the fork.
