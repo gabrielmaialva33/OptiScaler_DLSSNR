@@ -74,8 +74,11 @@ Targets<PFN_vkQueuePresentKHR> g_present;
 
 template <typename T> Handle H(T handle) { return static_cast<Handle>(reinterpret_cast<uintptr_t>(handle)); }
 
-// Objects OptiScaler creates for itself (its own Vulkan work, or a D3D device it is making).
-bool Internal() { return ScopedSkipVulkanHooks::Active() || State::Instance().creatingD3DDevice; }
+// Objects OptiScaler creates for itself: its own Vulkan work runs under ScopedSkipVulkanHooks (the D3D12 bridge, the
+// GPU check's DXVK device, Anti-Lag 2, FFX). Not State::creatingD3DDevice, which the D3D hooks also set around the
+// game's own D3D12CreateDevice, CreateDXGIFactory and D3D11 device creation: vkd3d-proton and DXVK make their instance
+// and device inside those calls, and those are exactly the devices this host is for.
+bool Internal() { return ScopedSkipVulkanHooks::Active(); }
 
 struct CallerInfo
 {
