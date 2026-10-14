@@ -242,3 +242,8 @@ summary = "No home path, LAN or tailnet address, or token in any tracked file ou
 tier = "host"
 timeout = 60
 summary = "Runtime LSFG shader library: DLL discovery (Steam VDF, Wine Z:, override), PE RT_RCDATA SPIR-V extraction, and hash-keyed cache."
+
+[lsfg-integration]
+tier = "host"
+timeout = 120
+summary = "LSFG as FSR-FG's interpolator (study branch): DXIL PSV0 reader, LSFG 3.1 pass graph, cbuffer table, frame refusals, history schedule, [LSFG] four-point round trip, FSRFG_Dx12 call sites as a set; the user's own 99 modules when LSFG_DXIL_DIR is set."

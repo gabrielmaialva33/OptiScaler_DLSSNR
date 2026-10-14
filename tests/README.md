@@ -28,7 +28,7 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy` and `lsfg-shader-library` |
+| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `lsfg-shader-library` and `lsfg-integration` |
 | `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
@@ -38,10 +38,16 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Forty-two suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
+**Host tier.** Forty-three suites. All but `nr-invariants` and `repo-privacy` build real production code with local fakes under
 AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `lsfg-shader-library` — the LSFG runtime shader library (`retoque/lsfg/LsfgShaderLibrary.{h,cpp}`): DLL discovery (Windows Steam `libraryfolders.vdf`, registry, Wine/Proton `Z:` paths, `$HOME`, `$XDG_DATA_HOME`, override, `Lossless.dll` folder mapping), PE `RT_RCDATA` SPIR-V module extraction (99 modules), SPIR-V magic validation, Quality/Performance and FP32/FP16 resource ID resolution, real user DLL extraction when present, and content-hash-keyed DXIL cache storage/invalidation.
+- `lsfg-integration` — LSFG 3.1 as FSR-FG's interpolator (study branch, `retoque/lsfg/`): the DXIL PSV0 reader
+  the root signatures come from (synthetic containers, every truncation and byte corruption), the pass graph
+  (34 + 66 dispatches, extents against `tools/lsfg-study/PIPELINE_V3_1.md`, pools, one writer per image,
+  variants, flow scale), the cbuffer table, which frames LSFG refuses, the warm-up/reset schedule, the `[LSFG]`
+  four-point round trip and the `FSRFG_Dx12.cpp` call sites as a set. With `LSFG_DXIL_DIR`, the user's own 99
+  converted modules against the graph. No D3D12 is executed.
 - `nr-kernel-profile` — DLSS-NR NvAPI CUDA kernel classification by prefix (pre_block, swin_*, vit,
   etc.), FP8 variant identification, and per-window timing aggregation (mean and maximum).
 - `nr-detail-measure` — the "Measure detail" CPU tile reduction and statistical aggregation (detail added,
