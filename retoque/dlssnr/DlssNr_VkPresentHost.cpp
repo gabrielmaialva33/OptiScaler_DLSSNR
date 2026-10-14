@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "DlssNr_VkPresentHost.h"
+#include "DlssNr_VkModelOwner.h"
 #include "DlssNr_VkPresentModel.h"
 #include "DlssNr_VkPresentRegistry.h"
 #include "DlssNr_VkPresentTransport.h"
@@ -344,6 +345,18 @@ struct SwapchainTransport
     uint64_t nextSerial = 1;
 };
 
+// The way back from the after-upscale route (DlssNr_VkModelOwner.h): the drain of the route's device, under way. One
+// fence per queue of the device, each on an empty submit made after the hand-back began, so each signals once
+// everything submitted to its queue before it has completed -- the route's last recordings among it.
+struct HandBackDrain
+{
+    bool active = false;
+    bool calledOff = false; // a drain submit failed: the arbiter's hand-back is off, the fences only waited for
+    std::vector<VkFence> fences;
+    std::chrono::steady_clock::time_point started;
+    bool saidSlow = false;
+};
+
 // Objects whose GPU completion was not proven when their swapchain went: kept, and tried again at device destruction.
 struct Leftover
 {
@@ -380,6 +393,8 @@ struct DeviceTransport
     RecordId modelSwapchain = 0;                     // the swapchain the model serves (one at a time)
     uint64_t nextTicket = 1;
     std::vector<std::string> lines; // the model's lines, logged once the transport's lock is released
+    HandBackDrain handBack;         // the model taken back from the after-upscale route, while its queues drain
+    std::chrono::steady_clock::time_point handBackNotBefore; // after a drain submit failed: not tried again until then
 };
 
 std::mutex g_transportMutex;
@@ -1034,12 +1049,256 @@ void StandDown(DeviceTransport& dev)
                         ": the model stood down and was freed");
 }
 
+// --- The way back from the after-upscale route -------------------------------------------------------------------
+
+// Every queue of the device the application retrieved, with its locks. The locks outlive the call: they go only at
+// the device's destruction, which no present on it overlaps.
+std::vector<std::pair<VkQueue, QueueLocks*>> DeviceQueues(VkDevice device)
+{
+    std::vector<std::pair<VkQueue, QueueLocks*>> queues;
+    std::shared_lock lock(g_queueLocksMutex);
+    for (const auto& [queue, entry] : g_queueLocks)
+    {
+        if (entry.device == device && entry.locks != nullptr)
+            queues.emplace_back(queue, entry.locks.get());
+    }
+    return queues;
+}
+
+// Whether a frame of this device could be shown to the model, as far as is known before a present: NR on, the model's
+// extensions there, a carried swapchain whose colour the model may see. A hand-back the host could not use would only
+// free the after-upscale route's objects for it to build again.
+bool CouldRunModel(const DeviceTransport& dev)
+{
+    if (!Config::Instance()->DlssNrEnabled.value_or_default() || !dev.nrReady || dev.lost || !dev.off.empty() ||
+        dev.instance == VK_NULL_HANDLE)
+        return false;
+
+    for (const auto& [handle, sc] : dev.swapchains)
+    {
+        if (sc.on && !sc.retired && sc.colour.sdr && sc.nrOff.empty())
+            return true;
+    }
+
+    return false;
+}
+
+std::string DeviceName(const DeviceTransport& dev)
+{
+    return "DLSS-NR Vulkan present host: device " + Hex(H(dev.device)) + " #" + std::to_string(dev.id);
+}
+
+// The after-upscale route went quiet on this device: begin the hand-back and drain every queue of the device behind a
+// fence. Never waits: a queue another thread holds, or a fence that cannot be made, is tried again at the next present.
+void StartHandBack(DeviceTransport& dev)
+{
+    const auto queues = DeviceQueues(dev.device);
+    if (queues.empty())
+        return;
+
+    // Each queue's present lock, then its submit lock, as a borrower takes them, so no other thread submits to it or
+    // presents on it between the hand-back beginning and its fence. The presenting queue's present lock is this
+    // thread's already (they are recursive).
+    std::vector<std::unique_lock<std::recursive_timed_mutex>> held;
+    held.reserve(queues.size() * 2);
+    for (const auto& [queue, locks] : queues)
+    {
+        std::unique_lock<std::recursive_timed_mutex> present(locks->present, std::try_to_lock);
+        if (!present.owns_lock())
+            return;
+        std::unique_lock<std::recursive_timed_mutex> submit(locks->submit, std::try_to_lock);
+        if (!submit.owns_lock())
+            return;
+        held.push_back(std::move(present));
+        held.push_back(std::move(submit));
+    }
+
+    std::vector<VkFence> fences;
+    const auto destroyFrom = [&dev, &fences](size_t first)
+    {
+        for (size_t i = first; i < fences.size(); ++i)
+            dev.fn.destroyFence(dev.device, fences[i], nullptr);
+        fences.resize(first);
+    };
+
+    VkFenceCreateInfo fenceInfo { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    for (size_t i = 0; i < queues.size(); ++i)
+    {
+        VkFence fence = VK_NULL_HANDLE;
+        if (dev.fn.createFence(dev.device, &fenceInfo, nullptr, &fence) != VK_SUCCESS)
+        {
+            destroyFrom(0);
+            return;
+        }
+        fences.push_back(fence);
+    }
+
+    // Begun before the first fence is submitted: from here the route asking again calls the hand-back off, and
+    // everything it recorded before (it last asked kAfterUpscaleIdleMs ago) is ahead of these fences on its queue.
+    if (!DlssNr::BeginAfterUpscaleHandBack(dev.device))
+    {
+        destroyFrom(0);
+        return;
+    }
+
+    size_t submitted = 0;
+    VkResult failure = VK_SUCCESS;
+    for (; submitted < queues.size(); ++submitted)
+    {
+        // No batch, only the fence: it signals when all work submitted to the queue before it has completed.
+        failure = dev.fn.queueSubmit(queues[submitted].first, 0, nullptr, fences[submitted]);
+        if (failure != VK_SUCCESS)
+            break;
+    }
+    held.clear();
+
+    HandBackDrain& hb = dev.handBack;
+    hb = {};
+    hb.started = std::chrono::steady_clock::now();
+
+    if (failure != VK_SUCCESS)
+    {
+        DlssNr::CancelAfterUpscaleHandBack(dev.device);
+        dev.handBackNotBefore =
+            hb.started + std::chrono::milliseconds(DlssNr::VkModelOwner::kAfterUpscaleIdleMs); // not every present
+        dev.lines.push_back(DeviceName(dev) + ": a hand-back drain submit returned " + std::to_string(failure) +
+                            "; the hand-back is called off, the after-upscale route keeps the model");
+
+        if (failure == VK_ERROR_DEVICE_LOST)
+        {
+            // Nothing destroyed on a lost device, the fences included.
+            MarkLost(dev);
+            return;
+        }
+
+        // The fences never submitted go now; those submitted are waited for before they do.
+        destroyFrom(submitted);
+        if (fences.empty())
+            return;
+        hb.calledOff = true;
+    }
+    else
+    {
+        dev.lines.push_back(DeviceName(dev) + ": the after-upscale route has not asked for the model for " +
+                            std::to_string(DlssNr::VkModelOwner::kAfterUpscaleIdleMs / 1000) +
+                            " s: taking it back, once the device's " + std::to_string(queues.size()) +
+                            " queue(s) drained");
+    }
+
+    hb.active = true;
+    hb.fences = std::move(fences);
+}
+
+// The hand-back's drain, at every present until it is over. Its fences signalled: the route's objects are freed and
+// the token released (Done), or the route asked again meanwhile and keeps everything (Cancelled).
+void PollHandBack(DeviceTransport& dev)
+{
+    HandBackDrain& hb = dev.handBack;
+
+    const auto forget = [&dev, &hb](const std::string& why)
+    {
+        // Nothing destroyed: the device is lost, or the fences' state is unknown.
+        if (!hb.calledOff)
+            DlssNr::CancelAfterUpscaleHandBack(dev.device);
+        dev.lines.push_back(DeviceName(dev) + ": " + why +
+                            "; the hand-back is called off, the after-upscale route keeps the model");
+        hb = {};
+    };
+
+    if (dev.lost)
+        return forget("the device was lost while it drained");
+
+    while (!hb.fences.empty())
+    {
+        const VkResult status = dev.fn.getFenceStatus(dev.device, hb.fences.back());
+
+        if (status == VK_NOT_READY)
+        {
+            if (!hb.saidSlow && Since(hb.started) >= kDrainNs)
+            {
+                hb.saidSlow = true;
+                dev.lines.push_back(DeviceName(dev) + ": the hand-back's drain is still waiting for the GPU after " +
+                                    std::to_string(kDrainNs / 1000000000) +
+                                    " s; nothing of the after-upscale route's is freed until it is over");
+            }
+            return;
+        }
+
+        if (status != VK_SUCCESS)
+        {
+            if (status == VK_ERROR_DEVICE_LOST)
+                MarkLost(dev);
+            return forget("a drain fence returned " + std::to_string(status));
+        }
+
+        dev.fn.destroyFence(dev.device, hb.fences.back(), nullptr);
+        hb.fences.pop_back();
+    }
+
+    if (hb.calledOff)
+    {
+        hb = {};
+        return;
+    }
+
+    const uint64_t drainMs = Since(hb.started) / 1000000;
+    switch (DlssNr::FinishAfterUpscaleHandBack(dev.device, dev.lines))
+    {
+    case DlssNr::AfterUpscaleHandBack::Busy:
+        return; // the route is evaluating: it called the hand-back off, or finds it over at the next present
+    case DlssNr::AfterUpscaleHandBack::Done:
+        dev.lines.push_back(DeviceName(dev) + ": the model is the present host's again (the drain took " +
+                            std::to_string(drainMs) + " ms)");
+        break;
+    case DlssNr::AfterUpscaleHandBack::Cancelled:
+        dev.lines.push_back(DeviceName(dev) + ": the hand-back is called off: the after-upscale route asked for the "
+                                              "model again while the device drained; it keeps it");
+        break;
+    case DlssNr::AfterUpscaleHandBack::NotRetiring:
+        break;
+    }
+
+    hb = {};
+}
+
+// At the device's destruction, or its loss: the drain's fences waited for within what is left of `budgetNs` and
+// destroyed, or forgotten (lost, never signalled); the hand-back off. The route's objects go with the device
+// (AfterUpscaleDeviceGone).
+void EndHandBack(DeviceTransport& dev, uint64_t budgetNs)
+{
+    HandBackDrain& hb = dev.handBack;
+    if (!hb.active)
+        return;
+
+    if (!hb.calledOff)
+        DlssNr::CancelAfterUpscaleHandBack(dev.device);
+
+    if (!dev.lost && !hb.fences.empty() &&
+        dev.fn.waitForFences(dev.device, static_cast<uint32_t>(hb.fences.size()), hb.fences.data(), VK_TRUE,
+                             budgetNs) == VK_SUCCESS)
+    {
+        for (const VkFence fence : hb.fences)
+            dev.fn.destroyFence(dev.device, fence, nullptr);
+    }
+
+    hb = {};
+}
+
 // On every present of the device, whatever becomes of it (a frame the transport refuses, a swapchain the model may not
 // see): with NR turned off live, or another route asking for the model, the model stands down. Otherwise a model that
 // once ran here would hold the token for as long as the device's presents never reached the model's decision -- an
 // HDR swapchain after an SDR menu, a swapchain gone observe-only -- and keep the game's own upscaler from it.
+//
+// And the other way: with no model here, the after-upscale route holding it on this device and quiet for
+// kAfterUpscaleIdleMs (the game turned its upscaler off), the hand-back begins, and its drain is followed here.
 void Housekeep(DeviceTransport& dev)
 {
+    if (dev.handBack.active)
+        PollHandBack(dev);
+    else if (dev.model == nullptr && std::chrono::steady_clock::now() >= dev.handBackNotBefore && CouldRunModel(dev) &&
+             DlssNr::AfterUpscaleIdleOn(dev.device))
+        StartHandBack(dev);
+
     if (dev.model == nullptr)
         return;
 
@@ -1696,7 +1955,9 @@ void AbandonModel(DeviceTransport& dev)
         TakeModelLines(dev);
         dev.model.reset();
     }
+    EndHandBack(dev, 0);
     DlssNr::ReleaseModelFromPresentHost(dev.device);
+    DlssNr::AfterUpscaleDeviceGone(dev.device, dev.lines);
     DlssNr::ShutdownPresentNgx(dev.device, true, dev.lines);
 }
 
@@ -1784,7 +2045,12 @@ std::string TeardownDevice(DeviceTransport& dev)
         TakeModelLines(dev);
         dev.model.reset();
     }
+    // A hand-back under way: its fences within what is left of the drain's bound, then the hand-back off. The
+    // after-upscale route's objects on the device go with it, before NGX on it is shut down.
+    const uint64_t spent = Since(start);
+    EndHandBack(dev, spent < kDrainNs ? kDrainNs - spent : 0);
     DlssNr::ReleaseModelFromPresentHost(dev.device);
+    DlssNr::AfterUpscaleDeviceGone(dev.device, dev.lines);
     DlssNr::ShutdownPresentNgx(dev.device, forgetOnly, dev.lines);
 
     for (const VkSemaphore semaphore : dev.retained)
