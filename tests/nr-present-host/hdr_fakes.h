@@ -6,6 +6,7 @@
 
 inline bool g_hdrAvailable = true; // the build carries the conversion's shader
 inline bool g_hdrSupports = true;  // the device can load and typed-UAV-store the swapchain's format
+inline bool g_hdrResourcesValid = true;
 inline unsigned g_hdrPassesBuilt = 0;
 
 struct HdrDispatch
@@ -30,6 +31,10 @@ class DlssNr_PresentHdr_Dx12
     bool Supports(DXGI_FORMAT format)
     {
         return g_hdrSupports && (format == DXGI_FORMAT_R10G10B10A2_UNORM || format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+    }
+    bool ValidResources(ID3D12Resource*, ID3D12Resource*, ID3D12Resource*, uint32_t, uint32_t)
+    {
+        return g_hdrResourcesValid;
     }
     bool Decode(ID3D12GraphicsCommandList* list, ID3D12Resource* original, ID3D12Resource* work, uint32_t profile)
     {

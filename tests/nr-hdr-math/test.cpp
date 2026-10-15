@@ -8,6 +8,7 @@
 // the design names (tests/nr-hdr-d3d12) is where those are measured; it does not exist yet.
 #include <algorithm>
 #include <cassert>
+#include <string>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -158,9 +159,10 @@ void Hdr10Decode_MatchesTheReferenceAndKeepsNegatives()
 
 void Hdr10Bypass_UntouchedTexelsReturnBitForBit()
 {
-    // Every code on each channel alone and on all three, a grid of primaries and secondaries, and random texels: decode,
-    // store to FP16, let the composition leave it alone (or divide and multiply by the white point), encode with the
-    // original as reference. The original comes back bit for bit, so the UNORM store writes the game's own code.
+    // Every code on each channel alone and on all three, a grid of primaries and secondaries, and random texels:
+    // decode, store to FP16, let the composition leave it alone (or divide and multiply by the white point), encode
+    // with the original as reference. The original comes back bit for bit, so the UNORM store writes the game's own
+    // code.
     std::vector<float3> originals;
     for (int k = 0; k <= 1023; ++k)
     {
@@ -190,9 +192,9 @@ void Hdr10Bypass_UntouchedTexelsReturnBitForBit()
 
         // The same texel re-encoded from the work texture with no reference: what the bypass is for.
         const float3 direct = hlsl::EncodeHdr10(work);
-        const int moved = std::max({ std::abs(Code(direct.x) - Code(original.x)),
-                                     std::abs(Code(direct.y) - Code(original.y)),
-                                     std::abs(Code(direct.z) - Code(original.z)) });
+        const int moved =
+            std::max({ std::abs(Code(direct.x) - Code(original.x)), std::abs(Code(direct.y) - Code(original.y)),
+                       std::abs(Code(direct.z) - Code(original.z)) });
         wrongWithout += moved != 0 ? 1 : 0;
         worstWithout = std::max(worstWithout, moved);
     }
@@ -315,10 +317,33 @@ void NonFiniteProcessed_KeepsTheOriginal()
     assert(SameBits(hlsl::EncodeTexel(changed, scrgb, hlsl::kProfileScRgb), changed));
     ++g_cases;
 }
+void DisplayWhite_UnitsFallbackAndRefresh()
+{
+    using namespace DlssNr::PresentHdr;
+    assert(SelectSdrWhite(1000, true).nits == 80.0f);
+    assert(SelectSdrWhite(2500, true).nits == 200.0f);
+    assert(SelectSdrWhite(6000, true).nits == 480.0f);
+    assert(SelectSdrWhite(2500, true).fromDisplay);
+    for (uint32_t level : { 0u, 999u, 6001u, UINT32_MAX })
+        assert(!SelectSdrWhite(level, true).fromDisplay && SelectSdrWhite(level, true).nits == 203.0f);
+    assert(!SelectSdrWhite(2500, false).fromDisplay);
+    WhiteCache cache;
+    assert(cache.NeedsRefresh(1, 100));
+    cache.Store(1, 100, SelectSdrWhite(2500, true));
+    assert(!cache.NeedsRefresh(1, 5099));
+    assert(cache.NeedsRefresh(1, 5100));
+    assert(cache.NeedsRefresh(2, 101));
+    assert(cache.NeedsRefresh(1, 99));
+    assert(cache.Value().nits == 200.0f);
+    assert(std::string(WhiteSource(cache.Value())) == "Windows SDR white");
+    assert(std::string(WhiteSource({})) == "203-nit fallback");
+    ++g_cases;
+}
 } // namespace
 
 int main()
 {
+    DisplayWhite_UnitsFallbackAndRefresh();
     PqTransfer_MatchesTheReference();
     PqRoundTrip_EveryCodeIsItself();
     PqStep_IsCoarserThanTheBypassAndTheStabilizerUnit();
@@ -329,7 +354,7 @@ int main()
     ScRgb_EveryHalfComesBackAsItself();
     NonFiniteProcessed_KeepsTheOriginal();
 
-    if (g_cases != 9)
+    if (g_cases != 10)
         return 2; // a runner that exercises nothing must fail loudly
     std::printf("hdr math: %d cases passed\n", g_cases);
     return 0;
