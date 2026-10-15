@@ -6202,29 +6202,57 @@ static std::atomic<uint64_t> g_guideStatus { 0 };
 static std::atomic<long long> g_guideStatusAtMs { 0 };
 static std::atomic<uint8_t> g_guideFallback { static_cast<uint8_t>(DlssNr::PresentGuideIdentity::Fallback::Zero) };
 
-// The stamp, at capture: which device, what the upscaler produced and where, how much of the guides is real.
-static void StampPresentGuide(size_t slot, NVSDK_NGX_Parameter* params, const DlssNrFrameInfo& frame,
-                              const void* device, uint32_t depthWidth, uint32_t depthHeight)
+// What an evaluate says about the picture its guides belong to: the device their copies live on, and the output's
+// extent and base. The extent is the caller's, read from the output resource of whichever API made it (a D3D12
+// evaluate's D3D12OutputExtent, a native D3D11 one's own texture); the base is the evaluate's
+// DLSS.Output.Subrect.Base, read the same way for both.
+static DlssNr::PresentGuideIdentity::Stamp EvaluateOutput(NVSDK_NGX_Parameter* params, const void* device,
+                                                          uint32_t outputWidth, uint32_t outputHeight)
 {
     DlssNr::PresentGuideIdentity::Stamp stamp;
     stamp.device = device;
+    stamp.outputWidth = outputWidth;
+    stamp.outputHeight = outputHeight;
+
+    params->Get(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X, &stamp.outputBaseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y, &stamp.outputBaseY);
+    return stamp;
+}
+
+// A D3D12 evaluate's output extent: its Output resource, or zero when it named none.
+static void D3D12OutputExtent(NVSDK_NGX_Parameter* params, uint32_t* width, uint32_t* height)
+{
+    *width = 0;
+    *height = 0;
 
     if (ID3D12Resource* output = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output"))
     {
         const auto desc = output->GetDesc();
-        stamp.outputWidth = static_cast<uint32_t>(desc.Width);
-        stamp.outputHeight = desc.Height;
+        *width = static_cast<uint32_t>(desc.Width);
+        *height = desc.Height;
     }
+}
 
-    params->Get(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X, &stamp.outputBaseX);
-    params->Get(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y, &stamp.outputBaseY);
-
+// The stamp, at capture: the evaluate's output (EvaluateOutput), and how much of the guides is real.
+static void StampPresentGuide(size_t slot, DlssNr::PresentGuideIdentity::Stamp stamp, const DlssNrFrameInfo& frame,
+                              uint32_t depthWidth, uint32_t depthHeight)
+{
     const auto render = DlssNr::PresentGuideIdentity::RenderExtent(frame.RenderSubrectWidth, frame.RenderSubrectHeight,
                                                                    depthWidth, depthHeight);
     stamp.renderWidth = render.width;
     stamp.renderHeight = render.height;
 
     g_guideIdentity.tracker.StampCapture(slot, stamp, NowMs());
+}
+
+// The size of the frame the D3D11 bridge's present host last ran on, packed width << 32 | height; zero before its
+// first. The native D3D11 guide transport leaves out an evaluate whose output is another size (DlssNr_Dx11Guides.h).
+static std::atomic<uint64_t> g_bridgePresentedExtent { 0 };
+
+static void NoteBridgePresentedExtent(unsigned int width, unsigned int height)
+{
+    if (width != 0 && height != 0)
+        g_bridgePresentedExtent = static_cast<uint64_t>(width) << 32 | height;
 }
 
 // Who presents, for rule 3: the swapchain's window, so that the game's Streamline proxy at the boundary and the
@@ -6447,21 +6475,33 @@ static void ReleasePresentTemporal()
     g_temporalValid = false;
 }
 
-static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
-                            const DlssNrFrameInfo& frame)
+// The guides one capture copies into the present guide ring, wherever they came from: a D3D12 evaluate's own
+// resources (CaptureTemporal), or the bridge's D3D12 side of a native D3D11 evaluate's (CaptureBridgedGuides). The
+// states are where each source rests on the list, before and after the copy. `output` is EvaluateOutput's, without
+// its device, which is the depth's.
+struct GuideCapture
 {
-    if (g_nr.failed)
-        return;
+    ID3D12Resource* depth = nullptr;
+    ID3D12Resource* motion = nullptr;
+    D3D12_RESOURCE_STATES depthState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    D3D12_RESOURCE_STATES motionState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    DlssNr::PresentGuideIdentity::Stamp output {};
+};
 
-    ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
-    ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
+// The capture: a ring slot, its clones (rebuilt for another device, format, size or flags, the old ones parked, never
+// freed under the GPU), the copies recorded on cmdList and tracked before anything is recorded, the stamp, the commit.
+// True when committed. Takes g_nrMutex.
+static bool CaptureGuides(ID3D12GraphicsCommandList* cmdList, const GuideCapture& source, const DlssNrFrameInfo& frame)
+{
+    if (g_nr.failed || cmdList == nullptr || source.depth == nullptr || source.motion == nullptr)
+        return false;
 
-    if (depth == nullptr || motion == nullptr || cmdList == nullptr)
-        return;
+    ID3D12Resource* depth = source.depth;
+    ID3D12Resource* motion = source.motion;
 
     ID3D12Device* device = nullptr;
     if (FAILED(depth->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
-        return;
+        return false;
 
     const auto depthDesc = depth->GetDesc();
     const auto motionDesc = motion->GetDesc();
@@ -6471,7 +6511,7 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
         motionDesc.DepthOrArraySize != 1 || motionDesc.SampleDesc.Count != 1)
     {
         device->Release();
-        return;
+        return false;
     }
 
     struct AllocFailKey
@@ -6493,7 +6533,7 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
         s_failedAllocs.contains({ devId, motionDesc.Format, motionDesc.Width, motionDesc.Height }))
     {
         device->Release();
-        return;
+        return false;
     }
 
     const auto isReadInFlight = [](void* token) -> bool
@@ -6515,7 +6555,7 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
     if (slot >= DlssNr::PresentGuides::kRingSize)
     {
         device->Release();
-        return;
+        return false;
     }
 
     auto& clone = g_presentGuideClones[slot];
@@ -6563,7 +6603,7 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
                   "guides",
                   devId);
         g_presentGuideRing.InvalidateSlot(slot);
-        return;
+        return false;
     }
 
     clone.sourceDepthFormat = depthDesc.Format;
@@ -6592,15 +6632,12 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
             s_loggedTrackFail = true;
         }
         g_presentGuideRing.InvalidateSlot(slot);
-        return;
+        return false;
     }
 
     // Transitions around copy: game guide to COPY_SOURCE, clone to COPY_DEST, copy mip 0, restore states
-    const auto& cfg = *Config::Instance();
-    const auto depthArrival = static_cast<D3D12_RESOURCE_STATES>(
-        cfg.DepthResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
-    const auto motionArrival = static_cast<D3D12_RESOURCE_STATES>(
-        cfg.MVResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+    const auto depthArrival = source.depthState;
+    const auto motionArrival = source.motionState;
 
     if (depthArrival != D3D12_RESOURCE_STATE_COPY_SOURCE)
         Barrier(cmdList, depth, depthArrival, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -6634,11 +6671,62 @@ static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parame
 
     ++g_renderSeq; // Count render frame at successful CaptureTemporal (Correction 5b)
 
-    StampPresentGuide(slot, params, frame, devId, clone.width, clone.height);
+    DlssNr::PresentGuideIdentity::Stamp stamp = source.output;
+    stamp.device = devId;
+    StampPresentGuide(slot, stamp, frame, clone.width, clone.height);
     g_presentGuideRing.CommitRecord(slot, clone.width, clone.height, frame.DepthInverted, NowMs(),
                                     &clone.captureWriteUsage, &clone);
     g_temporalValid = true;
+    return true;
 }
+
+// A D3D12 evaluate's capture: its own depth and motion, in the states [OptiScaler] DepthResourceBarrier and
+// MVResourceBarrier say the game leaves them in, and its own output.
+static void CaptureTemporal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+                            const DlssNrFrameInfo& frame)
+{
+    if (g_nr.failed)
+        return;
+
+    GuideCapture source;
+    source.depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
+    source.motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
+
+    if (source.depth == nullptr || source.motion == nullptr || cmdList == nullptr)
+        return;
+
+    const auto& cfg = *Config::Instance();
+    source.depthState = static_cast<D3D12_RESOURCE_STATES>(
+        cfg.DepthResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+    source.motionState = static_cast<D3D12_RESOURCE_STATES>(
+        cfg.MVResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+
+    uint32_t outputWidth = 0;
+    uint32_t outputHeight = 0;
+    D3D12OutputExtent(params, &outputWidth, &outputHeight);
+    source.output = EvaluateOutput(params, nullptr, outputWidth, outputHeight);
+
+    CaptureGuides(cmdList, source, frame);
+}
+
+bool CaptureBridgedGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* depth, ID3D12Resource* motion,
+                          D3D12_RESOURCE_STATES state, NVSDK_NGX_Parameter* params, uint32_t outputWidth,
+                          uint32_t outputHeight)
+{
+    if (params == nullptr)
+        return false;
+
+    GuideCapture source;
+    source.depth = depth;
+    source.motion = motion;
+    source.depthState = state;
+    source.motionState = state;
+    source.output = EvaluateOutput(params, nullptr, outputWidth, outputHeight);
+
+    return CaptureGuides(cmdList, source, GatherGuideFrame(params));
+}
+
+unsigned long long BridgePresentedExtent() { return g_bridgePresentedExtent.load(); }
 
 // The pass object, built once on the device the first frame arrives on. Four routes reach for it and
 // two of them run on the present thread, so the build holds the lock: two threads each building one
@@ -7861,7 +7949,7 @@ void ReportSpatialContract(NVSDK_NGX_Parameter* params, ID3D12Resource* color, I
                  "rendered resolution");
 }
 
-DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
+DlssNrFrameInfo GatherGuideFrame(NVSDK_NGX_Parameter* params)
 {
     unsigned int createFlags = 0;
     params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &createFlags);
@@ -7906,6 +7994,16 @@ DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
     if (params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &frame.MvScaleY) != NVSDK_NGX_Result_Success ||
         !std::isfinite(frame.MvScaleY) || frame.MvScaleY == 0.0f)
         frame.MvScaleY = 1.0f;
+
+    return frame;
+}
+
+DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
+{
+    unsigned int createFlags = 0;
+    params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &createFlags);
+
+    DlssNrFrameInfo frame = GatherGuideFrame(params);
 
     // What the game says about its own exposure. Logged, used for nothing yet.
     //
@@ -8593,6 +8691,8 @@ bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** 
 {
     if (gameGuidesHold != nullptr)
         *gameGuidesHold = false;
+
+    NoteBridgePresentedExtent(presentWidth, presentHeight);
 
     if (depth == nullptr || motion == nullptr || frame == nullptr)
         return false;
@@ -9427,6 +9527,10 @@ PulseStatus GetPulseStatus()
 
 void Shutdown()
 {
+    // Before the locks: the transport takes its own lock and then g_nrMutex when it captures, so it is never asked
+    // to while g_nrMutex is held.
+    ShutdownNativeDx11Guides();
+
     std::lock_guard<std::mutex> preLock(g_preMutex);
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
 

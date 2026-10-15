@@ -966,6 +966,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="..\retoque\dlssnr\DlssNr_DirectRuntime.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_ZeroGuides.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_WorkingScale.cpp" />
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_Dx11Guides.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_PresentHost.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_SwapchainColour.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_PrivateSr.cpp" />
@@ -1025,6 +1026,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="..\retoque\dlssnr\DlssNr_PeScan.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_PresentColour.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_ZeroGuides.h" />
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_Dx11Guides.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_PresentHost.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_Exposure.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_Chain.h" />

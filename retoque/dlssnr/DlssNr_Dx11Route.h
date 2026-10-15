@@ -16,7 +16,7 @@
 // DlssNr_Dx11Upscaler.h is the layer that reads the config and writes the log.
 //
 //   PreferBridge  whether CreateFeature's default becomes dlss_12 instead of native DLSS (step 2)
-//   Decide        what to say when the route in use leaves the pass inert (step 1)
+//   Decide        what to say when the route in use leaves the pass inert (step 1), or its guides out (step 3)
 //
 // With NR off both are no-ops whatever else is true: PreferBridge answers false and Decide answers None, so the
 // D3D11 route is exactly what it was before this header existed.
@@ -54,14 +54,15 @@ enum class Report : uint8_t
 {
     None,     // nothing to say: NR off, or a route this header does not judge
     NoPass,   // native D3D11 DLSS, HookMethod 0 or 1: the pass belongs after the upscaler, and cannot get there
-    NoGuides, // native D3D11 DLSS, HookMethod 2: the game's depth and motion never reach the present host
+    NoGuides, // native D3D11 DLSS, HookMethod 2: the game's depth and motion are not reaching the present host
 };
 
 struct Inputs
 {
     bool nrEnabled = false;
     Kind route = Kind::Other;
-    uint32_t hookMethod = 1; // [DlssNr] HookMethod as configured; anything but 2 places the pass after the upscaler
+    uint32_t hookMethod = 1;    // [DlssNr] HookMethod as configured; anything but 2 places the pass after the upscaler
+    bool guidesCarried = false; // step 3: the native guide transport carried a capture to the present host lately
 };
 
 inline Report Decide(const Inputs& in)
@@ -71,8 +72,14 @@ inline Report Decide(const Inputs& in)
 
     // HookMethod 0 (Auto) on a D3D11 game stays on the upscaler's output (there is no D3D12 present hook to move to),
     // so it is the after-upscaler case too. 2 is the bridge's present host, which runs without an upscaler at all,
-    // when it was built at swapchain creation; native DLSS hands it nothing.
-    return in.hookMethod == 2 ? Report::NoGuides : Report::NoPass;
+    // when it was built at swapchain creation. Since step 3 the native evaluate's depth and motion are carried to it
+    // (DlssNr_Dx11Guides.h); while they are, there is nothing to report. When they are not -- no host, or the
+    // transport refusing, which its own log line explains -- the present runs without them, and dlss_12 still hands
+    // them over.
+    if (in.hookMethod != 2)
+        return Report::NoPass;
+
+    return in.guidesCarried ? Report::None : Report::NoGuides;
 }
 
 // The text for a report, in English. The menu runs it through Localization::Tr, so each one has a pt-BR entry
@@ -88,10 +95,10 @@ inline const char* ReportText(Report report)
                "device, where the pass cannot run after it. DLSS w/Dx12 (dlss_12) runs the same DLSS on OptiScaler's "
                "D3D12 bridge, which carries the pass: pick it under Upscalers, or set Dx11Upscaler=dlss_12.";
     case Report::NoGuides:
-        return "This game's DLSS runs natively on D3D11 (Dx11Upscaler dlss), so its depth and motion never reach the "
-               "pass: at present it can only run without them. DLSS w/Dx12 (dlss_12) runs the same DLSS on "
-               "OptiScaler's D3D12 bridge, which hands them over: pick it under Upscalers, or set "
-               "Dx11Upscaler=dlss_12.";
+        return "This game's DLSS runs natively on D3D11 (Dx11Upscaler dlss), and its depth and motion are not reaching "
+               "the pass at present, so it runs without them; the log's 'native D3D11 guides' line says why. DLSS "
+               "w/Dx12 (dlss_12) runs the same DLSS on OptiScaler's D3D12 bridge, which hands them over: pick it "
+               "under Upscalers, or set Dx11Upscaler=dlss_12.";
     case Report::None:
         break;
     }

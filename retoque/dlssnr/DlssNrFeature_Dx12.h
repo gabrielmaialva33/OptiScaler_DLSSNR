@@ -16,6 +16,8 @@
 #include <shaders/synth_motion/SynthMotion_Handoff.h>
 #include <nvsdk_ngx.h>
 
+struct ID3D11DeviceContext;
+
 // DLSS 5 Neural Rendering, run over the upscaler's output.
 //
 // Neural Rendering is a post-process, not an upscaler and not a denoiser: it takes a finished frame plus
@@ -106,6 +108,36 @@ bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** 
                            unsigned int presentWidth = 0, unsigned int presentHeight = 0,
                            bool* gameGuidesHold = nullptr);
 void AbandonCapturedGuides();
+
+// A native D3D11 evaluate's guides, on the bridge's D3D12 side, into the present guide ring
+// (docs/dlssnr/design/dx11-native-dlss-guides.md, option (c)). depth and motion are the D3D12 openings of the
+// bridge's shared copies, resting in `state` on cmdList, a list of the bridge's D3D12 device that the caller executes
+// on the bridge's queue, after that queue has been made to wait for the D3D11 copies. params is the game's D3D11
+// block, read only for what describes the guides (GatherGuideFrame) and the output's base; the output's extent is the
+// caller's, from the game's D3D11 output texture. True when the ring took it; the identity rules decide at the present.
+bool CaptureBridgedGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* depth, ID3D12Resource* motion,
+                          D3D12_RESOURCE_STATES state, NVSDK_NGX_Parameter* params, uint32_t outputWidth,
+                          uint32_t outputHeight);
+
+// The size of the frame the D3D11 bridge's present host last ran on, packed width << 32 | height; zero before its
+// first present.
+unsigned long long BridgePresentedExtent();
+
+// What an evaluate's parameter block says about its depth and motion -- create flags, reset, subrects, motion scale --
+// with none of GatherFrame's exposure reads, logs or counters. Reads values only, never a resource, so a D3D11
+// block is read the same way.
+DlssNrFrameInfo GatherGuideFrame(NVSDK_NGX_Parameter* params);
+
+// The native D3D11 guide transport: one call after NVSDK_NGX_D3D11_EvaluateFeature's evaluate
+// (DlssNr_Dx11Guides.cpp). Inert -- no device, context or parameter touched -- unless NR is on, HookMethod is 2, the
+// feature is native D3D11 DLSS and the D3D11 bridge hosts the pass at present.
+void CarryNativeDx11Guides(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* params, bool nativeDlss, bool evaluated);
+
+// Whether the transport carried a capture in the last second, for the D3D11 route's panel line.
+bool NativeDx11GuidesCarriedRecently();
+
+// Releases the transport's D3D12 objects once its last list has completed (bounded); from Shutdown, without the lock.
+void ShutdownNativeDx11Guides();
 
 // What a present host ran a frame on when the game's guides were not used: SynthMotion's estimate, or zeros. For the
 // status line and the menu's guides line, which name what is running (present-real-guides.md, D3).

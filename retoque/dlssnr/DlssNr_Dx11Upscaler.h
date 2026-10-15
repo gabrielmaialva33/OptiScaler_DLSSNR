@@ -7,6 +7,9 @@
 #include <atomic>
 #include <chrono>
 
+struct ID3D11DeviceContext;
+struct NVSDK_NGX_Parameter;
+
 // The D3D11 DLSS route as NVSDK_NGX_D3D11_CreateFeature, NVSDK_NGX_D3D11_EvaluateFeature and the NR panel see it
 // (docs/dlssnr/design/dx11-native-dlss-guides.md, steps 1 and 2). The decisions are in DlssNr_Dx11Route.h; this layer
 // reads the config, keeps the route of the last evaluate for the panel, and writes the log.
@@ -17,6 +20,10 @@
 
 namespace DlssNr
 {
+// Step 3, the native D3D11 guide transport (DlssNr_Dx11Guides.cpp), which NoteDx11Evaluate hands each evaluate to.
+void CarryNativeDx11Guides(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* params, bool nativeDlss, bool evaluated);
+bool NativeDx11GuidesCarriedRecently();
+
 namespace Dx11RouteDetail
 {
 inline Dx11Route::Kind KindOf(::Upscaler upscaler)
@@ -54,9 +61,12 @@ inline ::Upscaler Dx11DefaultUpscaler(::Upscaler upstreamDefault)
     return ::Upscaler::DLSS_on12;
 }
 
-// Every D3D11 super-resolution evaluate, with the upscaler its feature is. Keeps the route for the panel and logs a
-// report the first time one applies; per frame it is two relaxed stores and a config read.
-inline void NoteDx11Evaluate(::Upscaler upscaler)
+// Every D3D11 super-resolution evaluate, with the upscaler its feature is, the context and parameters it was
+// evaluated with, and whether it succeeded. Keeps the route for the panel, hands a native DLSS evaluate's guides to
+// the transport (step 3), and logs a report the first time one applies; per frame on any other route it is two
+// relaxed stores and a config read.
+inline void NoteDx11Evaluate(::Upscaler upscaler, ID3D11DeviceContext* context, NVSDK_NGX_Parameter* params,
+                             bool evaluated)
 {
     const Config& cfg = *Config::Instance();
 
@@ -68,7 +78,11 @@ inline void NoteDx11Evaluate(::Upscaler upscaler)
     Dx11RouteDetail::g_lastAt.store(std::chrono::steady_clock::now().time_since_epoch().count(),
                                     std::memory_order_relaxed);
 
-    const auto report = Dx11Route::Decide({ true, route, cfg.DlssNrHookMethod.value_or_default() });
+    // Before the report, so that an evaluate the transport carries is not reported as one whose guides are missing.
+    CarryNativeDx11Guides(context, params, route == Dx11Route::Kind::NativeDlss, evaluated);
+
+    const auto report =
+        Dx11Route::Decide({ true, route, cfg.DlssNrHookMethod.value_or_default(), NativeDx11GuidesCarriedRecently() });
 
     if (Dx11RouteDetail::g_reported.First(report))
         LOG_WARN("DLSS-NR: {}", Dx11Route::ReportText(report));
@@ -85,6 +99,7 @@ inline Dx11Route::Report Dx11RouteReport()
     const auto route = Dx11Route::Seen(Dx11RouteDetail::g_lastRoute.load(std::memory_order_relaxed),
                                        std::chrono::steady_clock::now() - at);
 
-    return Dx11Route::Decide({ cfg.DlssNrEnabled.value_or_default(), route, cfg.DlssNrHookMethod.value_or_default() });
+    return Dx11Route::Decide({ cfg.DlssNrEnabled.value_or_default(), route, cfg.DlssNrHookMethod.value_or_default(),
+                               NativeDx11GuidesCarriedRecently() });
 }
 } // namespace DlssNr
