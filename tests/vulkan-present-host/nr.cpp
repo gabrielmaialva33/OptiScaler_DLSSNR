@@ -319,6 +319,8 @@ struct App
     uint32_t frames = 12;
     bool cross = false;
     bool route = false;
+    bool wdx12 = false;
+    bool wdx12Probed = false;
     HMODULE optiscaler = nullptr;
     std::vector<PhaseFacts> phases;
     PhaseFacts* phase = nullptr; // the phase read-backs are counted in, with --route
@@ -479,6 +481,17 @@ struct App
         }
         Check(vkCreateDevice(physical, &info, nullptr, &device), "vkCreateDevice");
         vkGetDeviceQueue(device, graphicsFamily, 0, &graphicsQueue);
+        if (wdx12)
+        {
+            // Characterise the real wDx12 hook, not a test double: Vulkan accepts this zero-batch call, but
+            // hk_vkQueueSubmit rejects its null array. Exactly this one rejection must appear in the log;
+            // the host's hand-back and destroy drains must then get through it with empty, non-null batches.
+            auto submit = reinterpret_cast<PFN_vkQueueSubmit>(vkGetDeviceProcAddr(device, "vkQueueSubmit"));
+            Require(submit != nullptr, "no vkQueueSubmit for the wDx12 chain probe");
+            Require(submit(graphicsQueue, 0, nullptr, VK_NULL_HANDLE) == VK_ERROR_INITIALIZATION_FAILED,
+                    "the wDx12 null-submit rejection is absent: the required hook chain is not active");
+            wdx12Probed = true;
+        }
         if (computeFamily != UINT32_MAX)
             vkGetDeviceQueue(device, computeFamily, 0, &computeQueue);
     }
@@ -1161,7 +1174,8 @@ struct App
                 << ", \"max_diff\": " << s.maxDiff << ", \"alpha_changed\": " << s.alphaChanged
                 << ", \"black\": " << s.black << ", \"destroyed\": " << (s.destroyed ? "true" : "false") << "}";
         }
-        out << "],\n  \"phases\": [";
+        out << "],\n  \"wdx12_probed\": " << (wdx12Probed ? "true" : "false");
+        out << ",\n  \"phases\": [";
         for (size_t i = 0; i < phases.size(); ++i)
         {
             const auto& f = phases[i];
@@ -1187,6 +1201,8 @@ int main(int argc, char** argv)
                 app.cross = true;
             else if (!strcmp(argv[i], "--route"))
                 app.route = true;
+            else if (!strcmp(argv[i], "--wdx12"))
+                app.wdx12 = true;
             else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
                 app.frames = static_cast<uint32_t>(std::atoi(argv[++i]));
             else

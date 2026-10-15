@@ -10,6 +10,12 @@ as built".
 
 ## What this covers
 
+The source guard scans every C/C++ file under `retoque/` for literal zero-count or null-array `QueueSubmit`,
+`QueueSubmit2` and `QueueSubmit2KHR` calls (including dispatch-table names). Fence-only drains must use one empty,
+non-null submit struct: DOOM Eternal's downstream wDx12 hook rejects a null array even when Vulkan permits it.
+The guard covers the hand-back and bounded device-destroy drains; it does not perform pointer data-flow analysis
+or change forwarded application submits. Its scanner is self-tested against each API and each bad argument alone.
+
 The registry's state machine and the transport's decisions, with plain integers for handles as the headers use:
 
 - The Vulkan constants the headers repeat so they compile alone, held to `vulkan_core.h` (queue flags, usages,
