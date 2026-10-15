@@ -75,7 +75,7 @@ Related, outside that sequence:
 - [present-real-guides.md](design/present-real-guides.md): checking that the guides the present pass reuses belong to the frame being presented (step 0 measured in Crimson Desert; step 1, the rules applied, built and not yet run in a game).
 - [nr-before-dlssg.md](design/nr-before-dlssg.md): running the present pass at the game's Streamline `Present`, before its DLSS-G interpolates, so generated frames carry the edit; NeuRotic's pre-FG adapter as prior art (design).
 - [present-depth-without-upscaler.md](design/present-depth-without-upscaler.md): the game's own depth for the present pass in titles that call no upscaler: heuristic discovery from depth-stencil binds, Streamline depth tags, or synthesized motion alone; NeuRotic's built-in capture as prior art (design; step 0, log only, proposed).
-- [dx11-native-dlss-guides.md](design/dx11-native-dlss-guides.md): NR for D3D11 games that call DLSS themselves, through `dlss_12` first (design).
+- [dx11-native-dlss-guides.md](design/dx11-native-dlss-guides.md): NR for D3D11 games that call DLSS themselves: `dlss_12` by default with NR on (steps 1-2), and native D3D11 DLSS's own depth and motion carried to the present pass (step 3, option (c); built, not yet run in a game).
 - [pr-improvements.md](design/pr-improvements.md): review of state, exposure, multipass and localization work taken from open PRs.
 
 ## Frame generation

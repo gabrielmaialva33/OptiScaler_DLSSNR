@@ -250,19 +250,19 @@ before committing C++, because nothing local enforces it and it had drifted by 5
 
 ### Tests
 
-`tests/README.md` is the index; read it before adding or changing a suite. Sixty directories under
+`tests/README.md` is the index; read it before adding or changing a suite. Sixty-two directories under
 `tests/`, each self-contained with its own `run.py` and README, registered in `tests/suites.toml`.
 
 ```bash
-python3 tests/run_all.py            # host tier, the default; 51 suites, ~60 s
+python3 tests/run_all.py            # host tier, the default; 52 suites, ~60 s
 python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
-python3 tests/run_all.py --tier all # adds the nine wine suites
+python3 tests/run_all.py --tier all # adds the ten wine suites
 python3 tests/<name>/run.py         # one suite, unchanged
 ```
 
 The `nr-ab-compare` suite is stdlib Python and tests the offline PNG/PFM/raw A/B metrics and provenance checks.
 
-Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the thirty-seven
+Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the thirty-eight
 `nr-*` suites plus `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`,
 `mfg-patch-plan`, `mfg-probe`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy` (no home path, LAN/tailnet address or token in
 a tracked file; the tree is public), `deploy-safety` (`tools/deploy-to-game.sh` on fake game directories),
@@ -276,7 +276,8 @@ real process, under the system Wine and GE-Proton's), `nr-hdr-d3d12` (the HDR pr
 device), `nr-present-guide-identity-msvc` (the present guides' identity cases compiled by MSVC), `synth-motion-d3d12`,
 `synth-motion-vk` (the same estimator on Vulkan), `vulkan-overlay` (which also needs a graphical session and a working
 Vulkan loader), `vulkan-present-host` (the production DLL's Vulkan present host, the round trip and, under a local
-Proton with the model kit, cold NR, HDR and synthesized motion) and `dlssnr-loopback` (real NGX/NR under Proton).
+Proton with the model kit, cold NR, HDR and synthesized motion), `dx11-guides-transport` (a D3D11 game's depth and
+motion crossing to the D3D12 bridge under GE-Proton) and `dlssnr-loopback` (real NGX/NR under Proton).
 There are currently no **wip** suites.
 
 `suites.toml` is a drift guard, not just a config file. A directory with no entry, or an entry with
@@ -492,7 +493,8 @@ rebuild, no temporal accumulator).
   with `grep -a -c 'could not reach the swapchain' OptiScaler.dll` (1 = present pass linked in).
 - **Call sites outside the module** are deliberately one-liners: `inputs/NVNGX_DLSS_Dx12.cpp` and
   `NVNGX_DLSS_Vk.cpp` (evaluate after upscale), `inputs/NVNGX_DLSS_Dx11.cpp` (`dlss_12` as the D3D11
-  DLSS default with NR on, and the report that native D3D11 DLSS leaves the pass inert),
+  DLSS default with NR on; `NoteDx11Evaluate`, which at `HookMethod=2` also carries native D3D11 DLSS's depth and
+  motion to the bridge's present pass, and reports when it cannot),
   `upscalers/IFeature_Dx11wDx12.cpp` and `IFeature_VkwDx12.cpp`
   (bridges), `menu/menu_common.cpp` (panel, timing row, toggle key, compare tags, scan meter),
   `hooks/Vulkan_Hooks.cpp` (device extensions), `hooks/D3D12_Hooks.cpp` and

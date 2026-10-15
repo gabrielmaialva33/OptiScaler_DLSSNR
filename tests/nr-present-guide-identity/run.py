@@ -182,14 +182,22 @@ assert ('if (motion == _guides.Motion() && Config::Instance()->DlssNrZeroGuideRe
 assert '*gameGuidesHold = hold;' in bridge
 assert 'if (capturedMotion == nullptr)\n        NotePresentGuideFallback(motion != _guides.Motion());' in host
 
-# CaptureTemporal: one stamp, after both copies are recorded and right before the commit. It runs only where the
-# capture does: HookMethod 2, or 0 with the present hook live.
-capture = function(renderer, 'static void CaptureTemporal(')
-stamp = ('StampPresentGuide(slot, params, frame, devId, clone.width, clone.height);\n'
+# The capture: one stamp, after both copies are recorded and right before the commit, in the core both producers go
+# through (CaptureGuides). A D3D12 evaluate's runs only where the capture does: HookMethod 2, or 0 with the present hook
+# live; the native D3D11 transport's is CaptureBridgedGuides (tests/nr-dx11-native-guides).
+core = function(renderer, 'static bool CaptureGuides(')
+stamp = ('StampPresentGuide(slot, stamp, frame, clone.width, clone.height);\n'
          '    g_presentGuideRing.CommitRecord(')
-assert capture.count('StampPresentGuide(') == 1 and capture.count(stamp) == 1
-assert capture.index('cmdList->CopyTextureRegion(&dstMotion') < capture.index(stamp)
+assert core.count('StampPresentGuide(') == 1 and core.count(stamp) == 1
+assert core.index('cmdList->CopyTextureRegion(&dstMotion') < core.index(stamp)
+assert core.index('stamp.device = devId;') < core.index(stamp)
 assert renderer.count('StampPresentGuide(') == 2  # its definition and its one call
+assert renderer.count('CaptureGuides(cmdList, source, frame);') == 1
+assert renderer.count('return CaptureGuides(cmdList, source, GatherGuideFrame(params));') == 1
+assert renderer.count('CaptureGuides(') == 3  # its definition and its two producers
+temporal = function(renderer, 'static void CaptureTemporal(')
+assert 'D3D12OutputExtent(params, &outputWidth, &outputHeight);' in temporal
+assert 'cfg.DepthResourceBarrier.value_or(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)' in temporal
 assert renderer.count('CaptureTemporal(cmdList, params, frame);') == 1
 # The capture happens only when a present pass would use it, decided by DlssNr_PresentBoundary.h.
 assert 'if (DlssNr::PresentBoundary::UpscaledCapturesForPresent(boundary, PresentHookLive()))\n' \
