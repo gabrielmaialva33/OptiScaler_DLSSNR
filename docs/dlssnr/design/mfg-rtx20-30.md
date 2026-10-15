@@ -483,6 +483,127 @@ from step 0), then others one row at a time.
 
 **Turing** gets a step only when a Turing tester exists.
 
+## Step 0 as built (2026-10-14, branch `feat/mfg-below-ada-probe`)
+
+**What.** A probe that writes nothing: no memory patch, no file, no ini or Config key. It runs only on an NVIDIA
+adapter whose architecture is known and in `[0x160, 0x190)`, Turing and Ampere. On Ada, Blackwell, a non-NVIDIA vendor
+and an NVIDIA adapter whose architecture was never read, it returns at its gate. The floor exists because
+`IdentifyGpu` leaves the architecture at 0 while the vendor stays NVIDIA whenever its NvAPI query cannot run (no
+`nvapi64.dll` in system32, fakenvapi there, a failed `NvAPI_Initialize`, a LUID with no physical GPU); a bare "below
+`0x190`" would have let that 0 through on an Ada card too. The independent review caught it; nothing below Turing runs
+NGX. There is no key, so on a Turing or Ampere card the probe always logs; it stays on its branch until measured.
+
+**Where.**
+
+- Logic, std-only so the host tests compile it without Windows: `retoque/framegen/dlssg/MfgProbe.h`. The gate
+  (`ProbeApplies`) and its production memo (`GateCache`: the first call that sees an identified GPU decides, every
+  later one is an atomic load); the fatbin/cubin census (`TakeCensus`, `LoadableOnSm86`), whose length checks are
+  written as subtractions so a length near 2^64 cannot wrap; the line formatters; foreign-loader detection; and two
+  injected-environment drivers (`RunModuleProbe`, `RunAdmissionProbe`) that check the gate before anything else.
+  Everything stateful the glue does (resolving and de-duplicating the module, the admission's once-only claim,
+  bringing the NGX core up) is an environment call made after the gate, which is what the host test counts.
+- Windows glue: `retoque/framegen/dlssg/MfgProbe.cpp`. It reads the GPU (`IdentifyGpu`), the provider's PE
+  (`TimeDateStamp`, `SizeOfImage`, the `NVSDK_NGX_GetGPUArchitecture` export immediate, the readable non-executable
+  sections for the census, each read SEH-guarded), the file's sha256 (first six bytes), its provenance from the path,
+  the driver version from `_nvngx.dll`'s file version, HAGS from a read-only `D3DKMTQueryAdapterInfo`, and makes the
+  one NGX capability query. `BCryptHash` and the three D3DKMT entries are resolved with `GetProcAddress` past the
+  gate, so the DLL's import table is what it was before (checked with `objdump -p`): no machine maps `bcrypt.dll`
+  because of the probe. No lock is held across the work (one guards the list of modules described; the admission
+  claim is an atomic), so a load the work triggers cannot re-enter a held lock; and both entry points catch every
+  C++ exception, so nothing escapes into the game's `LoadLibrary` or the NGX export.
+- Gate census reuse: `MfgUnlock::ProbeGates` (new) runs the unlock's own advertise/validate signature search through
+  the plan-only path, which records bytes and never writes, with its log lines off (`PlanAdvertise`/`PlanValidate`
+  take `log=false`), so the probe reports `found`/`missing`/`foreign` without a second copy of the ten signatures
+  and without printing the unlock's "advertise at X, count 3 -> 5" beside a probe that writes nothing.
+- Call sites. The module line is called from the first statement of `MfgUnlock::TryApply`, which both provider load
+  sites in `LibraryLoad_Hooks.cpp` already call with the module they just mapped. So the probe runs before the
+  option check (with the unlock off), before any unlock write (it describes the provider as NVIDIA shipped it; the
+  first version ran after `TryApply` and would have read our own patched gates as `missing` with `AdaMfgUnlock=true`),
+  and before NGX initialises the module. `LibraryLoad_Hooks.cpp` is untouched. A null module (TryApply's other
+  callers) means "the game's `nvngx_dlssg.dll`, if loaded", resolved after the gate. The admission line is called
+  from one line in `NVSDK_NGX_D3D12_GetFeatureRequirements` (`OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp`), before that
+  function answers feature 11 itself. New files are in the fork-owned tail of `OptiScaler.vcxproj` and
+  `.vcxproj.filters`.
+
+**The exact lines.** Module line (one per provider module):
+
+```
+MFG below Ada (probe): adapter "NVIDIA GeForce RTX 3060" arch 0x170 impl 0x21 driver 616.92 HAGS on; provider nvngx_dlssg.dll 310.9.1.0 ts 0x6a986031 image 0x737000 sha256 ff6e90eb78b8 from game row=none; minArch export 0x190; kernels: 70 containers, frame 0/31 loadable on sm_86, network cubins sm_86 39; gates advertise=found validate=found; no writes
+```
+
+Admission line (once per process, when the game first asks about feature 11):
+
+```
+MFG below Ada (probe) admission: sl.dlss_g 2.14.1.0 plugin loaded; NGX feature 11 0xbad00001 flags 0x4 minArch 0x170; slDLSSGGetState max unset; slIsFeatureSupported/CreateFeature left out (see note); no writes
+```
+
+When the query did not run, `NGX feature 11 not queried (<reason>)`, the reason being `DLSS off or adapter not
+DLSS-capable`, `NGX core not loaded`, or `NGX core loaded without D3D12_GetFeatureRequirements`. If a foreign loader
+is present, this line comes first, before the module line:
+
+```
+MFG below Ada (probe): another frame-generation loader is present (module sm86_backend.dll loaded, dlssg_sm86.ini beside the game); the provider line below may describe its runtime, not the game's own
+```
+
+`row=none` always in step 0: the qualification table is step 3. `HAGS` reads `on(spoofed)` when OptiScaler's own
+`SpoofHAGS` hook is active (it sits on the same `D3DKMTQueryAdapterInfo`), so the real value is only unambiguous with
+spoofing off. Hex is lowercase without leading zeros, as in the offline inventory.
+
+**What was validated.** The host suite `tests/mfg-probe` (the 50th host suite), under ASan/UBSan, proves:
+
+- the gate exits before the claim, the census, the foreign-loader check, the facts and the emit on Ada, Blackwell,
+  an id above it, Volta, NVIDIA with an unread arch 0, and non-NVIDIA, counted through an injected environment;
+- the production memo (`GateCache`) reads the GPU once on Ada and memoises an unread architecture as inert;
+- the census over synthetic containers, including truncated and 2^64-wrapping lengths; a mutant with the old bound
+  hangs, and `run.py` fails it in 120 s;
+- the exact text of every line and skip reason;
+- the census over the real 310.9.1.0 `nvngx_dlssg.dll` in Crimson Desert matches the inventory: 70 containers, frame
+  0/31 loadable on sm_86, 39 sm_86 and 39 sm_89 bare cubins.
+
+The DLL builds and links; the probe's strings are in it, and its import table names neither `bcrypt.dll` nor the
+D3DKMT entries.
+
+**What was not validated.** Nothing ran on a Turing or Ampere card, because this is a 4090. The module line's
+machine-dependent fields (driver, HAGS, sha256, provenance, export immediate, gate state on a real below-Ada provider)
+and the whole admission line were never emitted here. The concrete Windows environments, the NGX bring-up, the
+capability query, the HAGS sequence and the lazily resolved `BCryptHash` run only on Rafael's 3060. The two entry
+points' thin bodies are not host-tested; their gate is `GateCache`, which is. Two costs remain on Ada:
+
+- the first provider load or feature-11 query reads `IdentifyGpu::getPrimaryGpu()` once to decide the gate (a copy
+  of the cached GPU list, or the identification itself if nothing asked before);
+- `TryApply`'s other callers resolve nothing, because a null module is resolved only after the gate.
+
+**One active call, and what was left out.** The admission line makes exactly one active call: the NGX core's
+capability query for feature 11, through `NVNGXProxy::D3D12_GetFeatureRequirements()` with the game's own
+`FeatureDiscoveryInfo`, behind the same gate `NVSDK_NGX_D3D12_GetFeatureRequirements` uses on its pass-through path
+(DLSS on, a DLSS-capable adapter) and after the same `InitNVNGX` if the core is not loaded, tried at most once. It
+creates no feature, and NVIDIA answers `0xbad00001` on a stock below-Ada card (measured,
+model-cost-across-architectures.md). On the pass-through path it repeats the query that function makes a few lines
+later. On the path where OptiScaler answers feature 11 itself (`isFG && dlssgAdjacent`, which never calls NGX), it
+is a call that would not otherwise happen. That is the point, since the spoofed answer says nothing about the card,
+and it is the one active step this probe takes.
+
+Two data are **left out because each needed an active call that could change what the game does**:
+
+- `slIsFeatureSupported`'s real per-adapter verdict. OptiScaler's own hook forces it to `eOk`, so reading the real
+  answer would take a second active Streamline call with a synthesised `AdapterInfo`. That call is not obviously
+  side-effect-free, and what it returned would not be what the game sees.
+- `CreateFeature(11)`'s result. Observing it would mean actually creating a frame-generation feature: a real side
+  effect, not a query.
+
+The admission line names both as left out.
+
+**What Rafael must send back.** `OptiScaler.log` with the lines above:
+
+- the module line, with his arch `0x170`, his provider's version, ts, image, sha256 prefix and provenance,
+  `minArch export 0x190`, `frame 0/31 loadable` and `network cubins sm_86 39`;
+- the admission line, with the NGX feature-11 verdict (expected `0xbad00001` flags `0x4`, as in
+  model-cost-across-architectures.md) or the reason it was not queried.
+
+Set `[Log] LogLevel=1`, so NGX's own `LOG_DEBUG` diagnosis is kept, and `[Spoofing] SpoofHAGS=false`, so the HAGS
+field is his real value. Remove `dlssg_for_sm86` from the test game first, or the foreign-loader line fires and the
+provider described is that project's bundle, not the game's. The test plan below has the steps.
+
 ## Test plan with Rafael's RTX 3060 (native Windows)
 
 **Before anything:** remove `dlssg_for_sm86` from the test game, using the `ROLLBACK.md` our kit's `install.ps1` wrote
@@ -492,7 +613,7 @@ DLSS-G that he has run: Monster Hunter Wilds (D3D12, logged above) or Mortal She
 
 | Step | Build and ini | What he does | What the log must show | Back out |
 |---|---|---|---|---|
-| 0 | normal build with the probe; no new key | launch, open graphics settings, try to turn frame generation on, play two minutes, quit | the probe line with arch `0x170`, the provider's version and sha256 prefix, `minArch export 0x190`, `frame 0/31 loadable`, `network cubins sm_86 39`; the admission line with NGX feature 11 refused (`0xbad00001`, flags `0x4`) as in model-cost-across-architectures.md; no `MFG below Ada summary` | nothing was written; remove our DLL as usual |
+| 0 | build from `feat/mfg-below-ada-probe` (see "Step 0 as built"); no new key; `[Log] LogToFile=true`, `LogLevel=1`; `[Spoofing] SpoofHAGS=false` | launch, open graphics settings, try to turn frame generation on, play two minutes, quit | the probe line with arch `0x170`, the provider's version and sha256 prefix, `minArch export 0x190`, `frame 0/31 loadable`, `network cubins sm_86 39`; the admission line with NGX feature 11 refused (`0xbad00001`, flags `0x4`) as in model-cost-across-architectures.md; no foreign-loader line; no `MFG below Ada summary` | nothing was written; remove our DLL as usual |
 | 2 | scratch build, `BelowAdaUnlock=true` (admission only) | same, and turn frame generation on if offered | feature 11 supported, `MinHWArchitecture 0x170`; then the failure code at create or first evaluate; whether the game kept running | delete the key line; nothing on disk changed |
 | 3 | step 3 build, `BelowAdaUnlock=true`, `[DLSSG] OverrideInterpolationCount` 1 then 3, `[DlssNr] Dred=true` | frame generation on; a minute standing still, a minute panning with the HUD visible, at 2X and at 4X; a short video; PresentMon or CapFrameX if he has it | `MFG below Ada summary (...): kernels=ok(31) gates=ok export=ok`, the wrapper summary, DLSS-G evaluates rising, presents per rendered frame at 2.00 and 4.00 in windows without menus or loads (the windowed method of mfg-count-override.md); no device removal, or DRED's breadcrumbs if there is one | `BelowAdaUnlock=false` or delete the line: the next launch takes the default path unchanged; the patches are memory only; a TDR resets the driver |
 
