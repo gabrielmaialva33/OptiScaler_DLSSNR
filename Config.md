@@ -427,10 +427,27 @@ HookMethod=auto
 ; the marker; adds the model's device extensions at vkCreateDevice and TRANSFER_SRC to swapchains whose surface offers
 ; it, and copies every presented image out and back before it is shown, running the model on the way on an SDR
 ; swapchain: cold, no game parameters, zero guides (constant depth, no motion), so motion may smear. Stands down while
-; the game's own upscaler runs NR on Vulkan, or the D3D12 route runs it. Logs "DLSS-NR Vulkan present host (cold NR)"
-; lines per window. Read at start-up (docs/dlssnr/design/nr-vulkan-present-host.md).
+; the game's own upscaler runs NR on Vulkan, or the D3D12 route runs it, and while frame generation is active (see
+; VulkanPresentFgTransport). Logs "DLSS-NR Vulkan present host (cold NR)" lines per window. Read at start-up
+; (docs/dlssnr/design/nr-vulkan-present-host.md).
 ; true or false - Default (auto) is false
 VulkanPresentHost=auto
+
+; With VulkanPresentHost: one line per swapchain every 10 s in this log, for stage 4's pacer experiment
+; (docs/dlssnr/design/nr-vulkan-present-host.md): the presenting threads and their callers, the queues, the
+; application's waits and the host's own signals, present ids, the frame-time tail (p50/p95/p99/max), how long
+; each present call took, its results, GPU completions, the frame-generation shape and Streamline's fence timeouts,
+; pacer messages, warnings and errors. Costs two short locks, a clock read and a few string and vector appends
+; per present. Read at start-up.
+; true or false - Default (auto) is false
+VulkanPresentTrace=auto
+
+; With VulkanPresentHost, while frame generation is active (the game's DLSS-G, OptiScaler's own frame
+; generation): the host runs no NR on those presents until stage 4 is proven, and by default carries them
+; untouched (no copy, no submit, no semaphore of its own). On, it keeps its round trip on them, still without NR:
+; the pacer experiment's submission-only arm, for a test build. Read at start-up.
+; true or false - Default (auto) is false
+VulkanPresentFgTransport=auto
 
 ; The D3D12 present pass only (HookMethod=2, and Auto once it has moved to present): require the game's
 ; own depth and motion, captured from its upscaler. A capture is used only on a frame it can be shown to

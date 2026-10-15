@@ -1909,6 +1909,9 @@
     <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentBuild.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentFg.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\retoque\with_dx12\Dx11wDx12_Window.h">
       <Filter>Header Files</Filter>
     </ClInclude>
