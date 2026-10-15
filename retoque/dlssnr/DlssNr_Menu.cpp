@@ -183,8 +183,8 @@ static bool RenderPresentHdr(Config* config)
                "\n\nOn, each frame is decoded to linear light, the pass runs on it as on any HDR"
                "\nframe, and it is encoded back with the game's own frame as the reference: every"
                "\npixel the pass leaves alone -- the interface, at strength zero -- keeps its exact"
-               "\ncode. The model is shown 203 nits (the BT.2408 reference white) times Paper white"
-               "\nas its white."
+               "\ncode. The model uses the display's Windows SDR white level times Paper white,"
+               "\nor 203 nits when the display query is unavailable."
                "\n\nExperimental: not yet measured on a real HDR display. HLG, studio-range or YCbCr"
                "\nPQ and other colour spaces stay declined.");
 
@@ -194,9 +194,10 @@ static bool RenderPresentHdr(Config* config)
     const float multiplier = config->DlssNrWhitePointScale.value_or_default();
     const float shown = std::isfinite(multiplier) && multiplier > 0.0f ? multiplier : 1.0f;
 
-    if (hdr.converted && profile != nullptr)
+    const bool converted = on && config->DlssNrEnabled.value_or_default() && hdr.converted;
+    if (converted && profile != nullptr)
         ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f), Localization::Tr("%s, SDR white %.0f nits x %.2f"),
-                           profile, DlssNr::PresentHdr::kSdrWhiteNits, shown);
+                           profile, hdr.whiteNits, shown);
     else if (!on && profile != nullptr)
         ImGui::TextDisabled(Localization::Tr("Off: this %s swapchain is shown as the game rendered it."), profile);
     else if (hdr.reason != nullptr)
@@ -204,8 +205,9 @@ static bool RenderPresentHdr(Config* config)
     else
         ImGui::TextDisabled("%s", Localization::Tr("Waiting for a frame..."));
 
-    if (!hdr.converted)
+    if (!converted)
         return false;
+    ImGui::TextDisabled("%s", Localization::Tr(hdr.whiteFromDisplay ? "Windows SDR white" : "203-nit fallback"));
 
     // The display's SDR white times this is the white the model is shown; the composition divides by it and
     // multiplies back, so it moves what the model sees, never where an untouched pixel lands. A quarter to four is the
@@ -220,7 +222,7 @@ static bool RenderPresentHdr(Config* config)
         config->DlssNrWhitePointScale = 1.0f;
 
     HelpMarker("The same Paper white as on any other frame, measured here against the display's"
-               "\nSDR white of 203 nits: 1.00 shows the model 203 nits as white. Raise it if the"
+               "\nSDR white shown above: 1.00 uses that value. Raise it if the"
                "\ngame's own HDR paper white is set brighter, lower it if darker. It changes what"
                "\nthe model is shown, not the frame where the pass leaves it alone.");
 
@@ -1402,10 +1404,15 @@ void RenderMenu(Config* config, float menuResScale)
         }
         else if (config->DlssNrHookMethod.value_or_default() == 2)
         {
-            ImGui::TextDisabled(
-                Localization::Tr("Hook method is set to Present: the swapchain backbuffer is already\n"
-                                 "tone-mapped and display-referred sRGB. White point and exposure mapping\n"
-                                 "controls are bypassed."));
+            const auto hdr = DlssNr::GetPresentHdrStatus();
+            if (hdr.available && hdr.seen)
+                ImGui::TextDisabled(
+                    Localization::Tr("HDR present conversion is inactive; the game's original frame is shown."));
+            else
+                ImGui::TextDisabled(
+                    Localization::Tr("Hook method is set to Present: the swapchain backbuffer is already\n"
+                                     "tone-mapped and display-referred sRGB. White point and exposure mapping\n"
+                                     "controls are bypassed."));
         }
         else
         {

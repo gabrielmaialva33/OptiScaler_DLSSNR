@@ -112,6 +112,9 @@ inline DXGI_COLOR_SPACE_TYPE DefaultColourSpace(DXGI_FORMAT format)
 // text per reason, so each is logged once and the menu can show it.
 namespace PresentColourText
 {
+inline constexpr const char kResourceContract[] =
+    "HDR conversion resource contract unavailable; the frame stays original";
+inline constexpr const char kNoDescription[] = "HDR swapchain description unavailable; the frame stays original";
 inline constexpr const char kTypeless[] =
     "the swapchain's format is typeless, which the HDR conversion does not take; the frame is shown as the game "
     "rendered it";

@@ -154,6 +154,7 @@ class PresentHost
 
     bool _recorded = false;
     bool _recordedPass = false;
+    uint32_t _hdrRecordedProfile = 0;
     bool _resetOwed = true;
     // The motion estimator's own reset: owed after a rebuild, and paid by the first list that carried it
     // and executed. Not _resetOwed, which stays owed until the model runs: while the model is refused or

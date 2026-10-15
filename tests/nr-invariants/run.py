@@ -200,6 +200,12 @@ if (precompile / 'DlssNr_PresentHdr_Shader.cso').exists():
     targets.append(('DlssNr_PresentHdr_Shader.cso', 'DlssNr_PresentHdr_Shader.h', 'DlssNr_PresentHdr_cso', b'DXBC'))
 elif (precompile / 'DlssNr_PresentHdr_Shader.h').exists():
     fail('DlssNr_PresentHdr_Shader.h is committed without DlssNr_PresentHdr_Shader.cso beside it')
+# Both targets are required for this shared source, even before a Vulkan runtime consumer exists.
+if not (precompile / 'DlssNr_PresentHdr_Shader_Vk.spv').exists():
+    fail('HDR conversion SPIR-V is missing')
+else:
+    targets.append(('DlssNr_PresentHdr_Shader_Vk.spv', 'DlssNr_PresentHdr_Shader_Vk.h', 'dlssnr_present_hdr_spv', bytes.fromhex('03022307')))
+
 # Peripheral compression's three passes (peripheral-compression.md). Optional bytecode like the guide resample's:
 # none of the six files is a supported state (the feature says "unavailable"); any one of them commits to all
 # six, because DlssNr_Periphery_Dx12.cpp loads the three headers together and a .cso without its header, or a

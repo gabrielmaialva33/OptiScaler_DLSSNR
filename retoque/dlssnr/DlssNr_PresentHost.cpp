@@ -119,6 +119,7 @@ void PresentHost::_ReleaseBuilt()
     _sourceFormat = 0;
     _recorded = false;
     _recordedPass = false;
+    _hdrRecordedProfile = 0;
     _resetOwed = true;
     _motionResetOwed = true;
 }
@@ -329,6 +330,7 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
 {
     _recorded = false;
     _recordedPass = false;
+    _hdrRecordedProfile = 0;
     _motionRecorded = false;
 
     if (_failed || device == nullptr || cmdList == nullptr || source == nullptr)
@@ -431,6 +433,8 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         return false;
     }
 
+    const uint32_t hdrShaderProfile =
+        decision.profile == PresentColour::Hdr10 ? PresentHdr::kProfileHdr10 : PresentHdr::kProfileScRgb;
     // The HDR conversion's pass, on the first HDR frame and then for the host's life: built after _Ensure, which
     // releases what it rebuilds. A device that cannot store to this format from a shader declines the frame here,
     // before the frame's list carries anything (section 5.4: asked of the device, not assumed).
@@ -443,6 +447,11 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
                                  : !_hdr->IsInit()                    ? PresentColourText::kNotBuilt
                                  : !_hdr->Supports(sourceDesc.Format) ? PresentColourText::kNoTypedStore
                                                                       : nullptr;
+        if (hdrRefusal == nullptr &&
+            (!_hdr->ValidResources(source, source, _toWorking->Buffer(), hdrShaderProfile, PresentHdr::kModeDecode) ||
+             !_hdr->ValidResources(source, _toWorking->Buffer(), _fromWorking->Buffer(), hdrShaderProfile,
+                                   PresentHdr::kModeEncode)))
+            hdrRefusal = PresentColourText::kResourceContract;
         if (hdrRefusal != nullptr)
         {
             _resetOwed = true;
@@ -451,7 +460,7 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
             return false;
         }
 
-        NotePresentHdr(decision.profile, nullptr, true);
+        NotePresentHdr(decision.profile, nullptr, false);
     }
 
     // The guides' zeros and the model's creation happen once, on this host's own lists, before the
@@ -471,8 +480,6 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     // HDR: the source decoded into the working colour as linear Rec.709 in scRGB units, in place of the plain
     // conversion, and both dispatches timed as one conversion sample (finished before the caller closes the list).
     std::optional<GpuTiming::Conversion> hdrTiming;
-    const uint32_t hdrShaderProfile =
-        decision.profile == PresentColour::Hdr10 ? PresentHdr::kProfileHdr10 : PresentHdr::kProfileScRgb;
     bool convertedIn = false;
     if (hdr)
     {
@@ -627,6 +634,7 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     Transition(cmdList, _fromWorking->Buffer(), _outputState, D3D12_RESOURCE_STATE_COPY_SOURCE);
 
     _recordedPass = true;
+    _hdrRecordedProfile = hdr ? static_cast<uint32_t>(decision.profile) : 0;
     return true;
 }
 
@@ -647,6 +655,8 @@ void PresentHost::ConfirmExecuted()
 
     if (_recordedPass)
     {
+        if (_hdrRecordedProfile != 0)
+            NotePresentHdr(static_cast<PresentColour>(_hdrRecordedProfile), nullptr, true);
         // The model has seen a frame, so the next one has a history to continue from, and the serial
         // counts frames the model actually saw rather than frames that went past.
         _resetOwed = false;
@@ -655,6 +665,7 @@ void PresentHost::ConfirmExecuted()
 
     _recorded = false;
     _recordedPass = false;
+    _hdrRecordedProfile = 0;
 }
 
 void PresentHost::AbandonRecording()
@@ -679,6 +690,7 @@ void PresentHost::AbandonRecording()
 
     _recorded = false;
     _recordedPass = false;
+    _hdrRecordedProfile = 0;
 }
 
 } // namespace DlssNr

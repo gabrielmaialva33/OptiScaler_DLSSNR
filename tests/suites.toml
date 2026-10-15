@@ -282,3 +282,8 @@ summary = "LSFG as FSR-FG's interpolator (study branch): DXIL PSV0 reader, LSFG 
 tier = "host"
 timeout = 120
 summary = "LSFG at x3/x4 through the fork of FFX's swapchain (study branch): MfgPacing.h arithmetic under ASan/UBSan (x2 delta equals FFX's, output sets, steady-state schedule, summary), and source guards on the FSRFG routing, the router's forwarding, no FFX interface on the fork, drain-before-free, MIT notices, verbatim bytecode."
+
+[nr-hdr-d3d12]
+tier = "wine"
+timeout = 900
+summary = "Production D3D12 HDR conversion: exact HDR10/scRGB GPU identity, known edits, resource refusals and a real ten-bit swapchain/PQ-support probe; no NGX."
