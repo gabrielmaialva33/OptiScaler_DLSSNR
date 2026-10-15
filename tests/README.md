@@ -145,8 +145,10 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   (stored deflate, CRC-32, Adler-32, the provenance tEXt chunk) and PFM, decoded with Python's `zlib` and checked
   pixel by pixel against readback-shaped sources with padding, every half and R11G11B10 value, the
   request/record/ticket/hand-off state machine over a fake backend (nothing read before completion, nothing freed
-  before it is proven safe), the menu button's table, names and the 64-pair cap, write-then-rename, the record in its
-  three forms with the repository's privacy patterns run over it, and source guards on the pass. No GPU.
+  before it is proven safe), the menu button's table and its order, the record site's refusal order, names and the
+  64-pair cap applied after the write, write-then-rename with the failing step named, the folder in a real read-only
+  directory, the record's exact text from the production builders and in its three forms with the repository's
+  privacy patterns run over it, and source guards on the pass. No GPU.
 - `nr-cadence` — model cadence (`docs/dlssnr/design/model-cadence.md`): the production scheduler (age
   in presents the pass ran at, the held reset, forced model frames, every refusal with its reason, off
   allocating nothing) and the production per-pixel rules -- the header the shader includes -- over

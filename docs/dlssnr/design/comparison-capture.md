@@ -1,9 +1,10 @@
 # Same-frame comparison capture: original and processed as image files, with provenance
 
-Status: v1 implemented on D3D12, 2026-10-13, on branch `feat/comparison-capture`; not yet built or run in a game.
-The open questions of section 8 were answered by the maintainer (section 9); section 10 records where the code
-differs from the design below. Line numbers in sections 2 to 7 are against `93730d39` (branch
-`docs/design-hdr-capture`) and have drifted.
+Status: v1 implemented on D3D12, 2026-10-13, and merged into `dlss-neural-rendering` (`f56379c9`); a third,
+independent review's fixes followed on 2026-10-15 (section 10.1). Built -- every string of it is in a Release DLL --
+but **not yet run in a game**, and not on native Windows. The open questions of section 8 were answered by the
+maintainer (section 9); section 10 records where the code differs from the design below. Line numbers in sections 2
+to 7 are against `93730d39` (branch `docs/design-hdr-capture`) and have drifted.
 
 ## 1. The answer
 
@@ -301,11 +302,13 @@ as good as public too.
   is, `DlssNr_Dx12.cpp:691`). Not `dlssnr-capture/`: that one is wiped on the first request of every run
   (`ClearCaptureDirectory`), and screenshots are meant to outlast the session. Created on first capture; a
   failure to create it is logged once and disables the button with that reason. Under Wine this is inside
-  the game's directory in the prefix; the log line prints the path, and the menu shows the file name only.
+  the game's directory in the prefix; the log says "retoque-captures beside OptiScaler" and the file names,
+  never a path, and the menu shows the file stem only.
 - Names: `<yyyymmdd-hhmmss>-<exe>-<seq>.original.png` (`.pfm`), `<same stem>.processed.png`, `<same
   stem>.json`. A pair shares a stem; a sort by name keeps pairs together.
-- A cap of **64 pairs**. On a new capture, if the count of files matching exactly this pattern exceeds it,
-  the oldest *pairs* by name are deleted. Files that do not match the pattern are never touched. The cap is a
+- A cap of **64 pairs**. Once a new pair has been written, if more than 64 stems match exactly this pattern,
+  the oldest *pairs* by name are deleted, never the one just written. Files that do not match the pattern are
+  never touched (v1 deleted them before the write; section 10.1 says why that moved). The cap is a
   constant, like `kMaxFrames` (`DlssNr_Capture.h:28`), so the feature cannot fill a drive (about 1.9 GB at
   3440x1440 uncompressed PNG, 3.2 GB at 4K, as arithmetic); a larger cap or a compressing writer is a later
   decision.
@@ -315,10 +318,15 @@ as good as public too.
 
 "Zero" is checked as follows:
 
-- **Allocation: none** until the first request reaches `Dispatch`. The readbacks are allocated at record
-  time and released at write time. The writer thread is created on the first capture.
+- **Allocation: none** until the first request. Not even the session object exists before it (section 10.1).
+  The readbacks are allocated at record time and released once proven safe. The writer thread is created on the
+  first capture.
 - **GPU work: none.** No copy is recorded unless the request flag is set and the state allows it.
-- **CPU per frame:** one relaxed atomic load in `Dispatch` for the flag, one more when a ticket is pending.
+- **CPU per frame, before the first request:** one relaxed atomic load at the top of `Dispatch` (`Poll`), and one
+  more at the record site on a frame the pass wrote (`Wanted`). When GPU timing is on, its metadata asks `Wanted`
+  too. After a capture, an idle frame costs the session's own check besides: one more relaxed load and an
+  empty-vector test.
+- **The menu with NR off:** nothing; the panel returns before it asks the capture anything.
 - **The trigger-file poll is not zero.** `CheckCaptureTrigger` runs a `std::filesystem::exists` once per 60
   frames (`DlssNr_Dx12.cpp:709-723`). That is existing cost, and it is the only thing that lets a session be
   asked from outside the game. It stays as it is; it is named here so "zero" is not claimed for it.
@@ -522,3 +530,50 @@ Where it differs from sections 4 and 6, and why:
   the submission tracker's hooks, as the pulse metric and "Measure detail" do; they stay for the session.
 - **Not done in v1**: the wine-tier test of section 6 (`tests/dlssnr-loopback` with a frame counter in pixels), the
   burst's own ticket (section 4.9, second item), and Vulkan.
+
+### 10.1 Review fixes, 2026-10-15
+
+A third review, independent and read-only, walked DEVELOPMENT.md sections 1 and 3 over the merged code. It found no
+blocker: nothing is mapped on the render thread, no readback is freed before its list is sealed, and the D3D12 calls
+follow the rules as native Windows judges them. These are the items it raised that changed the code:
+
+- **The cap runs after the write.** Deleting the oldest pairs before writing meant a folder that allows deletes but
+  not new files, or a full disk, lost an older pair on every failed press and gained nothing. `RotateFolder` now runs
+  only once all three files are in place. It protects the new stem even when that stem sorts first (a clock set
+  back), and counts only the files it actually removed.
+- **A failed write says why.** `WriteViaTemporary` names the step that failed (open, write, close or rename) and the
+  system's reason, never a path. The log line is `writing <stem> failed (open: Permission denied); nothing kept`.
+- **The folder is checked first.** `EnsureDirectory` runs before the means, the adapter query and the model lookup;
+  where the folder cannot exist, none of those is worth doing.
+- **Nothing exists before the first request.** `g_used` gates `Poll`, `Wanted`, `Shutdown` and the status the menu
+  reads, so section 4.7's "no allocation" is true of the session object too. The menu returns before asking anything
+  while NR is off.
+- **A throw at the record site withdraws the capture.** Describing the frame allocates (`TimingContract`,
+  `std::format`), and the timing metadata beside it was already inside `try`. The record site now is too. A throw
+  hands the request back to idle with "The capture failed while the frame was being recorded; nothing was captured
+  (see the log)." Whatever was allocated before the throw is kept, not freed, because copies may already be recorded
+  into it.
+- **The proxy is refused at the request.** With `UseProxy` on, `Dispatch` returns before the record site, so the
+  refusal there could never be reached: a trigger-file request expired after 5 s with the wrong reason. The trigger
+  file's log now gives the actual reason: the proxy, a capture already under way, or the capture off after a
+  recording that never completed.
+- **A refusal for a setting is not shown once the setting is off** (`ReasonStillApplies`). The line under the button
+  no longer says "Turn off Compare" after Compare is off.
+- **An MSAA or non-2D surface gets its own reason** ("This frame is not a single-sample 2D texture"). It used to read
+  "differ in shape". The refusal order is one pure function, `RefusalFor`: settings before surfaces.
+- **The untracked fallback says why in the log.** When `Submission::Track` refuses the list (a COMPUTE list on the
+  upscaler routes, for one), the log names the tracker's reason. The `completion=assumed-8-frames` label counts the
+  pass's dispatches, which the line now says.
+- The adapter and model caches are never destroyed, like the writer that reads them.
+
+`tests/nr-capture` now holds the record's exact text and key order from the production builders
+(`FillFrameRecord`, `FillWriteRecord`). It also covers the folder in a real read-only directory, rotation after a
+write, the refusal and button-row order, `Abandon`, and a pt-BR scan that no longer misses a literal continued on the
+next line. Each new check was shown to fail on an injected defect, with one exception, which the suite's README
+explains.
+
+Raised, reviewed and left as they are: the untracked fallback itself (section 10, third item; a maintainer decision,
+safe unless the GPU runs 32 dispatches behind); a recording on a list the game drops never completes, so the capture
+gives up after 1,200 dispatches with a reason that blames the GPU (safe, rare, no common path found); the two readback
+allocations on the render thread on the capture frame, which the in-game run should read from the frame times; and
+the disabled, not hidden, button on native Vulkan (DEVELOPMENT.md section 2.3).
