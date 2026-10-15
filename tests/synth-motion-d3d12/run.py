@@ -177,9 +177,12 @@ def nvofa_unavailable():
 
 
 def estimator_sources():
+    # The D3D12 estimators only: the Vulkan one (SynthMotion_Vk.*, *_Shader_Vk.h) is tests/synth-motion-vk's.
     precompile = ESTIMATOR / 'precompile'
-    return (sorted(ESTIMATOR.glob('*.cpp')),
-            sorted(ESTIMATOR.glob('*.h')) + sorted(precompile.glob('*_Shader*.h')) + sorted(precompile.glob('static_overlay_*.h')))
+    def d3d12(paths):
+        return sorted(p for p in paths if '_Vk' not in p.name)
+    return (d3d12(ESTIMATOR.glob('*.cpp')),
+            d3d12(ESTIMATOR.glob('*.h')) + d3d12(precompile.glob('*_Shader*.h')) + sorted(precompile.glob('static_overlay_*.h')))
 
 
 def check_layer_margin():
@@ -195,7 +198,7 @@ def check_layer_margin():
 
 def sources():
     cpp, headers = estimator_sources()
-    files = [HERE / 'harness.cpp', HERE / 'run.py'] + sorted((HERE / 'stubs').glob('*.h')) + cpp + headers
+    files = [HERE / 'harness.cpp', HERE / 'sequences.h', HERE / 'run.py'] + sorted((HERE / 'stubs').glob('*.h')) + cpp + headers
     return {str(p.relative_to(ROOT)): digest(p) for p in files}
 
 

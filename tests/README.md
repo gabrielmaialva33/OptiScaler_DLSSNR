@@ -29,7 +29,7 @@ entry, or the next run tells you.
 | Tier | Needs | Suites |
 |---|---|---|
 | `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `windows-installer`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
-| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback` |
+| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session, and they and `synth-motion-vk` a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `synth-motion-vk`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
 The wine tier is serial on purpose. These suites compile through the single msvc-wine
@@ -232,6 +232,10 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   overlay, its depth and UI layer exact).
   `--source nvofa` runs the NVIDIA Optical Flow source through the same sequences, and skips
   when `nvofapi64.dll` or its shaders are unavailable. No NGX, no game.
+- `synth-motion-vk` — the same estimator on Vulkan (`SynthMotion_Vk`, its SPIR-V from the same sources) on a real
+  device under Wine, with core and synchronization validation on (proved active) and zero errors required: the D3D12
+  suite's frames, sequences and scores (`synth-motion-d3d12/sequences.h`), judged by its `judge()`, and GPU time. SKIP
+  when the device cannot run it. No NGX, no game.
 - `vulkan-overlay` — builds a real DLL and drives real Vulkan to exercise overlay
   lifetime.
 - `vulkan-present-host` — the production DLL from `build-local.sh`, uninstrumented, under a Win32 Vulkan application,
@@ -249,7 +253,10 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   cross-family, an extent not a multiple of eight, working scale 0.5) -- every read-back exact with `ApplyModel` off,
   changed by about three eight-bit steps with it on -- and refused, with every read-back exact, for a device without
   `VK_NVX_binary_import` (the test layer hides it), the kit's old forwarder, and no model (SKIP without the kit or a
-  local Proton). No game or FG.
+  local Proton). Stage 5 (`nr-synth-motion`, `[DlssNr] SynthMotion`): the picture panning, the estimator made with every
+  product off the present path and its field the model's motion guide after each swapchain's warm-up, validation
+  clean; `nr-pan-zero` is the same pan on zero motion, and both report how much of the unmoved previous frame the
+  model's edit carries. No game or FG.
 
 **Not a suite.** `nr-before-upscale/verify-invariants.py` is a one-shot evidence
 script pinned to baseline commit `660303ec`. `run.py` does not call it and

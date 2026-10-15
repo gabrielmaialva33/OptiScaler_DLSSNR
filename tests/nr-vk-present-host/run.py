@@ -589,6 +589,63 @@ print('PASS: stage-3 guards (decided before recording, counted on submit, seen c
       'abandoned on loss; after-upscale route asks first; passthrough encode; semaphores freed after the destroy)',
       flush=True)
 
+# --- Stage 5: synthesized motion at the present ------------------------------------------------------------------
+# The estimator (SynthMotion_Vk.*) is made off the present path like the rest of the product -- its pipelines and its
+# images by the builder, their initialisation in the build's own command buffer -- and only recorded on it: before the
+# encode reads the working colour, its field the model's motion guide once Ready, its history advanced on submit,
+# dropped on a discard, its scene-change bit read when the frame's fence was seen.
+synth_vk = (root / 'retoque/shaders/synth_motion/SynthMotion_Vk.cpp').read_text()
+synth_vk_h = (root / 'retoque/shaders/synth_motion/SynthMotion_Vk.h').read_text()
+for forbidden in ('LOG_', 'QueueSubmit', 'WaitIdle', 'WaitForFences', 'vkGetFenceStatus', 'Sleep('):
+    assert forbidden not in code(synth_vk), forbidden
+for name, text in (('Admit', admit), ('Record', record_model)):
+    for forbidden in ('CreateVkImages(', 'CreateVkPipelines(', 'VkUnsupported('):
+        assert forbidden not in text, (name, forbidden)
+assert 'SynthWanted(Config::Instance()->DlssNrSynthMotion.value_or_default(), !m.synthOff.empty(), width, height)' \
+    in flat(admit)
+assert 'const BuildKey want { width, height, workWidth, workHeight, family, synth };' in admit
+assert 'job.synthOff = SynthMotion::VkUnsupported(pd, job.dev.apiVersion);' in run_build
+assert run_build.index('CreateVkPipelines(d, job.synthPipelines') < run_build.index('vkBeginCommandBuffer(cmd')
+assert run_build.index('vkBeginCommandBuffer(cmd') < \
+    run_build.index('SynthMotion::CreateVkImages(d, pd, k.width, k.height, cmd, job.synthImages, job.synthOff)') < \
+    run_build.index('g_fwd.create(') < run_build.index('job.dev.submit(')
+free_build = code(function(feature_vk, 'void FreeBuild(PresentBuildJob& job)'))
+assert 'DestroyVkImages(d, job.synthImages);' in free_build and 'DestroyVkPipelines(job.synthPipelines);' in free_build
+forget_build = code(function(feature_vk, 'void ForgetBuild(PresentBuildJob& job)'))
+assert 'job.synthImages = SynthMotion::VkImages {};' in forget_build and 'Destroy' not in forget_build
+assert 'old.synth = synthImages;' in retire and 'estimator.Restart();' in retire
+free_set = code(function(feature_vk, '    void Free(RetiredSet& set)'))
+assert 'SynthMotion::DestroyVkImages(dev.device, set.synth);' in free_set
+# The estimator reads the working colour before the encode, the model then gets the field or the zero guide.
+assert record_model.index('m.estimator.Record(cmd, m.synthPipelines, m.synthImages, frame.view, VK_IMAGE_LAYOUT_GENERAL,') \
+    < record_model.index('m.pass->Dispatch(cmd, encode,') < record_model.index('ChooseMotionGuide(') < \
+    record_model.index('g_fwd.evaluate(')
+assert 'SynthReset(m.reset, frame.cut, m.lastSynthMs, now)' in record_model
+assert 'NrResetWithMotion(m.reset, frame.cut, sceneCut,' in flat(record_model)
+assert 'motionGuide, &m.output.ngx' in flat(record_model) and 'guide.width, guide.height, 0, 0, 0, 0' in flat(record_model)
+assert 'guide.scaleX, guide.scaleY);' in flat(record_model)
+# Confirmed with the submit, abandoned with a discard, its scene-change bit read only at completion.
+submitted = code(function(feature_vk, 'void VkPresentModel::Submitted(uint64_t ticket)'))
+discarded = code(function(feature_vk, 'void VkPresentModel::Discarded(uint64_t ticket)'))
+assert 'm.estimator.ConfirmExecuted();' in submitted and 'AbandonRecording' not in submitted
+assert 'm.estimator.AbandonRecording();' in discarded and 'ConfirmExecuted' not in discarded
+assert 'm.estimator.Completed(ticket, m.synthImages);' in completed
+assert 'DestroyVkImages(m.dev.device, m.synthImages);' in release and 'DestroyVkPipelines(m.synthPipelines);' in release
+assert 'm.synthImages = SynthMotion::VkImages {};' in abandon and 'm.synthPipelines = SynthMotion::VkPipelines {};' in abandon
+# The host counts a frame on the field, and hands the model the instance's version (the estimator needs 1.1).
+assert 'out.nrSynthesized = dev->model != nullptr && dev->model->LastFrameSynthesized();' in host
+assert 'device.apiVersion = dev.apiVersion;' in host
+# The project builds the estimator, and its SPIR-V is the committed one (nr-invariants checks the headers).
+for item in (r'<ClCompile Include="..\retoque\shaders\synth_motion\SynthMotion_Vk.cpp" />',
+             r'<ClInclude Include="..\retoque\shaders\synth_motion\SynthMotion_Vk.h" />'):
+    assert item in project, item
+assert 'kVkReadbackSlots = 8;' in synth_vk_h and 'kNrInFlightMax = 4;' in nr  # a slot per frame in flight, and more
+
+print('PASS: stage-5 guards (the estimator made by the builder, its images initialised in the build\'s buffer; recorded '
+      'before the encode, its field the motion guide once Ready; confirmed on submit, dropped on discard, its cut read '
+      'at completion; freed with the product, forgotten on abandon; it logs, submits and waits for nothing)',
+      flush=True)
+
 # The present hook goes in at a device's swapchain creation, after the bundle's own (installed in its vkCreateDevice),
 # so it runs first: application -> NR -> overlay -> present.
 assert 'HookPresent(device);' in code(function(host, 'VkResult OnCreateSwapchain('))

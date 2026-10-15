@@ -179,11 +179,17 @@ static bool FourBytes(VkFormat format)
     }
 }
 
+// With --pan, the whole picture pans this many pixels a frame (content moving left): a camera turning, for synthesized
+// motion (stage 5) to follow. Zero otherwise.
+static uint32_t g_pan = 0;
+
 // The picture: a horizontal and a vertical gradient, a fine texture, flat patches, thin stripes, and a square that
-// moves a few pixels a frame. Opaque. R, G, B in that order; the caller swizzles for BGRA.
-static void Picture(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t frame, uint8_t rgb[3])
+// moves a few pixels a frame. Opaque. R, G, B in that order; the caller swizzles for BGRA. With --pan everything but the
+// square is sampled g_pan pixels further right every frame, the gradient repeating every two widths.
+static void Picture(uint32_t xIn, uint32_t y, uint32_t w, uint32_t h, uint32_t frame, uint8_t rgb[3])
 {
-    int r = 30 + static_cast<int>(170 * x / std::max(w, 1u));
+    const uint32_t x = g_pan != 0 ? (xIn + frame * g_pan) % std::max(2 * w, 1u) : xIn;
+    int r = 30 + static_cast<int>(170 * (x % std::max(w, 1u)) / std::max(w, 1u));
     int g = 40 + static_cast<int>(160 * y / std::max(h, 1u));
     int b = 90 + static_cast<int>(((x ^ y) & 31));
 
@@ -200,7 +206,7 @@ static void Picture(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t fra
     const uint32_t side = std::max(w, h) / 10;
     const uint32_t sx = (frame * 5) % std::max(w - side, 1u);
     const uint32_t sy = h / 3;
-    if (x >= sx && x < sx + side && y >= sy && y < sy + side) // the moving square
+    if (xIn >= sx && xIn < sx + side && y >= sy && y < sy + side) // the moving square
     {
         r = 250;
         g = 220;
@@ -273,6 +279,12 @@ struct SwapchainFacts
     uint32_t black = 0; // read-backs whose every colour channel came back zero
     bool destroyed = false;
     double maxPresentMs = 0.0; // the longest vkQueuePresentKHR call, the host's hook and everything below included
+    // With --pan, from the swapchain's 16th frame (past the model's build and the estimator's warm-up): how much of the
+    // previous frame, unmoved, the model's edit carries -- the projection of (read back - presented) on (previous -
+    // presented) at the same pixel, per frame. A model blending a stale history it was told did not move ghosts toward
+    // 1; one whose history follows the camera stays near 0.
+    double trailSum = 0.0;
+    uint32_t trailFrames = 0;
 };
 
 // One phase of --route, with the read-backs of the frames presented in it counted apart.
@@ -343,6 +355,7 @@ struct App
         Buffer upload;
         Buffer download;
         size_t facts = 0;
+        uint32_t firstFrame = 0; // the frame number its first present carried
     };
 
     uint32_t nextFrame = 0;
@@ -628,6 +641,7 @@ struct App
         facts.sdr = Sdr(format.format, format.colorSpace);
         swapchains.push_back(facts);
         target.facts = swapchains.size() - 1;
+        target.firstFrame = nextFrame;
         std::printf("SWAPCHAIN %s format %u colour space %u %ux%u images %u family %u\n", name, format.format,
                     format.colorSpace, extent.width, extent.height, count, family);
     }
@@ -662,6 +676,28 @@ struct App
             }
         }
         const double mae = eightBit ? double(sum) / (double(w) * h * 3) : (exact ? 0.0 : 255.0);
+        const int64_t frame = target.expected[index];
+        if (g_pan != 0 && eightBit && frame >= int64_t(target.firstFrame) + 16)
+        {
+            std::vector<uint8_t> previous(expected.size());
+            Fill(previous.data(), target.format, w, h, static_cast<uint32_t>(frame - 1));
+            double along = 0.0, norm = 0.0;
+            for (size_t i = 0; i < expected.size(); i += 4)
+            {
+                for (int c = 0; c < 3; ++c)
+                {
+                    const double edit = double(got[i + c]) - double(expected[i + c]);
+                    const double stale = double(previous[i + c]) - double(expected[i + c]);
+                    along += edit * stale;
+                    norm += stale * stale;
+                }
+            }
+            if (norm > 0.0)
+            {
+                facts.trailSum += along / norm;
+                ++facts.trailFrames;
+            }
+        }
         if (phase != nullptr && target.expected[index] >= phaseFrom)
         {
             ++phase->readbacks;
@@ -1317,7 +1353,9 @@ struct App
                 << ", \"mae_mean\": " << (s.readbacks ? s.maeSum / s.readbacks : 0.0) << ", \"mae_max\": " << s.maeMax
                 << ", \"max_diff\": " << s.maxDiff << ", \"alpha_changed\": " << s.alphaChanged
                 << ", \"black\": " << s.black << ", \"destroyed\": " << (s.destroyed ? "true" : "false")
-                << ", \"max_present_ms\": " << s.maxPresentMs << "}";
+                << ", \"max_present_ms\": " << s.maxPresentMs
+                << ", \"trail_mean\": " << (s.trailFrames ? s.trailSum / s.trailFrames : 0.0)
+                << ", \"trail_frames\": " << s.trailFrames << "}";
         }
         out << "],\n  \"wdx12_probed\": " << (wdx12Probed ? "true" : "false");
         out << ",\n  \"phases\": [";
@@ -1354,6 +1392,8 @@ int main(int argc, char** argv)
                 app.slowBuild = true;
             else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
                 app.frames = static_cast<uint32_t>(std::atoi(argv[++i]));
+            else if (!strcmp(argv[i], "--pan") && i + 1 < argc)
+                g_pan = static_cast<uint32_t>(std::atoi(argv[++i]));
             else
                 Require(false, std::string("unknown argument ") + argv[i]);
         }

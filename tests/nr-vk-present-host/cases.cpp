@@ -1051,6 +1051,59 @@ static void NrCounters()
     CHECK(kNrInFlightMax * 3 <= 18); // three dispatches a frame in DlssNr_Vk's ring of eighteen slots
 }
 
+// Stage 5, synthesized motion at the Vulkan present (DlssNr_VkPresentNr.h): which products ask for the estimator, when
+// its history starts over, what the model is told about motion, when the model's history resets, and the counter.
+static void SynthMotionDecisions()
+{
+    // The key on, the device not refusing it, the frame no smaller than the estimator runs at.
+    CHECK(SynthWanted(true, false, 3440, 1440) && SynthWanted(true, false, 256, 128));
+    CHECK(!SynthWanted(false, false, 3440, 1440) && !SynthWanted(true, true, 3440, 1440));
+    CHECK(!SynthWanted(true, false, 255, 720) && !SynthWanted(true, false, 1280, 127));
+
+    // A product with the estimator is another key: turning the key on or off is a rebuild, frames carried meanwhile.
+    const BuildKey plain { 3440, 1440, 3440, 1440, 0 }, synth { 3440, 1440, 3440, 1440, 0, true };
+    CHECK(DecideBuild(false, BuildState::None, true, plain, synth) == BuildStep::Request);
+    CHECK(DecideBuild(false, BuildState::None, true, synth, plain) == BuildStep::Request);
+    CHECK(DecideBuild(false, BuildState::None, true, synth, synth) == BuildStep::Use);
+
+    // The estimator's history: over on the model's reset, the host's cut, its first recording, and a gap over 250 ms.
+    CHECK(SynthReset(false, false, 0, 1000));
+    CHECK(SynthReset(true, false, 990, 1000) && SynthReset(false, true, 990, 1000));
+    CHECK(!SynthReset(false, false, 1000 - kSynthStaleMs, 1000));
+    CHECK(SynthReset(false, false, 1000 - kSynthStaleMs - 1, 1000));
+
+    // The guide: the zero one, at the working size and unit scale, until the field is Ready; then the field whole, at
+    // the frame's size, scale 1 (pixels of the texture handed: RenderMotionScale's rule), or working over frame (the
+    // legacy conversion) with that key off. At native the two agree.
+    const MotionGuide zero = ChooseMotionGuide(false, 3440, 1440, 1720, 720, true);
+    CHECK(!zero.field && zero.width == 1720 && zero.height == 720 && zero.scaleX == 1.0f && zero.scaleY == 1.0f);
+    const MotionGuide field = ChooseMotionGuide(true, 3440, 1440, 1720, 720, true);
+    CHECK(field.field && field.width == 3440 && field.height == 1440 && field.scaleX == 1.0f && field.scaleY == 1.0f);
+    const MotionGuide legacy = ChooseMotionGuide(true, 3440, 1440, 1720, 720, false);
+    CHECK(legacy.field && legacy.width == 3440 && legacy.height == 1440 && legacy.scaleX == 0.5f &&
+          legacy.scaleY == 0.5f);
+    const MotionGuide native = ChooseMotionGuide(true, 1920, 1080, 1920, 1080, false);
+    CHECK(native.field && native.scaleX == 1.0f && native.scaleY == 1.0f);
+
+    // The model's reset: a scene cut is a cut; ZeroGuideReset applies only to a frame on the zero guide.
+    CHECK(NrResetWithMotion(false, false, true, false, true));
+    CHECK(!NrResetWithMotion(false, false, false, true, true));
+    CHECK(NrResetWithMotion(false, false, false, true, false));
+    CHECK(NrResetWithMotion(true, false, false, false, true) && NrResetWithMotion(false, true, false, false, true));
+    CHECK(!NrResetWithMotion(false, false, false, false, false));
+
+    // Counted per evaluated frame, and said only once a field has been handed over.
+    TransportStats s;
+    Outcome withField = WithNr(Transported(Route::SameQueue, 1, 1, 1), true);
+    withField.nrSynthesized = true;
+    s.Add(WithNr(Transported(Route::SameQueue, 1, 1, 1), true));
+    CHECK(NrText(s.nr) == "NR: evaluated 1, refused 0, history resets 0, pass GPU not measured");
+    s.Add(withField);
+    s.Add(withField);
+    CHECK(s.nr.evaluated == 3 && s.nr.synthesized == 2);
+    CHECK(NrText(s.nr) == "NR: evaluated 3, refused 0, history resets 0, motion synthesized 2, pass GPU not measured");
+}
+
 // One owner of the model in the process: the after-upscale route wins, the present host stands down and gives it up.
 static void OwnerArbitration()
 {
@@ -1561,6 +1614,7 @@ int main()
     ExtensionPlans();
     BdaPlans();
     NrCounters();
+    SynthMotionDecisions();
     OwnerArbitration();
     OwnerHandBack();
     Heartbeat();
@@ -1578,6 +1632,6 @@ int main()
     std::puts("PASS: registry state machine (records, reuse, many devices, unknowns, internal, lines), the round "
               "trip's decisions (usage plan, route, ring, counters, transport lines) and cold NR's (colour plan, "
               "device extensions, counters, one owner and the way back to the present host, NR lines), the model's build off "
-              "the present path and the stall watchdog's table");
+              "the present path, synthesized motion's decisions and the stall watchdog's table");
     return 0;
 }
