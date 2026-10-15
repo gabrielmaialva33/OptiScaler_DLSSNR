@@ -107,7 +107,13 @@ int wmain(int argc, wchar_t** argv)
     const wchar_t* mode = argv[1];
     const auto is = [mode](const wchar_t* name) { return lstrcmpW(mode, name) == 0; };
 
-    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    // A game does not set SEM_NOGPFAULTERRORBOX, and without it Wine's UnhandledExceptionFilter starts the AeDebug
+    // debugger (winedbg --auto in every prefix) before the default end. The "-default" modes leave the error mode alone
+    // to see what that does to the end; the others set it, to see the default end itself.
+    const size_t length = lstrlenW(mode);
+    const bool gameDefault = length > 8 && lstrcmpW(mode + length - 8, L"-default") == 0;
+    if (!gameDefault)
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
 
     if (!DlssNr::ProcessEnd::Watch(&Record))
         return 101;
@@ -137,7 +143,7 @@ int wmain(int argc, wchar_t** argv)
             return 103;
         TerminateProcess(self, 9);
     }
-    if (is(L"access-violation"))
+    if (is(L"access-violation") || is(L"access-violation-default"))
         *static_cast<volatile int*>(nullptr) = 1;
     if (is(L"abort"))
         std::abort();

@@ -27,10 +27,15 @@ threads); the process exit status must match:
 | `return-6` | return from `main` | 6 |
 | `terminate-self-0`, `terminate-self-7` | `TerminateProcess(GetCurrentProcess(), n)`, no DLL detach | `n` |
 | `terminate-self-handle-9` | `TerminateProcess` on a real handle to itself | 9 |
-| `access-violation` | unhandled exception, default end | `0xC0000005` |
+| `access-violation` | unhandled exception, default end (`SEM_NOGPFAULTERRORBOX` set: no debugger) | `0xC0000005` |
+| `access-violation-default` | the same as a game has it: the AeDebug debugger (`winedbg --auto`) attaches first | `0xC0000005` |
 | `abort` | the CRT's `abort()` (`__fastfail`) | nothing: ended below user mode, as on Windows (exit status `0xC0000409`) |
 | `own-filter-exit-3` | an unhandled exception whose filter calls `TerminateProcess(self, 3)` | 3: the known gap, a crash handler's own code |
 | `kill-other` | terminates a watched child, then `ExitProcess(0)` | 0, once; the child, killed from outside, records nothing |
+
+Before the cases, each prefix gets `ShowCrashDialog=0` (as Proton's prefixes have it), so winedbg never waits on a
+window; a case that still hangs is reported as a 120 s timeout, not a dead runner. The build prefix is copied once;
+delete `artifacts/` to take it again after a toolchain change.
 
 The hook is also asked twice in every mode (`Watch` returns the first answer and attaches nothing more), and the
 first-call rule is what keeps `ExitProcess`'s second `NtTerminateProcess` (after the DLL detach) from recording again.
@@ -48,3 +53,7 @@ changes". Native Windows is not run; the Windows rows in the note come from the 
 self-initiated end recorded once with `others=alive`; the killed child recorded nothing. `abort` was expected to
 record `0xC0000409` in the first draft and recorded nothing: Wine handles `__fastfail` below user mode, like
 Windows. The expectation and the design note were corrected; for the guard that end is "no end seen".
+
+After review, `access-violation-default` was added (a game does not set `SEM_NOGPFAULTERRORBOX`): under wine-11.19
+winedbg attached and printed its backtrace, and the process still ended through the hook with `0xC0000005`;
+GE-Proton's recorded the same. 24 of 24.
