@@ -13,8 +13,8 @@
 // Standard library only, so tests/nr-vk-present-host drives all of it on the host.
 
 #include <algorithm>
-#include <array>
 #include <cctype>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <map>
@@ -155,11 +155,12 @@ inline bool ContainsNoCase(std::string_view text, std::string_view word)
     return false;
 }
 
-// `level`: 0 info, 1 warning, 2 error (the callback's own LogType, mapped at the call site). A timeout is one in any
-// level; "pacer" only in a warning or an error (Streamline's info lines name its pacer at start-up).
+// `level`: 0 info, 1 warning, 2 error (the callback's own LogType, mapped at the call site). "timed out" is a timeout
+// at any level (the marker's failure: "Wait on gpu fence timed out after 500ms"); "timeout" and "pacer" only in a
+// warning or an error (Streamline's info lines name its pacer and its timeouts' settings at start-up).
 inline StreamlineKind ClassifyStreamline(int level, std::string_view message)
 {
-    if (ContainsNoCase(message, "timed out") || ContainsNoCase(message, "timeout"))
+    if (ContainsNoCase(message, "timed out") || (level >= 1 && ContainsNoCase(message, "timeout")))
         return StreamlineKind::FenceTimeout;
     if (level >= 1 && ContainsNoCase(message, "pacer"))
         return StreamlineKind::Pacer;
@@ -214,6 +215,7 @@ struct TraceSample
 {
     uint64_t swapchain = 0;   // the handle
     uint32_t swapchainId = 0; // the host's record, 0 when not on record
+    uint64_t device = 0;      // the device's handle (for a swapchain not on record, its queue's), 0 when unknown
     uint32_t deviceId = 0;
     uint64_t nowUs = 0;  // when the present entered the host (a monotonic clock)
     uint64_t callUs = 0; // how long the present took, the host's own work and the call down included
@@ -224,7 +226,7 @@ struct TraceSample
     uint32_t waits = 0;                // the application's wait semaphores
     bool hostSignal = false;           // the present went down on the host's own semaphore (a round trip)
     bool untouched = false;            // frame generation: carried untouched
-    std::optional<uint64_t> presentId; // VkPresentIdKHR, the first swapchain's
+    std::optional<uint64_t> presentId; // VkPresentIdKHR, the first swapchain's (0: none was given)
     int32_t result = 0;                // VkResult of the call down
     uint32_t completions = 0;          // the host's round trips seen complete during this present
     uint32_t ring = 0;
@@ -306,16 +308,22 @@ class TraceWindow
         _ring = std::max(_ring, s.ring);
         _maxWaitNs = std::max(_maxWaitNs, s.waitNs);
 
-        if (s.presentId.has_value())
+        // VK_KHR_present_id: 0 is no id. A gap is measured from the highest id seen (the previous window's included),
+        // so one id out of order is counted once and its successor is not a gap.
+        if (s.presentId.has_value() && *s.presentId != 0)
         {
             const uint64_t id = *s.presentId;
             if (!_idFirst.has_value())
                 _idFirst = id;
-            else if (id <= _idLast)
+            _idHigh = std::max(_idHigh, id);
+            if (_idMax != 0 && id <= _idMax)
                 ++_idOutOfOrder;
-            else if (id > _idLast + 1)
-                ++_idGaps;
-            _idLast = id;
+            else
+            {
+                if (_idMax != 0 && id > _idMax + 1)
+                    ++_idGaps;
+                _idMax = id;
+            }
             ++_ids;
         }
 
@@ -323,18 +331,17 @@ class TraceWindow
     }
 
     uint64_t Presents() const { return _presents; }
-    uint32_t DeviceId() const { return _deviceId; }
+    uint32_t SwapchainId() const { return _swapchainId; }
 
     // The line, `streamline` being what Streamline said during the window.
     std::string Line(const StreamlineCounts& streamline, const std::string& why)
     {
         const double seconds = static_cast<double>(_endUs - _startUs) / 1e6;
-        std::string line =
-            "DLSS-NR Vulkan present host (trace): swapchain " + Hex(_swapchain) +
-            (_swapchainId != 0 ? " #" + std::to_string(_swapchainId) + " on device #" + std::to_string(_deviceId)
-                               : std::string(" (not on record)")) +
-            ", " + Fixed(seconds, 1) + " s" + (why.empty() ? "" : " (" + why + ")") + ": " + std::to_string(_presents) +
-            " presents";
+        std::string line = "DLSS-NR Vulkan present host (trace): swapchain " + Hex(_swapchain) +
+                           (_swapchainId != 0 ? " #" + std::to_string(_swapchainId) : std::string(" (not on record)")) +
+                           (_deviceId != 0 ? " on device #" + std::to_string(_deviceId) : std::string()) + ", " +
+                           Fixed(seconds, 1) + " s" + (why.empty() ? "" : " (" + why + ")") + ": " +
+                           std::to_string(_presents) + " presents";
         if (seconds > 0.0)
             line += " (" + Fixed(static_cast<double>(_presents) / seconds, 1) + "/s)";
 
@@ -348,7 +355,7 @@ class TraceWindow
         if (_ids == 0)
             line += "; present ids none";
         else
-            line += "; present ids " + std::to_string(*_idFirst) + ".." + std::to_string(_idLast) + " (gaps " +
+            line += "; present ids " + std::to_string(*_idFirst) + ".." + std::to_string(_idHigh) + " (gaps " +
                     std::to_string(_idGaps) + ", out of order " + std::to_string(_idOutOfOrder) + ")";
 
         const double p50 = Percentile(_intervalsMs, 0.50);
@@ -456,12 +463,15 @@ class TraceWindow
         const uint64_t swapchain = _swapchain;
         const uint32_t id = _swapchainId;
         const uint32_t device = _deviceId;
+        const uint64_t idMax = _idMax;
         *this = TraceWindow {};
-        // The first interval of the next window is measured from this window's last present.
+        // The first interval of the next window is measured from this window's last present, its first present id
+        // from this window's highest.
         _lastUs = last;
         _swapchain = swapchain;
         _swapchainId = id;
         _deviceId = device;
+        _idMax = idMax;
     }
 
     uint64_t _swapchain = 0;
@@ -485,14 +495,16 @@ class TraceWindow
     uint64_t _completions = 0;
     uint32_t _ring = 0;
     uint64_t _maxWaitNs = 0;
-    std::optional<uint64_t> _idFirst;
-    uint64_t _idLast = 0;
+    std::optional<uint64_t> _idFirst; // this window's first id
+    uint64_t _idHigh = 0;             // this window's highest id
+    uint64_t _idMax = 0;              // the highest id seen on the swapchain, carried across windows
     uint64_t _ids = 0;
     uint64_t _idGaps = 0;
     uint64_t _idOutOfOrder = 0;
 };
 
-// Every swapchain's window, and Streamline's counts as of each swapchain's last line.
+// Every swapchain's window, by device and handle (handle values may repeat across devices), and Streamline's counts as
+// of each swapchain's last line.
 class PacerTrace
 {
   public:
@@ -500,7 +512,7 @@ class PacerTrace
     std::optional<std::string> Add(const TraceSample& sample, const StreamlineCounts& streamline)
     {
         // A swapchain's first window counts Streamline's messages from its own first present, not from the process's.
-        const auto [found, inserted] = _windows.try_emplace(sample.swapchain);
+        const auto [found, inserted] = _windows.try_emplace(Key { sample.device, sample.swapchain });
         Entry& entry = found->second;
         if (inserted)
         {
@@ -513,9 +525,9 @@ class PacerTrace
     }
 
     // The swapchain is going: its last, partial window, if it presented since its last line.
-    std::optional<std::string> Flush(uint64_t swapchain, const StreamlineCounts& streamline)
+    std::optional<std::string> Flush(uint64_t device, uint64_t swapchain, const StreamlineCounts& streamline)
     {
-        const auto found = _windows.find(swapchain);
+        const auto found = _windows.find(Key { device, swapchain });
         if (found == _windows.end())
             return std::nullopt;
         std::optional<std::string> line;
@@ -525,15 +537,37 @@ class PacerTrace
         return line;
     }
 
-    // The device is going: the last, partial windows of its swapchains still traced, and of every swapchain not on
-    // record (FSR-FG's own, whose destroy never reaches the driver's -- or this host's -- vkDestroySwapchainKHR).
-    std::vector<std::string> FlushDevice(uint32_t deviceId, const StreamlineCounts& streamline)
+    // A swapchain was made on the device: the windows that cannot have outlived it end -- one left under the same
+    // handle (its destroy was not seen), and the device's swapchains not on record (FSR-FG's proxy is made, and
+    // replaced, together with FFX's own swapchain, and its own creation and destruction never reach the host).
+    std::vector<std::string> FlushOnCreate(uint64_t device, uint64_t swapchain, const StreamlineCounts& streamline)
     {
         std::vector<std::string> lines;
         for (auto it = _windows.begin(); it != _windows.end();)
         {
-            const uint32_t owner = it->second.window.DeviceId();
-            if (owner != deviceId && owner != 0)
+            const bool same = it->first.device == device && it->first.swapchain == swapchain;
+            const bool unrecorded = it->first.device == device && it->second.window.SwapchainId() == 0;
+            if (!same && !unrecorded)
+            {
+                ++it;
+                continue;
+            }
+            if (it->second.window.Presents() != 0)
+                lines.push_back(
+                    Take(it->second, streamline, same ? "its handle made again" : "a swapchain made on its device"));
+            it = _windows.erase(it);
+        }
+        return lines;
+    }
+
+    // The device is going: the last, partial windows of its swapchains, those not on record included, and of any
+    // swapchain whose device was never known.
+    std::vector<std::string> FlushDevice(uint64_t device, const StreamlineCounts& streamline)
+    {
+        std::vector<std::string> lines;
+        for (auto it = _windows.begin(); it != _windows.end();)
+        {
+            if (it->first.device != device && it->first.device != 0)
             {
                 ++it;
                 continue;
@@ -548,26 +582,42 @@ class PacerTrace
     size_t Swapchains() const { return _windows.size(); }
 
   private:
+    struct Key
+    {
+        uint64_t device = 0;
+        uint64_t swapchain = 0;
+        bool operator<(const Key& other) const
+        {
+            return device != other.device ? device < other.device : swapchain < other.swapchain;
+        }
+    };
+
     struct Entry
     {
         TraceWindow window;
         StreamlineCounts seen; // the process's counts at this swapchain's last line
     };
 
+    // The counts only grow, but two presents may hand theirs in out of order: an older copy adds nothing.
+    static uint64_t Since(uint64_t now, uint64_t seen) { return now > seen ? now - seen : 0; }
+
     static std::string Take(Entry& entry, const StreamlineCounts& now, const std::string& why)
     {
         StreamlineCounts delta;
-        delta.fenceTimeouts = now.fenceTimeouts - entry.seen.fenceTimeouts;
-        delta.pacer = now.pacer - entry.seen.pacer;
-        delta.warnings = now.warnings - entry.seen.warnings;
-        delta.errors = now.errors - entry.seen.errors;
+        delta.fenceTimeouts = Since(now.fenceTimeouts, entry.seen.fenceTimeouts);
+        delta.pacer = Since(now.pacer, entry.seen.pacer);
+        delta.warnings = Since(now.warnings, entry.seen.warnings);
+        delta.errors = Since(now.errors, entry.seen.errors);
         if (delta.fenceTimeouts + delta.pacer + delta.warnings + delta.errors != 0)
             delta.last = now.last;
-        entry.seen = now;
+        entry.seen.fenceTimeouts = std::max(entry.seen.fenceTimeouts, now.fenceTimeouts);
+        entry.seen.pacer = std::max(entry.seen.pacer, now.pacer);
+        entry.seen.warnings = std::max(entry.seen.warnings, now.warnings);
+        entry.seen.errors = std::max(entry.seen.errors, now.errors);
         entry.seen.last.clear();
         return entry.window.Line(delta, why);
     }
 
-    std::map<uint64_t, Entry> _windows;
+    std::map<Key, Entry> _windows;
 };
 } // namespace DlssNr::VkPresentHost

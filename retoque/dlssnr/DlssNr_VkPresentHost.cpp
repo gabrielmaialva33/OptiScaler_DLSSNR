@@ -1855,7 +1855,17 @@ struct Prepared
     VkDevice device = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     uint32_t image = 0;
-    FgShape fg = FgShape::None;        // stage 4: what frame generation makes of this present
+    FgShape fg = FgShape::None; // stage 4: what frame generation makes of this present
+    bool fgKnown = false;       // Prepare classified it (not for a present it does not look at)
+    // Stage 4: round trips of the device's other swapchains seen complete while frame generation is on, credited to
+    // their own records rather than to this present's.
+    struct Polled
+    {
+        VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+        uint32_t completions = 0;
+        GpuTimes times;
+    };
+    std::vector<Polled> polledElsewhere;
     std::vector<std::string> warnings; // logged after every lock is released
 };
 
@@ -1906,6 +1916,7 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     // proven its presents go down untouched -- or, with the pacer experiment's key, with the round trip and no NR --
     // and the model stands down on the device (FgCarry, "Stage 4" in the design note).
     prep.fg = ClassifyFg(FgFactsFor(queue, info.pSwapchains != nullptr ? info.pSwapchains[0] : VK_NULL_HANDLE));
+    prep.fgKnown = true;
     const FgCarry fgCarry = DecideFg(prep.fg, g_fgTransport.load(std::memory_order_relaxed));
 
     // Before any of the refusals below, which return before the transport is looked at: a model on this device stands
@@ -1922,11 +1933,23 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
             else
             {
                 // No hand-back begins beside frame generation (one already draining finishes), the model's frames
-                // in flight are seen complete, and it stands down once they are.
+                // in flight are seen complete, and it stands down once they are. Every swapchain's model history is
+                // cut: frames went by that the model did not see.
                 if (dev->handBack.active)
                     PollHandBack(*dev);
                 for (auto& [handle, sc] : dev->swapchains)
-                    prep.outcome.completions += Poll(*dev, sc, times);
+                {
+                    sc.nrCut = true;
+                    if (handle == prep.swapchain)
+                    {
+                        prep.outcome.completions += Poll(*dev, sc, times);
+                        continue;
+                    }
+                    Prepared::Polled polled { handle };
+                    polled.completions = Poll(*dev, sc, polled.times);
+                    if (polled.completions != 0 || polled.times.timed != 0)
+                        prep.polledElsewhere.push_back(polled);
+                }
                 StandDown(*dev);
 
                 const uint32_t bit = 1u << static_cast<uint32_t>(prep.fg);
@@ -2641,14 +2664,14 @@ void OnDestroyDevice(PFN_vkDestroyDevice next, VkDevice device, const VkAllocati
 
     Log(modelLines);
 
-    // The trace's last windows for the device's swapchains, and for those not on record.
-    if (g_traceOn.load(std::memory_order_relaxed) && deviceId != 0)
+    // The trace's last windows for the device's swapchains, those not on record included.
+    if (g_traceOn.load(std::memory_order_relaxed))
     {
         const StreamlineCounts streamline = StreamlineNow();
         std::vector<std::string> traceLines;
         {
             std::lock_guard lock(g_traceMutex);
-            traceLines = g_trace.FlushDevice(static_cast<uint32_t>(deviceId), streamline);
+            traceLines = g_trace.FlushDevice(H(device), streamline);
         }
         Log(traceLines);
     }
@@ -2864,6 +2887,18 @@ VkResult OnCreateSwapchain(PFN_vkCreateSwapchainKHR next, VkDevice device, const
     if (!line.empty())
         LOG_INFO("{}", line);
 
+    // Stage 4's trace: windows that cannot have outlived this creation end here (PacerTrace::FlushOnCreate).
+    if (g_traceOn.load(std::memory_order_relaxed) && !internal)
+    {
+        const StreamlineCounts streamline = StreamlineNow();
+        std::vector<std::string> traceLines;
+        {
+            std::lock_guard lock(g_traceMutex);
+            traceLines = g_trace.FlushOnCreate(H(device), H(*swapchain), streamline);
+        }
+        Log(traceLines);
+    }
+
     HookPresent(device);
     return result;
 }
@@ -2914,7 +2949,7 @@ void OnDestroySwapchain(PFN_vkDestroySwapchainKHR next, VkDevice device, VkSwapc
             std::optional<std::string> traceLine;
             {
                 std::lock_guard lock(g_traceMutex);
-                traceLine = g_trace.Flush(H(swapchain), streamline);
+                traceLine = g_trace.Flush(H(device), H(swapchain), streamline);
             }
             if (traceLine.has_value())
                 LOG_INFO("{}", *traceLine);
@@ -3020,7 +3055,9 @@ VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInf
     if (info == nullptr)
         return next(queue, info);
 
-    const auto entered = std::chrono::steady_clock::now();
+    // Stage 4's pacer trace times the present from here, end to end; read once, so a present is traced whole or not.
+    const bool traced = g_traceOn.load(std::memory_order_relaxed);
+    const auto entered = traced ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
     HostActivity activity("vkQueuePresentKHR", H(queue));
 
     // For the whole present, the call down included: a thread borrowing this queue for a round trip waits for it.
@@ -3072,6 +3109,9 @@ VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInf
     {
         std::lock_guard lock(g_registryMutex);
         lines = g_registry.OnPresent(call);
+        for (const Prepared::Polled& polled : prep.polledElsewhere)
+            g_registry.OnCompletions(H(prep.device), H(polled.swapchain), polled.completions, polled.times.timed,
+                                     polled.times.last, polled.times.max, polled.times.sum);
     }
 
     Log(prep.warnings);
@@ -3097,12 +3137,23 @@ VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInf
     }
 
     // Stage 4's pacer trace ([DlssNr] VulkanPresentTrace): this present, end to end, into its swapchain's window.
-    if (g_traceOn.load(std::memory_order_relaxed) && info->swapchainCount >= 1 && info->pSwapchains != nullptr)
+    if (traced && info->swapchainCount >= 1 && info->pSwapchains != nullptr)
     {
         TraceSample sample;
         sample.swapchain = H(info->pSwapchains[0]);
         sample.swapchainId = viewed ? static_cast<uint32_t>(view.swapchainId) : 0;
+        sample.device = viewed ? view.device : 0;
         sample.deviceId = viewed ? static_cast<uint32_t>(view.deviceId) : 0;
+        if (!viewed)
+        {
+            // A swapchain not on record (FSR-FG's proxy, one made before the host): its device is its queue's.
+            std::lock_guard lock(g_registryMutex);
+            if (const auto* known = g_registry.FindQueue(H(queue)))
+            {
+                sample.device = known->device;
+                sample.deviceId = static_cast<uint32_t>(known->deviceId);
+            }
+        }
         sample.nowUs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(entered.time_since_epoch()).count());
         sample.callUs = static_cast<uint64_t>(
@@ -3119,7 +3170,7 @@ VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInf
         sample.completions = prep.outcome.completions;
         sample.ring = prep.outcome.ring;
         sample.waitNs = prep.outcome.waitNs;
-        sample.fg = viewed ? prep.fg : ClassifyFg(FgFactsFor(queue, info->pSwapchains[0]));
+        sample.fg = prep.fgKnown ? prep.fg : ClassifyFg(FgFactsFor(queue, info->pSwapchains[0]));
 
         const StreamlineCounts streamline = StreamlineNow();
         std::optional<std::string> traceLine;
@@ -3803,6 +3854,8 @@ void DlssNr::VkPresentHost::Install(HMODULE vulkan1)
         g_getFormatProperties = nullptr;
         g_enumerateDeviceExtensions = nullptr;
         g_getInstanceProcAddr = nullptr;
+        g_traceOn.store(false, std::memory_order_relaxed);
+        g_fgTransport.store(false, std::memory_order_relaxed);
     };
 
     if (o_CreateDevice == nullptr || o_DestroyInstance == nullptr || g_getDeviceProcAddr == nullptr)
@@ -3812,6 +3865,11 @@ void DlssNr::VkPresentHost::Install(HMODULE vulkan1)
         reset();
         return;
     }
+
+    // Stage 4's keys, before any detour can run.
+    g_traceOn.store(Config::Instance()->DlssNrVulkanPresentTrace.value_or_default(), std::memory_order_relaxed);
+    g_fgTransport.store(Config::Instance()->DlssNrVulkanPresentFgTransport.value_or_default(),
+                        std::memory_order_relaxed);
 
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
@@ -3831,9 +3889,6 @@ void DlssNr::VkPresentHost::Install(HMODULE vulkan1)
 
     g_installed = true;
     g_module = vulkan1;
-    g_traceOn.store(Config::Instance()->DlssNrVulkanPresentTrace.value_or_default(), std::memory_order_relaxed);
-    g_fgTransport.store(Config::Instance()->DlssNrVulkanPresentFgTransport.value_or_default(),
-                        std::memory_order_relaxed);
 
     // The stall watchdog: every half second, an activity inside the host for longer than its allowance is logged with
     // its stage, the locks it holds and, for a lock it waits on, the holder. It reads the table with atomics only and

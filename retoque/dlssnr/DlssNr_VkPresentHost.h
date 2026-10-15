@@ -45,7 +45,8 @@ void Install(HMODULE vulkan1);
 
 // From OptiScaler's Streamline log callbacks (both SDK generations), every message: `level` 0 info, 1 warning, 2 error.
 // Counted for stage 4's pacer trace (DlssNr_VkPresentFg.h); returns at once unless [DlssNr] VulkanPresentTrace is on
-// with the host installed. Any thread; takes one leaf lock, for a warning or an error only.
+// with the host installed. Any thread; takes one leaf lock, only for a message it counts (a warning, an error, or a
+// "timed out" at any level).
 void NoteStreamline(int level, const char* message);
 
 // For the bundle's vkQueuePresentKHR hook, which tells a DXVK or vkd3d-proton present from a native one by its caller:
