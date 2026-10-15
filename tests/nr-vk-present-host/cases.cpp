@@ -791,10 +791,10 @@ static void NrConstants()
 // SDR only: RGBA8/BGRA8, UNORM or sRGB, in sRGB non-linear. sRGB goes through its UNORM twin, so nothing is decoded.
 static void ColourPlans()
 {
-    for (const auto [format, raw] : { std::pair { kFormatB8G8R8A8Unorm, kFormatB8G8R8A8Unorm },
-                                      std::pair { kFormatR8G8B8A8Unorm, kFormatR8G8B8A8Unorm },
-                                      std::pair { kFormatB8G8R8A8Srgb, kFormatB8G8R8A8Unorm },
-                                      std::pair { kFormatR8G8B8A8Srgb, kFormatR8G8B8A8Unorm } })
+    for (const auto& [format, raw] : { std::pair { kFormatB8G8R8A8Unorm, kFormatB8G8R8A8Unorm },
+                                       std::pair { kFormatR8G8B8A8Unorm, kFormatR8G8B8A8Unorm },
+                                       std::pair { kFormatB8G8R8A8Srgb, kFormatB8G8R8A8Unorm },
+                                       std::pair { kFormatR8G8B8A8Srgb, kFormatR8G8B8A8Unorm } })
     {
         const ColourPlan plan = PlanColour(format, kColourSpaceSrgbNonlinear);
         CHECK(plan.sdr && plan.raw == raw && plan.refusal.empty());
