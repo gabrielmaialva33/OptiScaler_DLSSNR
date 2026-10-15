@@ -29,7 +29,7 @@ entry, or the next run tells you.
 | Tier | Needs | Suites |
 |---|---|---|
 | `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `windows-installer`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
-| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session, and they and `synth-motion-vk` a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `synth-motion-vk`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback` |
+| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session, and they and `synth-motion-vk` a working Vulkan loader | `nr-gpu-timing-d3d12`, `nr-session-exit`, `synth-motion-d3d12`, `synth-motion-vk`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
 The wine tier is serial on purpose. These suites compile through the single msvc-wine
@@ -59,10 +59,13 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-detail-measure` — the "Measure detail" CPU tile reduction and statistical aggregation (detail added,
   Laplacian raw, flicker beyond native, OkLab chroma/warmth, and shadow darkening/crush), delta comparisons
   and textual metric generation.
-- `nr-session-guard` — the NR session guard (`DlssNr_SessionGuard.h`): what a marker left by an unclean session
-  means (early end disables and stays blocked until acknowledged, middle ends warn then disable on the second,
-  long ends are not blamed), who owns a marker (live second instance, reused pid), unreadable and read-only
-  cases, and the call-site and session-only-disable source guards. The Windows layer is not exercised.
+- `nr-session-guard` — the NR session guard (`DlssNr_SessionGuard.h`): what a marker left by the last session
+  means, by how it ended (a normal quit leaves none; an exception or a device NR saw lost disables under 10 minutes;
+  an exit code or no end seen disables under 2 minutes and warns up to 10, the second in a row disabling), who owns a
+  marker (live second instance, reused pid, the probe's answers), unreadable, other-format and read-only cases, the
+  end of the process (fixed buffer, bounded lock tries, nothing started after it), the exact menu and log texts, and
+  source guards on the call sites, the exit hook, the at-exit code paths and the project entries. The Windows file
+  I/O is not exercised; the hook is, by `nr-session-exit`.
 - `nr-residual-limit` — the residual limit (`docs/dlssnr/design/residual-limit.md`): the composition's guard
   and limit sliced out of `dlssnr.hlsl` and compiled against HLSL's intrinsics, held against the guard alone (off
   is the guard to the bit; on bounds both ways in stops, only narrows, stays inside the guard, symmetric); the
@@ -142,8 +145,10 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   (stored deflate, CRC-32, Adler-32, the provenance tEXt chunk) and PFM, decoded with Python's `zlib` and checked
   pixel by pixel against readback-shaped sources with padding, every half and R11G11B10 value, the
   request/record/ticket/hand-off state machine over a fake backend (nothing read before completion, nothing freed
-  before it is proven safe), the menu button's table, names and the 64-pair cap, write-then-rename, the record in its
-  three forms with the repository's privacy patterns run over it, and source guards on the pass. No GPU.
+  before it is proven safe), the menu button's table and its order, the record site's refusal order, names and the
+  64-pair cap applied after the write, write-then-rename with the failing step named, the folder in a real read-only
+  directory, the record's exact text from the production builders and in its three forms with the repository's
+  privacy patterns run over it, and source guards on the pass. No GPU.
 - `nr-cadence` — model cadence (`docs/dlssnr/design/model-cadence.md`): the production scheduler (age
   in presents the pass ran at, the held reset, forced model frames, every refusal with its reason, off
   allocating nothing) and the production per-pixel rules -- the header the shader includes -- over
@@ -222,6 +227,10 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 **Wine tier.**
 
+- `nr-session-exit` — the session guard's exit hook (`DlssNr_ProcessEnd.cpp`, built as shipped) in a real process
+  under the system Wine and the newest GE-Proton's: every way a process ends itself reaches the hook once, with the
+  status the design note predicts and the other threads still running; a process killed from outside, and
+  `abort()`'s fail-fast, record nothing. Never loads OptiScaler.dll, NGX or a game.
 - `nr-gpu-timing-d3d12` — real D3D12 timestamp queries in an isolated prefix. It
   never loads NGX and never launches a game.
 - `dlssnr-loopback` — drives the production NGX exports, NR composition, resolution changes

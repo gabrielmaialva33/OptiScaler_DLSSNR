@@ -1072,6 +1072,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_Helpers.cpp" />
     <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_UiComposition.cpp" />
     <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_DebugPacing.cpp" />
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_ProcessEnd.h" />
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_ProcessEnd.cpp" />
   </ItemGroup>
   <ItemDefinitionGroup>
     <ClCompile>

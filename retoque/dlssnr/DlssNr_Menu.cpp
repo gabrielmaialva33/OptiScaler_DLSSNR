@@ -235,9 +235,13 @@ static bool RenderPresentHdr(Config* config)
 // capture, disabled with the reason wherever a press could not give the pair.
 static void RenderPairCapture(Config* config, bool nativeVulkan)
 {
+    // NR off: no button (ButtonFor's first row), and nothing of the capture is asked for.
+    if (!config->DlssNrEnabled.value_or_default())
+        return;
+
     const auto status = DlssNr::GetPairCaptureStatus();
     PairCapture::ButtonInputs in;
-    in.enabled = config->DlssNrEnabled.value_or_default();
+    in.enabled = true;
     in.nativeVulkan = nativeVulkan;
     in.d3d12Ran = DlssNr::IsRunning();
     in.proxy = config->DlssNrUseProxy.value_or_default();
@@ -268,7 +272,7 @@ static void RenderPairCapture(Config* config, bool nativeVulkan)
         ImGui::TextDisabled("%s", Localization::Tr(button.reason));
     else if (status.ok && !status.lastStem.empty())
         ImGui::TextDisabled(Localization::Tr("Saved %s (the pair and its .json)"), status.lastStem.c_str());
-    else if (status.reason != nullptr)
+    else if (status.reason != nullptr && PairCapture::ReasonStillApplies(status.reason, in))
         ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", Localization::Tr(status.reason));
 }
 
@@ -615,7 +619,14 @@ void RenderMenu(Config* config, float menuResScale)
 
         bool enabled = config->DlssNrEnabled.value_or_default();
         if (ImGui::Checkbox(Localization::Label("Enable Neural Rendering"), &enabled))
-            config->DlssNrEnabled = enabled;
+        {
+            // On is the same statement as the session guard's "Enable anyway" (it only sets the value when the guard
+            // has nothing standing), so its notice does not outlive the checkbox.
+            if (enabled)
+                SessionGuardEnableAnyway();
+            else
+                config->DlssNrEnabled = false;
+        }
 
         HelpMarker("Synthesises detail in the upscaler's output, before frame generation sees it."
                    "\n\nNeeds two similarly named files beside OptiScaler, one character apart:"
@@ -631,8 +642,28 @@ void RenderMenu(Config* config, float menuResScale)
             if (guard.action == SessionGuard::Action::Disable)
                 ImGui::TextWrapped(
                     "%s", Localization::Tr("Neural Rendering is off for this session. Your settings are unchanged."));
-            ImGui::TextWrapped("%s", Localization::Tr(SessionGuardReasonText(guard.reason)));
+            ImGui::TextWrapped("%s", Localization::Tr(SessionGuardReasonText(guard)));
             ImGui::PopStyleColor();
+
+            // The numbers behind it, dimmed: how the session ended and how long the model had run. A standing block
+            // carries none.
+            switch (guard.end)
+            {
+            case SessionGuard::End::Crashed:
+                ImGui::TextDisabled(Localization::Tr("Exception 0x%08X after the model had run for %lld s."),
+                                    guard.code, (long long) guard.ranSeconds);
+                break;
+            case SessionGuard::End::ExitCode:
+                ImGui::TextDisabled(Localization::Tr("Exit code %u after the model had run for %lld s."), guard.code,
+                                    (long long) guard.ranSeconds);
+                break;
+            case SessionGuard::End::Vanished:
+            case SessionGuard::End::DeviceRemoved:
+                ImGui::TextDisabled(Localization::Tr("The model had run for %lld s."), (long long) guard.ranSeconds);
+                break;
+            default:
+                break;
+            }
 
             if (guard.action == SessionGuard::Action::Disable &&
                 ImGui::SmallButton(Localization::Label("Enable anyway")))

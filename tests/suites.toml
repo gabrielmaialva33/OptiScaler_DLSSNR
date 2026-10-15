@@ -46,7 +46,7 @@ summary = "What the present host builds and when: tiny frames, resizes, the pass
 [nr-session-guard]
 tier = "host"
 timeout = 60
-summary = "Session guard: the policy table (early, middle, long unclean ends), marker ownership, unreadable and read-only cases, config-off, plus call-site guards."
+summary = "Session guard: the policy table by how the last session ended (normal quit, exit code, exception, device lost, no end seen) and for how long, marker ownership and the probe, unreadable, other-format and read-only cases, the end of the process (fixed buffer, lock tries, nothing after it), config-off, the exact texts, plus guards on the call sites, the exit hook and the project."
 
 [nr-dx11-route]
 tier = "host"
@@ -172,6 +172,11 @@ summary = "The production DLL (x64/out) under a Win32 Vulkan application and Win
 tier = "wine"
 timeout = 600
 summary = "Drives the production NGX exports on a real D3D12 device and exercises the post-stage settling gate by sweeping the output extent. Runs under the local Proton (--runtime proton); bare wine reaches NR but its feature create returns FAIL_PlatformError. Includes successful shutdown and rejects runs without NR composition."
+
+[nr-session-exit]
+tier = "wine"
+timeout = 900
+summary = "The session guard's exit hook (DlssNr_ProcessEnd.cpp, as shipped) in a real process under the system Wine and the newest GE-Proton's: ExitProcess, exit(), return from main, TerminateProcess on itself (pseudo and real handle), an unhandled access violation (with and without the AeDebug debugger attaching first), a crash filter's own exit code, and terminating another process each reach the hook once with the expected status and the other threads still running; a process killed from outside, and abort()'s fail-fast, record nothing. Never loads OptiScaler.dll, NGX or a game."
 
 [synth-motion-d3d12]
 tier = "wine"

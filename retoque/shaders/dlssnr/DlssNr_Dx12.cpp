@@ -761,9 +761,9 @@ void CheckCaptureTrigger()
             DlssNr::RequestCapture(capture::kMaxFrames);
             LOG_INFO("DLSS-NR capture: the raw burst requested by trigger file");
         }
-        else if (!DlssNr::RequestPairCapture())
+        else if (const char* why = nullptr; !DlssNr::RequestPairCapture(&why))
         {
-            LOG_INFO("DLSS-NR capture: trigger file ignored, a capture is already under way");
+            LOG_INFO("DLSS-NR capture: trigger file ignored: {}", why != nullptr ? why : "the request was not taken");
         }
     }
 }
@@ -3554,6 +3554,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         reportSkip("D3D12 device removed or hung");
         LOG_ERROR("DLSS-NR: D3D12 device removed or hung (reason: 0x{:08X})", (unsigned) removedReason);
         DlssNr::Dred::Report(device);
+        DlssNr::SessionGuardDeviceRemoved(); // evidence for the next launch, whatever the game does now
         device->Release();
         return false;
     }
@@ -5693,31 +5694,46 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // The comparison capture: the frame the pass read and the frame it wrote, copied on this list after the last
         // write to the target, so the pair is one frame by construction (docs/dlssnr/design/comparison-capture.md).
         // Only a frame the resolve wrote. Idle, one relaxed load; the description is built only when one is wanted.
+        // Describing the frame allocates; like the timing metadata above, a throw must not leave the frame, so the
+        // capture is withdrawn with a reason instead.
         if (wrote && DlssNr::PairCapture::Wanted())
         {
-            DlssNr::PairCapture::FrameFacts facts;
-            facts.route = frame.PresentSource            ? (frame.BridgeHost ? "d3d11-bridge" : "d3d12-present")
-                          : beforeUpscale                ? "before-upscale"
-                          : frame.AfterRayReconstruction ? "after-rr"
-                                                         : "after-upscale";
-            facts.surface = frame.PresentSource ? "present-final" : beforeUpscale ? "render-input" : "upscaler-output";
-            facts.hookMethod = cfg.DlssNrHookMethod.value_or_default();
-            facts.held = g_nr.heldActive;
-            facts.carried = carried;
-            facts.linearHdr = isHdrBuffer;
-            facts.proxy = useProxy;
-            facts.compare = cfg.DlssNrCompare.value_or_default();
-            facts.debugView = cfg.DlssNrDebugView.value_or_default();
-            facts.whitePoint = resolveParams.WhitePoint;
-            facts.frame = g_frames;
-            facts.present = observedFrame;
-            facts.settings = TimingContract(cfg, passSnapshot, beforeUpscale ? "before" : stageForTiming, guideWidth,
-                                            guideHeight, width, height, workWidth, workHeight, workScale, isHdrBuffer,
-                                            static_cast<unsigned>(desc.Format), cadence.cadence, enlargePlan.transfer,
-                                            DlssNr::Enlarge::Token(enlargePlan.why));
-            DlssNr::PairCapture::AtRecordSite(cmdList, device, g_nr.hdrCopy,
-                                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, target,
-                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, facts);
+            try
+            {
+                DlssNr::PairCapture::FrameFacts facts;
+                facts.route = frame.PresentSource            ? (frame.BridgeHost ? "d3d11-bridge" : "d3d12-present")
+                              : beforeUpscale                ? "before-upscale"
+                              : frame.AfterRayReconstruction ? "after-rr"
+                                                             : "after-upscale";
+                facts.surface = frame.PresentSource ? "present-final"
+                                : beforeUpscale     ? "render-input"
+                                                    : "upscaler-output";
+                facts.hookMethod = cfg.DlssNrHookMethod.value_or_default();
+                facts.held = g_nr.heldActive;
+                facts.carried = carried;
+                facts.linearHdr = isHdrBuffer;
+                facts.proxy = useProxy;
+                facts.compare = cfg.DlssNrCompare.value_or_default();
+                facts.debugView = cfg.DlssNrDebugView.value_or_default();
+                facts.whitePoint = resolveParams.WhitePoint;
+                facts.frame = g_frames;
+                facts.present = observedFrame;
+                facts.settings = TimingContract(
+                    cfg, passSnapshot, beforeUpscale ? "before" : stageForTiming, guideWidth, guideHeight, width,
+                    height, workWidth, workHeight, workScale, isHdrBuffer, static_cast<unsigned>(desc.Format),
+                    cadence.cadence, enlargePlan.transfer, DlssNr::Enlarge::Token(enlargePlan.why));
+                DlssNr::PairCapture::AtRecordSite(cmdList, device, g_nr.hdrCopy,
+                                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, target,
+                                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS, facts);
+            }
+            catch (const std::exception& e)
+            {
+                DlssNr::PairCapture::AbandonAfterError(e.what());
+            }
+            catch (...)
+            {
+                DlssNr::PairCapture::AbandonAfterError(nullptr);
+            }
         }
     }
     else if (carried)

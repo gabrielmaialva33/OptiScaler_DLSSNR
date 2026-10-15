@@ -431,6 +431,16 @@ The last session ended without closing, soon after the model started.	A última 
 The last two sessions ended without closing.	As duas últimas sessões terminaram sem fechar.
 An earlier session ended without closing, and this has not been confirmed since.	Uma sessão anterior terminou sem fechar, e isso não foi confirmado desde então.
 The last session ended without closing. If it was a crash, this one may too.	A última sessão terminou sem fechar. Se foi uma falha, esta também pode falhar.
+# 2026-10-14: session guard v2: how the last session ended, and the numbers line.
+The last session ended with an error soon after the model started.	A última sessão terminou com um erro logo depois de o modelo iniciar.
+The last session ended with an error. If it was a crash, this one may too.	A última sessão terminou com um erro. Se foi uma falha, esta também pode falhar.
+The last session crashed while the model was running.	A última sessão falhou enquanto o modelo rodava.
+The last session crashed, long after the model started. If the next one does too, Neural Rendering will be switched off.	A última sessão falhou, muito depois de o modelo iniciar. Se a próxima também falhar, o Neural Rendering será desligado.
+The graphics device was lost while the model was running in the last session.	O dispositivo gráfico foi perdido enquanto o modelo rodava na última sessão.
+The graphics device was lost in the last session, long after the model started. If it happens again, Neural Rendering will be switched off.	O dispositivo gráfico foi perdido na última sessão, muito depois de o modelo iniciar. Se acontecer de novo, o Neural Rendering será desligado.
+Exception 0x%08X after the model had run for %lld s.	Exceção 0x%08X depois de o modelo rodar por %lld s.
+Exit code %u after the model had run for %lld s.	Código de saída %u depois de o modelo rodar por %lld s.
+The model had run for %lld s.	O modelo tinha rodado por %lld s.
 # 2026-10-13: the pulse metric (docs/dlssnr/design/pulse-metric.md): the control under Compare and its help.
 Measure the light step	Medir o passo de luz
 How far the picture's light moves from one frame to the next because of the edit: the\nchange of log2(output light / frame light), in stops, averaged over two seconds.\nFrames where the model ran and frames where model cadence carried its edit are kept\napart, so the step on the model's frames against the carried ones is the cadence's\npulse as a number. A still scene reads cleanest; a pan adds its own changes.\n\nOne small measuring pass a frame while on. Also logged every 10 seconds.	Quanto a luz da imagem se move de um quadro para o seguinte por causa da edição: a\nvariação de log2(luz da saída / luz do quadro), em stops, com média de dois segundos.\nQuadros em que o modelo rodou e quadros em que a cadência do modelo levou a edição dele ficam\nseparados, então o passo nos quadros do modelo contra o dos quadros transportados é a\npulsação da cadência em número. Uma cena parada dá a leitura mais limpa; um movimento de câmera soma as próprias variações.\n\nUm pequeno passe de medição por quadro enquanto ligado. Também vai para o log a cada 10 segundos.
@@ -486,6 +496,11 @@ The two surfaces differ in shape; nothing was captured.	As duas superfícies tê
 Waiting for the next frame the pass writes...	Aguardando o próximo quadro que o passe escrever...
 Waiting for the GPU to finish the copies...	Aguardando a GPU terminar as cópias...
 Writing the files...	Gravando os arquivos...
+# 2026-10-15: the comparison capture's review fixes: a surface the copy cannot take, a failure while the frame was
+# recorded, and a request made while one is under way.
+This frame is not a single-sample 2D texture; nothing was captured.	Este quadro não é uma textura 2D de amostra única; nada foi capturado.
+The capture failed while the frame was being described or recorded; nothing was captured (see the log).	A captura falhou enquanto o quadro era descrito ou registrado; nada foi capturado (veja o log).
+A capture is already under way.	Já há uma captura em andamento.
 # 2026-10-13: the LSFG panel under FSR FG Settings (study branch; tools/lsfg-study/MFG_PRESENTER.md): its controls, the
 # multiplier and what it says about the swapchain the game started with, and the status line.
 LSFG 3.1 Interpolator (Lossless Scaling)	Interpolador LSFG 3.1 (Lossless Scaling)

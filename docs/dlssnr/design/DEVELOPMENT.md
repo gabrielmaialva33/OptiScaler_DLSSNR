@@ -118,12 +118,13 @@ are checked top to bottom and the first that applies wins.
 | handed to the writer | shown, disabled | "Writing the files..." |
 | the capture folder could not be created this session | shown, disabled | "The capture folder could not be created (see the log)." |
 | a recording never completed this session (given up) | shown, disabled | "The GPU never confirmed the copies; nothing was written, and the capture is off for this session." |
-| otherwise | shown, **enabled** | "Saved <stem> (the pair and its .json)" after a capture; the last refusal or failure in amber; nothing before the first |
+| otherwise | shown, **enabled** | "Saved <stem> (the pair and its .json)" after a capture; the last refusal or failure in amber, except a refusal for Compare, the debug view or the proxy once that setting is off (`ReasonStillApplies`); nothing before the first |
 
 Invariant checks against this table: absent wherever there is no frame of the pass to capture (rule 2); one control
-(rule 3); every disabled row says why. A frame format the files cannot hold is refused when the press reaches a
-frame and the reason shown on the line, not predicted before the press: predicting it would cost a store on every
-frame, and the capture's idle cost is one load (comparison-capture.md, section 4.7).
+(rule 3); every disabled row says why. A frame format the files cannot hold, or a surface that is not a single-sample
+2D texture, is refused when the press reaches a frame (`RefusalFor`, settings before surfaces), and the reason is
+shown on the line. It is not predicted before the press: predicting it would cost a store on every frame, and before
+the first request the capture's idle cost is one relaxed load per call site (comparison-capture.md, section 4.7).
 
 ---
 

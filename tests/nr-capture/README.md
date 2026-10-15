@@ -15,13 +15,30 @@ What it holds: the pure half of the same-frame comparison capture
   ticket that never completes kept and never released and the capture then off for the session, an ignored press that
   does not move a waiting request's expiry, the untracked path read after 8 dispatches and labelled
   `assumed-8-frames`, released after 32, refusals and expiry, an allocation failure, the retained-pair bound, a
-  hand-off the writer refuses, and shutdown freeing only what is proven done.
-- **The menu button**, every row of DEVELOPMENT.md section 2.3.
+  hand-off the writer refuses, shutdown freeing only what is proven done, and an exception part way through a
+  recording withdrawn by `Abandon` with nothing released.
+- **The menu button**, every row of DEVELOPMENT.md section 2.3 and their order (every condition at once, cleared one
+  row at a time), and the last outcome's line: a refusal for a setting is not shown once the setting is off.
+- **The record site's refusal** (`RefusalFor`): each reason alone, all at once cleared in order (settings before
+  surfaces), and the format refusal as the plan gives it (a linear FP16 frame is not refused: it is a PFM).
 - **Names**: the UTC stamp (epoch, a leap day, before 1970, 2100), the executable stem sanitiser, stems and file
   names, which names are ours, and the 64-pair cap over a shuffled list and in a real directory, where foreign files
   survive and a stray `.tmp` goes with its stem.
-- **Write then rename**: the final name never exists while the file is written; a failed write leaves neither name.
-- **The record**: one entry per key, `;` and anything outside printable ASCII replaced, valid as tEXt.
+- **Write then rename**: the final name never exists while the file is written; a failed write leaves neither name,
+  and says which step failed (open, write, close, rename) in the system's words, never with the path; a writer that
+  throws is a failed write, its file closed and its temporary removed.
+- **The folder**: created with its parents; refused with a reason when a file holds its name; in a real read-only
+  directory, refused, with nothing left behind, not even a temporary. Rotation after a write in a real folder: the
+  oldest pairs go, the pair just written stays even under an older name, the count is of files actually removed, and
+  foreign or non-ASCII names are never touched; and in a read-only folder nothing is lost and nothing counted. The two
+  read-only cases are skipped, and say so, where the permission bits do not bind (a superuser); the second is the only
+  check that tells counting removals from counting victims.
+- **The record**: one entry per key, `;` and anything outside printable ASCII replaced, valid as tEXt; and the
+  production builders' (`FillFrameRecord`, `FillWriteRecord`) exact text and key order, the build, route,
+  resolution, time, executable and settings (the preset and working scale) among them, for a PNG and for a PFM.
+  Numbers are held digit for digit against `std::format("{:.6g}")` (what v1 wrote) over 200,000 values, and the
+  record is rebuilt under a decimal-comma locale (pt_BR, de_DE or fr_FR, whichever is installed; skipped, and said,
+  when none is), because the CRT is the game's and a game may set one.
 
 `run.py` checks the files from the other side. Each image case is a source surface laid out like a readback (rows on
 a 256-byte pitch from a 512-byte offset, padding filled with bytes no file may contain) plus the file the production
@@ -36,17 +53,26 @@ the repository's privacy patterns (`tests/repo-privacy`, read from its source) m
 though the inputs carried a home path, a Windows profile, a Wine home and a tailnet host.
 
 Source guards hold the integration: nothing waits for the GPU or maps a readback outside the writer thread; the
-readback helpers exist once (`DlssNr_Readback.h`); no record value is set from a path, and the executable reaches it
-only as its sanitised stem; `PairCapture::Poll()` sits before the first return in `Dispatch`; the record site is
-guarded by `wrote && Wanted()`, comes after the stabilizer and copies `hdrCopy` (NON_PIXEL_SHADER_RESOURCE) and the
-target (UNORDERED_ACCESS); the burst's "before" is `hdrCopy`; `TimingMetadata` and the capture share
-`TimingContract`, and a frame that may carry a capture is labelled `capture_active` in the timing metadata; the
-record site does no file search or file read (the model's facts are found by the writer); the trigger file asks for
-the pair and for the burst on `burst`; `Shutdown` calls the capture's;
-the bridge host labels its frames; and `DlssNr_PairCapture.cpp` is in both project files once.
+readback helpers exist once (`DlssNr_Readback.h`); the backend sets no record key itself, fills the builders' inputs
+from nothing that may be a path, and the builders take only their inputs and literals; the executable reaches the
+record only as its sanitised stem; `PairCapture::Poll()` sits before the first return in `Dispatch`; `Poll`,
+`Wanted`, `Shutdown`, `AbandonAfterError` and the menu's status read `g_used` before they touch the session, and
+`RequestPairCapture` is the one place that sets it; a request under the driver proxy is refused at once; the menu asks
+nothing while NR is off and hides a setting's refusal once the setting is off; `FormatNumber` uses `std::to_chars`;
+`WritePair` runs inside `try` on the writer thread, and a throw while the files are written counts as a failed write;
+the record site is guarded by `wrote && Wanted()`, sits inside `try` with a throw withdrawing the capture, comes after
+the stabilizer and copies
+`hdrCopy` (NON_PIXEL_SHADER_RESOURCE) and the target (UNORDERED_ACCESS); the burst's "before" is `hdrCopy`;
+`TimingMetadata` and the capture share `TimingContract`, which carries the preset, the working scale and the sizes,
+and a frame that may carry a capture is labelled `capture_active` in the timing metadata; the record site does no file
+search or file read (the model's facts are found by the writer); the writer checks the folder before anything else and
+rotates once, only after the pair was written; the trigger file asks for the pair, for the burst on `burst`, and logs the
+reason a request was not taken; `Shutdown` calls the capture's; the bridge host labels its frames; and
+`DlssNr_PairCapture.cpp` is in both project files once.
 
 Every reason the capture can show on the menu's line must have a pt-BR entry (those reach the menu through a variable,
-which nr-localization's own drift guard cannot see).
+which nr-localization's own drift guard cannot see). The scan joins a literal continued on the next line before it
+matches, which it did not before 2026-10-15, so it missed one.
 
 Every check was shown to fail on an injected defect before this was registered. In the writers: an Adler-32 seeded
 wrong, BGRA not swizzled, a subnormal half off by one exponent, PFM rows top to bottom, quantising without rounding,
@@ -56,6 +82,20 @@ instead of `Ready`, releasing instead of leaking a recording that never complete
 one is under way, no retained-pair bound, the untracked path read after one dispatch, tracking after the first copy,
 shutdown releasing what is not ready, no request expiry, a poll that does not count. In the rest: the Compare row
 missing from the button, the cap off by one, a two-digit sequence accepted as ours, ';' left in a record value.
+
+The checks added on 2026-10-15 were shown to fail on these injected defects: the protected stem ignored by rotation,
+the folder refusal ordered after the format refusal, a Compare refusal still shown with Compare off, a record key
+dropped from a builder, a write failure that does not name its step, `Abandon` ignoring a recording in progress,
+rotation counting victims instead of removals, `Poll` touching the session before the idle gate, rotation before the
+write, the pt-BR entry of a continued literal removed, and the record site without its exception guard. One did not
+fail, and cannot on this host: `EnsureDirectory`'s `is_directory` after creation, with a file holding the folder's name.
+libstdc++'s `create_directories` already reports that as an error. The check stays as a guard for the MSVC runtime.
+
+A second review of those fixes added these, each shown to fail on its injected defect: `FormatNumber` through
+`snprintf` (the locale case), a writer exception escaping `WriteViaTemporary`, the writer thread without its catch,
+`g_used` set outside the request, the menu's status read without the gate, a second rotation on the failure path, the
+proxy refusal removed from the request, the menu dropping `ReasonStillApplies`, and a builder value from a helper
+call.
 
 ## What this does not cover
 

@@ -5,6 +5,7 @@
 #include "DlssNr_VkPresentModel.h"
 #include "DlssNr_VkPresentRegistry.h"
 #include "DlssNr_VkPresentTransport.h"
+#include "DlssNr_Session.h"
 
 #include <Config.h>
 #include <State.h>
@@ -519,6 +520,7 @@ void MarkLost(DeviceTransport& dev)
     {
         dev.lost = true;
         dev.off = "the device was lost";
+        DlssNr::SessionGuardDeviceRemoved(); // evidence for the next launch, whatever the game does now
     }
 }
 

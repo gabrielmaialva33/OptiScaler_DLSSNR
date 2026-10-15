@@ -17,6 +17,7 @@
 #include "DlssNrFeature_Dx12.h"
 
 #include <BuildInfo.h>
+#include <Config.h>
 #include <Logger.h>
 #include <State.h>
 #include <Util.h>
@@ -53,7 +54,6 @@ namespace DlssNr::PairCapture
 {
 namespace
 {
-constexpr const char* kReasonShape = "The two surfaces differ in shape; nothing was captured.";
 constexpr const wchar_t* kDirectoryName = L"retoque-captures";
 
 int64_t NowMs()
@@ -127,6 +127,10 @@ Writer& TheWriter()
 std::atomic<bool> g_directoryFailed { false };
 std::atomic<uint32_t> g_seq { 0 };
 
+// Set by the first request. Until then nothing of the capture exists -- not even the session object -- and the pass's
+// two calls are one relaxed load each (comparison-capture.md, section 4.7).
+std::atomic<bool> g_used { false };
+
 struct Dx12Backend
 {
     using Readback = capture::Shot;
@@ -147,8 +151,19 @@ struct Dx12Backend
         return capture::AllocReadback(recording.device, desc, out);
     }
 
-    // Before any copy is recorded, as Submission::Track requires.
-    bool Track(Recording& recording, Ticket& ticket) { return DlssNr::Submission::Track(recording.cmd, ticket); }
+    // Before any copy is recorded, as Submission::Track requires. Where it refuses, the record says the completion
+    // was assumed, and the log says why the list could not be followed.
+    bool Track(Recording& recording, Ticket& ticket)
+    {
+        if (DlssNr::Submission::Track(recording.cmd, ticket))
+            return true;
+        const char* why = DlssNr::Submission::LastRefusal();
+        LOG_INFO(
+            "DLSS-NR capture: the pass's list cannot be followed to its completion ({}); the copies are read after "
+            "{} of the pass's dispatches, an assumption the record names (completion=assumed-8-frames)",
+            why != nullptr ? why : "unknown", kAssumedPolls);
+        return false;
+    }
 
     void Copy(Recording& recording, int which, Readback& readback)
     {
@@ -265,17 +280,18 @@ Adapter QueryAdapter(LUID luid)
 
 const Adapter& AdapterFor(LUID luid)
 {
-    // Writer thread only, so no lock: one device per session in practice, and a second LUID is asked again.
-    static Adapter cached;
+    // Writer thread only, so no lock: one device per session in practice, and a second LUID is asked again. Never
+    // destroyed, like the writer that reads it.
+    static Adapter* cached = new Adapter();
     static LUID cachedLuid {};
     static bool have = false;
     if (!have || cachedLuid.LowPart != luid.LowPart || cachedLuid.HighPart != luid.HighPart)
     {
-        cached = QueryAdapter(luid);
+        *cached = QueryAdapter(luid);
         cachedLuid = luid;
         have = true;
     }
-    return cached;
+    return *cached;
 }
 
 const char* RouteToken(DlssNr::PeScan::Feature18Route route)
@@ -311,8 +327,8 @@ struct ModelFacts
 
 const ModelFacts& ModelFactsOnce()
 {
-    static ModelFacts facts;
-    static bool asked = false; // writer thread only
+    static ModelFacts* facts = new ModelFacts(); // never destroyed, like the writer that reads it
+    static bool asked = false;                   // writer thread only
     if (!asked)
     {
         asked = true;
@@ -321,17 +337,17 @@ const ModelFacts& ModelFactsOnce()
             if (const auto path = NgxInfo::FindModel(); path.has_value())
             {
                 const auto& ngx = NgxInfo::Describe(*path);
-                facts.version = Version(ngx.modelVersion);
-                facts.bytes = std::to_string(ngx.modelBytes);
-                facts.loader = Version(ngx.loaderVersion);
-                facts.route = RouteToken(ngx.route);
+                facts->version = Version(ngx.modelVersion);
+                facts->bytes = std::to_string(ngx.modelBytes);
+                facts->loader = Version(ngx.loaderVersion);
+                facts->route = RouteToken(ngx.route);
             }
         }
         catch (...)
         {
         }
     }
-    return facts;
+    return *facts;
 }
 
 // The readback as rows, from its placed footprint.
@@ -349,8 +365,6 @@ ImageFile::Rows RowsOf(const capture::Shot& shot, const void* mapped)
 
 std::FILE* OpenForWriting(const std::filesystem::path& path) { return _wfopen(path.c_str(), L"wb"); }
 
-std::string Number(double value) { return std::format("{:.6g}", value); }
-
 // Returns null on success, or the reason.
 const char* WritePair(Job& job, void* const (&mapped)[2], std::string& stemOut)
 {
@@ -365,61 +379,19 @@ const char* WritePair(Job& job, void* const (&mapped)[2], std::string& stemOut)
         }
     }
 
-    // The record is complete before the first byte, so both images carry the same one.
-    const ImageFile::Mean means[2] = { ImageFile::MeanOf(rows[0], p.plan), ImageFile::MeanOf(rows[1], p.plan) };
-    const Adapter& adapter = AdapterFor(p.luid);
-    const ModelFacts& model = ModelFactsOnce();
-    p.record.Set("completion", CompletionName(job.completion));
-    p.record.Set("model_version", model.version);
-    p.record.Set("model_bytes", model.bytes);
-    p.record.Set("ngx_loader", model.loader);
-    p.record.Set("ngx_route", model.route);
-    p.record.Set("gpu", adapter.name);
-    p.record.Set("gpu_driver", adapter.driver);
-    p.record.Set("mean_original", Number(means[0].Value()));
-    p.record.Set("mean_processed", Number(means[1].Value()));
-    if (p.plan.kind == ImageFile::FileKind::Pfm)
-    {
-        p.record.Set("nonfinite_original", std::to_string(means[0].nonFinite));
-        p.record.Set("nonfinite_processed", std::to_string(means[1].nonFinite));
-    }
-
-    std::error_code ec;
-    std::filesystem::create_directories(p.directory, ec);
-    if (ec || !std::filesystem::is_directory(p.directory, ec))
+    // The folder first: where it cannot exist, nothing else is worth computing.
+    std::string why;
+    if (!EnsureDirectory(p.directory, &why))
     {
         if (!g_directoryFailed.exchange(true))
             LOG_ERROR("DLSS-NR capture: the retoque-captures folder beside OptiScaler could not be created ({}); "
                       "the capture is off for this session",
-                      ec.message());
+                      why);
         return kReasonDirectory;
     }
 
-    // The cap: delete the oldest pairs so this one makes at most kMaxPairs. Only names of ours are considered.
-    {
-        std::vector<std::string> names;
-        for (std::filesystem::directory_iterator it(p.directory, ec), end; !ec && it != end; it.increment(ec))
-        {
-            const std::wstring name = it->path().filename().wstring();
-            std::string ascii;
-            bool plain = true;
-            for (const wchar_t c : name)
-            {
-                plain = plain && c > 0 && c < 0x80;
-                ascii.push_back(static_cast<char>(c));
-            }
-            if (plain)
-                names.push_back(std::move(ascii));
-        }
-        const auto victims = RotationVictims(names, kMaxPairs);
-        for (const auto& victim : victims)
-            std::filesystem::remove(p.directory / victim, ec);
-        if (!victims.empty())
-            LOG_INFO("DLSS-NR capture: removed {} file(s) of the oldest pairs to keep {} pairs", victims.size(),
-                     kMaxPairs);
-    }
-
     // A stem no file has yet, so nothing is overwritten even if the clock went back.
+    std::error_code ec;
     std::string stem;
     uint32_t seq = 0;
     for (int attempt = 0; attempt < 1000; ++attempt)
@@ -436,10 +408,26 @@ const char* WritePair(Job& job, void* const (&mapped)[2], std::string& stemOut)
     const std::string names[3] = { FileName(stem, Part::Original, p.plan.kind),
                                    FileName(stem, Part::Processed, p.plan.kind),
                                    FileName(stem, Part::Sidecar, p.plan.kind) };
-    p.record.Set("seq", std::to_string(seq));
-    p.record.Set("original_file", names[0]);
-    p.record.Set("processed_file", names[1]);
-    p.record.Set("sidecar", names[2]);
+
+    // The record is complete before the first byte, so both images carry the same one.
+    const Adapter& adapter = AdapterFor(p.luid);
+    const ModelFacts& model = ModelFactsOnce();
+    WriteRecordInputs writeRecord;
+    writeRecord.completion = job.completion;
+    writeRecord.modelVersion = model.version;
+    writeRecord.modelBytes = model.bytes;
+    writeRecord.ngxLoader = model.loader;
+    writeRecord.ngxRoute = model.route;
+    writeRecord.gpu = adapter.name;
+    writeRecord.gpuDriver = adapter.driver;
+    writeRecord.means[0] = ImageFile::MeanOf(rows[0], p.plan);
+    writeRecord.means[1] = ImageFile::MeanOf(rows[1], p.plan);
+    writeRecord.pfm = p.plan.kind == ImageFile::FileKind::Pfm;
+    writeRecord.seq = seq;
+    writeRecord.files[0] = names[0];
+    writeRecord.files[1] = names[1];
+    writeRecord.files[2] = names[2];
+    FillWriteRecord(p.record, writeRecord);
 
     const std::string line = p.record.Line();
     const std::string json = p.record.Json();
@@ -453,23 +441,40 @@ const char* WritePair(Job& job, void* const (&mapped)[2], std::string& stemOut)
             return ImageFile::WriteImage(sink, r, p.plan, kTextKeyword, line);
         };
     };
-    const bool ok = WriteViaTemporary(paths[0], OpenForWriting, image(rows[0])) &&
-                    WriteViaTemporary(paths[1], OpenForWriting, image(rows[1])) &&
-                    WriteViaTemporary(paths[2], OpenForWriting, [&json](std::FILE* f)
-                                      { return std::fwrite(json.data(), 1, json.size(), f) == json.size(); });
+    std::string failedAt;
+    bool ok = false;
+    try
+    {
+        ok = WriteViaTemporary(paths[0], OpenForWriting, image(rows[0]), &failedAt) &&
+             WriteViaTemporary(paths[1], OpenForWriting, image(rows[1]), &failedAt) &&
+             WriteViaTemporary(
+                 paths[2], OpenForWriting, [&json](std::FILE* f)
+                 { return std::fwrite(json.data(), 1, json.size(), f) == json.size(); }, &failedAt);
+    }
+    catch (...)
+    {
+        // A throw outside the writers' own (a path or a name that could not be built): the pair is not kept, and
+        // whatever of it was renamed into place goes below, as for any failed write.
+        ok = false;
+        failedAt = "an exception while the files were written";
+    }
 
     if (!ok)
     {
-        // A pair or nothing: whatever of this stem was renamed into place goes again.
+        // A pair or nothing: whatever of this stem was renamed into place goes again. No older pair was touched.
         for (const auto& path : paths)
             std::filesystem::remove(path, ec);
-        LOG_ERROR("DLSS-NR capture: writing {} failed; nothing kept", stem);
+        LOG_ERROR("DLSS-NR capture: writing {} failed ({}); nothing kept", stem, failedAt);
         return kReasonWrite;
     }
 
     LOG_INFO("DLSS-NR capture: wrote {}, {} and {} to retoque-captures beside OptiScaler", names[0], names[1],
              names[2]);
     LOG_INFO("DLSS-NR capture provenance: {}", line);
+
+    // The cap, now that this pair exists: the oldest pairs go so that at most kMaxPairs remain, this one among them.
+    if (const size_t removed = RotateFolder(p.directory, kMaxPairs, stem); removed != 0)
+        LOG_INFO("DLSS-NR capture: removed {} file(s) of the oldest pairs to keep {} pairs", removed, kMaxPairs);
     stemOut = stem;
     return nullptr;
 }
@@ -501,9 +506,29 @@ void Writer::Run()
         const char* failure = kReasonWrite;
         std::string stem;
         if (isMapped[0] && isMapped[1])
-            failure = WritePair(job, mapped, stem);
+        {
+            // Nothing may leave this thread: an exception out of a detached thread ends the game (std::terminate).
+            try
+            {
+                failure = WritePair(job, mapped, stem);
+            }
+            catch (const std::exception& e)
+            {
+                LOG_ERROR("DLSS-NR capture: writing the pair failed with an exception ({}); nothing kept", e.what());
+                failure = kReasonWrite;
+                stem.clear();
+            }
+            catch (...)
+            {
+                LOG_ERROR("DLSS-NR capture: writing the pair failed with an exception; nothing kept");
+                failure = kReasonWrite;
+                stem.clear();
+            }
+        }
         else
+        {
             LOG_ERROR("DLSS-NR capture: a readback could not be mapped; nothing written");
+        }
 
         for (int i = 0; i < 2; ++i)
         {
@@ -524,7 +549,9 @@ void Writer::Run()
 
 void Poll()
 {
-    // Idle with nothing held: one relaxed load, no clock read.
+    // Never asked: one relaxed load. Idle with nothing held: two more, and no clock read.
+    if (!g_used.load(std::memory_order_relaxed))
+        return;
     auto& session = TheSession();
     if (!session.Busy())
         return;
@@ -532,7 +559,18 @@ void Poll()
     session.Poll(backend, NowMs());
 }
 
-bool Wanted() { return TheSession().Current() == Phase::Requested; }
+bool Wanted() { return g_used.load(std::memory_order_relaxed) && TheSession().Current() == Phase::Requested; }
+
+void AbandonAfterError(const char* what)
+{
+    if (!g_used.load(std::memory_order_relaxed))
+        return;
+    // Every time: a capture is one press, and the line under the button points here.
+    LOG_ERROR("DLSS-NR capture: describing or recording the frame failed with an exception ({}); that capture is "
+              "withdrawn and the frame is unchanged",
+              what != nullptr ? what : "not a standard exception");
+    TheSession().Abandon(kReasonInternal);
+}
 
 void AtRecordSite(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D12Resource* original,
                   D3D12_RESOURCE_STATES originalState, ID3D12Resource* processed, D3D12_RESOURCE_STATES processedState,
@@ -548,17 +586,18 @@ void AtRecordSite(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D
     const DXGI_FORMAT format = capture::TypedForCopy(p.Format);
     const ImageFile::Plan plan = ImageFile::PlanFor(static_cast<uint32_t>(format), facts.linearHdr);
 
-    const char* refusal = facts.proxy                ? kReasonProxy
-                          : facts.compare != 0       ? kReasonCompare
-                          : facts.debugView != 0     ? kReasonDebugView
-                          : g_directoryFailed.load() ? kReasonDirectory
-                                                     : plan.refusal;
-    // One footprint shape for both, and a texture a copy to a buffer can take: one sample, two dimensions.
-    if (refusal == nullptr &&
-        (o.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || p.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-         o.SampleDesc.Count != 1 || p.SampleDesc.Count != 1 || o.Width != p.Width || o.Height != p.Height ||
-         capture::TypedForCopy(o.Format) != format))
-        refusal = kReasonShape;
+    // Settings first, then the surfaces; one footprint shape for both, and a texture a copy to a buffer can take.
+    RefusalInputs refusalInputs;
+    refusalInputs.proxy = facts.proxy;
+    refusalInputs.compare = facts.compare;
+    refusalInputs.debugView = facts.debugView;
+    refusalInputs.directoryFailed = g_directoryFailed.load();
+    refusalInputs.formatRefusal = plan.refusal;
+    refusalInputs.singleSample2d = o.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+                                   p.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && o.SampleDesc.Count == 1 &&
+                                   p.SampleDesc.Count == 1;
+    refusalInputs.sameShape = o.Width == p.Width && o.Height == p.Height && capture::TypedForCopy(o.Format) == format;
+    const char* refusal = RefusalFor(refusalInputs);
 
     CapturePayload payload;
     if (refusal == nullptr)
@@ -572,31 +611,26 @@ void AtRecordSite(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D
         payload.exe = SanitizeExeStem(Util::ExePath().stem().wstring());
         payload.luid = device->GetAdapterLuid();
 
-        Record& r = payload.record;
-        r.Set("record", "retoque-comparison-capture");
-        r.Set("record_version", "1");
-        r.Set("build", BuildInfo::ProductVersion());
-        r.Set("time_utc", payload.stamp.iso);
-        r.Set("exe", payload.exe);
-        r.Set("route", facts.route);
-        r.Set("surface", facts.surface);
-        r.Set("hook_method", std::to_string(facts.hookMethod));
-        r.Set("original", "the frame the pass read (hdrCopy)");
-        r.Set("processed", "the frame the pass wrote");
-        r.Set("width", std::to_string(p.Width));
-        r.Set("height", std::to_string(p.Height));
-        r.Set("original_format", ImageFile::FormatName(static_cast<uint32_t>(o.Format)));
-        r.Set("processed_format", ImageFile::FormatName(static_cast<uint32_t>(p.Format)));
-        r.Set("file_kind", ImageFile::FileKindName(plan.kind));
-        if (plan.quantisedFrom != nullptr)
-            r.Set("quantised_from", plan.quantisedFrom);
-        r.Set("linear_hdr", facts.linearHdr ? "1" : "0");
-        r.Set("held", facts.held ? "1" : "0");
-        r.Set("carried", facts.carried ? "1" : "0");
-        r.Set("white_point", Number(facts.whitePoint));
-        r.Set("frame", std::to_string(facts.frame));
-        r.Set("present", std::to_string(facts.present));
-        r.Set("settings", facts.settings);
+        FrameRecordInputs frameRecord;
+        frameRecord.build = BuildInfo::ProductVersion();
+        frameRecord.timeUtc = payload.stamp.iso;
+        frameRecord.exe = payload.exe;
+        frameRecord.route = facts.route;
+        frameRecord.surface = facts.surface;
+        frameRecord.hookMethod = facts.hookMethod;
+        frameRecord.width = static_cast<uint32_t>(p.Width);
+        frameRecord.height = p.Height;
+        frameRecord.originalFormat = static_cast<uint32_t>(o.Format);
+        frameRecord.processedFormat = static_cast<uint32_t>(p.Format);
+        frameRecord.plan = plan;
+        frameRecord.linearHdr = facts.linearHdr;
+        frameRecord.held = facts.held;
+        frameRecord.carried = facts.carried;
+        frameRecord.whitePoint = facts.whitePoint;
+        frameRecord.frame = facts.frame;
+        frameRecord.present = facts.present;
+        frameRecord.settings = facts.settings;
+        FillFrameRecord(payload.record, frameRecord);
     }
 
     Dx12Backend backend;
@@ -622,6 +656,8 @@ void AtRecordSite(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D
 
 void Shutdown()
 {
+    if (!g_used.load(std::memory_order_acquire))
+        return;
     Dx12Backend backend;
     TheSession().Shutdown(backend);
 }
@@ -629,22 +665,39 @@ void Shutdown()
 
 namespace DlssNr
 {
-bool RequestPairCapture()
+bool RequestPairCapture(const char** why)
 {
-    const bool accepted = PairCapture::TheSession().Request(PairCapture::NowMs());
-    if (accepted)
-        LOG_INFO("DLSS-NR capture: requested");
-    return accepted;
+    if (why != nullptr)
+        *why = nullptr;
+    // The driver proxy returns from the pass before the frame is written, so no frame could ever take the request.
+    const char* refusal = PairCapture::kReasonProxy;
+    if (!Config::Instance()->DlssNrUseProxy.value_or_default())
+    {
+        PairCapture::g_used.store(true, std::memory_order_release);
+        auto& session = PairCapture::TheSession();
+        if (session.Request(PairCapture::NowMs()))
+        {
+            LOG_INFO("DLSS-NR capture: requested");
+            return true;
+        }
+        refusal = session.GaveUp() ? PairCapture::kReasonNoCompletion : PairCapture::kReasonBusy;
+    }
+    if (why != nullptr)
+        *why = refusal;
+    return false;
 }
 
 PairCaptureStatus GetPairCaptureStatus()
 {
+    PairCaptureStatus status;
+    status.directoryFailed = PairCapture::g_directoryFailed.load();
+    if (!PairCapture::g_used.load(std::memory_order_acquire))
+        return status; // never asked: idle, nothing to report, and nothing allocated to say so
+
     auto& session = PairCapture::TheSession();
     session.ExpireIfStale(PairCapture::NowMs());
 
-    PairCaptureStatus status;
     status.phase = session.Current();
-    status.directoryFailed = PairCapture::g_directoryFailed.load();
     status.gaveUp = session.GaveUp();
     const auto outcome = session.LastOutcome();
     status.ok = outcome.ok;
