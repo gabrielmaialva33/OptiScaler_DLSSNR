@@ -25,7 +25,7 @@ after = between(source, 'void EvaluateAfterUpscale(', '// ----------------------
 coverage = between(source, 'std::mutex g_coverageMutex;', '// NGX result codes, by name.')
 resources = between(source, 'struct RestoreResourceState\n', '// The upscaler\'s own names differ')
 unit = '#include "fakes.h"\n' + coverage + allocation + resources
-spatial = between(source, 'void ReportSpatialContract(', 'DlssNrFrameInfo GatherFrame(')
+spatial = between(source, 'void ReportSpatialContract(', 'DlssNrFrameInfo GatherGuideFrame(')
 unit += '\nnamespace DlssNr {\n' + declaration + spatial + compose + after + scope + '\n}\n#include "cases.h"\n'
 (OUT / 'boundary.cpp').write_text(unit)
 subprocess.run(['g++', '-std=c++20', '-g', '-O1', '-fno-omit-frame-pointer',

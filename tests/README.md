@@ -29,7 +29,7 @@ entry, or the next run tells you.
 | Tier | Needs | Suites |
 |---|---|---|
 | `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `mfg-probe`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `windows-installer`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
-| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session, and they and `synth-motion-vk` a working Vulkan loader | `nr-gpu-timing-d3d12`, `nr-session-exit`, `synth-motion-d3d12`, `synth-motion-vk`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback`, `nr-present-guide-identity-msvc`, `nr-hdr-d3d12` |
+| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session, and they and `synth-motion-vk` a working Vulkan loader | `nr-gpu-timing-d3d12`, `nr-session-exit`, `synth-motion-d3d12`, `synth-motion-vk`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback`, `nr-present-guide-identity-msvc`, `nr-hdr-d3d12`, `dx11-guides-transport` |
 | `wip` | registered, no runner yet | — |
 
 The wine tier is serial on purpose. These suites compile through the single msvc-wine
@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Fifty suites. All but `nr-invariants`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
+**Host tier.** Fifty-one suites. All but `nr-invariants`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
 code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `lsfg-shader-library` — the LSFG runtime shader library (`retoque/lsfg/LsfgShaderLibrary.{h,cpp}`): DLL discovery (Windows Steam `libraryfolders.vdf`, registry, Wine/Proton `Z:` paths, `$HOME`, `$XDG_DATA_HOME`, override, `Lossless.dll` folder mapping), PE `RT_RCDATA` SPIR-V module extraction (99 modules), SPIR-V magic validation, Quality/Performance and FP32/FP16 resource ID resolution, real user DLL extraction when present, and content-hash-keyed DXIL cache storage/invalidation; plus `tools/lsfg-study/convert.py`'s Float16 detection (synthetic modules, and exactly ids 51..98 on the real DLL).
@@ -85,7 +85,13 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   and 2): `dlss_12` chosen over native D3D11 DLSS when `Dx11Upscaler` is unset, an explicit key kept, native DLSS
   reported once in the log and shown in the NR panel while it runs (`DlssNr_Dx11Route.h`, and the production layer
   `DlssNr_Dx11Upscaler.h` against a Config stub); source guards on the two call sites in `NVNGX_DLSS_Dx11.cpp` and
-  the panel. No D3D11 device, NGX or DLSS.
+  the panel. Since step 3, the route line at HookMethod 2 only while the native guides are not carried, and each
+  evaluate handed to the transport. No D3D11 device, NGX or DLSS.
+- `nr-dx11-native-guides` — step 3 of the same note, option (c): a native D3D11 DLSS evaluate's depth and motion
+  carried through the bridge to the present pass (`DlssNr_Dx11Guides.h`): every gate and refusal in order, another
+  view of the game left out, the slot rotation against a simulated GPU (no set written while a list reads it), the
+  window and its line; source guards on the transport (`DlssNr_Dx11Guides.cpp`), its one call site, the capture core
+  it shares with the D3D12 route, the present host's half and shutdown. No D3D11, D3D12 or GPU.
 - `nr-present-guides` — selection and completion tracking for the present-time guide snapshot ring
   (`DlssNr_PresentGuideRing.h`), preventing cross-queue GPU waits and DLSS-G deadlocks.
 - `nr-present-guide-identity` — step 1 of `docs/dlssnr/design/present-real-guides.md`: the identity decision
@@ -240,6 +246,12 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 **Wine tier.**
 
+- `dx11-guides-transport` — the native D3D11 guide transport's API sequence (`dx11-native-dlss-guides.md`, step 3)
+  on real devices under a local Proton, DXVK and vkd3d-proton as a game gets them: depth and motion formats cross
+  through shared textures and a shared fence into ring-style clones, six frames each, read back byte for byte. It
+  also takes apart the hazard the transport is built around: D3D12 never sees a D3D11 copy into a shared texture that
+  keeps the depth-stencil bind, unless D3D11 accesses it again before the hand-off. No OptiScaler, NGX or game; SKIP
+  without a local Proton.
 - `nr-session-exit` — the session guard's exit hook (`DlssNr_ProcessEnd.cpp`, built as shipped) in a real process
   under the system Wine and the newest GE-Proton's: every way a process ends itself reaches the hook once, with the
   status the design note predicts and the other threads still running; a process killed from outside, and
