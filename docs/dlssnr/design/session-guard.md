@@ -1,8 +1,8 @@
 # Session guard — do not crash the next launch the same way
 
 Status: version 2 (2026-10-14) adds the exit signal version 1 lacked: the process's own end, seen inside the
-process by a hook on `NtTerminateProcess`. Its Wine behaviour is measured by `tests/nr-session-exit` (Wine 11.19,
-see "Measured under Wine"). **It has not run in a game yet**, so `[DlssNr] SessionGuard` stays off by default until
+process by a hook on `NtTerminateProcess`. Its behaviour under Wine 11.19 and GE-Proton11-7's own Wine is measured
+by `tests/nr-session-exit` (see "Measured under Wine"). **It has not run in a game yet**, so `[DlssNr] SessionGuard` stays off by default until
 the check in "Before the default changes" is done. D3D12 and native Vulkan share the guard: it sits at the places an
 NR evaluate succeeds, not inside either route.
 
@@ -51,7 +51,7 @@ thread that ends it, before the end happens:
 | Unhandled exception, default handling | the thread-start filter ends it: `NtTerminateProcess(-1, exception code)` (Wine `call_unhandled_exception_handler`; Windows the same after WER) | **ended itself**, with the exception code |
 | The game's own crash handler ends it | whatever it calls: its own `TerminateProcess(self, n)` or `ExitProcess(n)` | ended itself with `n` (see "What this still gets wrong") |
 | Steam "Stop", Proton or wineserver killing the prefix, a hang the user kills, a crash handler process killing it, OOM or `SIGKILL` | nothing: the call is made in another process, or no code runs at all | **no end seen** |
-| Windows fail-fast (`__fastfail`, the kernel's stack-overflow kill) | nothing in user mode | no end seen |
+| Fail-fast: `__fastfail`, which the CRT's `abort()` and `std::terminate` use; the kernel's stack-overflow kill | nothing in user mode, on Windows and on Wine alike (measured) | no end seen |
 
 So the end the guard records is a fact about the process, not a guess from a duration: an end with status 0 is a
 normal quit and clears the marker whatever path the engine took; an end with an exception status is a crash; an end
@@ -61,9 +61,10 @@ which acts only when the handle names this process (`NULL`, the pseudo-handle, o
 ours) and only on the first such call, then passes everything through unchanged.
 
 Status classes, from the NTSTATUS severity bits: **0** is a normal quit; **0x80000000 and above** (warning and
-error severities: `0xC0000005` access violation, `0xC0000409` fail-fast, `0xC0000374` heap corruption,
-`0x80000003` breakpoint, `0xE06D7363` an unhandled C++ exception, a crash reporter's own `0xFFFF....`) is an
-exception, read as a crash; **anything else** is the program's own exit code. `exit(-1)` lands in the crash class;
+error severities: `0xC0000005` access violation, `0xC000001D` illegal instruction, `0x80000003` breakpoint, a crash
+reporter's own `0xFFFF....`) is an exception, read as a crash; **anything else** is the program's own exit code.
+An MSVC program's unhandled C++ exception goes to `std::terminate` and so to fail-fast: no end seen, not a recorded
+code. `exit(-1)` lands in the crash class;
 that is accepted, since it is not a normal quit either.
 
 Candidates that were considered for the signal and not taken:
@@ -157,6 +158,8 @@ rows: Steam "Stop" after an evening's play must not cost the user NR the next ti
 - **Two Wine prefixes sharing one game directory** cannot be told apart by pid; accepted, as in version 1.
 - **Under Proton with a debugger configured** (winedbg as AeDebug), an unhandled exception may be ended by the
   debugger from outside; it then reads as "no end seen", which is still unclean.
+- **A hook on an ntdll syscall stub** is the kind of thing anti-cheat integrity checks look at. OptiScaler is not for
+  anti-cheat titles in the first place, and this hook exists only with the guard on, in a session where NR ran.
 
 ## The marker
 
@@ -279,9 +282,21 @@ The default flips to true only after a game run shows the exit signal works wher
 ## Measured under Wine
 
 `tests/nr-session-exit` builds the shipped `DlssNr_ProcessEnd.cpp` into a small program and ends it every way the
-table above lists, under the system Wine (11.19 here), reading what the hook saw from a file it writes. What it must
-show: every self-initiated end reaches the hook exactly once, with the status the table predicts, and a process
-killed from outside never does. (Pending its first run when this note was written.)
+table above lists, under the system Wine (11.19) and under GE-Proton11-7's own (11.0 Staging, the build the test
+games run on), reading what the hook saw from a file it writes. First run, 2026-10-15, 22 of 22:
+
+- `ExitProcess(0)` and `(3)`, `exit(5)`, return 6 from `main`, `TerminateProcess` on itself with 0 and 7 through the
+  pseudo-handle and 9 through a real handle, an unhandled access violation (`0xC0000005`), and a crash filter that
+  ends the process with 3: each reached the hook exactly once, with that status, while a worker thread was still
+  running. So in `ExitProcess` the hook runs before `NtTerminateProcess(NULL)` stops the other threads, and the
+  second call after the DLL detach is not recorded again.
+- A watched child killed from outside by its parent recorded nothing; the parent's own termination of that child
+  was not taken for its own end; its own `ExitProcess(0)` was recorded once.
+- `abort()` recorded nothing and the process ended with `0xC0000409`: Wine ends a fail-fast below user mode, as
+  Windows does. The first draft of this note expected a recorded `0xC0000409`; the table above is corrected. For the
+  guard it is "no end seen", which is unclean, so nothing changes in the policy.
+
+The build used `/MT` and Detours from `OptiScaler/library/detours`, the same library the DLL links.
 
 ## Not done
 

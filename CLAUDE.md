@@ -250,13 +250,13 @@ before committing C++, because nothing local enforces it and it had drifted by 5
 
 ### Tests
 
-`tests/README.md` is the index; read it before adding or changing a suite. Fifty-four directories under
+`tests/README.md` is the index; read it before adding or changing a suite. Fifty-five directories under
 `tests/`, each self-contained with its own `run.py` and README, registered in `tests/suites.toml`.
 
 ```bash
 python3 tests/run_all.py            # host tier, the default; 49 suites, ~60 s
 python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
-python3 tests/run_all.py --tier all # adds the five wine suites
+python3 tests/run_all.py --tier all # adds the six wine suites
 python3 tests/<name>/run.py         # one suite, unchanged
 ```
 
@@ -269,7 +269,8 @@ without docker or `pwsh`), `lsfg-shader-library`, `lsfg-integration` and `lsfg-p
 `nr-invariants`, is the `docs/dlssnr/design/DEVELOPMENT.md` §4 mechanical guard (config round-trip for every `DlssNr`
 key, struct equals cbuffer, precompiled headers equal the committed bytecode, retired identifiers);
 it is pure Python and the one to run after touching `Config.*`, `OptiScaler.ini` or the shader. **wine** needs the msvc-wine prefix and runs serially, because these suites contend for the
-same prefix `build-local.sh` uses: `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`
+same prefix `build-local.sh` uses: `nr-gpu-timing-d3d12`, `nr-session-exit` (the session guard's exit hook in a
+real process, under the system Wine and GE-Proton's), `synth-motion-d3d12`, `vulkan-overlay`
 (which also needs a graphical session and a working Vulkan loader), `vulkan-present-host` (the production DLL's
 Vulkan present host, the round trip and, under a local Proton with the model kit, cold NR) and `dlssnr-loopback`
 (real NGX/NR under Proton).

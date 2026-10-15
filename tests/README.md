@@ -29,7 +29,7 @@ entry, or the next run tells you.
 | Tier | Needs | Suites |
 |---|---|---|
 | `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `windows-installer`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
-| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback` |
+| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `nr-session-exit`, `synth-motion-d3d12`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
 The wine tier is serial on purpose. These suites compile through the single msvc-wine
@@ -65,7 +65,7 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   marker (live second instance, reused pid, the probe's answers), unreadable, other-format and read-only cases, the
   end of the process (fixed buffer, bounded lock tries, nothing started after it), the exact menu and log texts, and
   source guards on the call sites, the exit hook, the at-exit code paths and the project entries. The Windows file
-  I/O and the hook in a real process are not exercised.
+  I/O is not exercised; the hook is, by `nr-session-exit`.
 - `nr-residual-limit` — the residual limit (`docs/dlssnr/design/residual-limit.md`): the composition's guard
   and limit sliced out of `dlssnr.hlsl` and compiled against HLSL's intrinsics, held against the guard alone (off
   is the guard to the bit; on bounds both ways in stops, only narrows, stays inside the guard, symmetric); the
@@ -225,6 +225,10 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 **Wine tier.**
 
+- `nr-session-exit` — the session guard's exit hook (`DlssNr_ProcessEnd.cpp`, built as shipped) in a real process
+  under the system Wine and the newest GE-Proton's: every way a process ends itself reaches the hook once, with the
+  status the design note predicts and the other threads still running; a process killed from outside, and
+  `abort()`'s fail-fast, record nothing. Never loads OptiScaler.dll, NGX or a game.
 - `nr-gpu-timing-d3d12` — real D3D12 timestamp queries in an isolated prefix. It
   never loads NGX and never launches a game.
 - `dlssnr-loopback` — drives the production NGX exports, NR composition, resolution changes

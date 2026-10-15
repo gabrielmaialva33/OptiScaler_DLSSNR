@@ -341,8 +341,7 @@ int main()
         g2.Begin(true, true);
         g2.NoteProcessEnd(0xC0000005u);
         g2.NoteEvaluated();
-        CHECK(!armed.exists && armed.writes == 0 && armed.exitWrites == 0 && armed.exitRemoves == 0 &&
-              g2.HasEnded());
+        CHECK(!armed.exists && armed.writes == 0 && armed.exitWrites == 0 && armed.exitRemoves == 0 && g2.HasEnded());
     }
 
     // The process ended itself with an exception: a crash, recorded with its code and the time to the end. Disabled
@@ -617,8 +616,8 @@ int main()
         guard.NoteDeviceRemoved();
         guard.NoteOff();
         guard.NoteProcessEnd(0xC0000005u);
-        CHECK(env.writes == 0 && env.removes == 0 && env.exitWrites == 0 && env.exitRemoves == 0 &&
-              env.watches == 0 && env.text == before);
+        CHECK(env.writes == 0 && env.removes == 0 && env.exitWrites == 0 && env.exitRemoves == 0 && env.watches == 0 &&
+              env.text == before);
     }
 
     // The probe cannot tell: same as live, never a verdict.

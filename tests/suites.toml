@@ -173,6 +173,11 @@ tier = "wine"
 timeout = 600
 summary = "Drives the production NGX exports on a real D3D12 device and exercises the post-stage settling gate by sweeping the output extent. Runs under the local Proton (--runtime proton); bare wine reaches NR but its feature create returns FAIL_PlatformError. Includes successful shutdown and rejects runs without NR composition."
 
+[nr-session-exit]
+tier = "wine"
+timeout = 900
+summary = "The session guard's exit hook (DlssNr_ProcessEnd.cpp, as shipped) in a real process under the system Wine and the newest GE-Proton's: ExitProcess, exit(), return from main, TerminateProcess on itself (pseudo and real handle), an unhandled access violation, a crash filter's own exit code, and terminating another process each reach the hook once with the expected status and the other threads still running; a process killed from outside, and abort()'s fail-fast, record nothing. Never loads OptiScaler.dll, NGX or a game."
+
 [synth-motion-d3d12]
 tier = "wine"
 timeout = 1800
