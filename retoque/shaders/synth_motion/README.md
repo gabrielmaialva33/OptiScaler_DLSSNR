@@ -218,7 +218,8 @@ not depend on the DLSS-NR module. Design: "The HUD: near depth and a UI layer" i
 
 `SynthMotion_Vk.h/.cpp`: the same passes, compiled to SPIR-V from the same sources under `VK_MODE`, and the same
 output contract (`kVkMotionFormat`, `VK_FORMAT_R16G16_SFLOAT`, at the colour's extent, left in `GENERAL` with its
-writes visible to every later stage's shader reads). Its consumer is the Vulkan present host's model (stage 5 of
+writes visible to every later stage's shader reads). Its consumer is the Vulkan present host's model, which runs it on
+its own input at the working size (stage 5 of
 [nr-vulkan-present-host.md](../../../docs/dlssnr/design/nr-vulkan-present-host.md), `[DlssNr] SynthMotion`). Measured
 in `tests/synth-motion-vk` against the D3D12 suite's own sequences and thresholds.
 
@@ -232,19 +233,20 @@ in `tests/synth-motion-vk` against the D3D12 suite's own sequences and threshold
 - **Formats in the SPIR-V.** Every storage image names its view's format (`r8ui`, `rg16i`, `rg16f`, `r32ui`, `r32f`),
   so no format-less storage feature is needed, and the scene-change atomics get the R32 format they require. The
   capabilities are `Shader`, `StorageImageExtendedFormats` (core) and, in the search only, subgroup arithmetic (Vulkan
-  1.1). The pyramid takes SPD's no-wave path: its quad operations would need compute derivatives.
+  1.1). The pyramid takes SPD's no-wave path: dxc compiles its quad operations in compute with
+  `SPV_KHR_compute_shader_derivatives`, which no game's device enables.
 - **Requirements** (`VkUnsupported`): an application instance and device of Vulkan 1.1, subgroups of 32 or 64 with
-  arithmetic in compute, nine push descriptors, storage on the five formats and atomics on `R32_UINT`, a frame of at
-  least 256x128.
+  arithmetic in compute, compute groups of 256 threads, nine push descriptors, storage and transfer on the five formats
+  and atomics on `R32_UINT`, a frame of at least 256x128.
 - **Barriers.** A recording begins with a dependency on everything earlier on the queue (the previous frame's estimate,
   every read of its field, its read-back copy), puts a compute-to-compute barrier after every dispatch, and ends with
   the field's writes made visible to any later stage. Clean under the validation layer's synchronization checks.
-- **Scene cuts.** The scene-change bits are copied into a read-back slot owned by the frame's ticket (eight slots) and
-  read by `Completed(ticket)` once the caller saw that frame's fence: `SceneCut()` rises at the next recording, one
-  frame after the cut. FFX's warm-up frames, which it counts as scene changes, and bits from before a reset are
-  ignored.
-- **Cost**, RTX 4090, clocks unlocked, 2026-10-15: 0.80 ms at 1920x1080, 1.79 ms at 3440x1440 (the D3D12 estimator,
-  the same hour and conditions: 0.86 ms and 2.63 ms).
+- **Scene cuts.** The scene-change bits are copied into a read-back slot owned by the frame's ticket (the first free of
+  eight) and read by `Completed(ticket)` once the caller saw that frame's fence: `SceneCut()` rises at the next
+  recording, one frame after the cut at the earliest. FFX's warm-up frames, which it counts as scene changes, and bits
+  from before a reset are ignored; a cut raised on a recording that is abandoned stays owed.
+- **Cost**, RTX 4090, clocks unlocked, 2026-10-15: 0.8-1.1 ms at 1920x1080 and 1.8-3.1 ms at 3440x1440, varying run to
+  run (the D3D12 estimator the same hour: 0.86 ms and 2.63 ms; locked clocks, September: 0.63 ms at 3440x1440).
 
 ## Rebuilding the shaders
 
