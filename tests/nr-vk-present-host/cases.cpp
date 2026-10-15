@@ -6,8 +6,10 @@
 #include <vulkan/vulkan.h>
 
 #include "DlssNr_VkModelOwner.h"
+#include "DlssNr_VkPresentFg.h"
 #include "DlssNr_VkPresentRegistry.h"
 
+#include <algorithm>
 #include <future>
 #include <thread>
 #include <cstdio>
@@ -1123,6 +1125,223 @@ static void SynthMotionDecisions()
     CHECK(NrText(s.nr) == "NR: evaluated 3, refused 0, history resets 0, motion synthesized 2, pass GPU not measured");
 }
 
+// Stage 4 (DlssNr_VkPresentFg.h): which presents frame generation makes or takes, what the host does with them until the
+// pacer experiment is run, Streamline's messages, and the pacer trace.
+static void FrameGeneration()
+{
+    // Nothing on: the stages before, unchanged.
+    CHECK(ClassifyFg({}) == FgShape::None && DecideFg(FgShape::None, false) == FgCarry::Normal &&
+          DecideFg(FgShape::None, true) == FgCarry::Normal);
+
+    // The Vulkan output's own identification first, exact per present; then the process-wide signals.
+    FgFacts f;
+    f.vkFgQueue = true;
+    f.gameDlssgSet = true;
+    CHECK(ClassifyFg(f) == FgShape::VkFgOutput);
+    f = {};
+    f.vkFgSwapchain = true;
+    f.ownD3d12Fg = true;
+    CHECK(ClassifyFg(f) == FgShape::VkFgInput);
+    f = {};
+    f.ownD3d12Fg = true;
+    f.gameDlssgCount = 1;
+    CHECK(ClassifyFg(f) == FgShape::OwnD3d12Fg);
+    f = {};
+    f.gameDlssgSet = true;
+    CHECK(ClassifyFg(f) == FgShape::GameDlssg);
+    f = {};
+    f.gameDlssgCount = 3;
+    CHECK(ClassifyFg(f) == FgShape::GameDlssg);
+    f.gameDlssgCount = 0;
+    CHECK(ClassifyFg(f) == FgShape::None);
+
+    // Every shape: untouched until stage 4 is proven, the round trip without NR in the experiment arm. Never NR.
+    for (const FgShape shape : { FgShape::VkFgInput, FgShape::VkFgOutput, FgShape::GameDlssg, FgShape::OwnD3d12Fg })
+    {
+        CHECK(DecideFg(shape, false) == FgCarry::Untouched);
+        CHECK(DecideFg(shape, true) == FgCarry::TransportOnly);
+        CHECK(std::string(FgShapeName(shape)) != "none" && std::string(FgShapeShort(shape)) != "none");
+    }
+    CHECK(FgUnsupportedText(FgShape::GameDlssg, false) ==
+          "frame generation active (the game's DLSS-G): NR at present is off on this device until stage 4 is proven; "
+          "its presents go down untouched");
+    CHECK(Has(FgUnsupportedText(FgShape::VkFgOutput, true), "keep the round trip without NR ([DlssNr] "
+                                                            "VulkanPresentFgTransport"));
+
+    // Streamline: the marker's recorded failure ("timed out") is a fence timeout at any level; "timeout" and "pacer"
+    // count only as a warning or an error (its info lines name the pacer and its timeouts' settings at start-up);
+    // "skipped" hooks are info.
+    CHECK(ClassifyStreamline(1, "Wait on gpu fence timed out after 500ms") == StreamlineKind::FenceTimeout);
+    CHECK(ClassifyStreamline(0, "Wait on gpu fence TIMED OUT after 500ms") == StreamlineKind::FenceTimeout);
+    CHECK(ClassifyStreamline(1, "fence TIMEOUT") == StreamlineKind::FenceTimeout);
+    CHECK(ClassifyStreamline(0, "fence wait timeout set to 500 ms") == StreamlineKind::Info);
+    CHECK(ClassifyStreamline(1, "CPU Pacer skipping frames") == StreamlineKind::Pacer);
+    CHECK(ClassifyStreamline(0, "pacer thread started") == StreamlineKind::Info);
+    CHECK(ClassifyStreamline(0, "Hook sl.common:slHookVkPresent:before - skipped") == StreamlineKind::Info);
+    CHECK(ClassifyStreamline(2, "something failed") == StreamlineKind::Error);
+    CHECK(ClassifyStreamline(1, "something odd") == StreamlineKind::Warning);
+    StreamlineCounts sl;
+    sl.Add(StreamlineKind::Info, "ignored");
+    CHECK(sl.last.empty() && sl.warnings == 0);
+    sl.Add(StreamlineKind::FenceTimeout, std::string(300, 'x'));
+    CHECK(sl.fenceTimeouts == 1 && sl.last.size() == 160);
+
+    // The trace: a window per swapchain, its line every 10 s and at its end, Streamline's counts as the change since
+    // the swapchain's last line.
+    PacerTrace trace;
+    StreamlineCounts now;
+    TraceSample s;
+    s.swapchain = 0x55;
+    s.swapchainId = 5;
+    s.device = 0xD3;
+    s.deviceId = 3;
+    s.threadId = 1234;
+    s.threadName = "vkd3d_queue";
+    s.callerName = "d3d12core.dll";
+    s.queue = 0x99;
+    s.waits = 1;
+    s.hostSignal = true;
+    s.completions = 1;
+    s.ring = 2;
+    std::vector<std::string> lines;
+    for (uint64_t i = 0; i < 1300; ++i)
+    {
+        s.nowUs = 1000 + i * 8000 + (i >= 700 ? 24000 : 0); // one 32 ms frame at 700
+        s.callUs = i == 10 ? 3000 : 200;
+        // One gap (905 and 906 skipped at 900), then 906 late and 907 again: two out of order, and 908 no gap.
+        s.presentId = i == 900 ? 5 + i + 2 : 5 + i;
+        s.result = i == 500 ? 1000001003 : 0;
+        if (i == 1000)
+        {
+            s.threadId = 5678;
+            s.threadName.clear();
+            s.callerName = "sl.dlss_g.dll";
+        }
+        if (auto line = trace.Add(s, now))
+            lines.push_back(*line);
+    }
+    CHECK(lines.size() == 1);
+    if (!lines.empty())
+    {
+        const std::string& line = lines[0];
+        CheckHas(line, "DLSS-NR Vulkan present host (trace): swapchain 0x55 #5 on device #3, 10.0 s: 1248 presents", __LINE__);
+        CheckHas(line, "; threads tid 1234 \"vkd3d_queue\" (caller d3d12core.dll) 1000, tid 5678 (caller sl.dlss_g.dll) 248;",
+                 __LINE__);
+        CheckHas(line, "; queues 0x99 1248; waits 1-1 (1248), host signals 1248, untouched 0;", __LINE__);
+        CheckHas(line, "; present ids 5..", __LINE__);
+        CheckHas(line, "(gaps 1, out of order 2);", __LINE__);
+        CheckHas(line, "; frame time p50 8.00 p95 8.00 p99 8.00 max 32.00 ms, over twice the median 1;", __LINE__);
+        CheckHas(line, "; present call p50 0.200 p99 0.200 max 3.000 ms;", __LINE__);
+        CheckHas(line, "; results VK_SUCCESS 1247, VK_SUBOPTIMAL_KHR 1;", __LINE__);
+        CheckHas(line, "; GPU completions 1248, ring 2, max CPU wait 0.000 ms; frame generation none 1248;", __LINE__);
+        CheckHas(line, "; Streamline fence timeouts 0, pacer 0, warnings 0, errors 0", __LINE__);
+    }
+    now.Add(StreamlineKind::FenceTimeout, "Wait on gpu fence timed out after 500ms");
+    s.fg = FgShape::GameDlssg;
+    s.hostSignal = false;
+    s.untouched = true;
+    s.nowUs += 8000;
+    CHECK(!trace.Add(s, now).has_value());
+    const auto flushed = trace.Flush(0xD3, 0x55, now);
+    CHECK(flushed.has_value() && Has(*flushed, "(destroyed): ") &&
+          Has(*flushed, "host signals 52, untouched 1") && Has(*flushed, "frame generation none 52, game DLSS-G 1") &&
+          Has(*flushed, "; Streamline fence timeouts 1, pacer 0, warnings 0, errors 0 (last: Wait on gpu fence timed "
+                        "out after 500ms)"));
+    CHECK(trace.Swapchains() == 0 && !trace.Flush(0xD3, 0x55, now).has_value());
+
+    // Windows are by device and handle: the same handle value on two devices is two swapchains, and one's end leaves
+    // the other's window.
+    TraceSample twin = s;
+    twin.nowUs = 100;
+    twin.device = 0xD4;
+    twin.deviceId = 4;
+    trace.Add(s, now);
+    trace.Add(twin, now);
+    CHECK(trace.Swapchains() == 2);
+    const auto first = trace.Flush(0xD4, 0x55, now);
+    CHECK(first.has_value() && Has(*first, "swapchain 0x55 #5 on device #4,") && trace.Swapchains() == 1);
+    CHECK(trace.Flush(0xD3, 0x55, now).has_value() && trace.Swapchains() == 0);
+
+    // A swapchain not on record (FSR-FG's proxy, whose creation and destruction never reach the host) is its queue's
+    // device's: a swapchain made on that device ends its window, and so does the device's destruction. One made again
+    // under a handle whose destroy was not seen ends that handle's window. A window with nothing presented since its
+    // last line ends without a line; a swapchain whose device was never known goes with any device.
+    TraceSample proxy;
+    proxy.swapchain = 0x77;
+    proxy.device = 0xD3;
+    proxy.deviceId = 3;
+    proxy.fg = FgShape::VkFgInput;
+    proxy.nowUs = 50;
+    trace.Add(proxy, now);
+    TraceSample mine = proxy;
+    mine.swapchain = 0x88;
+    mine.swapchainId = 9;
+    mine.fg = FgShape::VkFgOutput;
+    trace.Add(mine, now);
+    TraceSample elsewhere = proxy;
+    elsewhere.device = 0xD5;
+    elsewhere.deviceId = 5;
+    trace.Add(elsewhere, now);
+    auto made = trace.FlushOnCreate(0xD3, 0x99, now);
+    CHECK(made.size() == 1 && Has(made[0], "swapchain 0x77 (not on record) on device #3, 0.0 s (a swapchain made on its "
+                                           "device): 1 presents;") &&
+          Has(made[0], "frame generation FSR-FG input 1") && Has(made[0], "frame time none") &&
+          Has(made[0], "present ids none") && Has(made[0], "Streamline fence timeouts 0,"));
+    CHECK(trace.Swapchains() == 2);
+    made = trace.FlushOnCreate(0xD3, 0x88, now);
+    CHECK(made.size() == 1 && Has(made[0], "swapchain 0x88 #9 on device #3, 0.0 s (its handle made again)") &&
+          trace.Swapchains() == 1);
+    TraceSample unknown = proxy;
+    unknown.device = 0;
+    unknown.deviceId = 0;
+    unknown.swapchain = 0x66;
+    trace.Add(unknown, now);
+    trace.Add(proxy, now);
+    auto gone = trace.FlushDevice(0xD3, now);
+    CHECK(gone.size() == 2 && trace.Swapchains() == 1);
+    CHECK(std::any_of(gone.begin(), gone.end(), [](const std::string& l) { return Has(l, "swapchain 0x66 (not on record), 0.0 s (device destroyed)"); }));
+    CHECK(trace.FlushDevice(0xD5, now).size() == 1 && trace.Swapchains() == 0);
+
+    // Streamline's counts as two presents hand them in out of order: an older copy adds nothing, and never wraps.
+    StreamlineCounts older;
+    StreamlineCounts newer = older;
+    newer.Add(StreamlineKind::Warning, "late");
+    TraceSample tick = s;
+    tick.nowUs = 1;
+    trace.Add(tick, newer);
+    tick.nowUs = 1 + kTraceWindowMs * 1000;
+    const auto ordered = trace.Add(tick, older);
+    CHECK(ordered.has_value() && Has(*ordered, "; Streamline fence timeouts 0, pacer 0, warnings 0, errors 0") &&
+          !Has(*ordered, "(last:"));
+    CHECK(trace.Flush(0xD3, 0x55, newer) == std::nullopt);
+
+    // Present ids: 0 is none; a gap is measured from the highest id seen, across windows.
+    TraceWindow ids;
+    TraceSample p = s;
+    for (const uint64_t id : { 1, 2, 0, 4, 3, 5, 5 })
+    {
+        p.presentId = id;
+        p.nowUs += 1000;
+        ids.Add(p);
+    }
+    std::string idLine = ids.Line({}, {});
+    CHECK(Has(idLine, "; present ids 1..5 (gaps 1, out of order 2);"));
+    p.presentId = 7;
+    ids.Add(p);
+    idLine = ids.Line({}, {});
+    CHECK(Has(idLine, "; present ids 7..7 (gaps 1, out of order 0);"));
+    p.presentId = 0;
+    ids.Add(p);
+    CHECK(Has(ids.Line({}, {}), "; present ids none;"));
+
+    // The percentile is nearest rank on a copy the caller owns; nothing for no samples.
+    std::vector<double> none;
+    CHECK(Percentile(none, 0.5) == 0.0);
+    std::vector<double> values { 5, 1, 4, 2, 3 };
+    CHECK(Percentile(values, 0.0) == 1.0 && Percentile(values, 0.5) == 3.0 && Percentile(values, 0.99) == 5.0);
+    CHECK(ResultName(-4) == std::string("VK_ERROR_DEVICE_LOST") && ResultName(12345) == nullptr);
+}
+
 // One owner of the model in the process: the after-upscale route wins, the present host stands down and gives it up.
 static void OwnerArbitration()
 {
@@ -1634,6 +1853,7 @@ int main()
     BdaPlans();
     NrCounters();
     SynthMotionDecisions();
+    FrameGeneration();
     OwnerArbitration();
     OwnerHandBack();
     Heartbeat();

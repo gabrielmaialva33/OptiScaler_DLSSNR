@@ -53,6 +53,11 @@ tier = "host"
 timeout = 60
 summary = "D3D11 DLSS with NR on: dlss_12 chosen when Dx11Upscaler is unset, native D3D11 DLSS reported once and shown while it runs."
 
+[nr-dx11-native-guides]
+tier = "host"
+timeout = 120
+summary = "Native D3D11 DLSS's depth and motion carried to the present pass on the D3D11 bridge (option (c), step 3): every gate and refusal of the transport's decision header, the slot rotation against a simulated GPU, the window and its line, and source guards on the transport, its call site, the capture core and shutdown."
+
 [nr-present-boundary]
 tier = "host"
 timeout = 60
@@ -183,6 +188,11 @@ tier = "wine"
 timeout = 900
 summary = "nr-present-guide-identity's decision cases and glue slice compiled by MSVC (private prefix copy) and run under Wine. No D3D12, no GPU."
 
+[dx11-guides-transport]
+tier = "wine"
+timeout = 1500
+summary = "The native D3D11 guide transport's API sequence on real devices under a local Proton (DXVK and vkd3d-proton): depth and motion formats a game uses cross through shared textures and a shared fence into clones made as the present guide ring makes them, six frames each, read back byte for byte; the depth-stencil hazard the transport avoids is reported. SKIP without a local Proton."
+
 [synth-motion-d3d12]
 tier = "wine"
 timeout = 1800
@@ -307,3 +317,8 @@ summary = "LSFG at x3/x4 through the fork of FFX's swapchain (study branch): Mfg
 tier = "wine"
 timeout = 900
 summary = "Production D3D12 HDR conversion: exact HDR10/scRGB GPU identity, known edits, resource refusals and a real ten-bit swapchain/PQ-support probe; no NGX."
+
+[nr-ab-compare]
+tier = "host"
+timeout = 120
+summary = "Offline Stage 0/1 capture metrics on synthetic PNG/PFM/raw pairs, temporal controls, provenance validation and CLI refusals; stdlib only."

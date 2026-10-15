@@ -61,7 +61,10 @@ size_t Capture(NVSDK_NGX_Parameter* params, const DlssNrFrameInfo& frame, ID3D12
     GLUE_CHECK(slot < kRingSize);
     static ID3D12Resource copy;
     DlssNr::g_presentGuideClones[slot] = { &copy, &copy };
-    DlssNr::StampPresentGuide(slot, params, frame, device, depthWidth, depthHeight);
+    uint32_t outputWidth = 0, outputHeight = 0;
+    DlssNr::D3D12OutputExtent(params, &outputWidth, &outputHeight);
+    DlssNr::StampPresentGuide(slot, DlssNr::EvaluateOutput(params, device, outputWidth, outputHeight), frame,
+                              depthWidth, depthHeight);
     g_done[slot] = true;
     DlssNr::g_presentGuideRing.CommitRecord(slot, depthWidth, depthHeight, false, DlssNr::NowMs(), &g_done[slot],
                                             &DlssNr::g_presentGuideClones[slot]);

@@ -527,6 +527,10 @@ class Config
     // No NR yet. Not a placement control like HookMethod; it chooses whether this host exists. Read once, when
     // vulkan-1.dll is hooked. See dlssnr/DlssNr_VkPresentHost.h.
     CustomOptional<bool> DlssNrVulkanPresentHost { false };
+    // Stage 4 (nr-vulkan-present-host.md): the pacer trace, and the pacer experiment's submission-only arm beside frame
+    // generation. Read with the host, at start-up.
+    CustomOptional<bool> DlssNrVulkanPresentTrace { false };
+    CustomOptional<bool> DlssNrVulkanPresentFgTransport { false };
 
     // Ask the driver's own nvngx.dll whether it will dispatch Neural Rendering, once per session.
     //

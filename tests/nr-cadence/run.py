@@ -84,9 +84,13 @@ for field in ('driverProxy = useProxy', 'available = DlssNr_Cadence_Dx12::Availa
     assert f'cadenceInputs.{field};' in renderer, field
 # Only an upscaler's own guides count as the game's: a present host with nothing captured has none.
 assert 'bool GameGuides = false;' in read_nr('shaders/dlssnr/DlssNr_Common.h')
+# Set once, in GatherGuideFrame, the guide description every capture of the game's guides is made from: the after-
+# upscale route's GatherFrame calls it, and so does the native D3D11 guide transport (CaptureBridgedGuides).
 assert renderer.count('frame.GameGuides = true;') == 1
+guide = renderer[renderer.index('DlssNrFrameInfo GatherGuideFrame('):]
+assert guide.index('frame.GameGuides = true;') < guide.index('\n}\n')
 gather = renderer[renderer.index('DlssNrFrameInfo GatherFrame('):]
-assert gather.index('frame.GameGuides = true;') < gather.index('\n}\n')
+assert gather.index('DlssNrFrameInfo frame = GatherGuideFrame(params);') < gather.index('\n}\n')
 # Parked, never freed under the GPU, and freed with the rest.
 assert 'delete retired.cadence;' in renderer and 'delete r.cadence;' in renderer
 # Under peripheral compression the vectors the carry reads are the packed ones the model is handed, already in

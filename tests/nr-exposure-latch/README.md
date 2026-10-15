@@ -4,7 +4,9 @@
 python3 tests/nr-exposure-latch/run.py
 ```
 
-The runner compiles `retoque/dlssnr/DlssNr_Exposure.h` with g++ C++20, ASan/UBSan, and `-Werror`.
+The runner compiles `retoque/dlssnr/DlssNr_Exposure.h` and the actual `WhitePoint()` function sliced
+from `dlssnr.hlsl`, with and without `VK_MODE`, using g++ C++20, ASan/UBSan, and `-Werror`.
+This checks the numerical rule, not shader execution on a GPU.
 
 ## What this covers
 
@@ -18,3 +20,8 @@ The runner compiles `retoque/dlssnr/DlssNr_Exposure.h` with g++ C++20, ASan/UBSa
 - **Ignored readings**: NaN, infinity, zero and negative values change nothing.
 - **Reset**, and **fallback behaviour**: when latched, `Exposure::WhitePoint` for source 1 returns the slider and
   `Exposure::LiveWanted` is false; sources 0 and 2 are unaffected.
+
+- **Live white point**: invalid samples and ratios (NaN, infinities, zero, negatives, division overflow,
+  and just outside the range) use the CPU fallback. Inclusive endpoints and valid values pass unchanged.
+  Live-off and Vulkan always use the CPU value, retaining its minimum floor.
+- **CPU policy**: delayed extremes still clamp; pre-exposure/trim sanitization and slider fallback stay intact.

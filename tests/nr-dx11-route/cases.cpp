@@ -6,6 +6,7 @@
 
 #include <dlssnr/DlssNr_Dx11Upscaler.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -13,6 +14,27 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+// The native D3D11 guide transport (DlssNr_Dx11Guides.cpp), as the layer sees it: what it was handed, and whether
+// it carried anything lately, which the cases set.
+struct CarryCall
+{
+    bool nativeDlss;
+    bool evaluated;
+    ID3D11DeviceContext* context;
+    NVSDK_NGX_Parameter* params;
+};
+static std::vector<CarryCall> g_carryCalls;
+static bool g_carriedRecently = false;
+
+namespace DlssNr
+{
+void CarryNativeDx11Guides(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* params, bool nativeDlss, bool evaluated)
+{
+    g_carryCalls.push_back({ nativeDlss, evaluated, context, params });
+}
+bool NativeDx11GuidesCarriedRecently() { return g_carriedRecently; }
+} // namespace DlssNr
 
 namespace
 {
@@ -112,15 +134,22 @@ void PureReport()
     for (Kind kind : kKinds)
         for (uint32_t method : kHookMethods)
         {
-            Require(Decide(Inputs { false, kind, method }) == Report::None, "NR off: nothing to report, ever");
+            for (bool carried : { false, true })
+            {
+                Require(Decide(Inputs { false, kind, method, carried }) == Report::None,
+                        "NR off: nothing to report, ever");
 
-            const Report on = Decide(Inputs { true, kind, method });
-            if (kind != Kind::NativeDlss)
-                Require(on == Report::None, "dlss_12 and the routes this header does not judge report nothing");
-            else if (method == 2)
-                Require(on == Report::NoGuides, "native DLSS at HookMethod 2: the guides never reach the pass");
-            else
-                Require(on == Report::NoPass, "native DLSS at HookMethod 0, 1 or anything else: after the upscaler");
+                const Report on = Decide(Inputs { true, kind, method, carried });
+                if (kind != Kind::NativeDlss)
+                    Require(on == Report::None, "dlss_12 and the routes this header does not judge report nothing");
+                else if (method == 2 && carried)
+                    Require(on == Report::None, "native DLSS at HookMethod 2, guides carried to the host: nothing");
+                else if (method == 2)
+                    Require(on == Report::NoGuides, "native DLSS at HookMethod 2, guides not carried: say so");
+                else
+                    Require(on == Report::NoPass,
+                            "native DLSS at HookMethod 0, 1 or anything else: after the upscaler, carried or not");
+            }
         }
 
     Require(ReportText(Report::None) == nullptr, "None has no text");
@@ -143,6 +172,8 @@ void PureReport()
             "the two reports say different things");
     Require(Contains(ReportText(Report::NoGuides), "depth and motion"),
             "the HookMethod 2 text says what is missing: the depth and motion");
+    Require(Contains(ReportText(Report::NoGuides), "'native D3D11 guides'"),
+            "the HookMethod 2 text points at the transport's log line for why");
 }
 
 void PureOnce()
@@ -224,11 +255,12 @@ void ProductionReport()
 
     // --- NR off: nothing is stored, nothing is said.
     for (int frame = 0; frame < 100; ++frame)
-        DlssNr::NoteDx11Evaluate(Upscaler::DLSS);
+        DlssNr::NoteDx11Evaluate(Upscaler::DLSS, nullptr, nullptr, true);
 
     Require(lines() == 0, "NR off: no line at all");
     Require(Detail::g_lastAt.load() == 0 && Detail::g_lastRoute.load() == Kind::Other,
             "NR off: the evaluate note stores nothing");
+    Require(g_carryCalls.empty(), "NR off: nothing is handed to the guide transport");
     Require(DlssNr::Dx11RouteReport() == Report::None, "NR off: no panel line");
 
     // --- NR on, native DLSS evaluates, HookMethod 1 (the default).
@@ -236,35 +268,60 @@ void ProductionReport()
     Require(DlssNr::Dx11RouteReport() == Report::None, "no panel line before any D3D11 evaluate");
 
     for (int frame = 0; frame < 600; ++frame)
-        DlssNr::NoteDx11Evaluate(Upscaler::DLSS);
+        DlssNr::NoteDx11Evaluate(Upscaler::DLSS, nullptr, nullptr, true);
 
     Require(lines() == 1, "600 native evaluates log one line");
     Require(LastLine() == std::string("WARN DLSS-NR: ") + ReportText(Report::NoPass),
             "the line is the after-upscaler report, at warning level");
     Require(DlssNr::Dx11RouteReport() == Report::NoPass, "the panel shows the same report");
 
+    // Each evaluate is handed to the transport, with the evaluate's own context, parameters and result, native DLSS
+    // said as such; the transport decides for itself (tests/nr-dx11-native-guides).
+    {
+        int contextTag = 0, paramsTag = 0;
+        auto* context = reinterpret_cast<ID3D11DeviceContext*>(&contextTag);
+        auto* params = reinterpret_cast<NVSDK_NGX_Parameter*>(&paramsTag);
+        g_carryCalls.clear();
+        DlssNr::NoteDx11Evaluate(Upscaler::DLSS, context, params, false);
+        DlssNr::NoteDx11Evaluate(Upscaler::DLSS_on12, context, params, true);
+        Require(g_carryCalls.size() == 2 && g_carryCalls[0].nativeDlss && !g_carryCalls[0].evaluated &&
+                    g_carryCalls[0].context == context && g_carryCalls[0].params == params &&
+                    !g_carryCalls[1].nativeDlss && g_carryCalls[1].evaluated,
+                "every evaluate is handed to the transport as it was made");
+        DlssNr::NoteDx11Evaluate(Upscaler::DLSS, nullptr, nullptr, true);
+    }
+
     // HookMethod is read live by the panel; the log says the HookMethod 2 report at the next evaluate.
     cfg.DlssNrHookMethod = 2u;
     Require(DlssNr::Dx11RouteReport() == Report::NoGuides, "the panel follows HookMethod at once");
+
+    // Step 3: while the transport carries the guides to the present host, there is nothing to report or log.
+    g_carriedRecently = true;
+    Require(DlssNr::Dx11RouteReport() == Report::None, "guides carried at HookMethod 2: no panel line");
     for (int frame = 0; frame < 10; ++frame)
-        DlssNr::NoteDx11Evaluate(Upscaler::DLSS);
+        DlssNr::NoteDx11Evaluate(Upscaler::DLSS, nullptr, nullptr, true);
+    Require(lines() == 1, "guides carried at HookMethod 2: no log line");
+    g_carriedRecently = false;
+
+    for (int frame = 0; frame < 10; ++frame)
+        DlssNr::NoteDx11Evaluate(Upscaler::DLSS, nullptr, nullptr, true);
     Require(lines() == 2 && LastLine() == std::string("WARN DLSS-NR: ") + ReportText(Report::NoGuides),
-            "the HookMethod 2 report is logged once");
+            "the HookMethod 2 report is logged once, when the guides stop reaching the host");
     cfg.DlssNrHookMethod = 1u;
 
     // Switched to dlss_12 in the menu: the line goes at the next evaluate, and nothing is logged.
-    DlssNr::NoteDx11Evaluate(Upscaler::DLSS_on12);
+    DlssNr::NoteDx11Evaluate(Upscaler::DLSS_on12, nullptr, nullptr, true);
     Require(DlssNr::Dx11RouteReport() == Report::None && lines() == 2, "dlss_12: no panel line, no log line");
 
     // Ray reconstruction and the other upscalers are not judged here.
     for (Upscaler upscaler : { Upscaler::DLSSD, Upscaler::FSR22, Upscaler::XeSS, Upscaler::FFX_on12 })
     {
-        DlssNr::NoteDx11Evaluate(upscaler);
+        DlssNr::NoteDx11Evaluate(upscaler, nullptr, nullptr, true);
         Require(DlssNr::Dx11RouteReport() == Report::None, "routes other than native DLSS get no panel line");
     }
 
     // Back to native: the panel line returns, the log stays quiet.
-    DlssNr::NoteDx11Evaluate(Upscaler::DLSS);
+    DlssNr::NoteDx11Evaluate(Upscaler::DLSS, nullptr, nullptr, true);
     Require(DlssNr::Dx11RouteReport() == Report::NoPass && lines() == 2,
             "back on native DLSS: panel line again, no second log line");
 

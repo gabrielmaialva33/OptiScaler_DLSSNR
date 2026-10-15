@@ -52,7 +52,7 @@ require(0 <= supersampling_at < call_at < rr_at, 'the default is replaced for su
 
 evaluate = function_body(dx11, 'NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_EvaluateFeature(')
 type_at = evaluate.find('auto upscaler = deviceContext->GetUpscalerType();')
-note_at = evaluate.find('DlssNr::NoteDx11Evaluate(upscaler);')
+note_at = evaluate.find('DlssNr::NoteDx11Evaluate(upscaler, InDevCtx, InParameters, upscaleResult);')
 require(0 <= type_at < note_at, 'EvaluateFeature must note each evaluate with the feature\'s own upscaler type')
 require(evaluate.find('deviceContext->Evaluate(InDevCtx, InParameters);') < note_at,
         'the evaluate is noted after it ran, not before')
@@ -68,6 +68,9 @@ note = layer[layer.find('inline void NoteDx11Evaluate('):layer.find('inline Dx11
 gate = note.find('if (!cfg.DlssNrEnabled.value_or_default())\n        return;')
 require(0 <= gate < note.find('g_lastRoute.store') and gate < note.find('LOG_'),
         'NoteDx11Evaluate must return with NR off before it stores or logs anything')
+carry = note.find('CarryNativeDx11Guides(context, params, route == Dx11Route::Kind::NativeDlss, evaluated);')
+require(0 <= gate < carry < note.find('Dx11Route::Decide('),
+        'NoteDx11Evaluate hands the evaluate to the transport after the NR gate and before it decides the report')
 choose = layer[layer.find('inline ::Upscaler Dx11DefaultUpscaler('):layer.find('inline void NoteDx11Evaluate(')]
 require('cfg.DlssNrEnabled.value_or_default()' in choose and 'cfg.Dx11Upscaler.has_value()' in choose,
         'Dx11DefaultUpscaler decides from DlssNrEnabled and whether Dx11Upscaler is set')

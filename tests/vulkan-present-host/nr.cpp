@@ -346,6 +346,7 @@ struct App
     bool wdx12 = false;
     bool nrToggle = false;
     bool slowBuild = false;
+    bool fg = false; // --fg: a Vulkan 1.2 device with timeline semaphores, for OptiScaler's Vulkan FSR-FG output
     bool hdr = false;
     bool wdx12Probed = false;
     HMODULE optiscaler = nullptr;
@@ -414,7 +415,8 @@ struct App
         }
         VkApplicationInfo app { VK_STRUCTURE_TYPE_APPLICATION_INFO };
         app.pApplicationName = "OptiScaler Vulkan present host cold NR";
-        app.apiVersion = VK_API_VERSION_1_1;
+        // With --fg, Vulkan 1.2: OptiScaler's Vulkan FSR-FG output needs timeline semaphores on the device.
+        app.apiVersion = fg ? VK_API_VERSION_1_2 : VK_API_VERSION_1_1;
         VkInstanceCreateInfo info { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
         info.pNext = &debug;
         info.pApplicationInfo = &app;
@@ -516,6 +518,14 @@ struct App
             info.pEnabledFeatures = &features;
             info.pNext = &float16;
             info.enabledExtensionCount = 2;
+        }
+        // With --fg, what OptiScaler's Vulkan FSR-FG output asks of the device (FFX's swapchain syncs with them).
+        VkPhysicalDeviceVulkan12Features vulkan12 { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+        if (fg)
+        {
+            vulkan12.timelineSemaphore = VK_TRUE;
+            vulkan12.pNext = const_cast<void*>(info.pNext);
+            info.pNext = &vulkan12;
         }
         Check(vkCreateDevice(physical, &info, nullptr, &device), "vkCreateDevice");
         vkGetDeviceQueue(device, graphicsFamily, 0, &graphicsQueue);
@@ -1396,7 +1406,9 @@ struct App
     std::string Facts() const
     {
         std::ostringstream out;
-        out << "{\n  \"status\": \"" << (validationErrors == 0 ? "PASS" : "FAIL") << "\",\n  \"first_validation\": \""
+        // With --fg, FFX's frame-generation swapchain and OptiScaler's FG output report validation errors of their own
+        // (validation.txt has every one): the runner tells them from the host's, so they do not fail the run here.
+        out << "{\n  \"status\": \"" << (validationErrors == 0 || fg ? "PASS" : "FAIL") << "\",\n  \"first_validation\": \""
             << Escape(firstValidation) << "\",\n  \"validation_active\": " << (validationActive ? "true" : "false")
             << ",\n  \"validation_errors\": " << validationErrors
             << ",\n  \"wine_injected_extension_messages\": " << wineInjected
@@ -1459,6 +1471,8 @@ int main(int argc, char** argv)
                 app.hdr = true;
             else if (!strcmp(argv[i], "--slow-build"))
                 app.slowBuild = true;
+            else if (!strcmp(argv[i], "--fg"))
+                app.fg = true;
             else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
                 app.frames = static_cast<uint32_t>(std::atoi(argv[++i]));
             else if (!strcmp(argv[i], "--pan") && i + 1 < argc)
@@ -1468,7 +1482,7 @@ int main(int argc, char** argv)
         }
         app.Run();
         std::ofstream("result.json") << app.Facts();
-        Require(validationErrors == 0, "Vulkan validation reported errors (first: " + firstValidation + ")");
+        Require(validationErrors == 0 || app.fg, "Vulkan validation reported errors (first: " + firstValidation + ")");
         uint32_t presents = 0, readbacks = 0;
         for (const auto& s : app.swapchains)
         {

@@ -1,7 +1,8 @@
 # Optional Neural Rendering before upscaling
 
 Status: experimental port built and host boundary tests passed (2026-09-05).
-No local in-game performance or image-quality claim. Not deployed.
+A September 15 Cyberpunk cost A/B is recorded in [stage-before-upscale-measured.md](stage-before-upscale-measured.md);
+paired image-quality and temporal measurements remain open. The protocol below targets that gap.
 
 Adapted from GrimsVerk/OptiScaler_NR_then_SR, branch `nr-before-upscale`, commit
 `ba3ed2e401` and its Stage=1 implementation by that fork's contributors:
@@ -183,3 +184,265 @@ the fork people credit with it. What this tree has, what was measured, and what 
     thing here.
 - **Missing:** a non-zero colour origin; native Vulkan before the upscaler; the guide resample on
   Vulkan; the guide shader's bytecode; any measurement below 100% at either stage.
+
+
+## 2026-10-15 measurement kit: implementation contract
+
+`tools/nr_ab_compare.py` reads comparison sidecars with their PNG or linear-HDR PFM pairs. It measures
+changes against each pair's own original; it must never silently resize render-input Stage 1 into
+upscaler-output Stage 0 or call that a final-image quality score. Check actual route/stage, picture
+settings, model/build/adapter provenance, completion proof, and within-pair dimensions before measuring.
+Report native-pixel gradient/Laplacian energy, low-gradient residual variation (a noise proxy), RGB
+bias/opponent-colour residual, and temporal residual variation with original-frame motion alongside it.
+These are diagnostic statistics, not perceptual quality or ground truth. Sampling and units must be explicit.
+
+Support the existing eight-recording raw burst for temporal work as well as a sequence of sidecar pairs.
+The legacy burst has no frame ids or JSON provenance and assumes delayed completion; label those limits
+and require a companion pair from the same arm for interpretation. Repeated empty triggers are sparse
+pairs, not consecutive frames. Never claim continuous-frame flicker from their timestamps alone.
+The tool stays stdlib-only so its synthetic PNG/PFM/raw tests run in the existing host CI without packages.
+
+
+### What today's audit established
+
+At `171f4574`, `ScopedPreUpscale` still substitutes its private render-sized colour only after a
+successful composition and restores the original typed/untyped Color slots on scope exit. The post
+path stands down for that evaluation; a declined contract is marked separately as `after-fallback`.
+The 500 ms extent gate, no-present/creation-frame gate, scratch-loan serialization, format/state/
+subrect checks, device ownership and allocation-failure latch remain. RR, NR Hold frame, the driver
+proxy and HookMethod=2 cannot serve as a before-stage sample. Native Vulkan has no before stage.
+The targeted `nr-before-upscale`, `nr-capture`, `nr-render-size`, `nr-gpu-timing` and `nr-invariants`
+suites pass. That verifies host decisions, not that Crimson Desert currently executes Stage 1 on GPU.
+No new runtime defect was found and no runtime code was changed by this kit.
+
+The opening 2026-09-05 status and its shader-field counts above are historical, not the current
+measurement status: September already measured cost. The remaining question is image quality and
+stability with reproducible captures, especially at stronger upscaling ratios.
+
+### Gabriel's first Crimson Desert A/B
+
+Use **separate game processes** for Stage 0 and Stage 1, fixed resolution and model settings, following
+the lifetime boundary above. No live stage/resolution/working-scale stress test is implied. The Claude
+side manages configuration/captures; this kit neither deploys nor launches the game.
+
+1. Use D3D12, the same save, display resolution and DLSS **Quality** for the first comparison. In the
+   game turn **Ray Reconstruction off**, **frame generation off** and **dynamic resolution off**.
+   Keep HDR, exposure-related game settings, time of day, weather, sharpening, motion blur and camera
+   FOV identical. DLAA gives no render-resolution saving. Do Balanced/Performance later as separate
+   experiments, never pooled into the first result.
+2. Before launch, replace existing values in the DLL-side INI (do not append duplicate sections/keys):
+
+   ```ini
+   [DlssNr]
+   Enabled=true
+   ApplyModel=true
+   HookMethod=1
+   Stage=0
+   ApplyAfterRR=false
+   UseProxy=false
+   HoldFrame=false
+   Passes=1
+   WorkingScale=1.0
+   Transfer=0
+   ReversibleMode=0
+   PeripheryCompression=false
+   UiProtection=false
+   StabilizerStrength=0
+   Cadence=1
+   CadenceSmoothing=0
+   Compare=0
+   DebugView=0
+   WhitePointSource=0
+   WhitePointScale=1.0
+   GpuTiming=true
+   GpuTimingInterval=30
+
+   [Log]
+   LogToFile=true
+   LogLevel=2
+   ```
+
+   For the second process change **only `Stage=1`**. Keep preset/style/intensity/detail/colour/guard,
+   highlight controls and every other setting unchanged, and retain both INIs with the result. Also retain the model DLL SHA-256: the sidecar
+   version and byte count alone do not authenticate identical model contents. A
+   different fixed paper-white scalar is acceptable if chosen before **both** runs; record it.
+   Fixing source 0 avoids interpreting eye-adaptation normalization as temporal change; the recorded CPU
+   white can differ from the actual live-exposure shader white under source 1. This is a
+   controlled experiment, not a proposed new everyday preset. Sidecars do not contain every INI key.
+3. Home → **Neural Rendering**: confirm Hook is the upscaled route (INI `HookMethod=1`), then Stage
+   **After the upscaler** or **Before the upscaler (experimental)** as appropriate. Confirm NR is running.
+   Under Compare, **Hold frame stays unchecked**, comparison/debug views off. The button there is
+   **Capture original and processed**. Under GPU measurement enable **Measure NR on the GPU**, sample
+   every 30 eligible evaluations. Close the menu and allow at least 10 seconds for history to settle.
+   Select the stage before the run; do not use this walkthrough as permission for repeated live toggles.
+4. Stand at a reproducible landmark facing a wall/sign with small texture detail, a diagonal roof/rail,
+   and some foliage or hair against the sky. Include a smooth shadow patch. Keep the camera still;
+   avoid combat, particles and NPCs crossing the analysis area. Record a reference screenshot and
+   camera/FOV/save location so the other process can reproduce it. Animation and lighting can still
+   move in a stationary-camera scene; the original images are the control for that.
+5. In each process collect **five stationary-camera pairs**, then **three eight-recording raw bursts**
+   without moving. Next do the same slow, constant-direction pan across the landmark: **five pairs**
+   over the pan and **three eight-recording bursts**, repeating the same pan for each burst. Return to
+   the marker between repetitions. That is **10 primary pairs plus 6 companion pairs and 6 raw bursts (48 recordings) per stage**;
+   only 16 of the session's 64 pair slots are needed. Keep still and pan directories separate.
+6. Collect at least **100 eligible GPU samples per stage** in a separate capture-free interval with
+   the same view/workload. At interval 30 that is 3,000 model evaluations; wait for the actual count,
+   not a guessed number of seconds. Save the log before rotation. Repeat a second Stage 0 process
+   (A/B/A) if time permits, to expose scene or thermal drift.
+
+**A held frame is a diagnostic control, not the Stage 1 arm.** NR's Hold frame explicitly declines
+pre-upscale and uses the post path. The main protocol therefore holds the *camera*, not NR's input.
+Optionally, in a separate Stage 0 control, check Hold frame, wait 10 evaluations, take two pairs, and
+compare decoded original pixels; they should be identical. PNG file hashes will differ because the
+embedded provenance changes. Mark that directory `stage0-held-control`; the A/B tool rejects it, as
+it must. A game's own photo/pause mode is useful only if it still evaluates the upscaler, preserves the
+same render pipeline and does not change resolution/post-processing; verify coverage before using it.
+Do not turn Hold frame on during the Stage 1 slow-pan/flicker measurement.
+
+### Trigger capture from outside, without menu interaction
+
+The commands below are for the Claude-side operator during the arranged run, **not deployment**.
+Set `GAME_DIR` to the directory containing the actually loaded proxy DLL, and `ARM_DIR` to a fresh
+analysis directory outside the game, e.g. under `~/.cache/retoque-stage-ab/run1/stage0-still`.
+Use a new arm directory for the pan and each stage/process. Do not overwrite a pending trigger.
+
+```bash
+export GAME_DIR="/path/to/Crimson Desert/bin64"
+export ARM_DIR="$HOME/.cache/retoque-stage-ab/run1/stage0-still"
+uv run python - <<'PY_CAPTURE'
+import json, os, shutil, time
+from pathlib import Path
+game, out = Path(os.environ['GAME_DIR']), Path(os.environ['ARM_DIR'])
+out.mkdir(parents=True, exist_ok=False)
+captures, trigger = game / 'retoque-captures', game / 'dlssnr-capture.trigger'
+for n in range(5):
+    seen = set(captures.glob('*.json'))
+    with trigger.open('x') as f:  # empty means one original/processed pair
+        pass
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        found = []
+        for p in set(captures.glob('*.json')) - seen:
+            r = json.loads(p.read_text())
+            files = [captures / r[k] for k in ('original_file', 'processed_file')]
+            if all(f.is_file() for f in files):
+                found.append((p, files))
+        if found:
+            if len(found) != 1:
+                raise RuntimeError('multiple captures arrived; isolate the operator/run')
+            p, files = found[0]
+            for f in [*files, p]:
+                shutil.copy2(f, out / f.name)
+            print(n + 1, p.name, flush=True)
+            break
+        time.sleep(.25)
+    else:
+        raise RuntimeError('capture did not complete; inspect the capture refusal/status log')
+    time.sleep(2)
+PY_CAPTURE
+```
+
+The trigger is checked every **60 NR dispatches**, not every display frame or exactly once a second.
+Wait for completed files as above; a deleted trigger alone is not proof of capture. Busy/no-write/
+no-submission completion can refuse or delay it. These five pairs are **sparse samples**, not a
+consecutive-frame burst. Linear-HDR surfaces produce `.original.pfm`/`.processed.pfm` plus `.json`;
+SDR/code-value surfaces produce PNG. The tool handles both; do not tone-map PFM into PNG first.
+
+For each of the six raw bursts, first take/retain one additional companion pair in the same view and
+unchanged settings (use the script above with `range(1)` and a fresh `*-burstN-companion` directory), then request:
+
+```bash
+printf 'burst\n' > "$GAME_DIR/dlssnr-capture.trigger"
+```
+
+Only do this with no pending pair/trigger/burst. Wait for `dlssnr-capture/manifest.txt` to be newly
+written after the request, `frames 8`, and all `before_00.raw`…`before_07.raw` and matching `after`
+files to have finished writing. Copy the **entire** `dlssnr-capture/` to a fresh external directory
+such as `stage0-still-burst1` before requesting another: the next burst overwrites names, and a new
+process clears the old directory on its first burst. The manifest's old sentence “as the upscaler
+produced it” is misleading for Stage 1: today's code records `hdrCopy`, the actual input of NR, on
+both stages. Dark initial captures may re-arm; do not harvest an old manifest.
+
+**Raw burst limitation:** eight adjacent successful recording opportunities, without present ids,
+timestamps, per-frame settings, or GPU-fence proof. The legacy path waits eight dispatches before
+mapping. Treat its temporal results as exploratory until a frame/present trace and completion proof
+are available. This kit does not relabel that path as fence-safe. Do not infer display-frame flicker
+frequency from it, and do not launch another burst while its readback/write is pending. The paired
+capture must say `completion=submission-fence`; the comparator rejects assumed-completion pairs.
+
+### Run and interpret the comparator
+
+From this checkout, with copies outside the game:
+
+```bash
+uv run tools/nr_ab_compare.py \
+  --stage0 "$AB_ROOT/stage0-still" --stage1 "$AB_ROOT/stage1-still" \
+  --stage0-log "$AB_ROOT/stage0-timing.log" --stage1-log "$AB_ROOT/stage1-timing.log" \
+  --output "$AB_ROOT/still-report.json"
+```
+
+Set `AB_ROOT` to the experiment root. For a raw-burst report, point `--stage0` and `--stage1` at the
+respective `*-burstN-companion` directories and add `--stage0-burst` / `--stage1-burst` pointing at
+the saved raw directories. Repeat for pan and each burst, using a fresh output name (the
+tool refuses to overwrite). No dependencies beyond Python's stdlib; `uv` supplies the runner. One
+sidecar instead of a directory is accepted for a companion/control pair, but temporal analysis needs
+at least three captures for a useful sequence. The raw-burst association is the operator's assertion;
+the tool checks extents/formats but cannot establish its stage or timestamp from the manifest.
+
+The JSON contains both arms, per-pair statistics, medians, provenance, input SHA-256s, temporal
+transitions, timing groups, units, sampling parameters and explicit limitations. No automatic winner.
+No cropping or image registration is performed. Default `--grid 128` uniformly samples at most
+128 centres per dimension; derivatives use adjacent native pixels, not grid neighbours. Increase to
+`--grid 512` for a more expensive sensitivity check; keep it equal across reports. Full-image decode
+still occurs. Source-1/HDR white-point changes normalize each pair separately and can confound temporal
+values; the protocol fixes source 0. Raw values use the companion pair's white, explicitly assumed constant.
+
+| Metric | Definition / interpretation | Cannot establish |
+|---|---|---|
+| `gradient_change_percent`, `laplacian_change_percent` | Change in RMS central-difference luminance gradient / four-neighbour Laplacian vs that pair's original. Null when original energy is zero | Added true detail; noise and ringing can increase both |
+| `flat_residual_laplacian_rms` | RMS Laplacian of processed-minus-original in original regions with gradient ≤ `--flat-threshold` (default .01); report selected fraction | Sensor/model noise separately from texture, checkerboard aliasing or sharpening |
+| `luma_edit_mae`, `luma_edit_bias`, `rgb_edit_bias` | Absolute and signed changes vs the same original; RGB bias keeps signs | Whether the change is more correct or pleasing |
+| `opponent_colour_edit_rms` | RMS of residual R−G and B−G differences | Perceptual Delta E, display gamut/tonemapper effect |
+| `edit_delta_rms` | RMS change in the NR luminance edit between successive captures, with original/processed change RMS alongside | Motion-compensated flicker or frequency in Hz |
+| `stable_original_edit_delta_rms` | Same, only where original luminance changes ≤ threshold; selected fraction reported | True correspondence; similar luminance can hide motion/disocclusion |
+
+PNG metrics use stored code values / full scale, with no gamma conversion. PFM metrics use linear
+RGB / the recorded white point, retaining negative and above-white values. Raw values retain their
+native precision rather than PNG quantization. Compare matching domains only. Native-pixel statistics
+at different compose resolutions are not spatial-frequency-equivalent, even though their within-pair
+percent changes are useful diagnostics. Inspect the originals and images along with the numbers.
+
+### GPU-cost and acceptance gate
+
+Look for both of these actual markers in their respective logs:
+
+```text
+DLSS-NR coverage stage=after ... window_model_ok=... window_applied=...
+DLSS-NR coverage stage=before ... window_model_ok=... window_applied=...
+DLSS-NR gpu timing confirmed: ... stage=after ... dispatch_ms=... model_ms=... outside_model_ms=... proof=sealed-single-execution-fence
+DLSS-NR gpu timing confirmed: ... stage=before ... dispatch_ms=... model_ms=... outside_model_ms=... proof=sealed-single-execution-fence
+```
+
+The ellipses above mark omitted fields, not literal log text. Require sustained nonzero intended-stage
+application after warm-up; report skips/fallback as proportions. `after-fallback`, `after-rr`, missing
+coverage or `ZERO_APPLIED_IN_WINDOW` invalidate a Stage 1 result. Capture `route=before-upscale`,
+`surface=render-input`, `settings` containing `stage=before` is an additional check. The tool rejects
+wrong stages, held/carried frames, different build/model/adapter/picture settings, changed render extent,
+missing provenance, missing fence proof, malformed/non-finite images and within-pair size mismatches.
+
+The optional log reader accepts only the requested stage with `capture_active=0`, `model_reset=false`,
+`carried=false`, cadence 1, all requested passes completed, and sealed single-execution fence proof.
+It reports n/p10/median/p90 (linear-interpolated percentiles) for **dispatch**, **model** and **outside
+model** GPU ms, separately for each run/contract/model identity/render/compose/model-size tuple.
+It never accidentally matches `model_ms` inside `outside_model_ms`. Keep the log interval capture-free
+anyway: the final draining capture/write can overlap a later non-capture sample. Timing-to-sidecar
+association and equal workload remain operator checks. Do not pool startup or different contract groups.
+`dispatch_ms` is NR cost, not full-frame time, input latency or an FPS prediction.
+
+Accept the collection only with matched build/model/settings/game state, correct actual stages and
+completion, ≥100 eligible cost samples per arm, and interpretable originals. Record a finding such as
+“model median fell X ms; within-arm sharpness/noise/colour changed Y; stationary residual variation Z;
+these surfaces differ in resolution” rather than “Stage 1 is objectively better.” A final displayed-image
+quality comparison still needs matched screenshots/video after the upscaler and game post-processing:
+Stage 1's existing pair is **not** that final surface. No final-image or new in-game performance claim
+is made by this kit.

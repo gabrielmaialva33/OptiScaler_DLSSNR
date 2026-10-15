@@ -29,7 +29,7 @@ entry, or the next run tells you.
 | Tier | Needs | Suites |
 |---|---|---|
 | `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `mfg-probe`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `windows-installer`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
-| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session, and they and `synth-motion-vk` a working Vulkan loader | `nr-gpu-timing-d3d12`, `nr-session-exit`, `synth-motion-d3d12`, `synth-motion-vk`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback`, `nr-present-guide-identity-msvc`, `nr-hdr-d3d12` |
+| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session, and they and `synth-motion-vk` a working Vulkan loader | `nr-gpu-timing-d3d12`, `nr-session-exit`, `synth-motion-d3d12`, `synth-motion-vk`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback`, `nr-present-guide-identity-msvc`, `nr-hdr-d3d12`, `dx11-guides-transport` |
 | `wip` | registered, no runner yet | — |
 
 The wine tier is serial on purpose. These suites compile through the single msvc-wine
@@ -38,8 +38,10 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Fifty suites. All but `nr-invariants`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
+**Host tier.** Fifty-two suites. All but `nr-invariants`, `nr-ab-compare`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
 code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
+
+- `nr-ab-compare` — stdlib offline Stage 0/1 capture analysis: synthetic PNG/PFM/raw pairs, detail/noise/colour/temporal controls, provenance and invalid-input rejection. No GPU or image-quality claim.
 
 - `lsfg-shader-library` — the LSFG runtime shader library (`retoque/lsfg/LsfgShaderLibrary.{h,cpp}`): DLL discovery (Windows Steam `libraryfolders.vdf`, registry, Wine/Proton `Z:` paths, `$HOME`, `$XDG_DATA_HOME`, override, `Lossless.dll` folder mapping), PE `RT_RCDATA` SPIR-V module extraction (99 modules), SPIR-V magic validation, Quality/Performance and FP32/FP16 resource ID resolution, real user DLL extraction when present, and content-hash-keyed DXIL cache storage/invalidation; plus `tools/lsfg-study/convert.py`'s Float16 detection (synthetic modules, and exactly ids 51..98 on the real DLL).
 - `lsfg-integration` — LSFG 3.1 as FSR-FG's interpolator (study branch, `retoque/lsfg/`): the DXIL PSV0 reader
@@ -85,7 +87,13 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   and 2): `dlss_12` chosen over native D3D11 DLSS when `Dx11Upscaler` is unset, an explicit key kept, native DLSS
   reported once in the log and shown in the NR panel while it runs (`DlssNr_Dx11Route.h`, and the production layer
   `DlssNr_Dx11Upscaler.h` against a Config stub); source guards on the two call sites in `NVNGX_DLSS_Dx11.cpp` and
-  the panel. No D3D11 device, NGX or DLSS.
+  the panel. Since step 3, the route line at HookMethod 2 only while the native guides are not carried, and each
+  evaluate handed to the transport. No D3D11 device, NGX or DLSS.
+- `nr-dx11-native-guides` — step 3 of the same note, option (c): a native D3D11 DLSS evaluate's depth and motion
+  carried through the bridge to the present pass (`DlssNr_Dx11Guides.h`): every gate and refusal in order, another
+  view of the game left out, the slot rotation against a simulated GPU (no set written while a list reads it), the
+  window and its line; source guards on the transport (`DlssNr_Dx11Guides.cpp`), its one call site, the capture core
+  it shares with the D3D12 route, the present host's half and shutdown. No D3D11, D3D12 or GPU.
 - `nr-present-guides` — selection and completion tracking for the present-time guide snapshot ring
   (`DlssNr_PresentGuideRing.h`), preventing cross-queue GPU waits and DLSS-G deadlocks.
 - `nr-present-guide-identity` — step 1 of `docs/dlssnr/design/present-real-guides.md`: the identity decision
@@ -224,7 +232,7 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-vk-extensions` — the Vulkan device-extension merge the NR hook hands `vkCreateDevice`,
   compiled against the real Vulkan headers: `VK_KHR_` and `VK_EXT_buffer_device_address` never
   leave it together, and the one the game asked for is the one kept.
-- `nr-vk-present-host` — the Vulkan present host's stages 1 to 3 (`docs/dlssnr/design/nr-vulkan-present-host.md`):
+- `nr-vk-present-host` — the Vulkan present host's stages 1 to 5 (`docs/dlssnr/design/nr-vulkan-present-host.md`):
   the registry header (`DlssNr_VkPresentRegistry.h`) through its state machine -- records with ids of their own, a
   reused handle as a new record, two devices with the same swapchain handle value, destroys taking their children,
   unknown and internal objects, the window, creation and destruction lines field for field -- and the transport's
@@ -234,12 +242,23 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   usage and a transported present's waits ever edited; no refusal after a wait is spent; locks in order; drains
   before frees. Stage 3: the colour plan, the device's extensions and bufferDeviceAddress, the model's counters and
   lines, the one-owner arbiter; guards that a model frame is decided before recording, counted on submit, seen
-  complete on a fence, freed only idle and abandoned on a lost device. No Vulkan or Wine.
+  complete on a fence, freed only idle and abandoned on a lost device. Stage 4 (`DlssNr_VkPresentFg.h`): the
+  frame-generation shape from the state the D3D12 route reads and the FG output's own facts, the carry decided for
+  each (untouched, or the round trip without NR in the pacer experiment), the unsupported line's text, Streamline's
+  log lines sorted into fence timeouts, pacer lines, warnings and errors, and the pacer trace's windows, percentiles
+  and flushes; guards that the frame-generation branch comes before housekeeping and before any edit, that the trace
+  is off unless its key is on, that its locks are leaves, and the Streamline call sites. No Vulkan or Wine.
 - `nr-zero-guides` — zero depth and motion for a host with no engine buffers, and the
   two-heap clear contract.
 
 **Wine tier.**
 
+- `dx11-guides-transport` — the native D3D11 guide transport's API sequence (`dx11-native-dlss-guides.md`, step 3)
+  on real devices under a local Proton, DXVK and vkd3d-proton as a game gets them: depth and motion formats cross
+  through shared textures and a shared fence into ring-style clones, six frames each, read back byte for byte. It
+  also takes apart the hazard the transport is built around: D3D12 never sees a D3D11 copy into a shared texture that
+  keeps the depth-stencil bind, unless D3D11 accesses it again before the hand-off. No OptiScaler, NGX or game; SKIP
+  without a local Proton.
 - `nr-session-exit` — the session guard's exit hook (`DlssNr_ProcessEnd.cpp`, built as shipped) in a real process
   under the system Wine and the newest GE-Proton's: every way a process ends itself reaches the hook once, with the
   status the design note predicts and the other threads still running; a process killed from outside, and
@@ -282,7 +301,10 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   product off the present path and its field the model's motion guide after each swapchain's warm-up, validation
   clean, at native and at half the working size (the field at the model's working size); `nr-pan-zero` is the same pan
   on zero motion, and both report how much of the unmoved previous frame the
-  model's edit carries. No game or FG.
+  model's edit carries. Stage 4: `nr-trace` holds the pacer trace's counts to the application's, and `nr-fg-vk`
+  (`-transport`) runs OptiScaler's Vulkan FSR-FG output with no DLSS-G input: every present set aside as frame
+  generation (or carried without NR in the experiment arm), never the model, validation reports only FSR-FG's own. No
+  game, no Streamline and no generated frame.
 
 **Not a suite.** `nr-before-upscale/verify-invariants.py` is a one-shot evidence
 script pinned to baseline commit `660303ec`. `run.py` does not call it and

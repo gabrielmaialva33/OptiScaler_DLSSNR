@@ -10,6 +10,7 @@
 #include <hooks/Reflex_Hooks.h>
 #include <framegen/dlssg/MfgUnlock.h>
 #include <dlssnr/DlssNr_SlBoundaryProbe.h>
+#include <dlssnr/DlssNr_VkPresentHost.h>
 #include <hooks/Streamline_LogRepeat.h>
 #include <menu/menu_overlay_base.h>
 #include <framegen/nvngx/Nvngx_FG.h>
@@ -152,6 +153,10 @@ void StreamlineHooks::streamlineLogCallback(sl::LogType type, const char* msg)
     char* trimmed_msg = trimStreamlineLog(msg);
     if (trimmed_msg != nullptr)
     {
+        DlssNr::VkPresentHost::NoteStreamline(type == sl::LogType::eInfo   ? 0
+                                              : type == sl::LogType::eWarn ? 1
+                                                                           : 2,
+                                              trimmed_msg);
         const auto decision = streamlineRepeats.Observe(trimmed_msg, StreamlineLogRepeat::Clock::now());
         const std::string repeats = StreamlineRepeatSuffix(decision);
 
@@ -730,6 +735,10 @@ void StreamlineHooks::streamlineLogCallback_sl1(sl1::LogType type, const char* m
 
     if (trimmed_msg != nullptr)
     {
+        DlssNr::VkPresentHost::NoteStreamline(type == sl1::LogType::eLogTypeInfo   ? 0
+                                              : type == sl1::LogType::eLogTypeWarn ? 1
+                                                                                   : 2,
+                                              trimmed_msg);
         const auto decision = streamlineRepeats.Observe(trimmed_msg, StreamlineLogRepeat::Clock::now());
         const std::string repeats = StreamlineRepeatSuffix(decision);
 

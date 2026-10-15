@@ -249,7 +249,7 @@ SamplerState        gLinear   : register(s0);  // so the edit can be read at a d
 // gWhitePoint; source 1 (the game's own exposure) also passes a CPU value in gWhitePoint as a fallback,
 // but when the exposure texture is bound (D3D12) it is recomputed HERE from the live exposure --
 // gExposurePreMul (= preExposure * trim) / exposure -- which removes the 3-4 frame CPU-readback lag the
-// meter path has. The clamp matches the CPU path's [0.01, 4096]. Vulkan compiles the live path out and
+// meter path has. A live result outside [0.01, 4096] falls back instead of clamping. Vulkan compiles it out and
 // always returns the CPU value, so its behaviour is unchanged.
 float WhitePoint()
 {
@@ -258,7 +258,11 @@ float WhitePoint()
     {
         float e = gExposure.Load(int3(0, 0, 0)).r;
         if (e > 1e-6 && e < 1e6)
-            return clamp(gExposurePreMul / e, 0.01, 4096.0);
+        {
+            float white = gExposurePreMul / e;
+            if (white >= 0.01f && white <= 4096.0f)
+                return white;
+        }
         // A missing or absurd sample falls through to the CPU value the meter path still maintains.
     }
 #endif

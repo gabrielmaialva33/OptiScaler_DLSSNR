@@ -441,19 +441,20 @@ inline bool BdaReady(BdaAction action) { return action != BdaAction::NotSupporte
 enum class NrSkip : uint8_t
 {
     None,
-    Off,            // [DlssNr] Enabled is off now (the host was installed with it on)
-    Colour,         // not an SDR RGBA8/BGRA8 swapchain (ColourPlan::refusal)
-    Extensions,     // the device was created without the model's extensions (ExtensionPlan::missing)
-    FormatFeatures, // the device cannot blit, store or sample a format the conversion or the model needs
-    TooSmall,       // below kDlssNrMinExtent, frame or working size
-    AfterUpscale,   // the after-upscale route owns or wants the model (VkModelOwner)
-    D3d12,          // the D3D12 route runs the model in this process
-    OtherDevice,    // the model is in use on another device
-    OtherSwapchain, // the model serves another live swapchain of this device
-    Unavailable,    // the model could not be brought up, or faulted: off for this device (the reason is logged)
-    Busy,           // as many of the model's frames in flight as its descriptor ring allows
-    RecordFailed,   // recording the pass failed; the frame carried unchanged and the model is off
-    Building,       // the model is being built off the present path; the frame carried unchanged
+    Off,             // [DlssNr] Enabled is off now (the host was installed with it on)
+    Colour,          // not an SDR RGBA8/BGRA8 swapchain (ColourPlan::refusal)
+    Extensions,      // the device was created without the model's extensions (ExtensionPlan::missing)
+    FormatFeatures,  // the device cannot blit, store or sample a format the conversion or the model needs
+    TooSmall,        // below kDlssNrMinExtent, frame or working size
+    AfterUpscale,    // the after-upscale route owns or wants the model (VkModelOwner)
+    D3d12,           // the D3D12 route runs the model in this process
+    OtherDevice,     // the model is in use on another device
+    OtherSwapchain,  // the model serves another live swapchain of this device
+    Unavailable,     // the model could not be brought up, or faulted: off for this device (the reason is logged)
+    Busy,            // as many of the model's frames in flight as its descriptor ring allows
+    RecordFailed,    // recording the pass failed; the frame carried unchanged and the model is off
+    Building,        // the model is being built off the present path; the frame carried unchanged
+    FrameGeneration, // stage 4: frame generation is active; the pacer experiment's round trip carries it, no NR
     Count,
 };
 
@@ -487,6 +488,8 @@ inline const char* NrSkipName(NrSkip skip)
         return "record failed";
     case NrSkip::Building:
         return "model building";
+    case NrSkip::FrameGeneration:
+        return "frame generation";
     default:
         return "none";
     }

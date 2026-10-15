@@ -88,7 +88,8 @@ D3D11 super-resolution evaluate, if one arrived in the last second; a game that 
 | on | none or stale (incl. every D3D12 and Vulkan game) | any | none | as before |
 | on | `dlss_12`, FSR, XeSS, ray reconstruction | any | none | as before |
 | on | native `dlss` | 0, 1, or out of range | **the pass cannot run after native D3D11 DLSS; `dlss_12` carries it** | replaced by the route line |
-| on | native `dlss` | 2 | **the game's depth and motion never reach the pass; `dlss_12` hands them over** | replaced by the route line |
+| on | native `dlss` | 2, the native guides carried to the bridge's present host in the last second (step 3) | none | as before |
+| on | native `dlss` | 2, not carried (no host, or the transport refusing) | **the game's depth and motion are not reaching the pass at present; the log's 'native D3D11 guides' line says why; `dlss_12` hands them over** | replaced by the route line |
 
 Invariant checks against this table: the line exists only when NR is on and the route leaves the pass inert
 (rule 2; it is a statement, not a control). In the HookMethod 0/1 row the hook status line under Source is hidden
@@ -97,7 +98,9 @@ say the opposite of the line above. With the pass running (a present host built 
 stays and the line follows it; the two do not contradict, because the line says what is missing, not that nothing
 runs. The log says each row once per process (`DlssNr_Dx11Route.h`, `LogOnce`). Since step 2, native `dlss`
 with NR on means an explicit `Dx11Upscaler=dlss` (ini or menu), or NR switched on over a feature created while it
-was off; with the key on auto, NR on creates `dlss_12`.
+was off; with the key on auto, NR on creates `dlss_12`. Since step 3 (option (c)) native `dlss` at HookMethod 2 carries
+the game's depth and motion to the bridge's present host, and the row reports only while they are not arriving; the log
+still says it once per process, at the first evaluate they did not arrive for.
 
 ### 2.3 Compare → "Capture original and processed" (`DlssNr_Menu.cpp`, `PairCapture::ButtonFor`)
 

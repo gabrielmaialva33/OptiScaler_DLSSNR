@@ -107,3 +107,121 @@ They cost nothing per frame and they are the reason any of this was answerable; 
 - ~~`OverrideInterpolationCount` does not persist.~~ Closed the same day: written to the test
   install's ini as `[DLSSG] OverrideInterpolationCount=3`, and a later session came up at 4x from the
   first frame with no menu interaction — the probe's first decision line already reads `override 3`.
+
+
+## Crimson Desert: `setDynamicMFGParams` under Proton (2026-10-15)
+
+**Finding: a missing Reflex-Sync implementation, not a demonstrated count-override defect.**
+No runtime change is made here. The count override is not necessary for the error to continue;
+whether the Ada unlock exposes this path cannot be isolated from the retained sessions. Do not
+call the error harmless or cost-free: fixed interpolation can continue, but pacing and retry cost
+have not been measured. No game was run for this investigation.
+
+### What fails, and why it appears every ten seconds
+
+In `bin64/OptiScaler.log`, the first pair is consecutive (lines 879-880):
+
+```text
+[09:50:12.037517] [E] StreamlineHooks::streamlineLogCallback [09-50-12][streamline][error][tid:504][17s:357ms:490us]generic.cpp:1400[setReflexSyncFG] NvAPI_D3D_SetReflexSync((IUnknown*)m_typelessDevice, (NV_SET_REFLEX_SYNC_PARAMS*)&m_cachedReflexSyncParams) failed error -3
+[09:50:12.037573] [E] StreamlineHooks::streamlineLogCallback [09-50-12][streamline][error][tid:504][17s:357ms:546us]rsync.cpp:660[setDynamicMFGParams] RSYNC: setDynamicMFGParams failed with status 1
+```
+
+The same pair starts the failures in `OptiScaler.previous.log:873-874` and
+`OptiScaler.log.pre-ge117:2228-2229`. `-3` is `NVAPI_NO_IMPLEMENTATION`
+(`external/nvapi/nvapi_lite_common.h`). The current native-DLSS-G hook forwards this call unchanged
+(`OptiScaler/hooks/Reflex_Hooks.cpp`, `hkNvAPI_D3D_SetReflexSync`); its early success branch is for
+FSR-FG/XeFG, and the fake-NVAPI implementation also returns success, not -3. The latest log identifies
+NVAPI as `C:\windows\system32\nvapi64.dll; native/runtime NVAPI` at line 949. That identifies the
+loaded route, not the exact DLL build or a guarantee of Windows driver functionality under Proton.
+
+NVIDIA's published Streamline v2.14.1 implementation of `Generic::setReflexSyncFG` writes the fixed
+multiplier, dynamic maximum and target FPS into cached parameters, then calls `NvAPI_D3D_SetReflexSync`.
+Its `NVAPI_CHECK` logs the native error once and returns `ComputeStatus::eError`, whose value is 1.
+This matches the adjacent log pair and explains why only the outer error keeps appearing. The RSync
+caller is in the binary-only DLSS-G plugin, so this is a source-and-log-supported explanation, not
+an inspection of that private function's control flow.
+Sources: [generic.cpp at v2.14.1](https://github.com/NVIDIA-RTX/Streamline/blob/2122257e0fce486f91b385aa63b9a09b0a34b363/source/platforms/sl.chi/generic.cpp#L1387),
+[status and NVAPI_CHECK](https://github.com/NVIDIA-RTX/Streamline/blob/2122257e0fce486f91b385aa63b9a09b0a34b363/source/platforms/sl.chi/compute.h#L533),
+[plugin source availability](https://github.com/NVIDIA-RTX/Streamline#readme).
+
+The ten seconds are **our log filter**, not the call interval:
+`retoque/hooks/Streamline_LogRepeat.h` sets `Interval = seconds(10)`. For example:
+
+```text
+[09:50:39.496147] [E] StreamlineHooks::streamlineLogCallback [09-50-39][streamline][error][tid:504][44s:815ms:695us]rsync.cpp:660[setDynamicMFGParams] RSYNC: setDynamicMFGParams failed with status 1 (repeated 411 more times since the previous line, not written)
+```
+
+That represents 412 callbacks in about ten seconds. Startup can write more often while the filter's
+256-site table is full and fails open; the old unfiltered session has a median error interval of
+29.89 ms. This is a repeatedly failed parameter update on the presentation path, not evidence of
+a harmless periodic capability query from the game. `OverrideForceDMFG=false` in both October 15
+logs, and fixed `eOn` is what the plugin reports; the method's name does not establish dynamic mode.
+
+### Retained sessions and the useful negative control
+
+Files were read only under `~/.local/share/Steam/steamapps/common/Crimson Desert/bin64/`.
+Build stamps date the sessions; rotating names alone do not.
+
+| Log / build | Relevant state | Failure evidence |
+|---|---|---|
+| `OptiScaler_146683100938.log`, `f034397a`, 2026-09-06 | sl.dlss_g 2.11.1; no configured DLSSG keys or unlock application logged; that build defaults unlock off; plugin reports max 1 and dynamic MFG unavailable | No matching errors in 11,410 lines, 13:58:13–14:06:03; fixed `eOn`, one generated frame, does run |
+| `OptiScaler.log.pre-ge117`, `529d8917`, 2026-09-19 | sl.dlss_g 2.14.1; both Ada options true; initially override 3 and forced dynamic mode true; provider advertise/validate/kernel and wrapper DRS patches applied | 15,743 errors, 01:59:18.573754–02:07:10.246591 |
+| `OptiScaler.previous.log`, `a2d02037`, 2026-10-15 | sl.dlss_g 2.14.1, provider 310.9.1; both Ada options true, override 3, forced dynamic false | 309 printed lines + 5,656 folded = at least 5,965 callbacks, 00:24:05.775481–00:27:57.051432 |
+| `OptiScaler.log`, `acf885e7`, 2026-10-15 | same starting setup; later override changes to 4 then 5 | 278 printed lines + 7,485 folded = at least 7,763 callbacks, 09:50:12.037573–09:54:29.899192 |
+
+Counts include printed lines and their explicit folded counts; unflushed pending repeats can make
+the actual total larger. The latest file is a prior `acf885e7` session, not an `a1b86054` capture.
+
+The September 19 log unsets the override mid-session:
+
+```text
+[02:05:16.214535] [I] StreamlineHooks::hkslDLSSGSetOptions DLSSG override state: mode eOn active true sl>=2.7.1 true mfgMax 5 override unset asked 1
+[02:05:16.219156] [E] StreamlineHooks::streamlineLogCallback [02-05-16][streamline][error][tid:536][378s:174ms:242us]rsync.cpp:660[setDynamicMFGParams] RSYNC: setDynamicMFGParams failed with status 1
+```
+
+There are **3,942 further errors after the unset**. At 02:05:46.996414 it again reports `eOn`,
+`override unset`, `asked 1`, and errors continue through 02:07:10.246591. Thus the continued failure
+does not require an active fixed-count override or dynamic mode. This is not a cold-start control:
+previous state and the unlock patches remain. The September 6 session also changes the wrapper
+version and available capability, so it cannot prove which change first enabled the failing path.
+No retained 2.14.1 session starts with the Ada unlock off.
+
+### Patch and hook audit
+
+- The count assignment comes from the upstream hook (`7a1f18ca`, `a2aef356`); our later
+  `1c7e25df`/`150b49d0` edits added diagnostics. A positive override writes
+  `numFramesToGenerate`; forcing dynamic mode is a separate option. NVIDIA documents that
+  dynamic mode ignores the fixed count and requires a separate support check:
+  [DLSS-G guide, sections 6.3 and 14.2](https://github.com/NVIDIA-RTX/Streamline/blob/2122257e0fce486f91b385aa63b9a09b0a34b363/docs/ProgrammingGuideDLSS_G.md).
+- `MfgUnlock::TryApply` gates writes on `AdaMfgUnlock`; it patches provider advertise/validate,
+  optional kernel selection, the wrapper ceiling and the DRS cap. `MfgPatchPlan.h` commits and
+  verifies those sites transactionally; neither component implements or calls Reflex-Sync.
+  Raising a capability can nevertheless expose an unsupported pacing path. That indirect
+  contribution remains plausible, not established by these logs.
+- `6a02e141` added the DRS-cap bypass on September 18, before the first retained failing session.
+  `c9d192f8` added the edx ceiling match and transactional writes on October 14, **after** the
+  September 19 failures. It cannot be their origin. In 2.14.1 the ceiling is already five and the
+  new ceiling site is a no-op. This does not exonerate the older unlock or DRS patch.
+- `770e57a4` added the ten-second limiter on October 4. It reduces log writes, not failed calls.
+  The earlier bridge investigation in `synthesized-frame-generation.md` also recorded the same
+  NVAPI/RSync pair; its observed interpolation is not a pacing-quality measurement for this game.
+
+### Cost, safety and remaining evidence
+
+The latest session logs interpolation enabled with `mode=eOn, numFramesToGenerate=3` immediately
+after the first error (line 881). That establishes acceptance of fixed 4x mode, not four distinct,
+correctly paced displayed frames. The failed pacing update could affect behavior beyond the log.
+
+There is CPU work on every callback: Streamline's failed call and formatting, our trim allocation
+and copy, site string/hash lookup under a mutex, and a counter increment. Retained messages also
+format, write and flush synchronously (`LogAsync=false`; `Logger.cpp` uses `flush_on(trace)`).
+The limiter avoids most writes after startup, but does not make the retries free. These logs contain
+no timing of the failed call or filter; **no milliseconds, FPS loss, or zero-cost claim is justified**.
+
+No safe local fix was demonstrated. Returning success without implementing Reflex-Sync, hiding its
+entry point, patching the private RSync retry, or changing the requested mode might silence the log
+while changing pacing. None is applied. Upstream `OptiScaler/` files remain byte-identical.
+A controlled follow-up needs the same 2.14.1/provider/runtime with a fresh process for unlock off/on
+and override unset/3 (forced dynamic off), plus a presentation/pacing trace. Native Windows would
+separate a Proton runtime limitation from a capability exposed by the unlock. These are the missing
+controls, not tests performed by this change.

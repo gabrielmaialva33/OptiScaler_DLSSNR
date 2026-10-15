@@ -43,6 +43,12 @@ namespace DlssNr::VkPresentHost
 // its own [Vulkan] SkipHooks / marker check. Installs once; a no-op unless the configuration above holds.
 void Install(HMODULE vulkan1);
 
+// From OptiScaler's Streamline log callbacks (both SDK generations), every message: `level` 0 info, 1 warning, 2 error.
+// Counted for stage 4's pacer trace (DlssNr_VkPresentFg.h); returns at once unless [DlssNr] VulkanPresentTrace is on
+// with the host installed. Any thread; takes one leaf lock, only for a message it counts (a warning, an error, or a
+// "timed out" at any level).
+void NoteStreamline(int level, const char* message);
+
 // For the bundle's vkQueuePresentKHR hook, which tells a DXVK or vkd3d-proton present from a native one by its caller:
 // with this host's present detour on top, its own return address lies in OptiScaler. Inside a present that went
 // through this host, the application's return address; otherwise -- the host off, or not installed -- `returnAddress`.
