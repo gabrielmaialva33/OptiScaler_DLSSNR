@@ -162,6 +162,15 @@ elif hdr_cpp != hdr_cb:
 if len(failures) == before:
     print(f'PASS: {len(hdr_cpp)} ordered 4-byte constants match between DlssNr_PresentHdr_Dx12::Constants and its cbuffer')
 
+# Vulkan uses the same four scalars, packed to 16 bytes and placed at aligned dynamic offsets.
+hdr_vk = (nr / 'shaders/dlssnr/DlssNr_PresentHdr_Vk.h').read_text()
+hdr_vk_fields = [(t.replace('uint32_t', 'uint'), n.lower()) for t, n in
+                 re.findall(r'\b(uint32_t|float)\s+(\w+)\s*;', body(hdr_vk, 'struct Constants'))]
+if hdr_vk_fields != hdr_cb:
+    fail(f'VkConversion::Constants {hdr_vk_fields} and HDR Params {hdr_cb} differ')
+else:
+    print('PASS: 4 ordered 4-byte Vulkan HDR constants match the shared cbuffer')
+
 # --- 3. Headers are the committed bytecode --------------------------------------------------------
 
 before = len(failures)

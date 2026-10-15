@@ -26,6 +26,7 @@
 #define NOMINMAX
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <windows.h>
+#include <DirectXPackedVector.h>
 #include <vulkan/vulkan.h>
 
 #include "nvsdk_ngx_vk.h"
@@ -184,8 +185,8 @@ static bool FourBytes(VkFormat format)
 static uint32_t g_pan = 0;
 
 // The picture: a horizontal and a vertical gradient, a fine texture, flat patches, thin stripes, and a square that
-// moves a few pixels a frame. Opaque. R, G, B in that order; the caller swizzles for BGRA. With --pan everything but the
-// square is sampled g_pan pixels further right every frame, the gradient repeating every two widths.
+// moves a few pixels a frame. Opaque. R, G, B in that order; the caller swizzles for BGRA. With --pan everything but
+// the square is sampled g_pan pixels further right every frame, the gradient repeating every two widths.
 static void Picture(uint32_t xIn, uint32_t y, uint32_t w, uint32_t h, uint32_t frame, uint8_t rgb[3])
 {
     const uint32_t x = g_pan != 0 ? (xIn + frame * g_pan) % std::max(2 * w, 1u) : xIn;
@@ -217,32 +218,41 @@ static void Picture(uint32_t xIn, uint32_t y, uint32_t w, uint32_t h, uint32_t f
     rgb[2] = static_cast<uint8_t>(std::clamp(b, 0, 255));
 }
 
-static uint32_t Hash(uint32_t seed, uint32_t i)
+static size_t PixelBytes(VkFormat format) { return format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 : 4; }
+static bool Hdr(VkFormat format, VkColorSpaceKHR space)
 {
-    uint32_t x = seed * 0x9E3779B1u ^ (i + 0x7F4A7C15u) * 0x85EBCA77u;
-    x ^= x >> 15;
-    x *= 0x2C1B3C6Du;
-    x ^= x >> 12;
-    return x;
+    return (space == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+            (format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || format == VK_FORMAT_A2R10G10B10_UNORM_PACK32)) ||
+           (space == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT && format == VK_FORMAT_R16G16B16A16_SFLOAT);
 }
-
 static void Fill(uint8_t* out, VkFormat format, uint32_t w, uint32_t h, uint32_t frame)
 {
     for (uint32_t y = 0; y < h; ++y)
     {
         for (uint32_t x = 0; x < w; ++x)
         {
-            uint8_t* p = out + (size_t(y) * w + x) * 4;
+            uint8_t* p = out + (size_t(y) * w + x) * PixelBytes(format);
+            uint8_t rgb[3];
+            Picture(x, y, w, h, frame, rgb);
+            if (format == VK_FORMAT_R16G16B16A16_SFLOAT)
+            {
+                const uint16_t rgba[] = { DirectX::PackedVector::XMConvertFloatToHalf(rgb[0] / 32.0f - 0.25f),
+                                          DirectX::PackedVector::XMConvertFloatToHalf(rgb[1] / 32.0f),
+                                          DirectX::PackedVector::XMConvertFloatToHalf(rgb[2] / 32.0f),
+                                          DirectX::PackedVector::XMConvertFloatToHalf((x % 4) / 3.0f) };
+                std::memcpy(p, rgba, 8);
+                continue;
+            }
             if (!(format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB ||
                   format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB))
             {
                 // Not an eight-bit format: only its exactness is judged, so any bits do.
-                const uint32_t v = Hash(frame + 1, y * w + x);
+                const uint32_t r = 64 + rgb[0] * 3, g = 64 + rgb[1] * 3, b = 64 + rgb[2] * 3;
+                const bool reverse = format == VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+                const uint32_t v = (reverse ? b : r) | (g << 10) | ((reverse ? r : b) << 20) | ((x % 4) << 30);
                 std::memcpy(p, &v, 4);
                 continue;
             }
-            uint8_t rgb[3];
-            Picture(x, y, w, h, frame, rgb);
             p[0] = Bgra(format) ? rgb[2] : rgb[0];
             p[1] = rgb[1];
             p[2] = Bgra(format) ? rgb[0] : rgb[2];
@@ -276,13 +286,14 @@ struct SwapchainFacts
     double maeMax = 0.0;
     uint32_t maxDiff = 0;
     uint64_t alphaChanged = 0;
-    uint32_t black = 0; // read-backs whose every colour channel came back zero
+    uint32_t black = 0;     // read-backs whose every colour channel came back zero
+    uint64_t nonFinite = 0; // HDR FP16 colour components that are NaN or infinity
     bool destroyed = false;
     double maxPresentMs = 0.0; // the longest vkQueuePresentKHR call, the host's hook and everything below included
     // With --pan, from the swapchain's 16th frame (past the model's build and the estimator's warm-up), on frames the
-    // model edited: how much of the previous frame, unmoved, the model's edit carries -- the projection of (read back - presented) on (previous -
-    // presented) at the same pixel, per frame. A model blending a stale history it was told did not move ghosts toward
-    // 1; one whose history follows the camera stays near 0.
+    // model edited: how much of the previous frame, unmoved, the model's edit carries -- the projection of (read back -
+    // presented) on (previous - presented) at the same pixel, per frame. A model blending a stale history it was told
+    // did not move ghosts toward 1; one whose history follows the camera stays near 0.
     double trailSum = 0.0;
     uint32_t trailFrames = 0;
 };
@@ -335,6 +346,7 @@ struct App
     bool wdx12 = false;
     bool nrToggle = false;
     bool slowBuild = false;
+    bool hdr = false;
     bool wdx12Probed = false;
     HMODULE optiscaler = nullptr;
     std::vector<PhaseFacts> phases;
@@ -388,16 +400,26 @@ struct App
         debug.messageType =
             VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT;
         debug.pfnUserCallback = DebugMessage;
-        const char* extensions[] = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
-                                     VK_EXT_DEBUG_UTILS_EXTENSION_NAME };
+        std::vector<const char*> extensions { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+                                              VK_EXT_DEBUG_UTILS_EXTENSION_NAME };
+        if (hdr)
+        {
+            uint32_t n = 0;
+            Check(vkEnumerateInstanceExtensionProperties(nullptr, &n, nullptr), "instance extensions");
+            std::vector<VkExtensionProperties> available(n);
+            Check(vkEnumerateInstanceExtensionProperties(nullptr, &n, available.data()), "instance extensions");
+            for (const auto& e : available)
+                if (!strcmp(e.extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))
+                    extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+        }
         VkApplicationInfo app { VK_STRUCTURE_TYPE_APPLICATION_INFO };
         app.pApplicationName = "OptiScaler Vulkan present host cold NR";
         app.apiVersion = VK_API_VERSION_1_1;
         VkInstanceCreateInfo info { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
         info.pNext = &debug;
         info.pApplicationInfo = &app;
-        info.enabledExtensionCount = 3;
-        info.ppEnabledExtensionNames = extensions;
+        info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+        info.ppEnabledExtensionNames = extensions.data();
         Check(vkCreateInstance(&info, nullptr, &instance), "vkCreateInstance");
         auto createDebug = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
             vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"));
@@ -606,6 +628,14 @@ struct App
         }
         info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
         info.clipped = VK_TRUE;
+        // GE-Proton11-7 Wayland aborts with "CM Surface already exists" if the old colour-managed swapchain
+        // is still alive while its replacement is created. HDR WSI cases exercise sequential surfaces; the normal
+        // SDR cases retain oldSwapchain overlap coverage.
+        if (hdr && target.swapchain != VK_NULL_HANDLE)
+        {
+            Check(vkDeviceWaitIdle(device), "idle before replacing HDR surface");
+            DestroySwapchain(target);
+        }
         const VkSwapchainKHR old = target.swapchain;
         info.oldSwapchain = old;
         VkSwapchainKHR swapchain = VK_NULL_HANDLE;
@@ -625,7 +655,7 @@ struct App
         target.images.resize(count);
         Check(vkGetSwapchainImagesKHR(device, swapchain, &count, target.images.data()), "swapchain images");
         target.expected.assign(count, -1);
-        const VkDeviceSize bytes = VkDeviceSize(extent.width) * extent.height * 4;
+        const VkDeviceSize bytes = VkDeviceSize(extent.width) * extent.height * PixelBytes(format.format);
         target.upload = MakeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
         target.download = MakeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
@@ -650,7 +680,7 @@ struct App
     {
         SwapchainFacts& facts = swapchains[target.facts];
         const uint32_t w = target.extent.width, h = target.extent.height;
-        std::vector<uint8_t> expected(size_t(w) * h * 4);
+        std::vector<uint8_t> expected(size_t(w) * h * PixelBytes(target.format));
         Fill(expected.data(), target.format, w, h, static_cast<uint32_t>(target.expected[index]));
         const auto* got = static_cast<const uint8_t*>(target.download.mapped);
 
@@ -660,7 +690,7 @@ struct App
         uint64_t sum = 0;
         uint32_t maxDiff = 0;
         uint64_t alpha = 0;
-        bool black = eightBit;
+        bool black = true;
         if (eightBit)
         {
             for (size_t i = 0; i < expected.size(); i += 4)
@@ -673,6 +703,30 @@ struct App
                     black = black && got[i + c] == 0;
                 }
                 alpha += expected[i + 3] != got[i + 3] ? 1 : 0;
+            }
+        }
+        if (!eightBit)
+        {
+            for (size_t i = 0; i < size_t(w) * h; ++i)
+            {
+                if (PixelBytes(target.format) == 8)
+                {
+                    alpha += std::memcmp(expected.data() + i * 8 + 6, got + i * 8 + 6, 2) != 0;
+                    uint16_t rgba[4];
+                    std::memcpy(rgba, got + i * 8, sizeof(rgba));
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        facts.nonFinite += (rgba[c] & 0x7C00) == 0x7C00;
+                        black = black && (rgba[c] & 0x7FFF) == 0;
+                    }
+                }
+                else
+                {
+                    alpha += (expected[i * 4 + 3] & 0xC0) != (got[i * 4 + 3] & 0xC0);
+                    uint32_t pixel;
+                    std::memcpy(&pixel, got + i * 4, sizeof(pixel));
+                    black = black && (pixel & 0x3FFFFFFF) == 0;
+                }
             }
         }
         const double mae = eightBit ? double(sum) / (double(w) * h * 3) : (exact ? 0.0 : 255.0);
@@ -1279,18 +1333,31 @@ struct App
                     Frames(target);
                 }
             }
+            if (hdr && first.format != VK_FORMAT_UNDEFINED)
+                break; // one SDR -> HDR -> SDR sequence; the normal cases exercise all four SDR formats
         }
         Require(first.format != VK_FORMAT_UNDEFINED, "the surface offers no SDR RGBA8/BGRA8 format");
 
         // One four-byte format that is not SDR, when the surface offers one: refused, carried unchanged.
         for (const auto& f : offered)
         {
-            if (FourBytes(f.format) && !Sdr(f.format, f.colorSpace))
+            if (!hdr && FourBytes(f.format) && !Sdr(f.format, f.colorSpace))
             {
                 MakeSwapchain(target, "not-sdr", f, graphicsQueue, graphicsFamily);
                 Frames(target);
                 break;
             }
+        }
+
+        if (hdr)
+        {
+            for (const auto& f : offered)
+                if (Hdr(f.format, f.colorSpace))
+                {
+                    const std::string name = "hdr-" + std::to_string(f.format);
+                    MakeSwapchain(target, name.c_str(), f, graphicsQueue, graphicsFamily);
+                    Frames(target);
+                }
         }
 
         // From the compute-only family: the round trip and the model on the graphics family, handed over and back.
@@ -1352,8 +1419,8 @@ struct App
                 << ", \"readbacks\": " << s.readbacks << ", \"exact\": " << s.exact
                 << ", \"mae_mean\": " << (s.readbacks ? s.maeSum / s.readbacks : 0.0) << ", \"mae_max\": " << s.maeMax
                 << ", \"max_diff\": " << s.maxDiff << ", \"alpha_changed\": " << s.alphaChanged
-                << ", \"black\": " << s.black << ", \"destroyed\": " << (s.destroyed ? "true" : "false")
-                << ", \"max_present_ms\": " << s.maxPresentMs
+                << ", \"black\": " << s.black << ", \"nonfinite\": " << s.nonFinite
+                << ", \"destroyed\": " << (s.destroyed ? "true" : "false") << ", \"max_present_ms\": " << s.maxPresentMs
                 << ", \"trail_mean\": " << (s.trailFrames ? s.trailSum / s.trailFrames : 0.0)
                 << ", \"trail_frames\": " << s.trailFrames << "}";
         }
@@ -1388,6 +1455,8 @@ int main(int argc, char** argv)
                 app.wdx12 = true;
             else if (!strcmp(argv[i], "--nr-toggle"))
                 app.nrToggle = true;
+            else if (!strcmp(argv[i], "--hdr"))
+                app.hdr = true;
             else if (!strcmp(argv[i], "--slow-build"))
                 app.slowBuild = true;
             else if (!strcmp(argv[i], "--frames") && i + 1 < argc)

@@ -300,7 +300,7 @@ for block in blocks:
 assert prepare.index('DecideNr(') < prepare.index('RecordWork(') < prepare.index('try_lock_for')
 record = code(function(host, 'Recorded RecordWork('))
 assert record.index('cmdCopyImage(buffer, image,') < record.index('cmdBlitImage(buffer, work,') < \
-    record.index('dev.model->Record(*nr)') < record.index('cmdBlitImage(buffer, nr->image,') < \
+    record.rindex('dev.model->Record(*nr)') < record.index('cmdBlitImage(buffer, nr->image,') < \
     record.index('cmdCopyImage(buffer, work,')
 # A model frame counts only once its work buffer was submitted: exactly the two submits that carry it, each on success.
 assert prepare.count('recording.Submitted(slot);') == 2
@@ -341,7 +341,7 @@ decide = code(function(host, 'NrDecision DecideNr('))
 assert decide.index('->Admit(') < decide.index('dev.modelSwapchain = sc.id;')
 assert decide.index('DlssNrEnabled') < decide.index('StandDown(dev)')
 assert decide.index('PresentHostMustYield') < decide.index('ClaimModelForPresentHost') < decide.index('->Admit(')
-for cheap in ('sc.colour.sdr', 'dev.nrReady', 'MissingFormatFeatures('):
+for cheap in ('colour.Eligible()', 'dev.nrReady', 'MissingFormatFeatures('):
     assert decide.index(cheap) < decide.index('ClaimModelForPresentHost'), cheap
 # Present semaphores of a destroyed swapchain are freed after the destroy returned, never before it.
 destroy = host[host.index('void OnDestroySwapchain('):]
@@ -356,8 +356,9 @@ assert after_upscale.index('ClaimModelForAfterUpscale(device)') < after_upscale.
 assert after_upscale.index('colour == nullptr || depth == nullptr || motion == nullptr') < \
     after_upscale.index('ClaimModelForAfterUpscale(device)')
 assert 'g_vk.' not in code(model), 'the present model must not touch the after-upscale route\'s state'
-record_model = code(function(feature_vk, 'bool VkPresentModel::Record(const VkPresentNrFrame& frame)'))
-assert 'encode.Passthrough = 1u;' in record_model and 'encode.HighlightRecovery = 0u;' in record_model
+record_model = code(function(feature_vk, 'bool VkPresentModel::Record(const VkPresentNrFrame& input)'))
+assert 'encode.Passthrough = frame.hdrProfile != 0 ? 0u : 1u;' in record_model
+assert 'PresentHdr::kSdrWhiteScRgb * scale' in record_model
 # One set of constants, the encode's; the downsample and the resolve are copies of it, so the passthrough gate holds in
 # every place the shader reproduces the encode.
 assert re.findall(r'DlssNrConstants (\w+)', record_model) == ['encode', 'down', 'resolve'], record_model
@@ -374,7 +375,7 @@ assert 'Shutdown' not in release, 'NGX goes with the device (ShutdownPresentNgx)
 assert 'm.dispatches + 3 - oldest > kPresentPassSlots' in admit
 # A queued job is called off first; a running one, frames in flight or a build-lost device abandon instead of freeing.
 assert release.index('m.CancelQueued();') < \
-    release.index('if (!m.pending.empty() || m.JobState() == BuildState::Running || m.deviceLost)') < \
+    release.index('if (!m.pending.empty() || m.JobState() == BuildState::Running || m.Lost())') < \
     release.index('g_fwd.release(')
 abandon = code(function(feature_vk, 'void VkPresentModel::Abandon()'))
 assert not re.search(r'\bvk[A-Z]\w*\(|g_fwd\.|Destroy', abandon), abandon
@@ -388,6 +389,37 @@ assert 'using PFN_NrVkShutdown1 = int(__cdecl*)(void*, unsigned int*);' in forwa
 assert 'using PFN_Shutdown1 = NVSDK_NGX_Result (*)(VkDevice, unsigned int*);' in feature_vk
 assert 'VULKAN_Shutdown1()(' not in code(model) and 'shutdown(device, &remaining);' in feature_vk
 
+# HDR conversion is a per-build product, never a present-thread allocation. Its fixed descriptor sets and uniform
+# records are read-only across frames; replacement follows the same completion tickets as the feature and images.
+hdr = (root / 'retoque/shaders/dlssnr/DlssNr_PresentHdr_Vk.h').read_text()
+hdr_record = code(function(hdr, '    void Record('))
+assert not re.search(r'vk(?:Create|Allocate|Update|Map|Wait)', hdr_record)
+assert 'VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT' in hdr
+assert 'vkGetPhysicalDeviceImageFormatProperties(' in hdr
+assert 'minUniformBufferOffsetAlignment' in hdr and 'mode * stride, 16' in hdr
+run_hdr = code(function(feature_vk, 'void RunBuild('))
+assert run_hdr.index('job.hdr.Create(') < run_hdr.index('job.dev.submit')
+assert 'job.lost = job.lost || job.hdr.lost;' in run_hdr
+for signature in ('void FreeBuild(',):
+    assert 'hdr.Destroy(' in code(function(feature_vk, signature))
+assert 'hdr = {};' in code(function(feature_vk, 'void ForgetBuild('))
+assert 'old.hdr = hdr;' in retire and 'hdr = {};' in retire
+assert 'm.hdr.Destroy(' in release and 'm.hdr = {};' in abandon
+assert 'if (Building() || Lost())' in code(function(feature_vk, '    void FreeRetired()'))
+loss = code(function(feature_vk, '    bool Lost() const'))
+assert loss.index('JobState()') < loss.index('state == BuildState::Done') < loss.index('job->lost')
+assert 'state == BuildState::Failed' in loss
+assert 'return _impl->Lost();' in code(function(feature_vk, 'bool VkPresentModel::DeviceLost() const'))
+assert release.index('(void) m.Adopt();') < release.rindex('if (m.Lost())') < release.index('m.FreeRetired();')
+assert 'm.hdrFailure' in admit and 'm.hdrFailure.reset();' in admit
+assert 'm.hdr.Record(cmd, m.width, m.height, PresentHdr::kModeDecode)' in record_model
+assert 'm.hdr.Record(cmd, m.width, m.height, PresentHdr::kModeEncode)' in record_model
+assert record_model.index('PresentHdr::kModeDecode') < record_model.index('g_fwd.evaluate(') < record_model.index('PresentHdr::kModeEncode')
+assert 'VK_IMAGE_LAYOUT_UNDEFINED' in record_model  # discarded recordings leave no stale layout bookkeeping
+assert 'HdrCopy(cmd, m.hdrEncoded.image, input.image, m.width, m.height)' in record_model
+assert '203.0 nits (203-nit fallback)' in feature_vk
+print('PASS: HDR resource lifetime, immutable descriptors, formatless per-format checks, worker-only allocation and decode/model/encode order')
+
 # The way back from the after-upscale route (DOOM Eternal, 2026-10-14; DlssNr_VkModelOwner.h). Begun only with no
 # model of the host's on the device and the route quiet there; followed at every present, before any refusal.
 housekeep_flat = flat(housekeep)
@@ -396,8 +428,8 @@ assert housekeep.index('AfterUpscaleIdleOn(dev.device)') < housekeep.index('Hand
 assert 'HandBackBlocked(dev, reason);' in housekeep and 'dev.handBackDiagnostics.Reset();' in housekeep
 assert 'handBackNotBefore =' not in housekeep  # F7 off does not postpone the already-due hand-back
 could_run = code(function(host, 'std::string ModelUnavailable(DeviceTransport& dev)'))
-for needed in ('dev.nrReady', 'dev.lost', 'sc.colour.sdr', 'sc.nrOff.empty()', 'sc.retired',
-               'PresentHostMustYield(dev.device)', 'MissingFormatFeatures(dev, sc.colour.raw)'):
+for needed in ('dev.nrReady', 'dev.lost', 'PlanColour(', 'sc.nrOff.empty()', 'sc.retired',
+               'PresentHostMustYield(dev.device)', 'MissingFormatFeatures(dev, sc.colour.raw,'):
     assert needed in could_run, needed
 assert 'DlssNrEnabled.value_or_default()' in housekeep
 # The real try-only lock helper is shared with host tests; StartHandBack's RAII vector releases earlier locks.
@@ -502,7 +534,7 @@ assert admit.index('DecideBuild(') < admit.index('pending.size() >= VkPresentHos
 assert re.search(r'return \{ NrSkip::Building,', admit)
 assert 'm.Building()' in record_model.split('return false;')[0]  # no evaluate while a job runs
 free_retired = code(function(feature_vk, '    void FreeRetired()'))
-assert re.match(r'\{\s*if \(Building\(\)\)\s*return;', free_retired), free_retired
+assert re.match(r'\{\s*if \(Building\(\) \|\| Lost\(\)\)\s*return;', free_retired), free_retired
 builder_part = code(feature_vk[feature_vk.index("// --- The model's builds, off the present path"):
                                feature_vk.index('struct VkPresentModel::Impl')])
 run_build = code(function(feature_vk, 'void RunBuild(PresentBuildJob& job)'))
@@ -514,7 +546,7 @@ for forbidden in ('g_vk.', 'g_vkMutex', 'g_ownerMutex', 'DeviceWaitIdle', 'Queue
     assert forbidden not in builder_part, forbidden
 assert builder_part.count('std::thread(') == 1 and 'std::thread(' in code(function(feature_vk, '    void Post('))
 # Orphaned (the device lost or destroyed): what the job made is forgotten, never freed.
-assert re.search(r"if \(job\.orphaned\.load\(std::memory_order_acquire\) \|\| !free\)\s*ForgetBuild\(job\);",
+assert re.search(r"if \(job\.orphaned\.load\(std::memory_order_acquire\) \|\| job\.lost \|\| !free\)\s*ForgetBuild\(job\);",
                  run_build)
 # The GPU's own work is waited for before the product is handed over; a timeout or a lost device frees nothing.
 assert re.search(r'if \(submitted == VK_TIMEOUT\)\s*return stop\([^;]*,\s*false\);', run_build, re.S)
@@ -555,7 +587,7 @@ assert 'fn.waitForFences(device, 1, &fence, VK_TRUE, slice)' in build_submit
 assert re.search(r'if \(result != VK_ERROR_DEVICE_LOST\)\s*fn\.destroyFence', build_submit)
 assert re.search(r'if \(result == VK_SUCCESS\)\s*fn\.destroyFence\(device, fence, nullptr\);\s*return result;',
                  build_submit)
-assert 'dev.model->Admit(sc.extent.width, sc.extent.height, workFamily)' in decide
+assert 'dev.model->Admit(sc.extent.width, sc.extent.height, workFamily, colour.profile, colour.raw)' in decide
 # vkDestroyDevice: a build under way is ended -- waited for, then orphaned and waited for again -- before anything,
 # the lost branch included; a build that lost the device marks it lost there and in DecideNr.
 end_build = code(function(host, 'void EndModelBuild(DeviceTransport& dev)'))

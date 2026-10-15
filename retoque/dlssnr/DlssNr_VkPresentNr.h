@@ -133,9 +133,11 @@ inline constexpr uint32_t kWorkingFormat = kFormatR16G16B16A16Sfloat;
 // model is shown the sRGB-encoded frame, as the D3D12 present pass shows it (a copy of the backbuffer's own bytes).
 struct ColourPlan
 {
-    bool sdr = false;       // the model may be shown this swapchain
+    uint32_t profile = 0; // 0: SDR/refused, 1: HDR10, 2: scRGB (shared conversion shader)
+    bool Eligible() const { return sdr || profile != 0; }
+    bool sdr = false;       // use the existing display-referred SDR composition
     uint32_t raw = 0;       // the raw image's format; the swapchain's own when !sdr (stage 2's unchanged round trip)
-    std::string refusal;    // why not, when !sdr
+    std::string refusal;    // why not, when !Eligible()
     std::string formatName; // for the lines
 };
 
@@ -162,19 +164,29 @@ inline std::string FormatName(uint32_t format)
     }
 }
 
-// SDR only, as the D3D12 present pass without its HDR conversion (DlssNr_PresentColour.h): eight-bit RGBA or BGRA,
-// UNORM or sRGB, in the sRGB non-linear colour space. Everything else is refused with its format and colour space
-// named, and goes to the screen as the game rendered it.
-inline ColourPlan PlanColour(uint32_t format, uint32_t colourSpace)
+// SDR is eight-bit RGBA/BGRA, UNORM or sRGB, in the sRGB non-linear colour space. With HdrPresent, the two exact
+// HDR profile/format pairs also qualify for the worker-built conversion. Everything else is refused with its format
+// and colour space named, and goes to the screen as the game rendered it.
+inline ColourPlan PlanColour(uint32_t format, uint32_t colourSpace, bool hdrPresent = false)
 {
     ColourPlan plan;
     plan.raw = format;
     plan.formatName = FormatName(format);
 
-    const auto refuse = [&plan, colourSpace](const std::string& what)
+    if (hdrPresent && colourSpace == kColourSpaceHdr10St2084 &&
+        (format == kFormatA2B10G10R10UnormPack32 || format == kFormatA2R10G10B10UnormPack32))
+        plan.profile = 1;
+    else if (hdrPresent && colourSpace == kColourSpaceExtendedSrgbLinear && format == kFormatR16G16B16A16Sfloat)
+        plan.profile = 2;
+    if (plan.profile != 0)
+        return plan;
+
+    const auto refuse = [&plan, colourSpace, hdrPresent](const std::string& what)
     {
-        plan.refusal = what + " (" + plan.formatName + ", colour space " + std::to_string(colourSpace) +
-                       "): the present host's NR takes SDR only; the frame is shown as the game rendered it";
+        plan.refusal =
+            what + " (" + plan.formatName + ", colour space " + std::to_string(colourSpace) +
+            (hdrPresent ? "): unsupported HDR format/colour-space pair; the frame is shown as the game rendered it"
+                        : "): the present host's NR takes SDR only; the frame is shown as the game rendered it");
         return plan;
     };
 

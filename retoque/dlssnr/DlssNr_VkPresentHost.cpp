@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "DlssNr_VkPresentHost.h"
+#include "DlssNrFeature_Dx12.h"
 #include "DlssNr_VkModelOwner.h"
 #include "DlssNr_VkPresentModel.h"
 #include "DlssNr_VkPresentRegistry.h"
@@ -349,6 +350,7 @@ struct SwapchainTransport
     // Stage 3: whether the model may be shown it, and the raw format its bytes are copied through (the sRGB formats'
     // UNORM twins, so nothing is decoded on the way; the swapchain's own format otherwise).
     ColourPlan colour;
+    uint32_t colourSpace = 0;
     std::string nrOff; // the model is off for this swapchain (its working colour could not be made)
     bool nrCut = true; // its next frame of the model starts the history over: the first, or one after a gap
 
@@ -936,7 +938,12 @@ Recorded RecordWork(DeviceTransport& dev, VkCommandBuffer buffer, VkImage image,
     dev.fn.cmdCopyImage(buffer, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, work, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                         1, &region);
 
-    if (nr != nullptr && dev.model != nullptr)
+    if (nr != nullptr && dev.model != nullptr && nr->hdrProfile != 0)
+    {
+        if (!dev.model->Record(*nr))
+            return Recorded::NrFailed;
+    }
+    else if (nr != nullptr && dev.model != nullptr)
     {
         // Into the working colour: a blit converts number by number (and BGRA by channel), from the raw bytes, which
         // are the sRGB formats' UNORM twins, so nothing is decoded. Its earlier frames' reads and writes of the working
@@ -1063,12 +1070,13 @@ uint32_t FormatFeatures(DeviceTransport& dev, uint32_t format)
 
 // Why the device cannot convert the presented image or hold the model's images, or empty when it can: the raw image
 // is blitted from and to, the working colour also sampled and stored, the guides cleared and sampled.
-std::string MissingFormatFeatures(DeviceTransport& dev, uint32_t raw)
+std::string MissingFormatFeatures(DeviceTransport& dev, uint32_t raw, bool hdr = false)
 {
     const uint32_t transfer = kFeatureTransferSrc | kFeatureTransferDst;
     const uint32_t images = kFeatureSampledImage | kFeatureStorageImage | transfer;
     const std::pair<uint32_t, uint32_t> needs[] = {
-        { raw, kFeatureBlitSrc | kFeatureBlitDst | transfer },
+        { raw, hdr ? kFeatureSampledImage | transfer | (raw == kFormatA2R10G10B10UnormPack32 ? kFeatureBlitDst : 0)
+                   : kFeatureBlitSrc | kFeatureBlitDst | transfer },
         { kWorkingFormat, kFeatureBlitSrc | kFeatureBlitDst | images },
         { kFormatR32Sfloat, images },
         { kFormatR16G16Sfloat, images },
@@ -1094,6 +1102,11 @@ void StandDown(DeviceTransport& dev)
         return;
 
     dev.model->Release();
+    if (dev.model->DeviceLost())
+    {
+        MarkLost(dev);
+        return;
+    }
     TakeModelLines(dev);
     dev.model.reset();
     dev.modelSwapchain = 0;
@@ -1139,17 +1152,19 @@ std::string ModelUnavailable(DeviceTransport& dev)
     std::vector<std::string> refusals;
     for (const auto& [handle, sc] : dev.swapchains)
     {
+        const auto colour =
+            PlanColour(sc.colour.raw, sc.colourSpace, Config::Instance()->DlssNrHdrPresent.value_or_default());
         std::string reason;
         if (sc.retired)
             reason = "retired";
         else if (!sc.on)
             reason = "transport off: " + sc.off;
-        else if (!sc.colour.sdr)
-            reason = "colour: " + sc.colour.refusal;
+        else if (!colour.Eligible())
+            reason = "colour: " + colour.refusal;
         else if (!sc.nrOff.empty())
             reason = "model unavailable: " + sc.nrOff;
         else
-            reason = MissingFormatFeatures(dev, sc.colour.raw);
+            reason = MissingFormatFeatures(dev, sc.colour.raw, colour.profile != 0);
         if (reason.empty())
             return {};
         refusals.push_back("swapchain " + Hex(H(handle)) + ": " + reason);
@@ -1464,6 +1479,11 @@ bool DrainForDestroy(DeviceTransport& dev, uint64_t budgetNs)
 // kAfterUpscaleIdleMs (the game turned its upscaler off), the hand-back begins, and its drain is followed here.
 void Housekeep(DeviceTransport& dev)
 {
+    if (dev.model != nullptr && dev.model->DeviceLost())
+        MarkLost(dev);
+    if (dev.lost)
+        return;
+
     if (dev.handBack.active)
         PollHandBack(dev);
     else if (DlssNr::AfterUpscaleIdleOn(dev.device))
@@ -1578,6 +1598,7 @@ struct NrDecision
 {
     NrSkip skip = NrSkip::None;
     std::string note;
+    uint32_t hdrProfile = 0;
 };
 
 // Whether this present's frame may be shown to the model, decided before anything of it is recorded. With `None`, the
@@ -1594,11 +1615,17 @@ NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workF
         return refuse(NrSkip::Off, "[DlssNr] Enabled is off");
     }
 
-    if (!sc.colour.sdr)
-        return refuse(NrSkip::Colour, sc.colour.refusal);
+    const auto colour =
+        PlanColour(sc.colour.raw, sc.colourSpace, Config::Instance()->DlssNrHdrPresent.value_or_default());
+    const auto observed = PlanColour(sc.colour.raw, sc.colourSpace, true);
+    if (observed.profile != 0)
+        DlssNr::NotePresentHdr(observed.profile == 1 ? DlssNr::PresentColour::Hdr10 : DlssNr::PresentColour::ScRgb,
+                               nullptr, false);
+    if (!colour.Eligible())
+        return refuse(NrSkip::Colour, colour.refusal);
     if (!dev.nrReady)
         return refuse(NrSkip::Extensions, dev.nrMissing);
-    if (std::string missing = MissingFormatFeatures(dev, sc.colour.raw); !missing.empty())
+    if (std::string missing = MissingFormatFeatures(dev, sc.colour.raw, colour.profile != 0); !missing.empty())
         return refuse(NrSkip::FormatFeatures, std::move(missing));
     if (!sc.nrOff.empty())
         return refuse(NrSkip::Unavailable, sc.nrOff);
@@ -1662,7 +1689,8 @@ NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workF
         }
     };
 
-    const DlssNr::VkPresentAdmission admission = dev.model->Admit(sc.extent.width, sc.extent.height, workFamily);
+    const DlssNr::VkPresentAdmission admission =
+        dev.model->Admit(sc.extent.width, sc.extent.height, workFamily, colour.profile, colour.raw);
     TakeModelLines(dev);
     if (admission.skip != NrSkip::None)
     {
@@ -1678,7 +1706,7 @@ NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workF
         return refuse(admission.skip, admission.text);
     }
 
-    if (!EnsureWorkingImage(dev, sc))
+    if (colour.profile == 0 && !EnsureWorkingImage(dev, sc))
     {
         sc.nrOff = "the working colour (" + FormatName(kWorkingFormat) + ") could not be made";
         letGo();
@@ -1691,7 +1719,7 @@ NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workF
         sc.nrCut = true;
     }
 
-    return {};
+    return { NrSkip::None, {}, colour.profile };
 }
 
 // A recording of the model's pass, until it is known to have been submitted: anything else -- a refusal after the
@@ -1918,7 +1946,8 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     if (nr.skip == NrSkip::None)
     {
         frame.cmd = slot.work;
-        frame.image = sc.working;
+        frame.hdrProfile = nr.hdrProfile;
+        frame.image = frame.hdrProfile != 0 ? sc.work : sc.working;
         frame.view = sc.workingView;
         frame.width = sc.extent.width;
         frame.height = sc.extent.height;
@@ -2601,7 +2630,8 @@ VkResult OnCreateSwapchain(PFN_vkCreateSwapchainKHR next, VkDevice device, const
 
     // The work image is in the raw format: the swapchain's own, or its UNORM twin when it is sRGB (stage 3).
     const ColourPlan colour =
-        PlanColour(static_cast<uint32_t>(info->imageFormat), static_cast<uint32_t>(info->imageColorSpace));
+        PlanColour(static_cast<uint32_t>(info->imageFormat), static_cast<uint32_t>(info->imageColorSpace),
+                   Config::Instance()->DlssNrHdrPresent.value_or_default());
 
     if (physical != 0)
     {
@@ -2655,10 +2685,13 @@ VkResult OnCreateSwapchain(PFN_vkCreateSwapchainKHR next, VkDevice device, const
             line = g_registry.SwapchainLine(H(device), H(*swapchain));
     }
 
-    // What the model may be shown of it (stage 3): SDR only. The round trip runs either way.
+    // What the model may be shown: SDR, or a supported HDR profile with HdrPresent. The round trip runs either way.
     if (!internal && plan.transport)
-        line += colour.sdr ? "; the model may run on it (" + colour.formatName + ", sRGB non-linear)"
-                           : "; the model will not run on it: " + colour.refusal;
+        line += colour.Eligible() ? "; the model may run on it (" + colour.formatName +
+                                        (colour.profile == 1   ? ", HDR10 PQ, Rec.2020)"
+                                         : colour.profile == 2 ? ", scRGB linear)"
+                                                               : ", sRGB non-linear)")
+                                  : "; the model will not run on it: " + colour.refusal;
 
     {
         TransportLock lock;
@@ -2682,6 +2715,7 @@ VkResult OnCreateSwapchain(PFN_vkCreateSwapchainKHR next, VkDevice device, const
             sc.extent = info->imageExtent;
             sc.id = swapchainId;
             sc.colour = colour;
+            sc.colourSpace = static_cast<uint32_t>(info->imageColorSpace);
 
             // The swapchain it replaces is retired: the model may move on from it.
             if (info->oldSwapchain != VK_NULL_HANDLE)
