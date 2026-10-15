@@ -944,8 +944,10 @@ is off).
   `EvaluateAfterUpscaleVk` where it commits to a frame) and wins: refused while the present host holds the model, its
   asking makes the host stand down at its next present -- stop recording, wait for its frames to be seen complete, free
   the model, release -- and the route takes it at its next evaluate. The host stays down while the route asked within
-  half a second (the D3D12 boundary's `BoundaryLive` window) and while it owns the model -- until the route goes
-  quiet, when the host takes it back (below, "The way back"; the first build held it for good). The host also stands
+  half a second (the D3D12 boundary's `BoundaryLive` window), from a refusal until the route takes the model (unless
+  the route goes quiet for ten seconds first: `the after-upscale route ... was refused the model and has not taken it
+  yet`), and while it owns the model -- until the route goes quiet, when the host takes it back (below, "The way back";
+  the first build held it for good). The host also stands
   down while the D3D12 route has a model (`DlssNr::IsRunning()`: a translated D3D12 title's own NR, a Vulkan title
   through the D3D12 bridge, the D3D11 bridge's host), and refuses on a second device while it holds the first. The
   stand-down check runs at every present of the device, before the refusals that return without reaching the model's
@@ -1162,14 +1164,25 @@ route's new device) -- the arbiter now keys the hand-back on the drained device.
 forwarder's "every feature released" precondition before `Shutdown1` (as stage 3 already did): its first fix, a
 `vkDeviceWaitIdle` before the free, was itself reviewed again and replaced -- unbounded under the transport's lock on a
 hung GPU, its result ignored on a lost one -- by the bounded fence drain above, whose failure forgets both the route's
-objects and NGX on the device. Left
-as risks: the ten seconds, not the fences, is what covers a command buffer recorded before the hand-back began but
+objects and NGX on the device. Left as risks: the ten seconds, not the fences, is what covers a command buffer recorded before the hand-back began but
 submitted after it (a game holding one across a stall, or re-submitting one recorded long ago); a settings menu kept
 open past ten seconds -- where players toggle DLSS -- costs a needless hand-back and a rebuild when the game's upscaler
 comes back. The game releasing its own feature (`NVSDK_NGX_VULKAN_ReleaseFeature`, which OptiScaler intercepts) would
 be a stronger signal that its buffers are done, but DOOM releases and recreates its feature within a second on a
 resolution change with DLSS still on, so it can only shorten the wait, never replace it; not done. The model's and the
 route's frees log under the transport's lock, as a stand-down's release always has.
+
+**The stand-down under slow frames.** The first full run of `nr-route-quiet` after those fixes ran with the host tier
+in parallel, and the harness's frames slowed to about a second each. The stand-down then flapped: refused at the
+route's evaluate, the host stood down at its next present, but the route's next ask came more than half a second
+later, so the host took the model again, stood down again, and only then did the route get it (`stood down and was
+freed` twice in a row, a fourth feature build of the host's). Any game whose upscaler evaluates less than twice a
+second -- a loading screen still evaluating, a loaded machine -- would flap the same way, two feature rebuilds a time.
+The arbiter now remembers a refusal: from the route's refusal until it takes the model, the host is refused
+(`kAfterUpscaleWaiting`) and, if it still holds the model, must yield, however long the route's frames take; a route
+refused once that never asks again lapses after the same ten seconds as the hand-back, and the host then takes the
+model back. The harness's judged phases also go on until they have a dozen frames, so a slow machine thins them
+instead of emptying them.
 
 The lines, in the order a DLSS off/on cycle makes them (`nr-route-quiet`'s run; device and sizes vary):
 
