@@ -1522,6 +1522,134 @@ called from the watchdog's own thread, outside every host lock).
   the model runs once its product is adopted.
 - An independent read-only review.
 
+## Stage 5: synthesized motion at the Vulkan present (design, 2026-10-15)
+
+### Why
+
+On zero guides the model is told that nothing moved, so under a moving camera its history drags the last frame
+behind the new one: ghosts and doubled edges (Generation Zero showed it first, on the D3D11 host;
+synthesized-motion.md). `[DlssNr] ZeroGuideReset` trades that for no history at all. The D3D12 present routes already
+answer it with `[DlssNr] SynthMotion`: a per-pixel motion field estimated from consecutive finished frames, the FidelityFX
+optical-flow port in `retoque/shaders/synth_motion/` (`SynthMotion::Estimator_Dx12`, measured 0.63 ms at 3440x1440 on the
+RTX 4090 in `tests/synth-motion-d3d12`). Stage 5 gives the Vulkan present host the same estimator, on Vulkan.
+
+### The estimator on Vulkan (`SynthMotion::Estimator_Vk`, `retoque/shaders/synth_motion/`)
+
+The same passes, the same resources and the same output contract as `Estimator_Dx12` (its README): a field of
+`R16G16_SFLOAT` at the colour's extent, `.rg` the displacement from the current frame to the previous one in colour
+pixels, +x right, +y down; zero on a reset, during FFX's five warm-up frames after one, on a scene cut, and per pixel
+where the expand's static-overlay rule keeps a HUD still. Only the binding model changes:
+
+- **Shaders.** The same HLSL compiled by dxc to SPIR-V (`-spirv`, Vulkan 1.1 for the search's subgroup arithmetic), under
+  `VK_MODE` (`precompile/build.sh`, the prefix's `dxc.exe`; `*_Shader_Vk.spv` and `*_Shader_Vk.h` beside the `.cso`,
+  which `nr-invariants` holds equal). The derived callbacks' two constant buffers (FFX's `cbOF` and, for the pyramid,
+  `cbOF_SPD`) become one 64-byte push constant block read through the same accessors; our expand and clear passes'
+  constants likewise. The UAV registers `u0..u7` are bindings 0..7 and the colour `t0` binding 8
+  (`-fvk-u-shift`/`-fvk-t-shift`); the colour is a sampled image read with loads, no sampler. Every storage image names
+  its view's format (`[[vk::image_format("r8ui")]]` for the luma, `rg16i` the flow, `rg16f` the field, `r32ui`/`r32f`
+  the scene-change textures): a format-less declaration would need storage reads and writes without format, a device
+  feature or `VK_KHR_format_feature_flags2` the game may not have, and the scene-change atomics need a declared R32
+  format anyway. The capabilities left are `Shader`, `StorageImageExtendedFormats` (core since 1.0) and, in the search
+  only, `GroupNonUniform`/`GroupNonUniformArithmetic` (Vulkan 1.1). The pyramid takes SPD's no-wave path
+  (`FFX_SPD_NO_WAVE_OPERATIONS`): dxc compiles its quad operations in a compute shader with
+  `SPV_KHR_compute_shader_derivatives` (`DerivativeGroupLinearKHR`), an extension and feature no game enables. The
+  DXIL does not change: every edit is under `VK_MODE`, and `build.sh` rebuilt the `.cso` byte for byte.
+- **Descriptors.** Push descriptors (`vkCmdPushDescriptorSetKHR`): `VK_KHR_push_descriptor` is one of the model's
+  extensions the host already adds at device creation. Every dispatch pushes its own nine bindings, so there is no
+  descriptor set, pool or ring to keep alive while frames are in flight.
+- **Resources.** As on D3D12, in `GENERAL` for their whole life: two luma pyramids (`R8_UINT`, 7 levels), two flow
+  pyramids (`R16G16_SINT`, 8x8 blocks), the final level-0 flow, the four scene-change textures, the field, and a
+  host-visible buffer of eight slots for the scene-change bit. A memory barrier (compute to compute) follows each
+  dispatch.
+- **History.** `ConfirmExecuted` / `AbandonRecording` as on D3D12: the previous frame's luma advances only when the
+  frame's work was submitted (`Submitted`); a dropped recording (`Discarded`) leaves the estimator where it was, a scene
+  cut it raised still owed. The scene-change bit is copied into a read-back slot owned by the frame's ticket (the first
+  free one: a frame that never completes keeps its slot and the others go round it) and read when the host sees that
+  frame's fence signalled (`Completed`), not guessed from a slot's age; it raises `SceneCut()` at the next recording, so
+  one frame after the cut at the earliest and more with frames in flight (the D3D12 estimator's: three). FFX counts its
+  warm-up frames as scene changes, so their bits are ignored, and so is a bit from before a reset. Eight slots, above
+  the four frames the host keeps in flight.
+
+### Built off the present path
+
+Its pipelines are device-level and made by the first build that asks for them; its images are at the model's working
+size and made by every build whose key asks for them (the build key gains "synthesized motion on"), their move into
+`GENERAL` and their clear recorded into the build's own command buffer and waited for with the rest. Turning
+`SynthMotion` on or off live is a new key: a rebuild, frames carried meanwhile. Nothing of the estimator is created on
+the present path. A build that could not make it latches the estimator off for the device and is adopted as the
+product the frame wants: the key is asked again after an adoption, so it is never rebuilt to ask for it again (the
+first version did, the independent review found).
+
+### Where it runs, and what the model is told
+
+In the round trip's work buffer, on the model's own input: after the encode (and, below native, the downsample) and
+before the model's evaluate, inside the pass's timestamps (the window's pass GPU time includes it). On this SDR route
+the encode is the identity (passthrough), so its proxy is the presented frame in the working colour's
+`R16G16B16A16_SFLOAT`, and the estimator reads it in `GENERAL`. Its field is therefore at the model's working size, in
+working pixels: the model's own grid. When the estimator is `Ready`, the model's motion guide is that field instead of
+the zero field, the subrect the working size from the origin, at scale 1. That is what the D3D12 route makes of its
+frame-size field with its guide resample (frame pixels in a working-size texture, scaled by working over frame under
+both `[DlssNr] RenderMotionScale` rules). The first design handed the frame-size field to the model below native, a
+guide larger than its colour, which the model reads at the wrong pixels (reduced-scale-guides.md); the review caught it
+before any game ran it. Depth stays zero.
+
+The model's history resets on the host's own cut (a new swapchain, a gap) or on the estimator's scene cut, and
+`ZeroGuideReset` keeps applying only to frames that go out on the zero field, as on D3D12. The estimator's own history
+starts over only after a gap of more than 250 ms between its recordings, and with new images (the D3D12 rule): not on
+the model's resets or the host's cut, when the model forgets its own history anyway; restarting it there would put six
+more frames on zero motion. These rules are standard-library functions in `DlssNr_VkPresentNr.h` (`SynthWanted`,
+`SynthReset`, `ChooseMotionGuide`, `NrResetWithMotion`).
+
+`SynthMotionSource=nvofa` is D3D12 only; the Vulkan present host always uses the FidelityFX port. Frame generation does
+not exist on this route.
+
+### When it is not used
+
+The estimator needs an application instance and a device of Vulkan 1.1 (the SPIR-V is 1.3, and the search's subgroup
+arithmetic), subgroups of 32 or 64 with arithmetic in compute, compute groups of 256 threads, nine push descriptors,
+storage and transfer on the five formats (atomics on `R32_UINT`), and a working size of at least 256x128 (FFX's level
+6). Missing a device's part, the model runs on the zero field and the model's lines say why, once ("synthesized motion
+is off on this device: ..."); below the size, that size's product is built without it. A failure of the estimator
+itself (a pipeline or an image that will not be made) does the same; it never turns NR off.
+
+### Tests
+
+- `tests/synth-motion-vk` (wine): the production `Estimator_Vk` on a real Vulkan device under Wine, no NGX, no
+  OptiScaler.dll, on the D3D12 loopback's sequences (`tests/synth-motion-d3d12/sequences.h`, shared) and judged by its
+  `judge()`: uniform pans in several directions and sizes (endpoint error, each axis' sign), a moving object over a
+  static background, a static frame (zero), a cut (a zero field, `SceneCut`), an abandoned recording (two steps on the
+  next frame), the static overlay rule (a crosshair and a HUD over a pan stay zero), a pan and the cut with three
+  frames in flight (each fence seen late, as in the host), and GPU time at 1920x1080 and 3440x1440. The colour is the
+  host's working format (`R16G16B16A16_SFLOAT`) in `GENERAL`. The validation layer's core and synchronization checks on,
+  a negative control for each proving them active, zero errors required.
+- `tests/nr-vk-present-host` (host): the build key with the estimator, the guide choice (field or zeros), its scale
+  and the reset rule as standard-library functions; source guards for the ordering (blit, estimator, encode) and the
+  confirm/abandon pairing.
+- `tests/vulkan-present-host` (wine, the real model): `nr-synth-motion`, the moving picture with `SynthMotion=true`,
+  the model's motion guide the field; validation clean, the estimator's lines, read-backs edited.
+
+### Measured (2026-10-15)
+
+- `tests/synth-motion-vk`, RTX 4090 under winevulkan, validation (core and synchronization, both proved active) on:
+  every pan exact (endpoint error 0.000, 100% within 1 px, both signs current-to-previous), three frames in flight
+  included; the moving object and the static frame exact; the static overlay at 0.131 / 0.224 px mean on its clear
+  pixels with 0.0% / 0.3% smeared (the D3D12 estimator's: 0.131 / 0.218, 0.0% / 0.3%); the cut a zero field with
+  `SceneCut()` at t=9, t=11 in flight (D3D12: t=11); the abandoned frame's successor two steps; zero validation
+  errors. GPU time with clocks unlocked varies run to run on this machine: 0.80 to 1.08 ms at 1920x1080 and 1.79 to
+  3.13 ms at 3440x1440 (the D3D12 estimator the same hour, unlocked: 0.86 and 2.63 ms; locked, in September: 0.63 ms
+  at 3440x1440). The first six frames after a reset cost about a third of the rest (the search writes zero vectors).
+- `tests/vulkan-present-host` `nr-synth-motion`, the real model under Proton: three swapchains of 40 frames with the
+  picture panning 4 px a frame; 108 frames evaluated, 96 on the field (the 6 warm-up frames of each of the two products,
+  632x446 and 517x389; the second swapchain at 632x446 continues the estimator's history), the first field at scale
+  1.000 x 1.000; zero validation errors of the host's. `nr-synth-motion-half`, the same at WorkingScale 0.5: the
+  estimator's images and the field at 316x223 and 259x195, the model's working sizes, 96 of 108 on the field. Against
+  `nr-pan-zero`, the same pan on zero motion, the share of the unmoved previous frame in the model's edit is 0.051; on
+  the field 0.031, and 0.014 at half size: on this synthetic picture the model ghosts little either way, so the numbers
+  say the field is used and moves the history the right way, not how much a game gains.
+- Independent review (read-only, 2026-10-15): two major findings, both fixed before the stage was handed over -- the
+  frame-size field below native (now estimated on the model's input), and a second build when the estimator latched
+  off at adoption -- and nine minor ones, fixed or answered in the commit that follows it.
+
 ## Decision and stop conditions
 
 Prefer this experiment over implementing the D3D11 dual-swapchain host first. It removes an entire

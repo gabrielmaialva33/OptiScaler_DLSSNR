@@ -1,5 +1,13 @@
 # Synthesized motion vectors for the no-upscaler NR path
 
+Update 2026-10-15 (branch `feat/vulkan-present-host`): **the Vulkan present host has it too.** The same estimator
+compiled to SPIR-V (`SynthMotion::Estimator_Vk`, `retoque/shaders/synth_motion/SynthMotion_Vk.*`), made off the present
+path with the model, recorded in the round trip before the encode, its field the model's motion guide once warmed up,
+behind the same `[DlssNr] SynthMotion` key (FidelityFX only: `SynthMotionSource=nvofa` stays D3D12's). Measured against
+this note's sequences and thresholds in `tests/synth-motion-vk`; integrated with the real model in
+`tests/vulkan-present-host` (`nr-synth-motion`). Design and numbers: "Stage 5" in
+[nr-vulkan-present-host.md](nr-vulkan-present-host.md).
+
 Update 2026-09-28 (branch `synth-motion-pixel-refine`): **static overlays keep zero motion.** Generation
 Zero's crosshair and HUD smeared under synthesized FG because every pixel of an 8x8 block got the
 block's vector. The expand pass now chooses, per pixel, between that vector and zero by which one

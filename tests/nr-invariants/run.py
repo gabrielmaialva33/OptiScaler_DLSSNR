@@ -280,9 +280,28 @@ with tempfile.TemporaryDirectory() as scratch:
             fail(f'{header.name} is not what create_header.py makes from {binary.name}: regenerate it')
         synth_checked.append(header.name)
 
+    # The Vulkan estimator's SPIR-V (SynthMotion_Vk.cpp): <stem>_Shader_Vk.spv -> <stem>_Shader_Vk.h, array <stem>_spv.
+    for binary in sorted(synth_precompile.glob('*_Shader_Vk.spv')):
+        header = synth_precompile / f'{binary.stem}.h'
+        array = binary.stem.removesuffix('_Shader_Vk') + '_spv'
+        if not header.exists():
+            fail(f'{binary.name} has no {header.name}: run shaders/synth_motion/precompile/build.sh')
+            continue
+        if not binary.read_bytes().startswith(bytes.fromhex('03022307')):
+            fail(f'{binary.name} does not start with the SPIR-V magic')
+        regenerated = Path(scratch) / header.name
+        subprocess.run([sys.executable, str(create_header), str(binary), str(regenerated), array],
+                       check=True, capture_output=True)
+        if regenerated.read_bytes() != header.read_bytes():
+            fail(f'{header.name} is not what create_header.py makes from {binary.name}: regenerate it')
+        synth_checked.append(header.name)
+    for header in sorted(synth_precompile.glob('*_Shader_Vk.h')):
+        if not (synth_precompile / f'{header.stem}.spv').exists():
+            fail(f'{header.name} is committed without {header.stem}.spv beside it')
+
 if len(failures) == before:
     print(f'PASS: {len(synth_checked)} synthesized-motion headers are byte-identical to create_header.py over the '
-          'committed .cso')
+          'committed .cso and .spv')
 
 # --- 4. Retired identifiers -------------------------------------------------------------------------
 

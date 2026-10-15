@@ -441,8 +441,8 @@ TRANSPORT = re.compile(
 
 NR = re.compile(
     r'NR: evaluated (?P<evaluated>\d+), refused (?P<refused>\d+)(?: \((?P<skips>[^)]*)\))?, history resets '
-    r'(?P<resets>\d+), pass GPU (?:not measured|last (?P<last>[\d.]+) ms, mean (?P<mean>[\d.]+) ms, max '
-    r'(?P<max>[\d.]+) ms)(?:; first refusal: (?P<first>.+))?$')
+    r'(?P<resets>\d+)(?:, motion synthesized (?P<synthesized>\d+))?, pass GPU (?:not measured|last (?P<last>[\d.]+) ms, '
+    r'mean (?P<mean>[\d.]+) ms, max (?P<max>[\d.]+) ms)(?:; first refusal: (?P<first>.+))?$')
 
 
 def nr_building_problems(where, text, presents, first_at_size):
@@ -928,13 +928,32 @@ NR_CASES = {
     # below the host's hook (the test layer); and the model's build slowed while presents and swapchain churn go on.
     'nr-stall-watch': (True, None, False, 'build', True, None),
     'nr-build-slow': (True, None, False, 'build', True, None),
+    # Stage 5: [DlssNr] SynthMotion on, the picture panning 4 px a frame, 40 frames a swapchain: the estimator made
+    # with the model off the present path, its field the model's motion guide once warmed up, under the validation
+    # layer's synchronization checks.
+    'nr-synth-motion': (True, None, False, 'build', True, None),
+    # The same at WorkingScale 0.5: the estimator reads the model's own input, so it and its field are at the working
+    # size, never a frame-size guide for a smaller colour.
+    'nr-synth-motion-half': (True, 0.5, False, 'build', True, None),
+    # Its control: the same panning picture on zero motion. What the model makes of a pan it is told is still, for the
+    # two read-back means to be set side by side.
+    'nr-pan-zero': (True, None, False, 'build', True, None),
 }
+
+# More of the [DlssNr] section, for the cases that need it.
+NR_INI = {'nr-synth-motion': 'SynthMotion=true\n', 'nr-synth-motion-half': 'SynthMotion=true\n'}
+# FFX's warm-up after every reset of the estimator: the frames a swapchain shows the model on zero motion before its
+# first field (frame indices 0 to 5).
+SYNTH_WARMUP = 6
 
 # The test layer's timing knobs and the harness's arguments, for the cases that use them.
 NR_TIMING = {
     'nr-stall-watch': ({'RETOQUE_STALL_PRESENT_AT': '30:2600'}, []),
     'nr-build-slow': ({'RETOQUE_SLOW_OFF_DEVICE_THREAD_MS': '400', 'RETOQUE_SLOW_OFF_DEVICE_THREAD_TOTAL_MS': '4000',
                        'RETOQUE_COUNT_OFF_THREAD_QUEUE': '1'}, ['--slow-build']),
+    'nr-synth-motion': ({}, ['--pan', '4', '--frames', '40']),
+    'nr-synth-motion-half': ({}, ['--pan', '4', '--frames', '40']),
+    'nr-pan-zero': ({}, ['--pan', '4', '--frames', '40']),
 }
 # The longest a present may take in nr-build-slow, while the model's build takes seconds: the round trip, the validation
 # layer and the call down at this harness's rate, nothing of the model's build.
@@ -1002,7 +1021,8 @@ def execute_nr(name, dll, redist, files):
         # 165 MB of NVIDIA's model: linked, never copied, never in the tree.
         (work / 'nvngx_dlssnr.dll').symlink_to(files['model'])
     # Into the one [DlssNr] section, never a second one.
-    extra = f'ApplyModel={str(apply_model).lower()}\n' + (f'WorkingScale={scale}\n' if scale is not None else '')
+    extra = f'ApplyModel={str(apply_model).lower()}\n' + (f'WorkingScale={scale}\n' if scale is not None else '') + \
+        NR_INI.get(name, '')
     ini = ini_for(False, True, True, True, level=1).replace('VulkanPresentHost=true\n', 'VulkanPresentHost=true\n' + extra)
     (work / 'OptiScaler.ini').write_text(ini)
     (work / MARKER).write_text('')
@@ -1171,8 +1191,9 @@ def check_nr(name, facts, log):
     elif not model:
         refusal = ('model unavailable', 'nvngx_dlssnr.dll was not found beside OptiScaler or the game')
     runs = refusal is None
+    synth = 'SynthMotion=true' in NR_INI.get(name, '')
 
-    evaluated_total = timed = 0
+    evaluated_total = timed = synthesized_total = 0
     seen = {}
     built_sizes = set()
     building = {}
@@ -1200,8 +1221,26 @@ def check_nr(name, facts, log):
                                                                   size not in built_sizes)
                 problems.extend(found)
                 built_sizes.add(size)
-                evaluated_total += s['presents'] - building[s['name']]
+                evaluated_here = s['presents'] - building[s['name']]
+                evaluated_total += evaluated_here
                 timed += 1
+                # Stage 5: a new product (the first swapchain at a size) starts the estimator over, so its first
+                # frames on the model go out on zero motion, then on the field. A later swapchain at a size already
+                # built continues the estimator's history (a new swapchain resets the model, not the estimator): every
+                # frame may be on the field, all but a warm-up's at least. Without the key, never on a field.
+                parsed = NR.match(nr_text)
+                synthesized = int(parsed.group('synthesized') or 0) if parsed else 0
+                synthesized_total += synthesized
+                if synth and building[s['name']]:
+                    need(0 < synthesized <= evaluated_here - SYNTH_WARMUP,
+                         f'{where}: {synthesized} of {evaluated_here} evaluated frames on the synthesized field '
+                         f'(at most {evaluated_here - SYNTH_WARMUP}, after the warm-up of a new product)')
+                elif synth:
+                    need(evaluated_here - SYNTH_WARMUP <= synthesized <= evaluated_here,
+                         f'{where}: {synthesized} of {evaluated_here} evaluated frames on the synthesized field (the '
+                         f'estimator continues across swapchains at a size: at least {evaluated_here - SYNTH_WARMUP})')
+                else:
+                    need(synthesized == 0, f'{where}: {synthesized} frames on a synthesized field without SynthMotion')
             else:
                 problems.extend(nr_problems(where, nr_text, 0, s['presents'], {refusal[0]: s['presents']}, refusal[1]))
         need(s['readbacks'] >= 1, f'{where}: nothing read back')
@@ -1230,6 +1269,28 @@ def check_nr(name, facts, log):
         need(len(gone) == 1 and gone[0].endswith('; the model freed'), f'device destruction: {gone}')
         need(any('NGX shut down on the device before it goes (returned 1)' in l for l in lines),
              'NGX was not shut down on the device before it went')
+        if synth:
+            # The estimator made with every product (one per size), its first field handed over at unit scale (frame
+            # pixels in a frame-size texture), and never off.
+            made = [l for l in lines if "synthesized motion: the estimator's images made for" in l]
+            need(len(made) == len(built_sizes), f'{len(made)} estimator image builds for {len(built_sizes)} sizes')
+            # At the model's working size, which the field is handed at too, scale 1 (working pixels).
+            factor = scale if scale is not None else 1.0
+            working = sorted(f'{int(w * factor + 0.5)}x{int(h * factor + 0.5)}' for w, h in built_sizes)
+            need(sorted(re.search(r'images made for (\d+x\d+), the model\'s working size', l).group(1) for l in made
+                        if re.search(r'images made for (\d+x\d+), the model\'s working size', l)) == working,
+                 f'estimator images not at the working sizes {working}: {made}')
+            first_field = [l for l in lines if 'synthesized motion: the first field handed to the model at' in l]
+            need(first_field and all('(motion vector scale 1.000 x 1.000' in l for l in first_field) and
+                 all(re.search(r'handed to the model at (\d+x\d+), its working size', l) and
+                     re.search(r'handed to the model at (\d+x\d+)', l).group(1) in working for l in first_field),
+                 f'first field lines: {first_field}')
+            need(not any('synthesized motion is off' in l for l in lines),
+                 next((l for l in lines if 'synthesized motion is off' in l), ''))
+            need(synthesized_total * 2 >= evaluated_total, f'only {synthesized_total} of {evaluated_total} evaluated '
+                                                           'frames on the synthesized field')
+        else:
+            need(not any('synthesized motion' in l for l in lines), 'synthesized motion lines without SynthMotion')
         if scale is not None:
             odd = next(s for s in facts['swapchains'] if s['name'] == 'odd')
             want = f'working {int(odd["width"] * scale + 0.5)}x{int(odd["height"] * scale + 0.5)})'
@@ -1248,6 +1309,9 @@ def check_nr(name, facts, log):
                                                     f'for {builds} feature builds')
 
     sdr = [s for s in facts['swapchains'] if s['sdr']]
+    # With --pan: how much of the previous frame, unmoved, the model's edit carries (nr.cpp, SwapchainFacts::trailSum).
+    trail_frames = sum(s.get('trail_frames', 0) for s in sdr)
+    trail_mean = sum(s.get('trail_mean', 0.0) * s.get('trail_frames', 0) for s in sdr) / max(trail_frames, 1)
     summary = (f'{len(facts["swapchains"])} swapchains ({", ".join(s["name"] for s in facts["swapchains"])}), '
                f'{sum(s["presents"] for s in facts["swapchains"])} presents, '
                + (f'the model ran on {evaluated_total} SDR presents ({sum(building.values())} carried while it was '
@@ -1257,6 +1321,9 @@ def check_nr(name, facts, log):
                      f'{sum(s["mae_mean"] for s in sdr) / max(len(sdr), 1):.2f} eight-bit steps (largest frame mean '
                      f'{max((s["mae_max"] for s in sdr), default=0):.2f})') if runs else
                   f'the model refused ({refusal[0]}: {refusal[1]}), every read-back exact')
+               + (f', {synthesized_total} of them on the synthesized field' if synth else '')
+               + (f', trail of the unmoved previous frame {trail_mean:.3f} over {trail_frames} frames'
+                  if trail_frames else '')
                + f', 0 validation errors of the host\'s ({facts.get("model_messages", 0)} of the model\'s own '
                f'{",".join(sorted(vuids)) or "objects"} set aside)')
     return problems, summary

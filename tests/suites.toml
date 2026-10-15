@@ -178,6 +178,11 @@ tier = "wine"
 timeout = 1800
 summary = "The synthesized-motion estimator (FidelityFX optical flow port) on a real D3D12 device under Wine: endpoint error against known pans, a moving object, static and cut frames, abandon semantics, the axis signs and GPU time; synthesized FG's HUD mask and the UI layer's own mask on the same frames (no scenery marked, precision and recall per element and part, the band around the overlay and the smear set it covers, depth and layer exact, GPU time with the layer off and on); --source nvofa runs the NVIDIA Optical Flow source the same way (SKIP when unavailable). Never loads NGX or a game."
 
+[synth-motion-vk]
+tier = "wine"
+timeout = 1800
+summary = "The Vulkan synthesized-motion estimator (SynthMotion_Vk, the same FidelityFX port compiled to SPIR-V) on a real Vulkan device under Wine with the validation layer's core and synchronization checks: the D3D12 suite's sequences, scores and thresholds (pans and axis signs, a moving object, static, a cut, an abandoned recording, the static overlay), GPU time, and zero validation errors. SKIP when the device cannot run it. Never loads NGX or a game."
+
 [bridge-lifetime]
 tier = "host"
 timeout = 300

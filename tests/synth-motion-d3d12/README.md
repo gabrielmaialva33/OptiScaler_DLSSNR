@@ -13,7 +13,8 @@ optical flow port, see `docs/dlssnr/design/synthesized-frame-generation.md`) com
 `pch.h`/`Logger.h` shim, on vkd3d-proton in an isolated Wine prefix. The compiler prefix is a
 private copy of the local MSVC prefix. No NGX, no OptiScaler.dll, no game.
 
-Each frame the harness writes a synthetic RGBA8 frame into a texture, calls `Record` on its own
+The frames, the sequences and the estimator's scoring are in `sequences.h`, which `tests/synth-motion-vk` shares,
+so the Vulkan estimator is held to the same pixels. Each frame the harness writes a synthetic RGBA8 frame into a texture, calls `Record` on its own
 list, copies `Motion()` to a readback buffer, executes, waits, calls `ConfirmExecuted()` and scores
 the field. Content is an integer-sampled procedural pattern (value noise at 3/9/27/81 px over a
 brick grid), so an integer shift is an exact translation and the ground truth needs no

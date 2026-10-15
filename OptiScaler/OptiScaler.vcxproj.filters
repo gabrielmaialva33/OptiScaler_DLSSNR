@@ -32,6 +32,9 @@
     <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotion_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotion_Vk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotion_Handoff.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1136,6 +1139,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\retoque\shaders\synth_motion\SynthMotion_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\retoque\shaders\synth_motion\SynthMotion_Vk.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\retoque\shaders\synth_motion\SynthMotionNvofa_Dx12.cpp">

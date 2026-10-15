@@ -1,4 +1,4 @@
-# Synthesized motion (`SynthMotion::Estimator_Dx12`)
+# Synthesized motion (`SynthMotion::Estimator_Dx12`, `SynthMotion::Estimator_Vk`)
 
 A per-pixel motion field reconstructed from consecutive finished frames. It is for passes that get no
 motion vectors from the game: DLSS-NR's present hosts and synthesized frame generation. Designs:
@@ -7,7 +7,7 @@ motion vectors from the game: DLSS-NR's present hosts and synthesized frame gene
 kernel). It lives outside `dlssnr/` because frame generation uses it too, and the NR module has to stay
 removable as one block.
 
-Status: built and syntax-checked. Not yet run on a GPU; the loopback harness is where it gets measured.
+Status: measured on a real GPU by the loopback suites, `tests/synth-motion-d3d12` and `tests/synth-motion-vk`.
 
 ## Output contract
 
@@ -214,11 +214,44 @@ not depend on the DLSS-NR module. Design: "The HUD: near depth and a UI layer" i
   `Release()`.
 - **Minimum extent 64x64:** anything smaller records nothing.
 
+## The estimator on Vulkan (`Estimator_Vk`)
+
+`SynthMotion_Vk.h/.cpp`: the same passes, compiled to SPIR-V from the same sources under `VK_MODE`, and the same
+output contract (`kVkMotionFormat`, `VK_FORMAT_R16G16_SFLOAT`, at the colour's extent, left in `GENERAL` with its
+writes visible to every later stage's shader reads). Its consumer is the Vulkan present host's model, which runs it on
+its own input at the working size (stage 5 of
+[nr-vulkan-present-host.md](../../../docs/dlssnr/design/nr-vulkan-present-host.md), `[DlssNr] SynthMotion`). Measured
+in `tests/synth-motion-vk` against the D3D12 suite's own sequences and thresholds.
+
+- **Split by lifetime**, so a caller can make everything off its present path: `VkPipelines` (the device's: ten
+  pipelines, a push-descriptor set layout, a pipeline layout with one 64-byte push constant range), `VkImages` (one
+  size's: the two luma and two flow pyramids, the final flow, the scene-change textures, the field, a host-visible
+  read-back; their move into `GENERAL` and clear recorded into a command buffer the caller submits and waits for), and
+  `Estimator_Vk` (the history, no Vulkan object). Nothing in it logs, submits or waits: failures come back as reasons.
+- **Bindings.** Push descriptors (`VK_KHR_push_descriptor`): `u0..u7` are bindings 0..7 and the colour (a sampled
+  image, read with loads) binding 8, in set 0, pushed per dispatch; nothing outlives the command buffer.
+- **Formats in the SPIR-V.** Every storage image names its view's format (`r8ui`, `rg16i`, `rg16f`, `r32ui`, `r32f`),
+  so no format-less storage feature is needed, and the scene-change atomics get the R32 format they require. The
+  capabilities are `Shader`, `StorageImageExtendedFormats` (core) and, in the search only, subgroup arithmetic (Vulkan
+  1.1). The pyramid takes SPD's no-wave path: dxc compiles its quad operations in compute with
+  `SPV_KHR_compute_shader_derivatives`, which no game's device enables.
+- **Requirements** (`VkUnsupported`): an application instance and device of Vulkan 1.1, subgroups of 32 or 64 with
+  arithmetic in compute, compute groups of 256 threads, nine push descriptors, storage and transfer on the five formats
+  and atomics on `R32_UINT`, a frame of at least 256x128.
+- **Barriers.** A recording begins with a dependency on everything earlier on the queue (the previous frame's estimate,
+  every read of its field, its read-back copy), puts a compute-to-compute barrier after every dispatch, and ends with
+  the field's writes made visible to any later stage. Clean under the validation layer's synchronization checks.
+- **Scene cuts.** The scene-change bits are copied into a read-back slot owned by the frame's ticket (the first free of
+  eight) and read by `Completed(ticket)` once the caller saw that frame's fence: `SceneCut()` rises at the next
+  recording, one frame after the cut at the earliest. FFX's warm-up frames, which it counts as scene changes, and bits
+  from before a reset are ignored; a cut raised on a recording that is abandoned stays owed.
+- **Cost**, RTX 4090, clocks unlocked, 2026-10-15: 0.8-1.1 ms at 1920x1080 and 1.8-3.1 ms at 3440x1440, varying run to
+  run (the D3D12 estimator the same hour: 0.86 ms and 2.63 ms; locked clocks, September: 0.63 ms at 3440x1440).
+
 ## Rebuilding the shaders
 
-`precompile/build.sh` runs dxc through the msvc-wine prefix and regenerates the `*_Shader.h` headers. It
-uses AMD's flags for the base permutation: `cs_6_2`, `FFX_HLSL_SM=62`, `FFX_HALF=0`, wave32, no msad4.
-Never run it while `build-local.sh` holds the same prefix.
-
-No SPIR-V is built: there is no Vulkan consumer yet. A Vulkan port would add a `-spirv` target of the
-same sources.
+`precompile/build.sh` runs dxc through the msvc-wine prefix and regenerates the `*_Shader.h` headers, and the Vulkan
+estimator's `*_Shader_Vk.spv` and `*_Shader_Vk.h` (`-spirv -fspv-target-env=vulkan1.1 -D VK_MODE`, `u` and `t`
+registers shifted to bindings 0..7 and 8). It uses AMD's flags for the base permutation: `cs_6_2`, `FFX_HLSL_SM=62`,
+`FFX_HALF=0`, wave32, no msad4. Never run it while `build-local.sh` holds the same prefix; `nr-invariants` holds every
+header equal to what `create_header.py` makes of the committed `.cso` or `.spv`.

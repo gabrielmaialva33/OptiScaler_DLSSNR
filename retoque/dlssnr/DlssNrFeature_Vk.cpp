@@ -22,6 +22,7 @@
 #include <shaders/dlssnr/DlssNr_Vk.h>
 #include <shaders/dlssnr/DlssNr_GuideMatch.h>
 #include <shaders/output_scaling/OS_Vk.h>
+#include <shaders/synth_motion/SynthMotion_Vk.h>
 
 #include <algorithm>
 #include <array>
@@ -1870,6 +1871,7 @@ struct RetiredSet
 {
     void* feature = nullptr;
     std::vector<OwnedImage> images;
+    SynthMotion::VkImages synth; // the synthesized-motion estimator's images for that size, if it had them
     std::vector<uint64_t> waitFor;
 };
 
@@ -1947,6 +1949,8 @@ struct PresentBuildJob
     NVSDK_NGX_Parameter* params = nullptr; // the model's capability block when !needDevice
     BuildConfig config;
     uint64_t postedMs = 0;
+    // key.synth with no estimator pipelines on the model yet: the device's part of the estimator is made too.
+    bool needSynthPipelines = false;
 
     std::atomic<BuildState> state { BuildState::Queued };
     std::atomic<bool> orphaned { false }; // its model is gone (device lost or destroyed): touch nothing of it
@@ -1964,6 +1968,11 @@ struct PresentBuildJob
     uint64_t tickMask = ~0ull;
     void* feature = nullptr;
     OwnedImage output, proxy, keep, proxySmall, depth, motion;
+    // Synthesized motion (stage 5), with key.synth: the estimator's pipelines (needSynthPipelines) and its images for
+    // this size. synthOff: why it could not be made; the product is then built without it (zero motion), never refused.
+    SynthMotion::VkPipelines synthPipelines;
+    SynthMotion::VkImages synthImages;
+    std::string synthOff;
     std::string failure; // empty: Done
     bool retry = false;  // a failure that frees everything and asks again later (the queue's locks stayed busy)
     bool lost = false;   // the device was lost during it: the host marks the device lost
@@ -1998,6 +2007,9 @@ void FreeBuild(PresentBuildJob& job)
 
     job.pass.reset();
 
+    SynthMotion::DestroyVkImages(d, job.synthImages);
+    SynthMotion::DestroyVkPipelines(job.synthPipelines);
+
     if (job.queryPool != VK_NULL_HANDLE)
     {
         vkDestroyQueryPool(d, job.queryPool, nullptr);
@@ -2021,6 +2033,8 @@ void ForgetBuild(PresentBuildJob& job)
     job.queryPool = VK_NULL_HANDLE;
     for (OwnedImage* image : job.Images())
         *image = OwnedImage {};
+    job.synthImages = SynthMotion::VkImages {};
+    job.synthPipelines = SynthMotion::VkPipelines {};
 }
 
 PresentBuildJob::~PresentBuildJob() { ForgetBuild(*this); }
@@ -2168,6 +2182,20 @@ void RunBuild(PresentBuildJob& job)
     if (job.orphaned.load(std::memory_order_acquire))
         return stop("its model was abandoned");
 
+    // Synthesized motion's device part (stage 5): whether the device can run the estimator at all, and its pipelines,
+    // once per model. Neither ever fails the build: the product is then made without the estimator, on zero motion.
+    if (job.key.synth)
+    {
+        activity.Stage("making the synthesized-motion estimator's pipelines");
+        job.synthOff = SynthMotion::VkUnsupported(pd, job.dev.apiVersion);
+        if (job.synthOff.empty() && job.needSynthPipelines &&
+            !SynthMotion::CreateVkPipelines(d, job.synthPipelines, job.synthOff) && job.synthOff.empty())
+            job.synthOff = "its pipelines could not be made";
+    }
+
+    if (job.orphaned.load(std::memory_order_acquire))
+        return stop("its model was abandoned");
+
     // The images for this size. The guides are made at the working size: a resample of a constant is the constant,
     // so this is the source-to-working scaling done once, exactly.
     activity.Stage("allocating the model's images");
@@ -2263,6 +2291,16 @@ void RunBuild(PresentBuildJob& job)
 
         job.depth.layout = VK_IMAGE_LAYOUT_GENERAL;
         job.motion.layout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+
+    // The estimator's images for the model's working size (it reads the model's input), moved into GENERAL and cleared
+    // in this same buffer. A failure leaves the product without them.
+    if (job.key.synth && job.synthOff.empty())
+    {
+        activity.Stage("allocating the synthesized-motion estimator's images");
+        if (SynthMotion::CreateVkImages(d, pd, k.workWidth, k.workHeight, cmd, job.synthImages, job.synthOff))
+            job.Say("synthesized motion: the estimator's images made for " + std::to_string(k.workWidth) + "x" +
+                    std::to_string(k.workHeight) + ", the model's working size (FidelityFX optical flow on Vulkan)");
     }
 
     // The feature, built cold: no game parameters, the tuning from the config, UI correction on as the after-upscale
@@ -2410,6 +2448,10 @@ PresentBuilder& Builder()
 }
 } // namespace
 
+static_assert(VkPresentHost::kSynthMinWidth == SynthMotion::Estimator_Vk::MinWidth &&
+                  VkPresentHost::kSynthMinHeight == SynthMotion::Estimator_Vk::MinHeight,
+              "the build key asks for the estimator only at a size it can run at");
+
 // --- The model, on the present path ----------------------------------------------------------------------------
 
 struct VkPresentModel::Impl
@@ -2437,6 +2479,20 @@ struct VkPresentModel::Impl
     OwnedImage proxySmall; // the proxy at the working size, below native only
     OwnedImage depth;      // zero guides at the working size: constant depth ...
     OwnedImage motion;     // ... and no motion
+
+    // Synthesized motion (stage 5, [DlssNr] SynthMotion): the estimator's pipelines (the device's, from the first build
+    // that asked for them) and its images (the product's, with key.synth), its history, and the field as NGX is handed
+    // it. synthOff: why the estimator cannot run on this device, latched; the model then keeps zero motion.
+    SynthMotion::VkPipelines synthPipelines;
+    SynthMotion::VkImages synthImages;
+    SynthMotion::Estimator_Vk estimator;
+    NVSDK_NGX_Resource_VK fieldNgx {};
+    std::string synthOff;
+    uint64_t lastSynthMs = 0; // the estimator's last recording, for the gap rule
+    bool synthRecorded =
+        false; // the frame being recorded carries an estimate: Submitted confirms it, Discarded drops it
+    bool lastSynthesized = false;
+    bool saidField = false; // "the first field handed to the model", once per product
 
     uint32_t width = 0;
     uint32_t height = 0;
@@ -2522,6 +2578,7 @@ struct VkPresentModel::Impl
             DestroyImageOn(dev.device, image);
 
         set.images.clear();
+        SynthMotion::DestroyVkImages(dev.device, set.synth);
     }
 
     // Free the retired sets nothing in flight uses any more -- never while a job runs, since releasing a feature is an
@@ -2556,12 +2613,17 @@ struct VkPresentModel::Impl
                 old.images.push_back(*image);
             *image = OwnedImage {};
         }
+        old.synth = synthImages;
+        synthImages = SynthMotion::VkImages {};
+        fieldNgx = NVSDK_NGX_Resource_VK {};
+        estimator.Restart();
+        synthRecorded = false;
         old.waitFor = pending;
         feature = nullptr;
         built = false;
         width = height = workWidth = workHeight = 0;
 
-        if (old.feature != nullptr || !old.images.empty())
+        if (old.feature != nullptr || !old.images.empty() || old.synth.motion.image != VK_NULL_HANDLE)
             retired.push_back(std::move(old));
     }
 
@@ -2582,13 +2644,15 @@ struct VkPresentModel::Impl
         next->config.localTone = cfg.DlssNrLocalTone.value_or_default();
         next->config.skinStructure = cfg.DlssNrSkinStructure.value_or_default();
         next->config.autoMask = cfg.DlssNrAutoMask.value_or_default() ? 1 : 0;
+        next->needSynthPipelines = want.synth && !synthPipelines.Valid();
         next->postedMs = OwnerNowMs();
         job = next;
         Builder().Post(std::move(next));
 
         Say("the model is being built for " + std::to_string(want.width) + "x" + std::to_string(want.height) +
-            " (working " + std::to_string(want.workWidth) + "x" + std::to_string(want.workHeight) +
-            ") off the present path; frames are carried unchanged until it is ready");
+            " (working " + std::to_string(want.workWidth) + "x" + std::to_string(want.workHeight) + ")" +
+            (want.synth ? ", with synthesized motion," : "") +
+            " off the present path; frames are carried unchanged until it is ready");
     }
 
     // A job is over: its product, or its failure. True when it is to be asked for again, at a later frame.
@@ -2625,6 +2689,20 @@ struct VkPresentModel::Impl
             tickMask = over->tickMask;
         }
 
+        // The estimator's: its pipelines once, its images with the product. A product asked for with synthesized motion
+        // and built without it records why, and the estimator stays off on this device (the key then stops asking).
+        if (over->synthPipelines.Valid())
+        {
+            synthPipelines = over->synthPipelines;
+            over->synthPipelines = SynthMotion::VkPipelines {};
+        }
+        synthImages = over->synthImages;
+        over->synthImages = SynthMotion::VkImages {};
+        estimator.Restart();
+        synthRecorded = false;
+        saidField = false;
+        lastSynthMs = 0;
+
         feature = over->feature;
         over->feature = nullptr;
         OwnedImage* mine[6] = { &output, &proxy, &keep, &proxySmall, &depth, &motion };
@@ -2636,6 +2714,29 @@ struct VkPresentModel::Impl
         }
 
         key = over->key;
+        if (key.synth && !synthImages.Valid())
+        {
+            key.synth = false;
+            if (synthOff.empty())
+            {
+                synthOff = over->synthOff.empty() ? std::string("its images were not made") : over->synthOff;
+                Say("synthesized motion is off on this device: " + synthOff + "; the model keeps zero motion");
+            }
+        }
+
+        if (key.synth)
+        {
+            // The field as NGX is handed it: the whole frame, read only.
+            fieldNgx.Type = NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW;
+            fieldNgx.Resource.ImageViewInfo.ImageView = synthImages.motion.view;
+            fieldNgx.Resource.ImageViewInfo.Image = synthImages.motion.image;
+            fieldNgx.Resource.ImageViewInfo.SubresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            fieldNgx.Resource.ImageViewInfo.Format = SynthMotion::kVkMotionFormat;
+            fieldNgx.Resource.ImageViewInfo.Width = synthImages.width;
+            fieldNgx.Resource.ImageViewInfo.Height = synthImages.height;
+            fieldNgx.ReadWrite = false;
+        }
+
         width = key.width;
         height = key.height;
         workWidth = key.workWidth;
@@ -2735,7 +2836,11 @@ VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height, uint32
                                        " pixels; the model is not built that small" };
     }
 
-    const BuildKey want { width, height, workWidth, workHeight, family };
+    const bool synthConfigured = Config::Instance()->DlssNrSynthMotion.value_or_default();
+    BuildKey want {
+        width,      height, workWidth,
+        workHeight, family, VkPresentHost::SynthWanted(synthConfigured, !m.synthOff.empty(), workWidth, workHeight)
+    };
     for (;;)
     {
         const auto step = VkPresentHost::DecideBuild(m.failed, m.JobState(), m.built, m.key, want);
@@ -2747,6 +2852,9 @@ VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height, uint32
         if (step == VkPresentHost::BuildStep::Adopt)
         {
             const bool retry = m.Adopt();
+            // An adoption can latch the estimator off for the device: the product just adopted, built without it, is
+            // then the one this frame wants, never a second build that asks for it again.
+            want.synth = VkPresentHost::SynthWanted(synthConfigured, !m.synthOff.empty(), workWidth, workHeight);
             m.FreeRetired();
             if (retry)
                 return { NrSkip::Building, "the model's build is asked for again at the next frame" };
@@ -2868,23 +2976,61 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
         modelInput = &m.proxySmall;
     }
 
+    // Synthesized motion (stage 5): the estimator reads the model's own input -- the encode's proxy, the frame itself
+    // on this SDR route (passthrough), downsampled below native -- so its field is at the working size in working
+    // pixels, the model's own grid, as the D3D12 route's guide resample makes it. Its own dispatches and push
+    // descriptors, not the pass's ring. Once it has a real field, that replaces the zero motion guide; a recording that
+    // does not happen (nothing invalid ever reaches it) leaves the model on zero motion.
+    bool fieldReady = false;
+    bool sceneCut = false;
+    m.synthRecorded = false;
+    if (m.key.synth && m.synthImages.Valid() && m.synthPipelines.Valid())
+    {
+        const uint64_t now = OwnerNowMs();
+        const bool synthReset = VkPresentHost::SynthReset(m.lastSynthMs, now);
+        m.lastSynthMs = now;
+        if (m.estimator.Record(cmd, m.synthPipelines, m.synthImages, modelInput->view, VK_IMAGE_LAYOUT_GENERAL,
+                               synthReset, frame.ticket))
+        {
+            m.synthRecorded = true;
+            fieldReady = m.estimator.Ready();
+            sceneCut = m.estimator.SceneCut();
+        }
+    }
+
     Transition(cmd, m.output, VK_IMAGE_LAYOUT_GENERAL);
 
-    // Zero guides: constant depth (read inverted, so zero is the far plane) and no motion, both covering the working
-    // size from the origin, at unit scale: nothing moved, so the scale has nothing to scale.
-    const bool reset = VkPresentHost::NrReset(m.reset, frame.cut, cfg.DlssNrZeroGuideReset.value_or_default());
-    const int evaluated = g_fwd.evaluate(
-        (void*) cmd, m.feature, m.params, &modelInput->ngx, &m.depth.ngx, &m.motion.ngx, &m.output.ngx, m.workWidth,
-        m.workHeight, m.workWidth, m.workHeight, m.workWidth, m.workHeight, 0, 0, 0, 0, 1, reset ? 1 : 0,
-        cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
-        cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
-        cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1.0f, 1.0f);
+    // Zero depth (constant, read inverted, so zero is the far plane) at the working size from the origin. Motion: the
+    // synthesized field when the estimator has one this frame, otherwise the zero guide; both at the working size, at
+    // unit scale (the field is in working pixels; the zero guide has nothing to scale).
+    const auto guide = VkPresentHost::ChooseMotionGuide(fieldReady, m.workWidth, m.workHeight);
+    const bool reset = VkPresentHost::NrResetWithMotion(m.reset, frame.cut, sceneCut,
+                                                        cfg.DlssNrZeroGuideReset.value_or_default(), guide.field);
+    NVSDK_NGX_Resource_VK* motionGuide = guide.field ? &m.fieldNgx : &m.motion.ngx;
+    const int evaluated =
+        g_fwd.evaluate((void*) cmd, m.feature, m.params, &modelInput->ngx, &m.depth.ngx, motionGuide, &m.output.ngx,
+                       m.workWidth, m.workHeight, m.workWidth, m.workHeight, guide.width, guide.height, 0, 0, 0, 0, 1,
+                       reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
+                       cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+                       cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0,
+                       guide.scaleX, guide.scaleY);
 
     if (evaluated != 1)
         return fail("the model refused to evaluate (returned " + std::to_string(evaluated) + ")");
 
     _lastReset = reset;
+    _lastSynthesized = guide.field;
     m.reset = false;
+
+    if (guide.field && !m.saidField)
+    {
+        m.saidField = true;
+        char scale[64];
+        std::snprintf(scale, sizeof(scale), "%.3f x %.3f", guide.scaleX, guide.scaleY);
+        m.Say("synthesized motion: the first field handed to the model at " + std::to_string(guide.width) + "x" +
+              std::to_string(guide.height) + ", its working size (motion vector scale " + scale + ", frame " +
+              std::to_string(m.width) + "x" + std::to_string(m.height) + ")");
+    }
 
     // Resolve: the proxy, the model's answer and the untouched frame back into the working colour.
     DlssNrConstants resolve = encode;
@@ -2912,11 +3058,17 @@ void VkPresentModel::Submitted(uint64_t ticket)
     m.pending.push_back(ticket);
     m.firstDispatch.emplace_back(ticket, m.recordFirst);
 
+    // The estimator's history advances with the frame that reached the GPU.
+    if (m.synthRecorded)
+        m.estimator.ConfirmExecuted();
+    m.synthRecorded = false;
+
     if (!m.saidRuns)
     {
         m.saidRuns = true;
         m.Say("the model runs at present on " + std::to_string(m.width) + "x" + std::to_string(m.height) +
-              " (working " + std::to_string(m.workWidth) + "x" + std::to_string(m.workHeight) + "), on zero guides");
+              " (working " + std::to_string(m.workWidth) + "x" + std::to_string(m.workHeight) + "), on zero guides" +
+              (m.key.synth ? " until the synthesized motion's first field" : ""));
     }
 
     SessionGuardEvaluated();
@@ -2933,7 +3085,10 @@ void VkPresentModel::Discarded(uint64_t ticket)
     }
 
     // Nothing of the model's is built in a recording any more (the builder makes it all, its GPU work seen complete):
-    // a discarded frame only starts the history over.
+    // a discarded frame only starts the history over -- the estimator's stays where it was, its recording dropped.
+    if (m.synthRecorded)
+        m.estimator.AbandonRecording();
+    m.synthRecorded = false;
     m.reset = true;
 }
 
@@ -2947,6 +3102,9 @@ std::optional<double> VkPresentModel::Completed(uint64_t ticket)
 
     m.pending.erase(found);
     std::erase_if(m.firstDispatch, [ticket](const auto& entry) { return entry.first == ticket; });
+
+    // The frame's scene-change bit, now that its copy has landed (none when the images were retired since).
+    m.estimator.Completed(ticket, m.synthImages);
 
     std::optional<double> ms;
     for (uint32_t i = 0; i < kPresentQueryPairs; ++i)
@@ -3017,6 +3175,12 @@ void VkPresentModel::Release()
     for (OwnedImage* image : m.Images())
         DestroyImageOn(m.dev.device, *image);
 
+    SynthMotion::DestroyVkImages(m.dev.device, m.synthImages);
+    SynthMotion::DestroyVkPipelines(m.synthPipelines);
+    m.fieldNgx = NVSDK_NGX_Resource_VK {};
+    m.estimator.Restart();
+    m.synthRecorded = false;
+
     m.pass.reset();
 
     if (m.queryPool != VK_NULL_HANDLE)
@@ -3065,6 +3229,11 @@ void VkPresentModel::Abandon()
     m.pending.clear();
     for (OwnedImage* image : m.Images())
         *image = OwnedImage {};
+    m.synthImages = SynthMotion::VkImages {};
+    m.synthPipelines = SynthMotion::VkPipelines {};
+    m.fieldNgx = NVSDK_NGX_Resource_VK {};
+    m.estimator.Restart();
+    m.synthRecorded = false;
     m.width = m.height = m.workWidth = m.workHeight = 0;
     m.ngxInitialised = false;
     m.deviceReady = false;
