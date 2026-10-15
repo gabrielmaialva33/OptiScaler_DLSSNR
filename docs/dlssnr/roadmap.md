@@ -6,6 +6,22 @@ and only then the change, as [nr-before-dlssg.md](design/nr-before-dlssg.md) did
 
 ## Done
 
+- **The gaps NeuRotic had open over us, closed 2026-10-15** (report: `~/.local/state/dlss5/notes/neurotic-20261013/report.md`;
+  ideas only, no code taken). Confirmed in game by the user the same morning:
+  - **HDR at present** ([hdr-present-conversion.md](design/hdr-present-conversion.md)): HDR10 and scRGB on the D3D12
+    present pass (Crimson Desert under GE-Proton with `PROTON_ENABLE_WAYLAND=1 PROTON_ENABLE_HDR=1`: colours and
+    highlights as the game's, 0.11-0.13 ms GPU, the 203-nit fallback white) and on the Vulkan present host (real HDR
+    surfaces under Proton, zero validation errors; not yet in a game).
+  - **Real guides at present, step 1** ([present-real-guides.md](design/present-real-guides.md)): Crimson Desert at its own
+    Present used the game's depth and motion on every frame of every window but one ambiguous start-up frame, lag 1
+    throughout; the picture judged fine.
+  - **HUD at present under DLSS-G** ([hud-protection.md](design/hud-protection.md)): with `UiProtection` on, the HUD
+    stopped smearing and shaking on camera turns in Crimson Desert, DLSS-G at 4x.
+  - **The Vulkan present host without the game's DLSS** ([nr-vulkan-present-host.md](design/nr-vulkan-present-host.md)):
+    the model built off the present path with a stall watchdog (DOOM Eternal's one start-up hang in eight launches;
+    one clean launch since, more wanted), the way back from a quiet DLSS (4-5 ms drains), and synthesized motion on
+    Vulkan (`SynthMotion`): the smear on camera turns judged gone in DOOM Eternal.
+  - Session guard v2 and the comparison capture hardened (both default off, not yet in a game).
 - **NR ahead of the game's own DLSS-G** ([nr-before-dlssg.md](design/nr-before-dlssg.md)). Measured in Crimson Desert:
   no flicker at 3x, same cost as the upscaled route. Merged in `c9c5e64f`.
 - **MFG unlock hardening** (edx wrapper ceiling, transactional gates). Measured: Crimson Desert at 6x (provider
