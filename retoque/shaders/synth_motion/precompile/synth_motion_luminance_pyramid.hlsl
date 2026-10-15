@@ -36,6 +36,11 @@
 #define FFX_OPTICALFLOW_BIND_CB_COMMON 0
 #define FFX_OPTICALFLOW_BIND_CB_SPD 1
 
+// Vulkan: SPD's LDS path. Its quad operations would need compute derivatives, which no game's device enables.
+#if defined(VK_MODE)
+#define FFX_SPD_NO_WAVE_OPERATIONS 1
+#endif
+
 #include "synth_motion_callbacks.h"
 #include "opticalflow/ffx_opticalflow_compute_luminance_pyramid.h"
 
