@@ -32,6 +32,9 @@
     <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotion_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotion_Vk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\retoque\shaders\synth_motion\SynthMotion_Handoff.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1138,6 +1141,9 @@
     <ClCompile Include="..\retoque\shaders\synth_motion\SynthMotion_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\retoque\shaders\synth_motion\SynthMotion_Vk.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="..\retoque\shaders\synth_motion\SynthMotionNvofa_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1900,6 +1906,9 @@
     <ClInclude Include="..\retoque\dlssnr\DlssNr_VkModelOwner.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentBuild.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\retoque\with_dx12\Dx11wDx12_Window.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -2054,6 +2063,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClCompile Include="..\retoque\framegen\dlssg\MfgProbe.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_ProcessEnd.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_ProcessEnd.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

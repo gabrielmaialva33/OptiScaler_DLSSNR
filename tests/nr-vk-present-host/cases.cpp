@@ -8,6 +8,8 @@
 #include "DlssNr_VkModelOwner.h"
 #include "DlssNr_VkPresentRegistry.h"
 
+#include <future>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -359,6 +361,8 @@ struct World
         return id;
     }
 
+    uint64_t nowMs = 0;
+
     std::vector<std::string> Present(Handle queue, Handle swapchain, uint32_t index, uint32_t waits, bool acquire,
                                      Handle device, Caller caller = Caller::Native, Handle module = 0x140000000,
                                      const Outcome& outcome = Outcome {})
@@ -366,6 +370,7 @@ struct World
         if (acquire)
             r.OnAcquire(device, swapchain, index);
         PresentCall call;
+        call.nowMs = nowMs;
         call.queue = queue;
         call.waitSemaphores = waits;
         call.swapchainCount = 1;
@@ -378,6 +383,92 @@ struct World
         return r.OnPresent(call);
     }
 };
+
+static void Heartbeat()
+{
+    World w;
+    w.Device(0xD1);
+    w.r.OnQueue(0xD1, 0, 0, 0, 0x51);
+    w.r.OnSurfaceCreated(World::instance, 0x5F1, 0xAAA);
+    w.Swapchain(0xD1, 0x5C1, 0x5F1, 0x12);
+    w.nowMs = 1234;
+    CHECK(w.Present(0x51, 0x5C1, 0, 1, true, 0xD1).size() == 1);
+    w.nowMs += 59999;
+    CHECK(w.Present(0x51, 0x5C1, 1, 1, true, 0xD1).empty());
+    ++w.nowMs;
+    auto lines = w.Present(0x51, 0x5C1, 2, 1, true, 0xD1);
+    CHECK(lines.size() == 1);
+    if (!lines.empty())
+        HAS(lines[0], "60 s heartbeat");
+    CHECK(w.Present(0x51, 0x5C1, 0, 1, true, 0xD1).empty());
+    // The first present after a long gap emits one current line, not a catch-up burst.
+    w.nowMs += 180000;
+    lines = w.Present(0x51, 0x5C1, 1, 1, true, 0xD1);
+    CHECK(lines.size() == 1);
+    if (!lines.empty())
+        HAS(lines[0], "presents 5");
+    CHECK(w.Present(0x51, 0x5C1, 2, 1, true, 0xD1).empty());
+    // Any event line resets the heartbeat deadline.
+    w.r.OnQueue(0xD1, 2, 0, 0, 0x52);
+    w.nowMs += 50000;
+    CHECK(w.Present(0x52, 0x5C1, 0, 1, true, 0xD1).size() == 1);
+    w.nowMs += 10000;
+    CHECK(w.Present(0x52, 0x5C1, 1, 1, true, 0xD1).empty());
+}
+
+static void HandBackDiagnosticsAndLocks()
+{
+    using namespace DlssNr::VkModelOwner;
+    Arbiter owner;
+    CHECK(owner.AfterUpscale(1, 0).granted);
+    owner.AfterUpscaleDone(0);
+    const uint64_t due = kAfterUpscaleIdleMs;
+    CHECK(owner.IdleAfterUpscaleDevice(due) == 1);
+    HandBackReadiness ready;
+    HandBackDiagnostics diagnostics;
+    ready.enabled = false; // F7 off: the route's idle clock is not restarted.
+    auto reason = HandBackBlockReason(ready);
+    CHECK(reason == "NR off ([DlssNr] Enabled=false)");
+    CHECK(diagnostics.Blocked(reason, due));
+    for (uint64_t i = 1; i < 100; ++i)
+        CHECK(!diagnostics.Blocked(reason, due + i));
+    ready.enabled = true;
+    CHECK(HandBackBlockReason(ready).empty());
+    CHECK(owner.BeginHandBack(1, due + 100)); // at once, not another ten seconds
+    CHECK(owner.FinishHandBack(1) == HandBack::Done);
+    diagnostics.Reset();
+    CHECK(diagnostics.Blocked(reason, due + 101)); // a new due episode can report it again
+    CHECK(diagnostics.Blocked("device lost", due + 102));
+    CHECK(!diagnostics.Blocked(reason, due + 103)); // distinct reasons do not spam when alternating
+
+    for (bool submitBusy : { false, true })
+    {
+        QueueLocks queue;
+        std::promise<void> locked, release;
+        auto released = release.get_future();
+        std::thread worker(
+            [&]
+            {
+                std::lock_guard lock(submitBusy ? queue.submit : queue.present);
+                locked.set_value();
+                released.wait();
+            });
+        locked.get_future().wait();
+        diagnostics.Reset();
+        std::vector<std::unique_lock<QueueMutex>> held;
+        const std::string expected = submitBusy ? "submit" : "present";
+        for (uint64_t ms : { 0, 999, 1000, 1001, 5000 })
+        {
+            const char* busy = TryHandBackQueueLocks(queue, held);
+            CHECK(busy != nullptr && expected == busy && held.empty());
+            CHECK(diagnostics.Blocked(expected, ms, 1000) == (ms == 1000));
+        }
+        release.set_value();
+        worker.join();
+        CHECK(TryHandBackQueueLocks(queue, held) == nullptr && held.size() == 2);
+        held.clear();
+    }
+}
 
 static void FirstPresentDecadesAndWaits()
 {
@@ -814,6 +905,27 @@ static void ColourPlans()
                                                               "(B8G8R8A8_UNORM, colour space 1000104001)");
     HAS(PlanColour(VK_FORMAT_R5G6B5_UNORM_PACK16, 0).refusal, "a format other than RGBA8/BGRA8 (format 4, colour "
                                                               "space 0)");
+    for (const auto format : { kFormatA2B10G10R10UnormPack32, kFormatA2R10G10B10UnormPack32 })
+    {
+        const auto hdr = PlanColour(format, kColourSpaceHdr10St2084, true);
+        CHECK(hdr.profile == 1 && hdr.Eligible() && !hdr.sdr && hdr.raw == format && hdr.refusal.empty());
+        CHECK(!PlanColour(format, kColourSpaceHdr10St2084, false).Eligible());
+        CHECK(!PlanColour(format, kColourSpaceExtendedSrgbLinear, true).Eligible());
+    }
+    CHECK(PlanColour(kFormatR16G16B16A16Sfloat, kColourSpaceExtendedSrgbLinear, true).profile == 2);
+    CHECK(!PlanColour(kFormatR16G16B16A16Sfloat, kColourSpaceHdr10St2084, true).Eligible());
+    CHECK(!PlanColour(kFormatR8G8B8A8Unorm, kColourSpaceHdr10St2084, true).Eligible());
+    CHECK(PlanColour(kFormatR8G8B8A8Unorm, kColourSpaceSrgbNonlinear, true).sdr);
+    BuildKey sdr { 3440, 1440, 3440, 1440, 0 };
+    auto hdr = sdr;
+    hdr.hdrProfile = 1;
+    hdr.rawFormat = kFormatA2B10G10R10UnormPack32;
+    CHECK(DecideBuild(false, BuildState::None, true, sdr, hdr) == BuildStep::Request);
+    CHECK(DecideBuild(false, BuildState::Running, true, sdr, hdr) == BuildStep::Wait);
+    CHECK(DecideBuild(false, BuildState::None, true, hdr, hdr) == BuildStep::Use);
+    auto other = hdr;
+    other.rawFormat = kFormatA2R10G10B10UnormPack32;
+    CHECK(DecideBuild(false, BuildState::None, true, hdr, other) == BuildStep::Request);
 }
 
 // The model's device extensions at vkCreateDevice: what the device offers and the application did not ask for.
@@ -958,6 +1070,57 @@ static void NrCounters()
     CHECK(NrReset(true, false, false) && NrReset(false, true, false) && NrReset(false, false, true));
     CHECK(!NrReset(false, false, false));
     CHECK(kNrInFlightMax * 3 <= 18); // three dispatches a frame in DlssNr_Vk's ring of eighteen slots
+}
+
+// Stage 5, synthesized motion at the Vulkan present (DlssNr_VkPresentNr.h): which products ask for the estimator, when
+// its history starts over, what the model is told about motion, when the model's history resets, and the counter.
+static void SynthMotionDecisions()
+{
+    // The key on, the device not refusing it, the model's working size (what the estimator runs at) no smaller than
+    // it can: 517x389 at WorkingScale 0.5 is 259x195, enough; 480x270 at 0.5 is not.
+    CHECK(SynthWanted(true, false, 3440, 1440) && SynthWanted(true, false, 256, 128) &&
+          SynthWanted(true, false, 259, 195));
+    CHECK(!SynthWanted(false, false, 3440, 1440) && !SynthWanted(true, true, 3440, 1440));
+    CHECK(!SynthWanted(true, false, 255, 720) && !SynthWanted(true, false, 1280, 127) &&
+          !SynthWanted(true, false, 240, 135));
+
+    // A product with the estimator is another key: turning the key on or off is a rebuild, frames carried meanwhile.
+    const BuildKey plain { 3440, 1440, 3440, 1440, 0 }, synth { 3440, 1440, 3440, 1440, 0, true };
+    CHECK(DecideBuild(false, BuildState::None, true, plain, synth) == BuildStep::Request);
+    CHECK(DecideBuild(false, BuildState::None, true, synth, plain) == BuildStep::Request);
+    CHECK(DecideBuild(false, BuildState::None, true, synth, synth) == BuildStep::Use);
+
+    // The estimator's history: over on its first recording and after a gap over 250 ms (the D3D12 rule), not on the
+    // model's resets or the host's cut (the model forgets its own history then).
+    CHECK(SynthReset(0, 1000));
+    CHECK(!SynthReset(990, 1000));
+    CHECK(!SynthReset(1000 - kSynthStaleMs, 1000));
+    CHECK(SynthReset(1000 - kSynthStaleMs - 1, 1000));
+
+    // The guide: the zero one until the field is Ready, then the field; either at the model's working size (the field
+    // is estimated on the model's own input, in working pixels), at unit scale. Never larger than the model's colour.
+    const MotionGuide zero = ChooseMotionGuide(false, 1720, 720);
+    CHECK(!zero.field && zero.width == 1720 && zero.height == 720 && zero.scaleX == 1.0f && zero.scaleY == 1.0f);
+    const MotionGuide field = ChooseMotionGuide(true, 1720, 720);
+    CHECK(field.field && field.width == 1720 && field.height == 720 && field.scaleX == 1.0f && field.scaleY == 1.0f);
+
+    // The model's reset: a scene cut is a cut; ZeroGuideReset applies only to a frame on the zero guide.
+    CHECK(NrResetWithMotion(false, false, true, false, true));
+    CHECK(!NrResetWithMotion(false, false, false, true, true));
+    CHECK(NrResetWithMotion(false, false, false, true, false));
+    CHECK(NrResetWithMotion(true, false, false, false, true) && NrResetWithMotion(false, true, false, false, true));
+    CHECK(!NrResetWithMotion(false, false, false, false, false));
+
+    // Counted per evaluated frame, and said only once a field has been handed over.
+    TransportStats s;
+    Outcome withField = WithNr(Transported(Route::SameQueue, 1, 1, 1), true);
+    withField.nrSynthesized = true;
+    s.Add(WithNr(Transported(Route::SameQueue, 1, 1, 1), true));
+    CHECK(NrText(s.nr) == "NR: evaluated 1, refused 0, history resets 0, pass GPU not measured");
+    s.Add(withField);
+    s.Add(withField);
+    CHECK(s.nr.evaluated == 3 && s.nr.synthesized == 2);
+    CHECK(NrText(s.nr) == "NR: evaluated 3, refused 0, history resets 0, motion synthesized 2, pass GPU not measured");
 }
 
 // One owner of the model in the process: the after-upscale route wins, the present host stands down and gives it up.
@@ -1266,6 +1429,189 @@ static void NrLines()
         "evaluated 9, refused 1 (model busy 1), history resets 2, pass GPU last 3.750 ms, mean 3.500 ms, max 3.750 ms");
 }
 
+// Off the present path (DOOM Eternal's startup hang, 2026-10-14): the model's build state machine. Nothing is built on
+// a frame; a job is requested, waited for, adopted, and only then used; a failure latches; a resize churn while a job
+// runs costs at most one extra build.
+static void BuildDecisions()
+{
+    const BuildKey a { 841, 671, 841, 671, 0 }, b { 3440, 1440, 3440, 1440, 0 }, bOther { 3440, 1440, 3440, 1440, 2 };
+    const BuildKey bHalf { 3440, 1440, 1720, 720, 0 };
+
+    // Cold: nothing built, no job -> request; while queued or running -> wait (the frame carried); done -> adopt.
+    CHECK(DecideBuild(false, BuildState::None, false, {}, a) == BuildStep::Request);
+    CHECK(DecideBuild(false, BuildState::Queued, false, {}, a) == BuildStep::Wait);
+    CHECK(DecideBuild(false, BuildState::Running, false, {}, a) == BuildStep::Wait);
+    CHECK(DecideBuild(false, BuildState::Done, false, {}, a) == BuildStep::Adopt);
+    CHECK(DecideBuild(false, BuildState::Failed, false, {}, a) == BuildStep::Adopt);
+    // Adopted: used while the key holds; a new size, working scale or family is a new build.
+    CHECK(DecideBuild(false, BuildState::None, true, a, a) == BuildStep::Use);
+    CHECK(DecideBuild(false, BuildState::None, true, a, b) == BuildStep::Request);
+    CHECK(DecideBuild(false, BuildState::None, true, b, bHalf) == BuildStep::Request);
+    CHECK(DecideBuild(false, BuildState::None, true, b, bOther) == BuildStep::Request);
+    // A latched failure ends it, whatever else.
+    CHECK(DecideBuild(true, BuildState::None, true, a, a) == BuildStep::Off);
+    CHECK(DecideBuild(true, BuildState::Running, false, {}, a) == BuildStep::Off);
+
+    // The DOOM churn, driven frame by frame: 841x671, then #9 at 3440x1440 for one present, then #11 at 3440x1440,
+    // the builder slow. Requests: one per key the frames ask for while nothing runs.
+    struct Model
+    {
+        bool built = false;
+        BuildKey key;
+        BuildState job = BuildState::None;
+        BuildKey jobKey;
+        int requests = 0, used = 0, carried = 0;
+    } m;
+    const auto frame = [&m](const BuildKey& want)
+    {
+        for (;;)
+        {
+            switch (DecideBuild(false, m.job, m.built, m.key, want))
+            {
+            case BuildStep::Use:
+                ++m.used;
+                return;
+            case BuildStep::Adopt:
+                m.built = true;
+                m.key = m.jobKey;
+                m.job = BuildState::None;
+                continue;
+            case BuildStep::Request:
+                ++m.requests;
+                m.built = false;
+                m.job = BuildState::Queued;
+                m.jobKey = want;
+                ++m.carried;
+                return;
+            default:
+                ++m.carried;
+                return;
+            }
+        }
+    };
+    frame(a);                    // request a
+    m.job = BuildState::Running; // the builder takes it
+    frame(a);                    // carried
+    m.job = BuildState::Done;
+    for (int i = 0; i < 183; ++i)
+        frame(a); // adopted at the first, then used
+    frame(b);     // #9's one present: a new build
+    m.job = BuildState::Running;
+    frame(b); // #11: carried, the build for b is running
+    frame(b);
+    m.job = BuildState::Done;
+    frame(b); // adopted, used
+    CHECK(m.requests == 2 && m.used == 184 && m.carried == 5);
+
+    // A resize while a job runs: the job ends, is adopted for the old key, and the next frame asks again.
+    m = {};
+    frame(a);
+    m.job = BuildState::Running;
+    frame(b);
+    CHECK(m.requests == 1);
+    m.job = BuildState::Done;
+    frame(b); // adopts a, then requests b
+    CHECK(m.requests == 2 && m.key == a && m.jobKey == b && m.job == BuildState::Queued);
+
+    CHECK(std::string(BuildStateName(BuildState::Running)) == "running");
+    CHECK(std::string(NrSkipName(NrSkip::Building)) == "model building");
+}
+
+// The stall watchdog's table: lines after 2 s (5 s for the build), once per occupancy then every 10 s, with the stage,
+// the object, the locks held and, for a lock waited on, its holder and what the holder is doing.
+static void StallWatch()
+{
+    ActivityTable table;
+    SetThreadTag(1652);
+    const size_t present = table.Enter("vkQueuePresentKHR", 0x51, 1000);
+    table.Hold(present, kLockPresent, true);
+    SetThreadTag(1700);
+    const size_t destroy = table.Enter("vkDestroySwapchainKHR", 0x5C9, 900);
+    table.Hold(destroy, kLockTransport, true);
+    table.Stage(destroy, "retiring the swapchain's slots (bounded drain)");
+    table.Stage(present, "waiting for the transport lock", kLockTransport, 1700);
+    SetThreadTag(1800);
+    const size_t build = table.Enter("model build", 0xD1, 1000, kBuildStallMs);
+    table.Stage(build, "creating the feature (NGX)");
+
+    CHECK(table.Check(2899).empty()); // nobody has been in for its allowance yet
+    std::vector<std::string> lines = table.Check(3000);
+    CHECK(lines.size() == 2); // the destroy (2.1 s) and the present (2.0 s); the build has 5 s
+    std::string presentLine;
+    for (const std::string& line : lines)
+    {
+        if (line.find("thread 1652") == 0)
+            presentLine = line;
+    }
+    CHECK(presentLine == "thread 1652 in vkQueuePresentKHR (0x51) for 2.0 s: waiting for the transport lock (the "
+                         "transport lock is held by thread 1700, in vkDestroySwapchainKHR for 2.1 s: retiring the "
+                         "swapchain's slots (bounded drain)); holds the present lock");
+    CHECK(table.Check(3500).empty()); // once per occupancy ...
+    CHECK(table.Check(5999).empty());
+    // ... the build's allowance is 5 s; its line names it holding no host lock ...
+    lines = table.Check(6000);
+    CHECK(lines.size() == 1 &&
+          lines[0] == "thread 1800 in model build (0xD1) for 5.0 s: creating the feature (NGX); holds no host lock");
+    CHECK(table.Check(12999).empty());     // ... and each is said again 10 s after its last line
+    CHECK(table.Check(13000).size() == 2); // the present and the destroy
+    CHECK(table.Check(13001).empty());
+    table.Leave(present);
+    table.Leave(destroy);
+    CHECK(table.Check(15999).empty() && table.Check(16000).size() == 1); // the build
+
+    // A slot freed and taken again is a new occupancy, reported on its own clock.
+    table.Leave(build);
+    SetThreadTag(1652);
+    const size_t again = table.Enter("vkQueuePresentKHR", 0x51, 20000);
+    CHECK(again == present || again == destroy || again == build);
+    CHECK(table.Check(21999).empty() && table.Check(22000).size() == 1);
+    table.Leave(again);
+    CHECK(table.Check(40000).empty());
+
+    // A holder outside every entry point, and a full table: nothing waits, the activity goes unrecorded.
+    const size_t lonely = table.Enter("vkQueueSubmit", 0x51, 0);
+    table.Stage(lonely, "waiting for the queue's submit lock", kLockSubmit, 4242);
+    lines = table.Check(2500);
+    CHECK(lines.size() == 1 && lines[0].find("(the submit lock is held by thread 4242, outside the host's entry "
+                                             "points)") != std::string::npos);
+    table.Leave(lonely);
+    std::vector<size_t> slots;
+    for (size_t i = 0; i < kActivitySlots; ++i)
+        slots.push_back(table.Enter("vkQueueSubmit", 0, 0));
+    CHECK(table.Enter("vkQueueSubmit", 0, 0) == kActivitySlots);
+    table.Stage(kActivitySlots, "ignored");
+    table.Hold(kActivitySlots, kLockSubmit, true);
+    table.Leave(kActivitySlots);
+    for (size_t slot : slots)
+        table.Leave(slot);
+
+    CHECK(HostLockNames(kLockPresent | kLockTransport) == "the present lock, the transport lock");
+    CHECK(HostLockNames(kLockNone).empty());
+
+    // The tracked lock: its holder while held, through recursion, nobody once given back; a waiter reads it.
+    TrackedMutex<std::recursive_timed_mutex> lock;
+    SetThreadTag(77);
+    CHECK(lock.Owner() == 0);
+    lock.lock();
+    CHECK(lock.Owner() == 77);
+    CHECK(lock.try_lock() && lock.Owner() == 77);
+    lock.unlock();
+    CHECK(lock.Owner() == 77);
+    uint32_t seen = 0;
+    std::thread other(
+        [&]
+        {
+            SetThreadTag(78);
+            seen = lock.Owner();
+            CHECK(!lock.try_lock_for(std::chrono::milliseconds(1)));
+        });
+    other.join();
+    CHECK(seen == 77);
+    lock.unlock();
+    CHECK(lock.Owner() == 0);
+    SetThreadTag(0);
+}
+
 int main()
 {
     Constants();
@@ -1287,8 +1633,13 @@ int main()
     ExtensionPlans();
     BdaPlans();
     NrCounters();
+    SynthMotionDecisions();
     OwnerArbitration();
     OwnerHandBack();
+    Heartbeat();
+    HandBackDiagnosticsAndLocks();
+    BuildDecisions();
+    StallWatch();
     NrLines();
 
     if (failures != 0)
@@ -1297,8 +1648,10 @@ int main()
         return 1;
     }
 
-    std::puts("PASS: registry state machine (records, reuse, many devices, unknowns, internal, lines), the round "
-              "trip's decisions (usage plan, route, ring, counters, transport lines) and cold NR's (colour plan, "
-              "device extensions, counters, one owner and the way back to the present host, NR lines)");
+    std::puts(
+        "PASS: registry state machine (records, reuse, many devices, unknowns, internal, lines), the round "
+        "trip's decisions (usage plan, route, ring, counters, transport lines) and cold NR's (colour plan, "
+        "device extensions, counters, one owner and the way back to the present host, NR lines), the model's build off "
+        "the present path, synthesized motion's decisions and the stall watchdog's table");
     return 0;
 }

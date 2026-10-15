@@ -647,10 +647,14 @@ direction and a readback of the copy. Serial, like the rest of the tier.
 - **Not DLAA**: it is a DLSS evaluate at native size, which is exactly why it is the ground-truth arm.
 - **Not FSR or XeSS**: OptiScaler intercepts those and normalizes them into the same evaluate (no-upscaler-titles.md).
 - Confirm from the log, not from the menu:
-  - the identity line (`identity check (log only`) never appears, since a ring that never recorded logs nothing;
+  - the identity line (`identity check (log only`, `identity applied` since present-real-guides.md's step 1) never
+    appears, since a ring that never recorded logs nothing;
   - the status line reads `present: active, presentation backbuffer with dummy temporal inputs` (`HookStatus`,
     `DlssNr_Dx12.cpp:6949`), not "with DLSS temporal inputs". That text latches on the first capture, so one at the
-    title screen spoils the arm; restart the game after changing the setting;
+    title screen spoils the arm; restart the game after changing the setting. (Since present-real-guides.md's step 1
+    the status no longer latches: off the boundary it reads `present: active, zero guides (no motion)` or
+    `synthesized motion`, and the menu's guides line says the same; the routing latch is unchanged, so restart
+    anyway);
   - the scan line shows `0 upscaler captures` in every window.
 - `HookMethod=2` must be in the ini before start-up, both for the boundary under DLSS-G and for the observer's gate.
 - If the game offers no such mode, Crimson Desert is the DLAA arm only, and Cyberpunk 2077 carries the target arm.

@@ -12,6 +12,9 @@
 //  - The colour input is saturated before the luma is taken, and the transfer function is always 0.
 //  - Accessors no pass here uses (game motion vectors, histograms for global motion, additional info,
 //    debug visualisation) are left out.
+//  - Under VK_MODE (the Vulkan estimator, SynthMotion_Vk.cpp): the two constant buffers are one push
+//    constant block read through the same accessors, and every storage image names its view's format
+//    (nr-vulkan-present-host.md, "Stage 5").
 //
 // This file is part of the FidelityFX SDK.
 //
@@ -70,6 +73,36 @@
 // Internal textures read-only in a pass are still UAVs (see the header comment).
 #define SM_DECLARE_RO(regIndex) : register(DECLARE_UAV_REGISTER(regIndex))
 
+#if defined(VK_MODE)
+// Every storage image names its format, the view's exactly: no device feature is needed for a typed storage image of
+// these formats (StorageImageExtendedFormats is core), and the scene-change atomics require a declared R32 format.
+#define SM_VK_FORMAT(format) [[vk::image_format(format)]]
+
+// cbOF then cbOF_SPD, one block: Vulkan allows one push constant block per entry point.
+struct SmConstants
+{
+    FfxInt32x2 iInputLumaResolution;
+    FfxUInt32 uOpticalFlowPyramidLevel;
+    FfxUInt32 uOpticalFlowPyramidLevelCount;
+
+    FfxUInt32 iFrameIndex;
+    FfxUInt32 backbufferTransferFunction;
+    FfxFloat32x2 minMaxLuminance;
+
+    FfxUInt32 mips;
+    FfxUInt32 numWorkGroups;
+    FfxUInt32x2 workGroupOffset;
+    FfxUInt32 numWorkGroupOpticalFlowInputPyramid;
+    FfxUInt32 pad0_;
+    FfxUInt32 pad1_;
+    FfxUInt32 pad2_;
+};
+[[vk::push_constant]] SmConstants smConstants;
+#define SM_CB(member) smConstants.member
+#else
+#define SM_VK_FORMAT(format)
+#define SM_CB(member) member
+
 cbuffer cbOF : register(b0)
 {
     FfxInt32x2 iInputLumaResolution;
@@ -92,31 +125,34 @@ cbuffer cbOF_SPD : register(b1)
     FfxUInt32 pad1_;
     FfxUInt32 pad2_;
 };
+#endif // FFX_OPTICALFLOW_BIND_CB_SPD
+#endif // VK_MODE
 
+#if defined(FFX_OPTICALFLOW_BIND_CB_SPD)
 FfxUInt32 NumWorkGroups()
 {
-    return numWorkGroupOpticalFlowInputPyramid;
+    return SM_CB(numWorkGroupOpticalFlowInputPyramid);
 }
 #endif // FFX_OPTICALFLOW_BIND_CB_SPD
 
 FfxInt32x2 DisplaySize()
 {
-    return iInputLumaResolution;
+    return SM_CB(iInputLumaResolution);
 }
 
 FfxUInt32 FrameIndex()
 {
-    return iFrameIndex;
+    return SM_CB(iFrameIndex);
 }
 
 FfxUInt32 BackbufferTransferFunction()
 {
-    return backbufferTransferFunction;
+    return SM_CB(backbufferTransferFunction);
 }
 
 FfxFloat32x2 MinMaxLuminance()
 {
-    return minMaxLuminance;
+    return SM_CB(minMaxLuminance);
 }
 
 FfxBoolean CrossedSceneChangeThreshold(FfxFloat32 sceneChangeValue)
@@ -126,12 +162,12 @@ FfxBoolean CrossedSceneChangeThreshold(FfxFloat32 sceneChangeValue)
 
 FfxUInt32 OpticalFlowPyramidLevel()
 {
-    return uOpticalFlowPyramidLevel;
+    return SM_CB(uOpticalFlowPyramidLevel);
 }
 
 FfxUInt32 OpticalFlowPyramidLevelCount()
 {
-    return uOpticalFlowPyramidLevelCount;
+    return SM_CB(uOpticalFlowPyramidLevelCount);
 }
 
 // SRV declarations. The colour is the only real SRV.
@@ -139,57 +175,57 @@ FfxUInt32 OpticalFlowPyramidLevelCount()
 Texture2D<FfxFloat32x4> r_input_color FFX_DECLARE_SRV(FFX_OPTICALFLOW_BIND_SRV_INPUT_COLOR);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_SRV_OPTICAL_FLOW_INPUT
-RWTexture2D<FfxUInt32> r_optical_flow_input SM_DECLARE_RO(FFX_OPTICALFLOW_BIND_SRV_OPTICAL_FLOW_INPUT);
+SM_VK_FORMAT("r8ui") RWTexture2D<FfxUInt32> r_optical_flow_input SM_DECLARE_RO(FFX_OPTICALFLOW_BIND_SRV_OPTICAL_FLOW_INPUT);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_SRV_OPTICAL_FLOW_PREVIOUS_INPUT
-RWTexture2D<FfxUInt32> r_optical_flow_previous_input SM_DECLARE_RO(FFX_OPTICALFLOW_BIND_SRV_OPTICAL_FLOW_PREVIOUS_INPUT);
+SM_VK_FORMAT("r8ui") RWTexture2D<FfxUInt32> r_optical_flow_previous_input SM_DECLARE_RO(FFX_OPTICALFLOW_BIND_SRV_OPTICAL_FLOW_PREVIOUS_INPUT);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_SRV_OPTICAL_FLOW
-RWTexture2D<FfxInt32x2> r_optical_flow SM_DECLARE_RO(FFX_OPTICALFLOW_BIND_SRV_OPTICAL_FLOW);
+SM_VK_FORMAT("rg16i") RWTexture2D<FfxInt32x2> r_optical_flow SM_DECLARE_RO(FFX_OPTICALFLOW_BIND_SRV_OPTICAL_FLOW);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_SRV_OPTICAL_FLOW_PREVIOUS
-RWTexture2D<FfxInt32x2> r_optical_flow_previous SM_DECLARE_RO(FFX_OPTICALFLOW_BIND_SRV_OPTICAL_FLOW_PREVIOUS);
+SM_VK_FORMAT("rg16i") RWTexture2D<FfxInt32x2> r_optical_flow_previous SM_DECLARE_RO(FFX_OPTICALFLOW_BIND_SRV_OPTICAL_FLOW_PREVIOUS);
 #endif
 
 // UAV declarations
 #if defined FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT
-RWTexture2D<FfxUInt32> rw_optical_flow_input FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT);
+SM_VK_FORMAT("r8ui") RWTexture2D<FfxUInt32> rw_optical_flow_input FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_1
-globallycoherent RWTexture2D<FfxUInt32> rw_optical_flow_input_level_1 FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_1);
+SM_VK_FORMAT("r8ui") globallycoherent RWTexture2D<FfxUInt32> rw_optical_flow_input_level_1 FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_1);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_2
-globallycoherent RWTexture2D<FfxUInt32> rw_optical_flow_input_level_2 FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_2);
+SM_VK_FORMAT("r8ui") globallycoherent RWTexture2D<FfxUInt32> rw_optical_flow_input_level_2 FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_2);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_3
-globallycoherent RWTexture2D<FfxUInt32> rw_optical_flow_input_level_3 FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_3);
+SM_VK_FORMAT("r8ui") globallycoherent RWTexture2D<FfxUInt32> rw_optical_flow_input_level_3 FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_3);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_4
-globallycoherent RWTexture2D<FfxUInt32> rw_optical_flow_input_level_4 FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_4);
+SM_VK_FORMAT("r8ui") globallycoherent RWTexture2D<FfxUInt32> rw_optical_flow_input_level_4 FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_4);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_5
-globallycoherent RWTexture2D<FfxUInt32> rw_optical_flow_input_level_5 FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_5);
+SM_VK_FORMAT("r8ui") globallycoherent RWTexture2D<FfxUInt32> rw_optical_flow_input_level_5 FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_5);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_6
-globallycoherent RWTexture2D<FfxUInt32> rw_optical_flow_input_level_6 FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_6);
+SM_VK_FORMAT("r8ui") globallycoherent RWTexture2D<FfxUInt32> rw_optical_flow_input_level_6 FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT_LEVEL_6);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW
-RWTexture2D<FfxInt32x2> rw_optical_flow FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW);
+SM_VK_FORMAT("rg16i") RWTexture2D<FfxInt32x2> rw_optical_flow FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_NEXT_LEVEL
-RWTexture2D<FfxInt32x2> rw_optical_flow_next_level FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_NEXT_LEVEL);
+SM_VK_FORMAT("rg16i") RWTexture2D<FfxInt32x2> rw_optical_flow_next_level FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_NEXT_LEVEL);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_SCD_HISTOGRAM
-RWTexture2D<FfxUInt32> rw_optical_flow_scd_histogram FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_SCD_HISTOGRAM);
+SM_VK_FORMAT("r32ui") RWTexture2D<FfxUInt32> rw_optical_flow_scd_histogram FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_SCD_HISTOGRAM);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_SCD_PREVIOUS_HISTOGRAM
-RWTexture2D<FfxFloat32> rw_optical_flow_scd_previous_histogram FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_SCD_PREVIOUS_HISTOGRAM);
+SM_VK_FORMAT("r32f") RWTexture2D<FfxFloat32> rw_optical_flow_scd_previous_histogram FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_SCD_PREVIOUS_HISTOGRAM);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_SCD_TEMP
-RWTexture2D<FfxUInt32> rw_optical_flow_scd_temp FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_SCD_TEMP);
+SM_VK_FORMAT("r32ui") RWTexture2D<FfxUInt32> rw_optical_flow_scd_temp FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_SCD_TEMP);
 #endif
 #if defined FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_SCD_OUTPUT
-RWTexture2D<FfxUInt32> rw_optical_flow_scd_output FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_SCD_OUTPUT);
+SM_VK_FORMAT("r32ui") RWTexture2D<FfxUInt32> rw_optical_flow_scd_output FFX_DECLARE_UAV(FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_SCD_OUTPUT);
 #endif
 
 #if defined(FFX_OPTICALFLOW_BIND_SRV_INPUT_COLOR)

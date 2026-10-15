@@ -10,6 +10,7 @@
 #include <dlssnr/DlssNr_Consumers.h>
 #include <dlssnr/DlssNrFeature_Dx12.h>
 #include <dlssnr/DlssNr_VkModelOwner.h>
+#include <dlssnr/DlssNr_VkPresentBuild.h>
 #include <dlssnr/DlssNr_VkPresentModel.h>
 #include <dlssnr/DlssNr_Enlarge.h>
 #include <dlssnr/DlssNr_Exposure.h>
@@ -21,15 +22,22 @@
 #include <shaders/dlssnr/DlssNr_Vk.h>
 #include <shaders/dlssnr/DlssNr_GuideMatch.h>
 #include <shaders/output_scaling/OS_Vk.h>
+#include <shaders/synth_motion/SynthMotion_Vk.h>
+#include <shaders/dlssnr/DlssNr_PresentHdr_Vk.h>
+#include "DlssNr_PresentHdr.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 namespace DlssNr
 {
@@ -339,9 +347,15 @@ static VkImageInfo ImageInfoOf(const OwnedImage& img)
 }
 
 bool CreateImageOn(VkDevice device, VkPhysicalDevice physicalDevice, OwnedImage& img, uint32_t width, uint32_t height,
-                   VkFormat format, bool readWrite)
+                   VkFormat format, bool readWrite, bool* lost = nullptr, bool storage = true)
 {
     DestroyImageOn(device, img);
+    const auto failed = [lost](VkResult result)
+    {
+        if (lost && result == VK_ERROR_DEVICE_LOST)
+            *lost = true;
+        return result != VK_SUCCESS;
+    };
 
     VkImageCreateInfo info {};
     info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -352,12 +366,12 @@ bool CreateImageOn(VkDevice device, VkPhysicalDevice physicalDevice, OwnedImage&
     info.arrayLayers = 1;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                 VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    info.usage = (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0) | VK_IMAGE_USAGE_SAMPLED_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vkCreateImage(device, &info, nullptr, &img.image) != VK_SUCCESS)
+    if (failed(vkCreateImage(device, &info, nullptr, &img.image)))
     {
         LOG_ERROR("DLSS-NR Vulkan: could not create a {}x{} image", width, height);
         return false;
@@ -372,11 +386,12 @@ bool CreateImageOn(VkDevice device, VkPhysicalDevice physicalDevice, OwnedImage&
     alloc.memoryTypeIndex =
         FindMemoryTypeIndexOn(physicalDevice, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    if (alloc.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(device, &alloc, nullptr, &img.memory) != VK_SUCCESS ||
-        vkBindImageMemory(device, img.image, img.memory, 0) != VK_SUCCESS)
+    if (alloc.memoryTypeIndex == UINT32_MAX || failed(vkAllocateMemory(device, &alloc, nullptr, &img.memory)) ||
+        failed(vkBindImageMemory(device, img.image, img.memory, 0)))
     {
         LOG_ERROR("DLSS-NR Vulkan: could not back a {}x{} image", width, height);
-        DestroyImageOn(device, img);
+        if (!lost || !*lost)
+            DestroyImageOn(device, img);
         return false;
     }
 
@@ -387,10 +402,11 @@ bool CreateImageOn(VkDevice device, VkPhysicalDevice physicalDevice, OwnedImage&
     view.format = format;
     view.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
 
-    if (vkCreateImageView(device, &view, nullptr, &img.view) != VK_SUCCESS)
+    if (failed(vkCreateImageView(device, &view, nullptr, &img.view)))
     {
         LOG_ERROR("DLSS-NR Vulkan: could not view a {}x{} image", width, height);
-        DestroyImageOn(device, img);
+        if (!lost || !*lost)
+            DestroyImageOn(device, img);
         return false;
     }
 
@@ -1853,11 +1869,10 @@ constexpr uint32_t kPresentQueryPairs = 8;
 // DlssNr_Vk's constant/descriptor slots (kSlotsPerFrame 6 x kFramesInFlight 3), handed out in order.
 constexpr uint64_t kPresentPassSlots = 18;
 
-// The device the present host brought the driver's NGX core up on (NVNGXProxy holds one), if it did. Read and written
-// only under the host's transport lock, as every present-model call is.
+// The device the present host brought the driver's NGX core up on (NVNGXProxy holds one), if it did, and the device it
+// last initialised NGX on through the forwarder. Written by the model's builder thread, read at vkDestroyDevice: both
+// under g_presentNgxMutex (below).
 VkDevice g_presentCoreDevice = VK_NULL_HANDLE;
-
-// The device the present host last initialised NGX on through the forwarder, if it did. Under the same lock.
 VkDevice g_presentForwarderDevice = VK_NULL_HANDLE;
 
 // A feature and images replaced while frames that used them were in flight: freed once every one of those frames is
@@ -1866,6 +1881,8 @@ struct RetiredSet
 {
     void* feature = nullptr;
     std::vector<OwnedImage> images;
+    SynthMotion::VkImages synth; // the synthesized-motion estimator's images for that size, if it had them
+    PresentHdr::VkConversion hdr;
     std::vector<uint64_t> waitFor;
 };
 
@@ -1908,6 +1925,576 @@ std::wstring PresentModelDataPath()
 }
 } // namespace
 
+// --- The model's builds, off the present path ------------------------------------------------------------------
+//
+// Everything that brings the model up or resizes it runs on one process-wide builder thread, never inside the game's
+// vkQueuePresentKHR (nr-vulkan-present-host.md, "Off the present path"): the forwarder, NGX's initialisation on the
+// device, the driver core's bring-up and its capability block, the composition pass, the images, the zero guides'
+// clear and the feature's creation, whose GPU work the builder submits through the host and waits for. A job's product
+// is handed to the present path only once that work is seen complete; while a job is queued or running, the present
+// path makes no NGX call for its model.
+
+namespace
+{
+using VkPresentHost::BuildKey;
+using VkPresentHost::BuildState;
+
+// The config a feature is built with, read once when the job is posted.
+struct BuildConfig
+{
+    int preset = 0;
+    float intensity = 0.0f;
+    int style = 0;
+    float localStructure = 0.0f;
+    float localTone = 0.0f;
+    float skinStructure = 0.0f;
+    int autoMask = 0;
+};
+
+struct PresentBuildJob
+{
+    // Inputs, set before the job is posted; the builder only reads them.
+    VkPresentModelDevice dev;
+    BuildKey key;
+    bool needDevice = false;               // the model's first job: everything of the device's too
+    NVSDK_NGX_Parameter* params = nullptr; // the model's capability block when !needDevice
+    BuildConfig config;
+    uint64_t postedMs = 0;
+    // key.synth with no estimator pipelines on the model yet: the device's part of the estimator is made too.
+    bool needSynthPipelines = false;
+
+    std::atomic<BuildState> state { BuildState::Queued };
+    std::atomic<bool> orphaned { false }; // its model is gone (device lost or destroyed): touch nothing of it
+    std::mutex doneMutex;
+    std::condition_variable done;
+
+    // Outputs, written by the builder before `state` leaves Running (release), read after (acquire).
+    bool ngxInitialised = false;
+    bool coreReady = false;
+    NVSDK_NGX_Parameter* newParams = nullptr;
+    bool floatSlotKnown = false;
+    std::unique_ptr<DlssNr_Vk> pass;
+    VkQueryPool queryPool = VK_NULL_HANDLE;
+    double tickNs = 0.0;
+    uint64_t tickMask = ~0ull;
+    void* feature = nullptr;
+    OwnedImage output, proxy, keep, proxySmall, depth, motion;
+    OwnedImage hdrOriginal, hdrLinear, hdrEncoded;
+    PresentHdr::VkConversion hdr;
+    // Synthesized motion (stage 5), with key.synth: the estimator's pipelines (needSynthPipelines) and its images for
+    // this size. synthOff: why it could not be made; the product is then built without it (zero motion), never refused.
+    SynthMotion::VkPipelines synthPipelines;
+    SynthMotion::VkImages synthImages;
+    std::string synthOff;
+    std::string failure;     // empty: Done
+    bool hdrFailure = false; // only the optional conversion failed, so another profile/size may still run
+    bool retry = false;      // a failure that frees everything and asks again later (the queue's locks stayed busy)
+    bool lost = false;       // the device was lost during it: the host marks the device lost
+    std::vector<std::string> lines;
+    uint64_t startedMs = 0;
+    uint64_t finishedMs = 0;
+
+    std::array<OwnedImage*, 9> Images()
+    {
+        return { &output, &proxy, &keep, &proxySmall, &depth, &motion, &hdrOriginal, &hdrLinear, &hdrEncoded };
+    }
+
+    void Say(std::string line) { lines.push_back("DLSS-NR Vulkan present host: " + std::move(line)); }
+
+    // Whatever is still in it when the last reference goes is forgotten, never destroyed: a product handed over has
+    // left it, one freed by the builder is gone, and anything else belongs to an orphaned job or an abandoned model.
+    ~PresentBuildJob();
+};
+
+// The devices the present host brought the driver's NGX core up on, and initialised NGX on through the forwarder.
+// Written by the builder thread, read at vkDestroyDevice under the host's transport lock: under their own lock.
+std::mutex g_presentNgxMutex;
+
+// Whatever a job made, freed on its own thread: nothing of it ever reached the GPU, or its GPU work was seen complete.
+void FreeBuild(PresentBuildJob& job)
+{
+    VkDevice d = job.dev.device;
+
+    if (job.feature != nullptr && g_fwd.release != nullptr)
+        g_fwd.release(job.feature);
+    job.feature = nullptr;
+
+    job.hdr.Destroy(d);
+    for (OwnedImage* image : job.Images())
+        DestroyImageOn(d, *image);
+
+    job.pass.reset();
+
+    SynthMotion::DestroyVkImages(d, job.synthImages);
+    SynthMotion::DestroyVkPipelines(job.synthPipelines);
+
+    if (job.queryPool != VK_NULL_HANDLE)
+    {
+        vkDestroyQueryPool(d, job.queryPool, nullptr);
+        job.queryPool = VK_NULL_HANDLE;
+    }
+
+    if (job.newParams != nullptr)
+    {
+        if (const auto destroy = NVNGXProxy::VULKAN_DestroyParameters())
+            destroy(job.newParams);
+        job.newParams = nullptr;
+    }
+}
+
+// Forget whatever a job made, calling nothing: its GPU work may not be over, or its device may be gone.
+void ForgetBuild(PresentBuildJob& job)
+{
+    job.hdr = {};
+    (void) job.pass.release();
+    job.feature = nullptr;
+    job.newParams = nullptr;
+    job.queryPool = VK_NULL_HANDLE;
+    for (OwnedImage* image : job.Images())
+        *image = OwnedImage {};
+    job.synthImages = SynthMotion::VkImages {};
+    job.synthPipelines = SynthMotion::VkPipelines {};
+}
+
+PresentBuildJob::~PresentBuildJob() { ForgetBuild(*this); }
+
+// One job, on the builder thread. Returns with `failure` empty and the product in the job, or with the reason; what it
+// made is then freed (nothing reached the GPU, or its work is over), or forgotten (its work may still run).
+void RunBuild(PresentBuildJob& job)
+{
+    using namespace VkPresentHost;
+    ActivityScope activity("model build", reinterpret_cast<uint64_t>(job.dev.device), kBuildStallMs);
+    CurrentActivity current(activity);
+
+    const VkDevice d = job.dev.device;
+    const VkPhysicalDevice pd = job.dev.physical;
+    NVSDK_NGX_Parameter* params = job.params;
+
+    const auto stop = [&job](std::string why, bool free = true)
+    {
+        job.failure = std::move(why);
+        if (job.orphaned.load(std::memory_order_acquire) || job.lost || !free)
+            ForgetBuild(job);
+        else
+            FreeBuild(job);
+    };
+
+    if (job.needDevice)
+    {
+        activity.Stage("loading the forwarder");
+        if (const char* why = LoadForwarderShared())
+            return stop(why);
+
+        auto snippet = FindSnippet();
+        if (!snippet.has_value())
+            return stop("nvngx_dlssnr.dll was not found beside OptiScaler or the game");
+
+        // Before init and the first build, so the model's own account of them is in the log.
+        DlssNr::ModelLog::Install(*snippet);
+
+        // Four bits, one per entry point: anything short of fifteen and the model's Vulkan surface is not all there.
+        const int probe = g_fwd.probe != nullptr ? g_fwd.probe(snippet->wstring().c_str()) : 0;
+        if (probe != 15)
+            return stop("the model does not expose a complete Vulkan surface (probe " + std::to_string(probe) + ")");
+
+        // Cold: no application NGX initialisation exists to reuse. The same SDK version the after-upscale route
+        // initialises with. The forwarder answers 1 at once for the device it already initialised.
+        activity.Stage("initialising NGX on the device (the model's snippet, through the forwarder)");
+        const std::wstring dataPath = PresentModelDataPath();
+        const int result = g_fwd.init(snippet->wstring().c_str(), dataPath.c_str(), (void*) job.dev.instance,
+                                      (void*) pd, (void*) d, 0x0000015);
+        if (result != 1)
+        {
+            std::string fault;
+            if (ModelFaulted(&fault))
+                return stop("the model faulted inside its own code (" + fault + "); off for this session");
+            return stop("NVSDK_NGX_VULKAN_Init_Ext returned " + std::to_string(result) + " on this device (NGX " +
+                        LastNgxResult("dlssnr_vk_last_init") + ")");
+        }
+
+        job.ngxInitialised = true;
+        char device[24];
+        std::snprintf(device, sizeof(device), "0x%llX",
+                      static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(d)));
+        job.Say(std::string("the model initialised on device ") + device +
+                " (cold: no application NGX initialisation; the driver's NGX core brought up on it)");
+
+        // The driver's NGX core on this device, as the D3D12 route brings it up: the model's feature wants the core's
+        // own capability block, which carries the snippet's and the presets' callbacks.
+        activity.Stage("bringing the driver's NGX core up on the device");
+        // The lock guards the two device records only, never an NGX call: vkDestroyDevice takes it under the host's
+        // transport lock, and must not wait behind an opaque bring-up.
+        VkDevice olderCore = VK_NULL_HANDLE;
+        {
+            std::lock_guard<std::mutex> lock(g_presentNgxMutex);
+            g_presentForwarderDevice = d;
+
+            // Brought up by an earlier model of the host's on another device, still alive: shut down there first,
+            // since NVNGXProxy holds one (taken over here, so that device's destruction does not shut it down too).
+            // Brought up by anything else (a game's own NGX through OptiScaler): used as it is.
+            if (g_presentCoreDevice != VK_NULL_HANDLE && g_presentCoreDevice != d)
+            {
+                olderCore = g_presentCoreDevice;
+                g_presentCoreDevice = VK_NULL_HANDLE;
+            }
+        }
+        if (olderCore != VK_NULL_HANDLE)
+        {
+            ShutdownPresentCore(olderCore);
+            NVNGXProxy::SetVulkanInited(false);
+        }
+
+        if (!NVNGXProxy::IsVulkanInited())
+        {
+            NVNGXProxy::InitVulkan(job.dev.instance, pd, d, vkGetInstanceProcAddr, vkGetDeviceProcAddr);
+            if (!NVNGXProxy::IsVulkanInited())
+                return stop("the driver's NGX core would not initialise on this device");
+            std::lock_guard<std::mutex> lock(g_presentNgxMutex);
+            g_presentCoreDevice = d;
+        }
+        job.coreReady = true;
+
+        activity.Stage("reading the driver core's capability block");
+        const auto capabilities = NVNGXProxy::VULKAN_GetCapabilityParameters();
+        if (capabilities == nullptr || capabilities(&job.newParams) != NVSDK_NGX_Result_Success ||
+            job.newParams == nullptr)
+        {
+            job.newParams = nullptr;
+            return stop("the driver's NGX core gave no capability parameters");
+        }
+        params = job.newParams;
+
+        // Before anything is written to it, where this block keeps floats.
+        DiscoverFloatSlotFor(job.floatSlotKnown, params);
+
+        if (job.dev.timestampValidBits != 0)
+        {
+            VkPhysicalDeviceProperties props {};
+            vkGetPhysicalDeviceProperties(pd, &props);
+
+            if (props.limits.timestampPeriod > 0.0f)
+            {
+                VkQueryPoolCreateInfo info {};
+                info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+                info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+                info.queryCount = kPresentQueryPairs * 2;
+
+                if (vkCreateQueryPool(d, &info, nullptr, &job.queryPool) == VK_SUCCESS)
+                {
+                    job.tickNs = props.limits.timestampPeriod;
+                    job.tickMask =
+                        job.dev.timestampValidBits >= 64 ? ~0ull : ((1ull << job.dev.timestampValidBits) - 1);
+                }
+                else
+                {
+                    job.queryPool = VK_NULL_HANDLE;
+                }
+            }
+        }
+
+        activity.Stage("creating the composition pass");
+        job.pass = std::make_unique<DlssNr_Vk>("Neural Rendering (present host)", d, pd);
+        if (!job.pass->IsInit())
+            return stop("the composition pass could not be created");
+    }
+
+    if (job.orphaned.load(std::memory_order_acquire))
+        return stop("its model was abandoned");
+
+    // Synthesized motion's device part (stage 5): whether the device can run the estimator at all, and its pipelines,
+    // once per model. Neither ever fails the build: the product is then made without the estimator, on zero motion.
+    if (job.key.synth)
+    {
+        activity.Stage("making the synthesized-motion estimator's pipelines");
+        job.synthOff = SynthMotion::VkUnsupported(pd, job.dev.apiVersion);
+        if (job.synthOff.empty() && job.needSynthPipelines &&
+            !SynthMotion::CreateVkPipelines(d, job.synthPipelines, job.synthOff) && job.synthOff.empty())
+            job.synthOff = "its pipelines could not be made";
+    }
+
+    if (job.orphaned.load(std::memory_order_acquire))
+        return stop("its model was abandoned");
+
+    // The images for this size. The guides are made at the working size: a resample of a constant is the constant,
+    // so this is the source-to-working scaling done once, exactly.
+    activity.Stage("allocating the model's images");
+    const BuildKey& k = job.key;
+    const bool reduced = k.workWidth != k.width || k.workHeight != k.height;
+    const VkFormat working = VK_FORMAT_R16G16B16A16_SFLOAT;
+    const bool images = CreateImageOn(d, pd, job.output, k.workWidth, k.workHeight, working, true) &&
+                        CreateImageOn(d, pd, job.proxy, k.width, k.height, working, true) &&
+                        CreateImageOn(d, pd, job.keep, k.width, k.height, working, true) &&
+                        (!reduced || CreateImageOn(d, pd, job.proxySmall, k.workWidth, k.workHeight, working, true)) &&
+                        CreateImageOn(d, pd, job.depth, k.workWidth, k.workHeight, VK_FORMAT_R32_SFLOAT, false) &&
+                        CreateImageOn(d, pd, job.motion, k.workWidth, k.workHeight, VK_FORMAT_R16G16_SFLOAT, false);
+    if (!images)
+        return stop("the model's images could not be allocated at " + std::to_string(k.width) + "x" +
+                    std::to_string(k.height));
+
+    if (k.hdrProfile != 0)
+    {
+        job.hdrFailure = true;
+        activity.Stage("building HDR conversion resources");
+        const auto raw = static_cast<VkFormat>(k.rawFormat);
+        if (!PresentHdr::VkConversion::Supports(pd, raw, k.width, k.height))
+            return stop("HDR conversion format capabilities unavailable; the frame stays original");
+        if (!CreateImageOn(d, pd, job.hdrOriginal, k.width, k.height, raw, false, &job.lost, false) ||
+            !CreateImageOn(d, pd, job.hdrLinear, k.width, k.height, working, true, &job.lost) ||
+            !CreateImageOn(d, pd, job.hdrEncoded, k.width, k.height, PresentHdr::VkConversion::EncodedFormat(raw), true,
+                           &job.lost) ||
+            !job.hdr.Create(d, pd, k.width, k.height, k.hdrProfile, job.hdrOriginal.view, job.hdrLinear.view,
+                            job.hdrEncoded.view))
+        {
+            job.lost = job.lost || job.hdr.lost;
+            return stop("HDR conversion resources could not be built; the frame stays original");
+        }
+        job.hdrFailure = false;
+        job.Say("HDR conversion resources built off the present path for " + std::to_string(k.width) + "x" +
+                std::to_string(k.height) + ", " + VkPresentHost::FormatName(k.rawFormat));
+    }
+
+    job.Say("the model's images built for " + std::to_string(k.width) + "x" + std::to_string(k.height) + " (working " +
+            std::to_string(k.workWidth) + "x" + std::to_string(k.workHeight) +
+            "), zero guides (constant depth, no motion) at the working size");
+
+    if (job.orphaned.load(std::memory_order_acquire))
+        return stop("its model was abandoned");
+
+    // One command buffer of the builder's own: the pass's one-time setup, the guides' clear, and the feature's creation
+    // with its initialisation.
+    activity.Stage("recording the feature's creation (NGX)");
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo poolInfo { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolInfo.queueFamilyIndex = k.family;
+    if (vkCreateCommandPool(d, &poolInfo, nullptr, &pool) != VK_SUCCESS)
+        return stop("the build's command pool could not be made");
+
+    const auto dropPool = [&]()
+    {
+        vkDestroyCommandPool(d, pool, nullptr);
+        pool = VK_NULL_HANDLE;
+    };
+
+    VkCommandBufferAllocateInfo allocate { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    allocate.commandPool = pool;
+    allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate.commandBufferCount = 1;
+    VkCommandBufferBeginInfo begin { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkAllocateCommandBuffers(d, &allocate, &cmd) != VK_SUCCESS || vkBeginCommandBuffer(cmd, &begin) != VK_SUCCESS)
+    {
+        dropPool();
+        return stop("the build's command buffer could not be begun");
+    }
+
+    if (job.pass != nullptr && !job.pass->Prepare(cmd))
+    {
+        dropPool();
+        return stop("the composition pass's placeholder could not be made");
+    }
+
+    // The zero guides: cleared and left in GENERAL, where the model reads them; the fence makes the writes visible.
+    {
+        VkImageMemoryBarrier toClear[2] {};
+        VkImageMemoryBarrier toRead[2] {};
+        OwnedImage* guides[2] = { &job.depth, &job.motion };
+
+        for (int i = 0; i < 2; ++i)
+        {
+            toClear[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            toClear[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            toClear[i].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            toClear[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toClear[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toClear[i].image = guides[i]->image;
+            toClear[i].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            toClear[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+            toRead[i] = toClear[i];
+            toRead[i].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            toRead[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            toRead[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            toRead[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        }
+
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                             nullptr, 2, toClear);
+
+        const VkClearColorValue zero {};
+        const VkImageSubresourceRange range { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vkCmdClearColorImage(cmd, job.depth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
+        vkCmdClearColorImage(cmd, job.motion.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
+
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                             nullptr, 2, toRead);
+
+        job.depth.layout = VK_IMAGE_LAYOUT_GENERAL;
+        job.motion.layout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+
+    // The estimator's images for the model's working size (it reads the model's input), moved into GENERAL and cleared
+    // in this same buffer. A failure leaves the product without them.
+    if (job.key.synth && job.synthOff.empty())
+    {
+        activity.Stage("allocating the synthesized-motion estimator's images");
+        if (SynthMotion::CreateVkImages(d, pd, k.workWidth, k.workHeight, cmd, job.synthImages, job.synthOff))
+            job.Say("synthesized motion: the estimator's images made for " + std::to_string(k.workWidth) + "x" +
+                    std::to_string(k.workHeight) + ", the model's working size (FidelityFX optical flow on Vulkan)");
+    }
+
+    // The feature, built cold: no game parameters, the tuning from the config, UI correction on as the after-upscale
+    // route creates it. Its initialisation is recorded into this buffer.
+    const BuildConfig& c = job.config;
+    job.feature = g_fwd.create((void*) cmd, params, k.workWidth, k.workHeight, c.preset, c.intensity, c.style,
+                               c.localStructure, c.localTone, c.skinStructure, c.autoMask, 1);
+    if (job.feature == nullptr)
+    {
+        vkEndCommandBuffer(cmd);
+        dropPool();
+        std::string fault;
+        if (ModelFaulted(&fault))
+            return stop("the model faulted inside its own code (" + fault + "); off for this session");
+        return stop("the model would not build a feature at " + std::to_string(k.workWidth) + "x" +
+                    std::to_string(k.workHeight) + " (NGX " + LastNgxResult("dlssnr_vk_last_create") + ")");
+    }
+
+    if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
+    {
+        dropPool();
+        return stop("the build's command buffer could not be ended");
+    }
+
+    if (job.orphaned.load(std::memory_order_acquire))
+    {
+        dropPool();
+        return stop("its model was abandoned");
+    }
+
+    // Submitted through the host (the work queue's locks as a borrower takes them, its trampoline), and waited for.
+    activity.Stage("submitting the build's GPU work");
+    const VkResult submitted = job.dev.submit
+                                   ? job.dev.submit(cmd, k.family, kBuildGpuWaitMs * 1000000ull, job.orphaned)
+                                   : VK_ERROR_INITIALIZATION_FAILED;
+    if (submitted == VK_SUCCESS)
+    {
+        dropPool();
+        job.Say("the model's feature is up at " + std::to_string(k.workWidth) + "x" + std::to_string(k.workHeight) +
+                " (frame " + std::to_string(k.width) + "x" + std::to_string(k.height) + ")");
+        return;
+    }
+
+    if (submitted == VK_NOT_READY)
+    {
+        // Never submitted: the work queue's locks stayed busy. Everything goes, and a later frame asks again.
+        dropPool();
+        job.retry = true;
+        return stop("the work queue's locks stayed busy for " + std::to_string(kBuildQueueLockWaitMs) +
+                    " ms; the build is asked for again");
+    }
+
+    if (submitted == VK_TIMEOUT)
+        return stop("the build's GPU work was not seen complete in " + std::to_string(kBuildGpuWaitMs / 1000) +
+                        " s; what it made is left, never freed under the GPU",
+                    false);
+
+    // Orphaned while it waited (its device is going): nothing more is called on the device.
+    if (submitted == VK_INCOMPLETE)
+        return stop("its model was abandoned while its GPU work was waited for", false);
+
+    // A failed submit (never queued: everything may go) or a lost device (nothing may be called).
+    if (submitted == VK_ERROR_DEVICE_LOST)
+    {
+        job.lost = true;
+        return stop("the device was lost during the build", false);
+    }
+
+    dropPool();
+    return stop("the build's submit returned " + std::to_string(submitted));
+}
+
+// The process's builder: one thread, one job at a time, in the order they were posted. Started on the first job, so
+// with the present host off, or never reaching a model, it never exists.
+class PresentBuilder
+{
+  public:
+    void Post(std::shared_ptr<PresentBuildJob> job)
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _queue.push_back(std::move(job));
+        if (!_started)
+        {
+            _started = true;
+            std::thread([this]() { Run(); }).detach();
+        }
+        _cv.notify_one();
+    }
+
+  private:
+    void Run()
+    {
+        VkPresentHost::SetThreadTag(static_cast<uint32_t>(GetCurrentThreadId()));
+
+        for (;;)
+        {
+            std::shared_ptr<PresentBuildJob> job;
+            {
+                std::unique_lock<std::mutex> lock(_mutex);
+                _cv.wait(lock, [this]() { return !_queue.empty(); });
+                job = std::move(_queue.front());
+                _queue.pop_front();
+            }
+
+            job->startedMs = OwnerNowMs();
+            if (job->orphaned.load(std::memory_order_acquire))
+            {
+                job->failure = "its model was abandoned before the build began";
+            }
+            else
+            {
+                job->state.store(BuildState::Running, std::memory_order_release);
+                RunBuild(*job);
+
+                // Orphaned while it ran: whatever it made is the device's to reclaim (or the device is gone), so it is
+                // forgotten here and never handed over.
+                if (job->orphaned.load(std::memory_order_acquire))
+                {
+                    ForgetBuild(*job);
+                    if (job->failure.empty())
+                        job->failure = "its model was abandoned while it was being built";
+                }
+            }
+            job->finishedMs = OwnerNowMs();
+
+            {
+                std::lock_guard<std::mutex> lock(job->doneMutex);
+                job->state.store(job->failure.empty() ? BuildState::Done : BuildState::Failed,
+                                 std::memory_order_release);
+            }
+            job->done.notify_all();
+        }
+    }
+
+    std::mutex _mutex;
+    std::condition_variable _cv;
+    std::deque<std::shared_ptr<PresentBuildJob>> _queue;
+    bool _started = false;
+};
+
+PresentBuilder& Builder()
+{
+    static PresentBuilder* builder = new PresentBuilder(); // never destroyed: its thread may outlive static teardown
+    return *builder;
+}
+} // namespace
+
+static_assert(VkPresentHost::kSynthMinWidth == SynthMotion::Estimator_Vk::MinWidth &&
+                  VkPresentHost::kSynthMinHeight == SynthMotion::Estimator_Vk::MinHeight,
+              "the build key asks for the estimator only at a size it can run at");
+
+// --- The model, on the present path ----------------------------------------------------------------------------
+
 struct VkPresentModel::Impl
 {
     VkPresentModelDevice dev;
@@ -1916,30 +2503,51 @@ struct VkPresentModel::Impl
     std::string failure;
     std::vector<std::string> lines; // for the host to log once its lock is released
 
+    // The device's, from the model's first build.
+    bool deviceReady = false;
     bool ngxInitialised = false;
     bool coreReady = false;                // the driver's NGX core is up on this device (NVNGXProxy)
     NVSDK_NGX_Parameter* params = nullptr; // the core's capability block
-    bool floatSlotKnown = false;
     std::unique_ptr<DlssNr_Vk> pass;
-    bool everSubmitted = false; // a recording of this model reached the GPU: the pass's one-time setup is real
 
+    // The product: built for `key`, its GPU initialisation seen complete.
+    bool built = false;
+    BuildKey key;
     void* feature = nullptr;
-    uint64_t featureTicket = 0; // the recording that created it and records its initialisation, until submitted
-
     OwnedImage output;     // the model's answer, at the working size
     OwnedImage proxy;      // the encode's display-referred proxy, full size
     OwnedImage keep;       // the untouched frame, full size
     OwnedImage proxySmall; // the proxy at the working size, below native only
     OwnedImage depth;      // zero guides at the working size: constant depth ...
     OwnedImage motion;     // ... and no motion
-    bool guidesCleared = false;
-    uint64_t guidesTicket = 0; // the recording that clears them, until submitted
+    OwnedImage hdrOriginal, hdrLinear, hdrEncoded;
+    PresentHdr::VkConversion hdr;
+    bool saidHdr = false;
+    std::optional<BuildKey> hdrFailure;
+
+    // Synthesized motion (stage 5, [DlssNr] SynthMotion): the estimator's pipelines (the device's, from the first build
+    // that asked for them) and its images (the product's, with key.synth), its history, and the field as NGX is handed
+    // it. synthOff: why the estimator cannot run on this device, latched; the model then keeps zero motion.
+    SynthMotion::VkPipelines synthPipelines;
+    SynthMotion::VkImages synthImages;
+    SynthMotion::Estimator_Vk estimator;
+    NVSDK_NGX_Resource_VK fieldNgx {};
+    std::string synthOff;
+    uint64_t lastSynthMs = 0; // the estimator's last recording, for the gap rule
+    bool synthRecorded =
+        false; // the frame being recorded carries an estimate: Submitted confirms it, Discarded drops it
+    bool lastSynthesized = false;
+    bool saidField = false; // "the first field handed to the model", once per product
 
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t workWidth = 0;
     uint32_t workHeight = 0;
     bool reset = true;
+    bool saidRuns = false; // "the model runs at present", once per product
+
+    // The job building the next product, if any.
+    std::shared_ptr<PresentBuildJob> job;
 
     VkQueryPool queryPool = VK_NULL_HANDLE;
     double tickNs = 0.0;
@@ -1957,7 +2565,6 @@ struct VkPresentModel::Impl
     std::vector<std::pair<uint64_t, uint64_t>> firstDispatch; // ticket, the dispatch count at its first
     std::vector<RetiredSet> retired;
     bool adapterNoted = false;
-    uint64_t submitted = 0;
 
     void Say(std::string line) { lines.push_back("DLSS-NR Vulkan present host: " + std::move(line)); }
 
@@ -1983,6 +2590,38 @@ struct VkPresentModel::Impl
         return true;
     }
 
+    BuildState JobState() const { return job ? job->state.load(std::memory_order_acquire) : BuildState::None; }
+
+    // A job queued or running: no NGX call of this model's may be made on the present path.
+    bool Building() const
+    {
+        const BuildState state = JobState();
+        return state == BuildState::Queued || state == BuildState::Running;
+    }
+
+    // The device was lost during a build: the host marks the device lost, and nothing of the model's is freed.
+    bool deviceLost = false;
+
+    bool Lost() const
+    {
+        // JobState's acquire publishes the worker's non-atomic result. Never read it while the worker can write it.
+        const BuildState state = JobState();
+        return deviceLost || (job && (state == BuildState::Done || state == BuildState::Failed) && job->lost);
+    }
+
+    // A job still queued is called off (the builder skips it, touching nothing): a model giving the model up does not
+    // wait behind other work the builder has.
+    void CancelQueued()
+    {
+        if (JobState() == BuildState::Queued)
+            job->orphaned.store(true, std::memory_order_release);
+    }
+
+    std::array<OwnedImage*, 9> Images()
+    {
+        return { &output, &proxy, &keep, &proxySmall, &depth, &motion, &hdrOriginal, &hdrLinear, &hdrEncoded };
+    }
+
     void Free(RetiredSet& set)
     {
         if (set.feature != nullptr && g_fwd.release != nullptr)
@@ -1994,11 +2633,17 @@ struct VkPresentModel::Impl
             DestroyImageOn(dev.device, image);
 
         set.images.clear();
+        set.hdr.Destroy(dev.device);
+        SynthMotion::DestroyVkImages(dev.device, set.synth);
     }
 
-    // Free the retired sets nothing in flight uses any more.
+    // Free the retired sets nothing in flight uses any more -- never while a job runs, since releasing a feature is an
+    // NGX call and the builder's are not to be overlapped.
     void FreeRetired()
     {
+        if (Building() || Lost())
+            return;
+
         for (auto it = retired.begin(); it != retired.end();)
         {
             if (it->waitFor.empty())
@@ -2012,6 +2657,162 @@ struct VkPresentModel::Impl
             }
         }
     }
+
+    // The current product into the retired list, to be freed once the frames that used it are seen complete.
+    void RetireProduct()
+    {
+        RetiredSet old;
+        old.feature = feature;
+        old.hdr = hdr;
+        hdr = {};
+        for (OwnedImage* image : Images())
+        {
+            if (image->image != VK_NULL_HANDLE || image->memory != VK_NULL_HANDLE)
+                old.images.push_back(*image);
+            *image = OwnedImage {};
+        }
+        old.synth = synthImages;
+        synthImages = SynthMotion::VkImages {};
+        fieldNgx = NVSDK_NGX_Resource_VK {};
+        estimator.Restart();
+        synthRecorded = false;
+        old.waitFor = pending;
+        feature = nullptr;
+        built = false;
+        width = height = workWidth = workHeight = 0;
+
+        if (old.feature != nullptr || !old.images.empty() || old.synth.motion.image != VK_NULL_HANDLE)
+            retired.push_back(std::move(old));
+    }
+
+    void Request(const BuildKey& want)
+    {
+        RetireProduct();
+
+        auto& cfg = *Config::Instance();
+        auto next = std::make_shared<PresentBuildJob>();
+        next->dev = dev;
+        next->key = want;
+        next->needDevice = !deviceReady;
+        next->params = params;
+        next->config.preset = (int) cfg.DlssNrPreset.value_or_default();
+        next->config.intensity = cfg.DlssNrIntensity.value_or_default();
+        next->config.style = (int) cfg.DlssNrStyle.value_or_default();
+        next->config.localStructure = cfg.DlssNrLocalStructure.value_or_default();
+        next->config.localTone = cfg.DlssNrLocalTone.value_or_default();
+        next->config.skinStructure = cfg.DlssNrSkinStructure.value_or_default();
+        next->config.autoMask = cfg.DlssNrAutoMask.value_or_default() ? 1 : 0;
+        next->needSynthPipelines = want.synth && !synthPipelines.Valid();
+        next->postedMs = OwnerNowMs();
+        job = next;
+        Builder().Post(std::move(next));
+
+        Say("the model is being built for " + std::to_string(want.width) + "x" + std::to_string(want.height) +
+            " (working " + std::to_string(want.workWidth) + "x" + std::to_string(want.workHeight) + ")" +
+            (want.synth ? ", with synthesized motion," : "") +
+            " off the present path; frames are carried unchanged until it is ready");
+    }
+
+    // A job is over: its product, or its failure. True when it is to be asked for again, at a later frame.
+    bool Adopt()
+    {
+        std::shared_ptr<PresentBuildJob> over = std::move(job);
+        for (std::string& line : over->lines)
+            lines.push_back(std::move(line));
+        over->lines.clear();
+
+        if (over->state.load(std::memory_order_acquire) == BuildState::Failed)
+        {
+            deviceLost = deviceLost || over->lost;
+            if (over->retry && !over->orphaned.load(std::memory_order_acquire))
+            {
+                Say("the model's build did not reach the GPU (" + over->failure + "); asked for again");
+                return true;
+            }
+            if (over->hdrFailure && !over->lost)
+                hdrFailure = over->key;
+            Latch(NrSkip::Unavailable, over->failure);
+            return false;
+        }
+
+        if (over->needDevice)
+        {
+            deviceReady = true;
+            ngxInitialised = over->ngxInitialised;
+            coreReady = over->coreReady;
+            params = over->newParams;
+            over->newParams = nullptr;
+            pass = std::move(over->pass);
+            queryPool = over->queryPool;
+            over->queryPool = VK_NULL_HANDLE;
+            tickNs = over->tickNs;
+            tickMask = over->tickMask;
+        }
+
+        // The estimator's: its pipelines once, its images with the product. A product asked for with synthesized motion
+        // and built without it records why, and the estimator stays off on this device (the key then stops asking).
+        if (over->synthPipelines.Valid())
+        {
+            synthPipelines = over->synthPipelines;
+            over->synthPipelines = SynthMotion::VkPipelines {};
+        }
+        synthImages = over->synthImages;
+        over->synthImages = SynthMotion::VkImages {};
+        estimator.Restart();
+        synthRecorded = false;
+        saidField = false;
+        lastSynthMs = 0;
+
+        feature = over->feature;
+        over->feature = nullptr;
+        hdr = over->hdr;
+        over->hdr = {};
+        saidHdr = false;
+        const auto mine = Images();
+        const auto theirs = over->Images();
+        for (size_t i = 0; i < mine.size(); ++i)
+        {
+            *mine[i] = *theirs[i];
+            *theirs[i] = OwnedImage {};
+        }
+
+        key = over->key;
+        if (key.synth && !synthImages.Valid())
+        {
+            key.synth = false;
+            if (synthOff.empty())
+            {
+                synthOff = over->synthOff.empty() ? std::string("its images were not made") : over->synthOff;
+                Say("synthesized motion is off on this device: " + synthOff + "; the model keeps zero motion");
+            }
+        }
+
+        if (key.synth)
+        {
+            // The field as NGX is handed it: the whole frame, read only.
+            fieldNgx.Type = NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW;
+            fieldNgx.Resource.ImageViewInfo.ImageView = synthImages.motion.view;
+            fieldNgx.Resource.ImageViewInfo.Image = synthImages.motion.image;
+            fieldNgx.Resource.ImageViewInfo.SubresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            fieldNgx.Resource.ImageViewInfo.Format = SynthMotion::kVkMotionFormat;
+            fieldNgx.Resource.ImageViewInfo.Width = synthImages.width;
+            fieldNgx.Resource.ImageViewInfo.Height = synthImages.height;
+            fieldNgx.ReadWrite = false;
+        }
+
+        width = key.width;
+        height = key.height;
+        workWidth = key.workWidth;
+        workHeight = key.workHeight;
+        built = true;
+        reset = true;
+        saidRuns = false;
+
+        Say("the model is ready at " + std::to_string(width) + "x" + std::to_string(height) + ", built off the " +
+            "present path in " + std::to_string(over->finishedMs - over->postedMs) + " ms (" +
+            std::to_string(over->finishedMs - over->startedMs) + " ms of it building)");
+        return false;
+    }
 };
 
 VkPresentModel::VkPresentModel(const VkPresentModelDevice& device) : _impl(std::make_unique<Impl>())
@@ -2022,7 +2823,37 @@ VkPresentModel::VkPresentModel(const VkPresentModelDevice& device) : _impl(std::
 // Neither Release nor Abandon ran: whatever is left is abandoned (nothing here may call Vulkan).
 VkPresentModel::~VkPresentModel() { Abandon(); }
 
-size_t VkPresentModel::InFlight() const { return _impl->pending.size(); }
+// A job running counts; one only queued does not: it is called off when the model is given up (Release).
+size_t VkPresentModel::InFlight() const
+{
+    return _impl->pending.size() + (_impl->JobState() == BuildState::Running ? 1 : 0);
+}
+
+bool VkPresentModel::Building() const { return _impl->Building(); }
+
+bool VkPresentModel::DeviceLost() const { return _impl->Lost(); }
+
+void VkPresentModel::Orphan()
+{
+    if (_impl->job)
+        _impl->job->orphaned.store(true, std::memory_order_release);
+}
+
+bool VkPresentModel::WaitBuild(uint64_t timeoutMs)
+{
+    Impl& m = *_impl;
+    if (!m.Building())
+        return true;
+
+    std::shared_ptr<PresentBuildJob> job = m.job;
+    std::unique_lock<std::mutex> lock(job->doneMutex);
+    return job->done.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+                              [&job]()
+                              {
+                                  const BuildState state = job->state.load(std::memory_order_acquire);
+                                  return state != BuildState::Queued && state != BuildState::Running;
+                              });
+}
 
 const std::string& VkPresentModel::Failure() const { return _impl->failure; }
 
@@ -2033,14 +2864,23 @@ std::vector<std::string> VkPresentModel::TakeLines()
     return lines;
 }
 
-VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height)
+VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height, uint32_t family, uint32_t hdrProfile,
+                                         uint32_t rawFormat)
 {
     Impl& m = *_impl;
-    auto& cfg = *Config::Instance();
 
+    if (m.failed && m.hdrFailure && !m.deviceLost &&
+        (m.hdrFailure->hdrProfile != hdrProfile || m.hdrFailure->rawFormat != rawFormat ||
+         m.hdrFailure->width != width || m.hdrFailure->height != height))
+    {
+        m.failed = false;
+        m.failure.clear();
+        m.hdrFailure.reset();
+    }
     if (m.failed)
         return { NrSkip::Unavailable, m.failure };
 
+    // While a job runs the forwarder's fault record is read, never written, by this thread: no NGX call.
     if (m.FaultLatched())
         return { NrSkip::Unavailable, m.failure };
 
@@ -2068,6 +2908,39 @@ VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height)
                                        " pixels; the model is not built that small" };
     }
 
+    const bool synthConfigured = Config::Instance()->DlssNrSynthMotion.value_or_default();
+    BuildKey want {
+        width,      height, workWidth,
+        workHeight, family, VkPresentHost::SynthWanted(synthConfigured, !m.synthOff.empty(), workWidth, workHeight)
+    };
+    want.hdrProfile = hdrProfile;
+    want.rawFormat = hdrProfile != 0 ? rawFormat : 0;
+    for (;;)
+    {
+        const auto step = VkPresentHost::DecideBuild(m.failed, m.JobState(), m.built, m.key, want);
+
+        if (step == VkPresentHost::BuildStep::Use)
+            break;
+        if (step == VkPresentHost::BuildStep::Off)
+            return { NrSkip::Unavailable, m.failure };
+        if (step == VkPresentHost::BuildStep::Adopt)
+        {
+            const bool retry = m.Adopt();
+            // An adoption can latch the estimator off for the device: the product just adopted, built without it, is
+            // then the one this frame wants, never a second build that asks for it again.
+            want.synth = VkPresentHost::SynthWanted(synthConfigured, !m.synthOff.empty(), workWidth, workHeight);
+            m.FreeRetired();
+            if (retry)
+                return { NrSkip::Building, "the model's build is asked for again at the next frame" };
+            continue;
+        }
+        if (step == VkPresentHost::BuildStep::Request)
+            m.Request(want);
+
+        return { NrSkip::Building, "the model is being built for " + std::to_string(want.width) + "x" +
+                                       std::to_string(want.height) + " off the present path" };
+    }
+
     if (m.pending.size() >= VkPresentHost::kNrInFlightMax)
         return { NrSkip::Busy, "the model already has " + std::to_string(m.pending.size()) + " frames in flight" };
 
@@ -2081,191 +2954,45 @@ VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height)
             return { NrSkip::Busy, "the pass's descriptor ring would reach a frame still in flight" };
     }
 
-    if (const char* why = LoadForwarderShared())
-        return m.Latch(NrSkip::Unavailable, why);
-
-    if (!m.ngxInitialised)
-    {
-        auto snippet = FindSnippet();
-
-        if (!snippet.has_value())
-            return m.Latch(NrSkip::Unavailable, "nvngx_dlssnr.dll was not found beside OptiScaler or the game");
-
-        // Before init and the first build, so the model's own account of them is in the log.
-        DlssNr::ModelLog::Install(*snippet);
-
-        // Four bits, one per entry point: anything short of fifteen and the model's Vulkan surface is not all there.
-        const int probe = g_fwd.probe != nullptr ? g_fwd.probe(snippet->wstring().c_str()) : 0;
-
-        if (probe != 15)
-            return m.Latch(NrSkip::Unavailable,
-                           "the model does not expose a complete Vulkan surface (probe " + std::to_string(probe) + ")");
-
-        // Cold: no application NGX initialisation exists to reuse. The same SDK version the after-upscale route
-        // initialises with.
-        const std::wstring dataPath = PresentModelDataPath();
-        const int result = g_fwd.init(snippet->wstring().c_str(), dataPath.c_str(), (void*) m.dev.instance,
-                                      (void*) m.dev.physical, (void*) m.dev.device, 0x0000015);
-
-        if (result != 1)
-        {
-            if (m.FaultLatched())
-                return { NrSkip::Unavailable, m.failure };
-
-            return m.Latch(NrSkip::Unavailable, "NVSDK_NGX_VULKAN_Init_Ext returned " + std::to_string(result) +
-                                                    " on this device (NGX " + LastNgxResult("dlssnr_vk_last_init") +
-                                                    ")");
-        }
-
-        m.ngxInitialised = true;
-        g_presentForwarderDevice = m.dev.device;
-        char device[24];
-        std::snprintf(device, sizeof(device), "0x%llX",
-                      static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(m.dev.device)));
-        m.Say(std::string("the model initialised on device ") + device +
-              " (cold: no application NGX initialisation; the driver's NGX core brought up on it)");
-    }
-
-    // The driver's NGX core on this device, as the D3D12 route brings it up: the model's feature wants the core's own
-    // capability block, which carries the snippet's and the presets' callbacks; a freshly allocated block (OptiScaler's
-    // own, when no DLSS is loaded) does not, and the feature is then refused at creation.
-    if (!m.coreReady)
-    {
-        // Brought up by an earlier model of the host's on another device, still alive: shut down there first, since
-        // NVNGXProxy holds one. Brought up by anything else (a game's own NGX through OptiScaler): used as it is.
-        if (g_presentCoreDevice != VK_NULL_HANDLE && g_presentCoreDevice != m.dev.device)
-        {
-            ShutdownPresentCore(g_presentCoreDevice);
-            NVNGXProxy::SetVulkanInited(false);
-            g_presentCoreDevice = VK_NULL_HANDLE;
-        }
-
-        if (!NVNGXProxy::IsVulkanInited())
-        {
-            NVNGXProxy::InitVulkan(m.dev.instance, m.dev.physical, m.dev.device, vkGetInstanceProcAddr,
-                                   vkGetDeviceProcAddr);
-
-            if (!NVNGXProxy::IsVulkanInited())
-                return m.Latch(NrSkip::Unavailable, "the driver's NGX core would not initialise on this device");
-
-            g_presentCoreDevice = m.dev.device;
-        }
-
-        m.coreReady = true;
-    }
-
-    if (m.params == nullptr)
-    {
-        const auto capabilities = NVNGXProxy::VULKAN_GetCapabilityParameters();
-
-        if (capabilities == nullptr || capabilities(&m.params) != NVSDK_NGX_Result_Success || m.params == nullptr)
-        {
-            m.params = nullptr;
-            return m.Latch(NrSkip::Unavailable, "the driver's NGX core gave no capability parameters");
-        }
-    }
-
-    // Before anything is written to it, where this block keeps floats.
-    DiscoverFloatSlotFor(m.floatSlotKnown, m.params);
-
-    if (m.queryPool == VK_NULL_HANDLE && m.dev.timestampValidBits != 0)
-    {
-        VkPhysicalDeviceProperties props {};
-        vkGetPhysicalDeviceProperties(m.dev.physical, &props);
-
-        if (props.limits.timestampPeriod > 0.0f)
-        {
-            VkQueryPoolCreateInfo info {};
-            info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-            info.queryType = VK_QUERY_TYPE_TIMESTAMP;
-            info.queryCount = kPresentQueryPairs * 2;
-
-            if (vkCreateQueryPool(m.dev.device, &info, nullptr, &m.queryPool) == VK_SUCCESS)
-            {
-                m.tickNs = props.limits.timestampPeriod;
-                m.tickMask = m.dev.timestampValidBits >= 64 ? ~0ull : ((1ull << m.dev.timestampValidBits) - 1);
-            }
-            else
-            {
-                m.queryPool = VK_NULL_HANDLE;
-            }
-        }
-    }
-
-    if (m.pass == nullptr)
-    {
-        m.pass = std::make_unique<DlssNr_Vk>("Neural Rendering (present host)", m.dev.device, m.dev.physical);
-
-        if (!m.pass->IsInit())
-        {
-            // Nothing of it was ever recorded: its own destructor frees what it made.
-            m.pass.reset();
-            return m.Latch(NrSkip::Unavailable, "the composition pass could not be created");
-        }
-    }
-
-    if (m.width != width || m.height != height || m.workWidth != workWidth || m.workHeight != workHeight)
-    {
-        // The feature is built for a size and the images are this size. Whatever frames in flight still use the old
-        // ones keep them until they are seen complete (DEVELOPMENT.md rule 8), then they are freed.
-        RetiredSet old;
-        old.feature = m.feature;
-        for (OwnedImage* image : { &m.output, &m.proxy, &m.keep, &m.proxySmall, &m.depth, &m.motion })
-        {
-            if (image->image != VK_NULL_HANDLE || image->memory != VK_NULL_HANDLE)
-                old.images.push_back(*image);
-            *image = OwnedImage {};
-        }
-        old.waitFor = m.pending;
-        m.feature = nullptr;
-        m.featureTicket = 0;
-
-        if (old.feature != nullptr || !old.images.empty())
-            m.retired.push_back(std::move(old));
-        m.FreeRetired();
-
-        const bool reduced = workWidth != width || workHeight != height;
-        const VkFormat working = VK_FORMAT_R16G16B16A16_SFLOAT;
-        VkDevice d = m.dev.device;
-        VkPhysicalDevice pd = m.dev.physical;
-
-        // The guides are made at the working size: a resample of a constant is the constant, so this is the
-        // source-to-working scaling done once, exactly.
-        const bool ok = CreateImageOn(d, pd, m.output, workWidth, workHeight, working, true) &&
-                        CreateImageOn(d, pd, m.proxy, width, height, working, true) &&
-                        CreateImageOn(d, pd, m.keep, width, height, working, true) &&
-                        (!reduced || CreateImageOn(d, pd, m.proxySmall, workWidth, workHeight, working, true)) &&
-                        CreateImageOn(d, pd, m.depth, workWidth, workHeight, VK_FORMAT_R32_SFLOAT, false) &&
-                        CreateImageOn(d, pd, m.motion, workWidth, workHeight, VK_FORMAT_R16G16_SFLOAT, false);
-
-        m.width = width;
-        m.height = height;
-        m.workWidth = workWidth;
-        m.workHeight = workHeight;
-        m.guidesCleared = false;
-        m.guidesTicket = 0;
-        m.reset = true;
-
-        if (!ok)
-            return m.Latch(NrSkip::Unavailable, "the model's images could not be allocated at " +
-                                                    std::to_string(width) + "x" + std::to_string(height));
-
-        m.Say("the model's images built for " + std::to_string(width) + "x" + std::to_string(height) + " (working " +
-              std::to_string(workWidth) + "x" + std::to_string(workHeight) +
-              "), zero guides (constant depth, no motion) at the working size");
-    }
-
+    m.FreeRetired();
     return {};
 }
 
-bool VkPresentModel::Record(const VkPresentNrFrame& frame)
+namespace
 {
+void HdrBarrier(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImageLayout to)
+{
+    VkImageMemoryBarrier barrier { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    barrier.image = image;
+    barrier.oldLayout = from;
+    barrier.newLayout = to;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &barrier);
+}
+void HdrCopy(VkCommandBuffer cmd, VkImage from, VkImage to, uint32_t width, uint32_t height)
+{
+    VkImageCopy region {};
+    region.srcSubresource = region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.extent = { width, height, 1 };
+    vkCmdCopyImage(cmd, from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, to, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                   &region);
+}
+} // namespace
+
+bool VkPresentModel::Record(const VkPresentNrFrame& input)
+{
+    VkPresentNrFrame frame = input;
     Impl& m = *_impl;
     auto& cfg = *Config::Instance();
     VkCommandBuffer cmd = frame.cmd;
 
-    if (m.failed || m.pass == nullptr || cmd == VK_NULL_HANDLE || frame.view == VK_NULL_HANDLE ||
-        frame.width != m.width || frame.height != m.height)
+    if (m.failed || !m.built || m.Building() || m.feature == nullptr || m.pass == nullptr || cmd == VK_NULL_HANDLE ||
+        (frame.hdrProfile == 0 && frame.view == VK_NULL_HANDLE) || frame.width != m.width || frame.height != m.height ||
+        frame.hdrProfile != m.key.hdrProfile)
         return false;
 
     const bool reduced = m.workWidth != m.width || m.workHeight != m.height;
@@ -2301,56 +3028,33 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
         return false;
     };
 
-    // The zero guides, once per allocation: cleared with vkCmdClearColorImage and left in GENERAL, where the model
-    // reads them, with the clear's writes made visible to it.
-    if (!m.guidesCleared)
+    if (frame.hdrProfile != 0)
     {
-        VkImageMemoryBarrier toClear[2] {};
-        VkImageMemoryBarrier toRead[2] {};
-        OwnedImage* guides[2] = { &m.depth, &m.motion };
-
-        for (int i = 0; i < 2; ++i)
-        {
-            toClear[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            toClear[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            toClear[i].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            toClear[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            toClear[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            toClear[i].image = guides[i]->image;
-            toClear[i].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-            toClear[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-            toRead[i] = toClear[i];
-            toRead[i].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            toRead[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-            toRead[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            toRead[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        }
-
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                             nullptr, 2, toClear);
-
-        const VkClearColorValue zero {};
-        const VkImageSubresourceRange range { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        vkCmdClearColorImage(cmd, m.depth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
-        vkCmdClearColorImage(cmd, m.motion.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
-
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                             nullptr, 2, toRead);
-
-        m.depth.layout = VK_IMAGE_LAYOUT_GENERAL;
-        m.motion.layout = VK_IMAGE_LAYOUT_GENERAL;
-        m.guidesTicket = frame.ticket;
+        HdrBarrier(cmd, input.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        HdrBarrier(cmd, m.hdrOriginal.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        HdrCopy(cmd, input.image, m.hdrOriginal.image, m.width, m.height);
+        HdrBarrier(cmd, m.hdrOriginal.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+        HdrBarrier(cmd, m.hdrLinear.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        m.hdr.Record(cmd, m.width, m.height, PresentHdr::kModeDecode);
+        HdrBarrier(cmd, m.hdrLinear.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        frame.image = m.hdrLinear.image;
+        frame.view = m.hdrLinear.view;
     }
 
-    // Encode. The presented frame is display-referred SDR: the encode is the identity (gPassthrough), and so is every
-    // place the shader reproduces it. No game exposure exists on this route; the white point is the slider's.
+    // SDR is display-referred: the encode is the identity (gPassthrough), including every place it is reproduced.
+    // Decoded HDR is linear light and uses the reversible transfer at 203-nit white times the slider. No game
+    // exposure exists on this route.
     DlssNrConstants encode {};
     encode.Mode = DlssNrMode_Encode;
     encode.Width = m.width;
     encode.Height = m.height;
     encode.WhitePoint = cfg.DlssNrWhitePointScale.value_or_default();
-    encode.Passthrough = 1u;
+    encode.Passthrough = frame.hdrProfile != 0 ? 0u : 1u;
+    if (frame.hdrProfile != 0)
+    {
+        const float scale = std::isfinite(encode.WhitePoint) && encode.WhitePoint > 0.0f ? encode.WhitePoint : 1.0f;
+        encode.WhitePoint = PresentHdr::kSdrWhiteScRgb * scale;
+    }
     encode.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
     encode.ApplyModel = cfg.DlssNrApplyModel.value_or_default() ? 1u : 0u;
     encode.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
@@ -2360,7 +3064,7 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
     encode.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
     encode.GuideWidth = m.workWidth;
     encode.GuideHeight = m.workHeight;
-    encode.HighlightRecovery = 0u; // linear HDR only, and this frame is SDR
+    encode.HighlightRecovery = frame.hdrProfile != 0 ? cfg.DlssNrHighlightRecovery.value_or_default() : 0u;
     encode.ResidualLimit = DlssNr::ResidualLimitStops(cfg.DlssNrResidualLimit.value_or_default());
 
     Transition(cmd, m.proxy, VK_IMAGE_LAYOUT_GENERAL);
@@ -2392,44 +3096,61 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
         modelInput = &m.proxySmall;
     }
 
-    Transition(cmd, m.output, VK_IMAGE_LAYOUT_GENERAL);
-
-    // The feature, built cold: no game parameters, the tuning from the config, UI correction on as the after-upscale
-    // route creates it. Its initialisation is recorded into this buffer, which is why a discarded recording releases
-    // it again (Discarded).
-    if (m.feature == nullptr)
+    // Synthesized motion (stage 5): the estimator reads the model's own input -- the encode's proxy, the frame itself
+    // on SDR (passthrough), the reversible-transfer proxy on HDR, downsampled below native -- at the working size in
+    // pixels, the model's own grid, as the D3D12 route's guide resample makes it. Its own dispatches and push
+    // descriptors, not the pass's ring. Once it has a real field, that replaces the zero motion guide; a recording that
+    // does not happen (nothing invalid ever reaches it) leaves the model on zero motion.
+    bool fieldReady = false;
+    bool sceneCut = false;
+    m.synthRecorded = false;
+    if (m.key.synth && m.synthImages.Valid() && m.synthPipelines.Valid())
     {
-        m.feature =
-            g_fwd.create((void*) cmd, m.params, m.workWidth, m.workHeight, (int) cfg.DlssNrPreset.value_or_default(),
-                         cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
-                         cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
-                         cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1);
-
-        if (m.feature == nullptr)
-            return fail("the model would not build a feature at " + std::to_string(m.workWidth) + "x" +
-                        std::to_string(m.workHeight) + " (NGX " + LastNgxResult("dlssnr_vk_last_create") + ")");
-
-        m.featureTicket = frame.ticket;
-        m.reset = true;
-        m.Say("the model's feature is up at " + std::to_string(m.workWidth) + "x" + std::to_string(m.workHeight) +
-              " (frame " + std::to_string(m.width) + "x" + std::to_string(m.height) + ")");
+        const uint64_t now = OwnerNowMs();
+        const bool synthReset = VkPresentHost::SynthReset(m.lastSynthMs, now);
+        m.lastSynthMs = now;
+        if (m.estimator.Record(cmd, m.synthPipelines, m.synthImages, modelInput->view, VK_IMAGE_LAYOUT_GENERAL,
+                               synthReset, frame.ticket))
+        {
+            m.synthRecorded = true;
+            fieldReady = m.estimator.Ready();
+            sceneCut = m.estimator.SceneCut();
+        }
     }
 
-    // Zero guides: constant depth (read inverted, so zero is the far plane) and no motion, both covering the working
-    // size from the origin, at unit scale: nothing moved, so the scale has nothing to scale.
-    const bool reset = VkPresentHost::NrReset(m.reset, frame.cut, cfg.DlssNrZeroGuideReset.value_or_default());
-    const int evaluated = g_fwd.evaluate(
-        (void*) cmd, m.feature, m.params, &modelInput->ngx, &m.depth.ngx, &m.motion.ngx, &m.output.ngx, m.workWidth,
-        m.workHeight, m.workWidth, m.workHeight, m.workWidth, m.workHeight, 0, 0, 0, 0, 1, reset ? 1 : 0,
-        cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
-        cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
-        cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1.0f, 1.0f);
+    Transition(cmd, m.output, VK_IMAGE_LAYOUT_GENERAL);
+
+    // Zero depth (constant, read inverted, so zero is the far plane) at the working size from the origin. Motion: the
+    // synthesized field when the estimator has one this frame, otherwise the zero guide; both at the working size, at
+    // unit scale (the field is in working pixels; the zero guide has nothing to scale).
+    const auto guide = VkPresentHost::ChooseMotionGuide(fieldReady, m.workWidth, m.workHeight);
+    const bool reset = VkPresentHost::NrResetWithMotion(m.reset, frame.cut, sceneCut,
+                                                        cfg.DlssNrZeroGuideReset.value_or_default(), guide.field);
+    NVSDK_NGX_Resource_VK* motionGuide = guide.field ? &m.fieldNgx : &m.motion.ngx;
+    const int evaluated =
+        g_fwd.evaluate((void*) cmd, m.feature, m.params, &modelInput->ngx, &m.depth.ngx, motionGuide, &m.output.ngx,
+                       m.workWidth, m.workHeight, m.workWidth, m.workHeight, guide.width, guide.height, 0, 0, 0, 0, 1,
+                       reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
+                       cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+                       cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0,
+                       guide.scaleX, guide.scaleY);
 
     if (evaluated != 1)
         return fail("the model refused to evaluate (returned " + std::to_string(evaluated) + ")");
 
     _lastReset = reset;
+    _lastSynthesized = guide.field;
     m.reset = false;
+
+    if (guide.field && !m.saidField)
+    {
+        m.saidField = true;
+        char scale[64];
+        std::snprintf(scale, sizeof(scale), "%.3f x %.3f", guide.scaleX, guide.scaleY);
+        m.Say("synthesized motion: the first field handed to the model at " + std::to_string(guide.width) + "x" +
+              std::to_string(guide.height) + ", its working size (motion vector scale " + scale + ", frame " +
+              std::to_string(m.width) + "x" + std::to_string(m.height) + ")");
+    }
 
     // Resolve: the proxy, the model's answer and the untouched frame back into the working colour.
     DlssNrConstants resolve = encode;
@@ -2444,6 +3165,26 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
                           frame.view, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
         return fail("the resolve dispatch failed");
 
+    if (frame.hdrProfile != 0)
+    {
+        HdrBarrier(cmd, m.hdrLinear.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        HdrBarrier(cmd, m.hdrEncoded.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        m.hdr.Record(cmd, m.width, m.height, PresentHdr::kModeEncode);
+        HdrBarrier(cmd, m.hdrEncoded.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        HdrBarrier(cmd, input.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        if (m.hdrEncoded.format != m.hdrOriginal.format)
+        {
+            VkImageBlit region {};
+            region.srcSubresource = region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            region.srcOffsets[1] =
+                region.dstOffsets[1] = { static_cast<int32_t>(m.width), static_cast<int32_t>(m.height), 1 };
+            vkCmdBlitImage(cmd, m.hdrEncoded.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, input.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_NEAREST);
+        }
+        else
+            HdrCopy(cmd, m.hdrEncoded.image, input.image, m.width, m.height);
+    }
+
     if (pair != UINT32_MAX)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m.queryPool, pair * 2 + 1);
 
@@ -2454,22 +3195,34 @@ void VkPresentModel::Submitted(uint64_t ticket)
 {
     Impl& m = *_impl;
 
-    m.pending.push_back(ticket);
-    m.firstDispatch.emplace_back(ticket, m.recordFirst);
-    m.everSubmitted = true;
-
-    if (m.guidesTicket == ticket)
+    if (m.key.hdrProfile != 0)
+        NotePresentHdr(m.key.hdrProfile == 1 ? PresentColour::Hdr10 : PresentColour::ScRgb, nullptr, true,
+                       PresentHdr::kSdrWhiteNits, false);
+    if (m.key.hdrProfile != 0 && !m.saidHdr)
     {
-        m.guidesCleared = true;
-        m.guidesTicket = 0;
+        m.saidHdr = true;
+        m.Say(std::string("HDR conversion on, ") +
+              (m.key.hdrProfile == 1 ? "HDR10 (PQ, Rec.2020)" : "scRGB (FP16, linear)") + " at " +
+              std::to_string(m.width) + "x" + std::to_string(m.height) +
+              ": linear Rec.709 FP16, SDR white 203.0 nits (203-nit fallback) x Paper white; original codes bound for "
+              "reconstruction");
     }
 
-    if (m.featureTicket == ticket)
-        m.featureTicket = 0;
+    m.pending.push_back(ticket);
+    m.firstDispatch.emplace_back(ticket, m.recordFirst);
 
-    if (++m.submitted == 1)
+    // The estimator's history advances with the frame that reached the GPU.
+    if (m.synthRecorded)
+        m.estimator.ConfirmExecuted();
+    m.synthRecorded = false;
+
+    if (!m.saidRuns)
+    {
+        m.saidRuns = true;
         m.Say("the model runs at present on " + std::to_string(m.width) + "x" + std::to_string(m.height) +
-              " (working " + std::to_string(m.workWidth) + "x" + std::to_string(m.workHeight) + "), on zero guides");
+              " (working " + std::to_string(m.workWidth) + "x" + std::to_string(m.workHeight) + "), on zero guides" +
+              (m.key.synth ? " until the synthesized motion's first field" : ""));
+    }
 
     SessionGuardEvaluated();
 }
@@ -2478,34 +3231,18 @@ void VkPresentModel::Discarded(uint64_t ticket)
 {
     Impl& m = *_impl;
 
-    // The clear never ran: still owed, from UNDEFINED, which is where the guides still are.
-    if (m.guidesTicket == ticket)
-    {
-        m.guidesTicket = 0;
-        m.guidesCleared = false;
-    }
-
-    // Built in this recording, so its initialisation never ran and no frame on the GPU uses it: built again next time.
-    if (m.featureTicket == ticket && m.feature != nullptr)
-    {
-        if (g_fwd.release != nullptr)
-            g_fwd.release(m.feature);
-        m.feature = nullptr;
-        m.featureTicket = 0;
-    }
-
     for (uint64_t& owner : m.queryTicket)
     {
         if (owner == ticket)
             owner = 0;
     }
 
+    // Nothing of the model's is built in a recording any more (the builder makes it all, its GPU work seen complete):
+    // a discarded frame only starts the history over -- the estimator's stays where it was, its recording dropped.
+    if (m.synthRecorded)
+        m.estimator.AbandonRecording();
+    m.synthRecorded = false;
     m.reset = true;
-
-    // The pass records its own one-time setup (its placeholder image's layout) into its first recording; if no
-    // recording of it ever reached the GPU, that setup is not real. Nothing submitted ever used it, so it is rebuilt.
-    if (!m.everSubmitted)
-        m.pass.reset();
 }
 
 std::optional<double> VkPresentModel::Completed(uint64_t ticket)
@@ -2518,6 +3255,9 @@ std::optional<double> VkPresentModel::Completed(uint64_t ticket)
 
     m.pending.erase(found);
     std::erase_if(m.firstDispatch, [ticket](const auto& entry) { return entry.first == ticket; });
+
+    // The frame's scene-change bit, now that its copy has landed (none when the images were retired since).
+    m.estimator.Completed(ticket, m.synthImages);
 
     std::optional<double> ms;
     for (uint32_t i = 0; i < kPresentQueryPairs; ++i)
@@ -2555,8 +3295,22 @@ void VkPresentModel::Release()
 {
     Impl& m = *_impl;
 
-    // Only with nothing in flight: the caller saw every frame complete.
-    if (!m.pending.empty())
+    // Only with nothing in flight -- frames or a running build -- and the device not lost: the caller saw every frame
+    // complete. A job still queued is called off (the builder skips it, touching nothing); one over and not yet adopted
+    // is adopted first, so its product is freed with the rest.
+    m.CancelQueued();
+    if (!m.pending.empty() || m.JobState() == BuildState::Running || m.Lost())
+    {
+        Abandon();
+        return;
+    }
+
+    if (m.JobState() == BuildState::Queued)
+        m.job.reset(); // called off above: the builder holds its own reference, and skips it
+    else if (m.job)
+        (void) m.Adopt();
+
+    if (m.Lost())
     {
         Abandon();
         return;
@@ -2577,8 +3331,15 @@ void VkPresentModel::Release()
         m.params = nullptr;
     }
 
-    for (OwnedImage* image : { &m.output, &m.proxy, &m.keep, &m.proxySmall, &m.depth, &m.motion })
+    m.hdr.Destroy(m.dev.device);
+    for (OwnedImage* image : m.Images())
         DestroyImageOn(m.dev.device, *image);
+
+    SynthMotion::DestroyVkImages(m.dev.device, m.synthImages);
+    SynthMotion::DestroyVkPipelines(m.synthPipelines);
+    m.fieldNgx = NVSDK_NGX_Resource_VK {};
+    m.estimator.Restart();
+    m.synthRecorded = false;
 
     m.pass.reset();
 
@@ -2597,10 +3358,10 @@ void VkPresentModel::Release()
 
     // A latched failure stays: a model that could not run here keeps saying why, without holding anything.
     m.ngxInitialised = false;
+    m.deviceReady = false;
+    m.built = false;
     m.width = m.height = m.workWidth = m.workHeight = 0;
-    m.guidesCleared = false;
     m.reset = true;
-    m.everSubmitted = false;
     m.dispatches = 0;
     m.recordFirst = 0;
     m.firstDispatch.clear();
@@ -2609,9 +3370,18 @@ void VkPresentModel::Release()
 void VkPresentModel::Abandon()
 {
     Impl& m = *_impl;
+    m.deviceLost = m.Lost(); // retain a terminal worker result before dropping the job
+
+    // A job under way is orphaned: the builder drops what it makes without calling anything once it returns.
+    if (m.job)
+    {
+        m.job->orphaned.store(true, std::memory_order_release);
+        m.job.reset();
+    }
 
     // The pass's destructor would call vkDestroy* on a device that may be gone: leaked instead, as ShutdownVk(false)
     // leaks the after-upscale route's.
+    m.hdr = {};
     (void) m.pass.release();
 
     m.feature = nullptr;
@@ -2619,10 +3389,17 @@ void VkPresentModel::Abandon()
     m.queryPool = VK_NULL_HANDLE;
     m.retired.clear();
     m.pending.clear();
-    for (OwnedImage* image : { &m.output, &m.proxy, &m.keep, &m.proxySmall, &m.depth, &m.motion })
+    for (OwnedImage* image : m.Images())
         *image = OwnedImage {};
+    m.synthImages = SynthMotion::VkImages {};
+    m.synthPipelines = SynthMotion::VkPipelines {};
+    m.fieldNgx = NVSDK_NGX_Resource_VK {};
+    m.estimator.Restart();
+    m.synthRecorded = false;
     m.width = m.height = m.workWidth = m.workHeight = 0;
     m.ngxInitialised = false;
+    m.deviceReady = false;
+    m.built = false;
 
     m.coreReady = false;
     m.firstDispatch.clear();
@@ -2630,6 +3407,9 @@ void VkPresentModel::Abandon()
 
 void ShutdownPresentNgx(VkDevice device, bool forgetOnly, std::vector<std::string>& lines)
 {
+    // Called after the device's model build, if one was under way, is over (or orphaned): the builder writes these.
+    std::lock_guard<std::mutex> ngx(g_presentNgxMutex);
+
     if (g_presentCoreDevice == device)
     {
         if (!forgetOnly)

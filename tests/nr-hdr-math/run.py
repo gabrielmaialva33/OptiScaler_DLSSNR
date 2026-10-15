@@ -162,6 +162,21 @@ assert 'hdrPresent ? switchOn : ResolvePresentColour(sourceDesc.Format, record, 
 assert 'const bool presentWhite = std::isfinite(frame.PresentWhite) && frame.PresentWhite > 0.0f;' in renderer
 # Both hosts finish the timing sample before their list is closed or dropped.
 assert renderer.count('hdrTiming.reset();') == 2
+# Guards for native-only integration that the fake bridge cannot execute. These prove ordering/wiring,
+# not Win32 display behavior (the GPU harness separately calls the real query).
+present = renderer[renderer.index('void RunPresentPass('):renderer.index('void RunPresentPass(') + 45000]
+assert present.index('DlssNr_PresentHdr_Dx12::TextureShape(bbDesc)') < present.index('EnsureBbCopy(')
+assert 'presentHdr ? DlssNr::PresentHdr::DisplayWhiteForSwapchain(swapchain)' in present
+assert 'frame.PresentWhite = presentHdr ? presentWhite.nits / 80.0f' in present
+assert present.index('const bool executed = SubmitPresentList') < present.index('HDR conversion on, {}')
+assert 'SDR white {:.1f} nits ({}) x Paper white; original codes bound for reconstruction' in re.sub(r'"\s*"', '', present)
+assert host.index('_hdr->ValidResources(source, source,') < host.index('Transition(cmdList, source, sourceStateNow,')
+display = (retoque / 'dlssnr/DlssNr_DisplayWhite.h').read_text()
+assert 'GetContainingOutput(&output)' in display and 'path.targetInfo.adapterId' in display
+assert 'DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL' in display
+menu = (retoque / 'dlssnr/DlssNr_Menu.cpp').read_text()
+assert 'on && config->DlssNrEnabled.value_or_default() && hdr.converted' in menu
+assert "HDR present conversion is inactive; the game's original frame is shown." in menu
 # The menu shows a decline reason through Localization::Tr(reason), which the localization suite's drift guard cannot
 # see (it reads literals at Tr call sites): every reason the conversion gives has its pt-BR entry here instead.
 colour = (retoque / 'dlssnr/DlssNr_PresentColour.h').read_text()

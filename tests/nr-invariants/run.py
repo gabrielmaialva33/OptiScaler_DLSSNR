@@ -162,6 +162,15 @@ elif hdr_cpp != hdr_cb:
 if len(failures) == before:
     print(f'PASS: {len(hdr_cpp)} ordered 4-byte constants match between DlssNr_PresentHdr_Dx12::Constants and its cbuffer')
 
+# Vulkan uses the same four scalars, packed to 16 bytes and placed at aligned dynamic offsets.
+hdr_vk = (nr / 'shaders/dlssnr/DlssNr_PresentHdr_Vk.h').read_text()
+hdr_vk_fields = [(t.replace('uint32_t', 'uint'), n.lower()) for t, n in
+                 re.findall(r'\b(uint32_t|float)\s+(\w+)\s*;', body(hdr_vk, 'struct Constants'))]
+if hdr_vk_fields != hdr_cb:
+    fail(f'VkConversion::Constants {hdr_vk_fields} and HDR Params {hdr_cb} differ')
+else:
+    print('PASS: 4 ordered 4-byte Vulkan HDR constants match the shared cbuffer')
+
 # --- 3. Headers are the committed bytecode --------------------------------------------------------
 
 before = len(failures)
@@ -200,6 +209,12 @@ if (precompile / 'DlssNr_PresentHdr_Shader.cso').exists():
     targets.append(('DlssNr_PresentHdr_Shader.cso', 'DlssNr_PresentHdr_Shader.h', 'DlssNr_PresentHdr_cso', b'DXBC'))
 elif (precompile / 'DlssNr_PresentHdr_Shader.h').exists():
     fail('DlssNr_PresentHdr_Shader.h is committed without DlssNr_PresentHdr_Shader.cso beside it')
+# Both targets are required for this shared source, even before a Vulkan runtime consumer exists.
+if not (precompile / 'DlssNr_PresentHdr_Shader_Vk.spv').exists():
+    fail('HDR conversion SPIR-V is missing')
+else:
+    targets.append(('DlssNr_PresentHdr_Shader_Vk.spv', 'DlssNr_PresentHdr_Shader_Vk.h', 'dlssnr_present_hdr_spv', bytes.fromhex('03022307')))
+
 # Peripheral compression's three passes (peripheral-compression.md). Optional bytecode like the guide resample's:
 # none of the six files is a supported state (the feature says "unavailable"); any one of them commits to all
 # six, because DlssNr_Periphery_Dx12.cpp loads the three headers together and a .cso without its header, or a
@@ -274,9 +289,28 @@ with tempfile.TemporaryDirectory() as scratch:
             fail(f'{header.name} is not what create_header.py makes from {binary.name}: regenerate it')
         synth_checked.append(header.name)
 
+    # The Vulkan estimator's SPIR-V (SynthMotion_Vk.cpp): <stem>_Shader_Vk.spv -> <stem>_Shader_Vk.h, array <stem>_spv.
+    for binary in sorted(synth_precompile.glob('*_Shader_Vk.spv')):
+        header = synth_precompile / f'{binary.stem}.h'
+        array = binary.stem.removesuffix('_Shader_Vk') + '_spv'
+        if not header.exists():
+            fail(f'{binary.name} has no {header.name}: run shaders/synth_motion/precompile/build.sh')
+            continue
+        if not binary.read_bytes().startswith(bytes.fromhex('03022307')):
+            fail(f'{binary.name} does not start with the SPIR-V magic')
+        regenerated = Path(scratch) / header.name
+        subprocess.run([sys.executable, str(create_header), str(binary), str(regenerated), array],
+                       check=True, capture_output=True)
+        if regenerated.read_bytes() != header.read_bytes():
+            fail(f'{header.name} is not what create_header.py makes from {binary.name}: regenerate it')
+        synth_checked.append(header.name)
+    for header in sorted(synth_precompile.glob('*_Shader_Vk.h')):
+        if not (synth_precompile / f'{header.stem}.spv').exists():
+            fail(f'{header.name} is committed without {header.stem}.spv beside it')
+
 if len(failures) == before:
     print(f'PASS: {len(synth_checked)} synthesized-motion headers are byte-identical to create_header.py over the '
-          'committed .cso')
+          'committed .cso and .spv')
 
 # --- 4. Retired identifiers -------------------------------------------------------------------------
 
@@ -370,6 +404,24 @@ if bool_reads == 0:
     fail('found no bool read of a DlssNr setting; the scan no longer matches the code')
 if len(failures) == before:
     print(f'PASS: {bool_reads} DlssNr settings read into a bool are all bool settings')
+
+# --- 6. The status line reads no latch ----------------------------------------------------------------------------
+# g_temporalValid is set by the first capture and cleared only at shutdown, so a status that read it kept saying "with
+# DLSS temporal inputs" over frames that ran on zero guides (present-real-guides.md, D3). Routing may read it; the
+# status line (HookStatus) names the guides from what the present did in the last second instead.
+before = len(failures)
+renderer_text = (nr / 'shaders/dlssnr/DlssNr_Dx12.cpp').read_text()
+status_at = renderer_text.find('const char* HookStatus()\n{')
+if status_at < 0:
+    fail('HookStatus() not found in DlssNr_Dx12.cpp; the latch check no longer matches the code')
+else:
+    status_body = renderer_text[status_at:renderer_text.index('\n}\n', status_at)]
+    if re.search(r'\bg_temporalValid\b', re.sub(r'//[^\n]*', '', status_body)):
+        fail('HookStatus reads g_temporalValid again: the status line would claim the game\'s guides after they stop')
+    if 'RecentGuideStatus(' not in status_body:
+        fail('HookStatus no longer reads the recent guide status; the latch check no longer matches the code')
+if len(failures) == before:
+    print('PASS: the status line names the guides from the last second, not the g_temporalValid latch')
 
 if failures:
     for message in failures:

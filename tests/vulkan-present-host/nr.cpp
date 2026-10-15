@@ -26,6 +26,7 @@
 #define NOMINMAX
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <windows.h>
+#include <DirectXPackedVector.h>
 #include <vulkan/vulkan.h>
 
 #include "nvsdk_ngx_vk.h"
@@ -179,11 +180,17 @@ static bool FourBytes(VkFormat format)
     }
 }
 
+// With --pan, the whole picture pans this many pixels a frame (content moving left): a camera turning, for synthesized
+// motion (stage 5) to follow. Zero otherwise.
+static uint32_t g_pan = 0;
+
 // The picture: a horizontal and a vertical gradient, a fine texture, flat patches, thin stripes, and a square that
-// moves a few pixels a frame. Opaque. R, G, B in that order; the caller swizzles for BGRA.
-static void Picture(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t frame, uint8_t rgb[3])
+// moves a few pixels a frame. Opaque. R, G, B in that order; the caller swizzles for BGRA. With --pan everything but
+// the square is sampled g_pan pixels further right every frame, the gradient repeating every two widths.
+static void Picture(uint32_t xIn, uint32_t y, uint32_t w, uint32_t h, uint32_t frame, uint8_t rgb[3])
 {
-    int r = 30 + static_cast<int>(170 * x / std::max(w, 1u));
+    const uint32_t x = g_pan != 0 ? (xIn + frame * g_pan) % std::max(2 * w, 1u) : xIn;
+    int r = 30 + static_cast<int>(170 * (x % std::max(w, 1u)) / std::max(w, 1u));
     int g = 40 + static_cast<int>(160 * y / std::max(h, 1u));
     int b = 90 + static_cast<int>(((x ^ y) & 31));
 
@@ -200,7 +207,7 @@ static void Picture(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t fra
     const uint32_t side = std::max(w, h) / 10;
     const uint32_t sx = (frame * 5) % std::max(w - side, 1u);
     const uint32_t sy = h / 3;
-    if (x >= sx && x < sx + side && y >= sy && y < sy + side) // the moving square
+    if (xIn >= sx && xIn < sx + side && y >= sy && y < sy + side) // the moving square
     {
         r = 250;
         g = 220;
@@ -211,32 +218,41 @@ static void Picture(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t fra
     rgb[2] = static_cast<uint8_t>(std::clamp(b, 0, 255));
 }
 
-static uint32_t Hash(uint32_t seed, uint32_t i)
+static size_t PixelBytes(VkFormat format) { return format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 : 4; }
+static bool Hdr(VkFormat format, VkColorSpaceKHR space)
 {
-    uint32_t x = seed * 0x9E3779B1u ^ (i + 0x7F4A7C15u) * 0x85EBCA77u;
-    x ^= x >> 15;
-    x *= 0x2C1B3C6Du;
-    x ^= x >> 12;
-    return x;
+    return (space == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+            (format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || format == VK_FORMAT_A2R10G10B10_UNORM_PACK32)) ||
+           (space == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT && format == VK_FORMAT_R16G16B16A16_SFLOAT);
 }
-
 static void Fill(uint8_t* out, VkFormat format, uint32_t w, uint32_t h, uint32_t frame)
 {
     for (uint32_t y = 0; y < h; ++y)
     {
         for (uint32_t x = 0; x < w; ++x)
         {
-            uint8_t* p = out + (size_t(y) * w + x) * 4;
+            uint8_t* p = out + (size_t(y) * w + x) * PixelBytes(format);
+            uint8_t rgb[3];
+            Picture(x, y, w, h, frame, rgb);
+            if (format == VK_FORMAT_R16G16B16A16_SFLOAT)
+            {
+                const uint16_t rgba[] = { DirectX::PackedVector::XMConvertFloatToHalf(rgb[0] / 32.0f - 0.25f),
+                                          DirectX::PackedVector::XMConvertFloatToHalf(rgb[1] / 32.0f),
+                                          DirectX::PackedVector::XMConvertFloatToHalf(rgb[2] / 32.0f),
+                                          DirectX::PackedVector::XMConvertFloatToHalf((x % 4) / 3.0f) };
+                std::memcpy(p, rgba, 8);
+                continue;
+            }
             if (!(format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB ||
                   format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB))
             {
                 // Not an eight-bit format: only its exactness is judged, so any bits do.
-                const uint32_t v = Hash(frame + 1, y * w + x);
+                const uint32_t r = 64 + rgb[0] * 3, g = 64 + rgb[1] * 3, b = 64 + rgb[2] * 3;
+                const bool reverse = format == VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+                const uint32_t v = (reverse ? b : r) | (g << 10) | ((reverse ? r : b) << 20) | ((x % 4) << 30);
                 std::memcpy(p, &v, 4);
                 continue;
             }
-            uint8_t rgb[3];
-            Picture(x, y, w, h, frame, rgb);
             p[0] = Bgra(format) ? rgb[2] : rgb[0];
             p[1] = rgb[1];
             p[2] = Bgra(format) ? rgb[0] : rgb[2];
@@ -270,8 +286,16 @@ struct SwapchainFacts
     double maeMax = 0.0;
     uint32_t maxDiff = 0;
     uint64_t alphaChanged = 0;
-    uint32_t black = 0; // read-backs whose every colour channel came back zero
+    uint32_t black = 0;     // read-backs whose every colour channel came back zero
+    uint64_t nonFinite = 0; // HDR FP16 colour components that are NaN or infinity
     bool destroyed = false;
+    double maxPresentMs = 0.0; // the longest vkQueuePresentKHR call, the host's hook and everything below included
+    // With --pan, from the swapchain's 16th frame (past the model's build and the estimator's warm-up), on frames the
+    // model edited: how much of the previous frame, unmoved, the model's edit carries -- the projection of (read back -
+    // presented) on (previous - presented) at the same pixel, per frame. A model blending a stale history it was told
+    // did not move ghosts toward 1; one whose history follows the camera stays near 0.
+    double trailSum = 0.0;
+    uint32_t trailFrames = 0;
 };
 
 // One phase of --route, with the read-backs of the frames presented in it counted apart.
@@ -320,6 +344,9 @@ struct App
     bool cross = false;
     bool route = false;
     bool wdx12 = false;
+    bool nrToggle = false;
+    bool slowBuild = false;
+    bool hdr = false;
     bool wdx12Probed = false;
     HMODULE optiscaler = nullptr;
     std::vector<PhaseFacts> phases;
@@ -340,6 +367,7 @@ struct App
         Buffer upload;
         Buffer download;
         size_t facts = 0;
+        uint32_t firstFrame = 0; // the frame number its first present carried
     };
 
     uint32_t nextFrame = 0;
@@ -372,16 +400,26 @@ struct App
         debug.messageType =
             VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT;
         debug.pfnUserCallback = DebugMessage;
-        const char* extensions[] = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
-                                     VK_EXT_DEBUG_UTILS_EXTENSION_NAME };
+        std::vector<const char*> extensions { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+                                              VK_EXT_DEBUG_UTILS_EXTENSION_NAME };
+        if (hdr)
+        {
+            uint32_t n = 0;
+            Check(vkEnumerateInstanceExtensionProperties(nullptr, &n, nullptr), "instance extensions");
+            std::vector<VkExtensionProperties> available(n);
+            Check(vkEnumerateInstanceExtensionProperties(nullptr, &n, available.data()), "instance extensions");
+            for (const auto& e : available)
+                if (!strcmp(e.extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))
+                    extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+        }
         VkApplicationInfo app { VK_STRUCTURE_TYPE_APPLICATION_INFO };
         app.pApplicationName = "OptiScaler Vulkan present host cold NR";
         app.apiVersion = VK_API_VERSION_1_1;
         VkInstanceCreateInfo info { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
         info.pNext = &debug;
         info.pApplicationInfo = &app;
-        info.enabledExtensionCount = 3;
-        info.ppEnabledExtensionNames = extensions;
+        info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+        info.ppEnabledExtensionNames = extensions.data();
         Check(vkCreateInstance(&info, nullptr, &instance), "vkCreateInstance");
         auto createDebug = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
             vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"));
@@ -590,6 +628,14 @@ struct App
         }
         info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
         info.clipped = VK_TRUE;
+        // GE-Proton11-7 Wayland aborts with "CM Surface already exists" if the old colour-managed swapchain
+        // is still alive while its replacement is created. HDR WSI cases exercise sequential surfaces; the normal
+        // SDR cases retain oldSwapchain overlap coverage.
+        if (hdr && target.swapchain != VK_NULL_HANDLE)
+        {
+            Check(vkDeviceWaitIdle(device), "idle before replacing HDR surface");
+            DestroySwapchain(target);
+        }
         const VkSwapchainKHR old = target.swapchain;
         info.oldSwapchain = old;
         VkSwapchainKHR swapchain = VK_NULL_HANDLE;
@@ -609,7 +655,7 @@ struct App
         target.images.resize(count);
         Check(vkGetSwapchainImagesKHR(device, swapchain, &count, target.images.data()), "swapchain images");
         target.expected.assign(count, -1);
-        const VkDeviceSize bytes = VkDeviceSize(extent.width) * extent.height * 4;
+        const VkDeviceSize bytes = VkDeviceSize(extent.width) * extent.height * PixelBytes(format.format);
         target.upload = MakeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
         target.download = MakeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
@@ -625,6 +671,7 @@ struct App
         facts.sdr = Sdr(format.format, format.colorSpace);
         swapchains.push_back(facts);
         target.facts = swapchains.size() - 1;
+        target.firstFrame = nextFrame;
         std::printf("SWAPCHAIN %s format %u colour space %u %ux%u images %u family %u\n", name, format.format,
                     format.colorSpace, extent.width, extent.height, count, family);
     }
@@ -633,7 +680,7 @@ struct App
     {
         SwapchainFacts& facts = swapchains[target.facts];
         const uint32_t w = target.extent.width, h = target.extent.height;
-        std::vector<uint8_t> expected(size_t(w) * h * 4);
+        std::vector<uint8_t> expected(size_t(w) * h * PixelBytes(target.format));
         Fill(expected.data(), target.format, w, h, static_cast<uint32_t>(target.expected[index]));
         const auto* got = static_cast<const uint8_t*>(target.download.mapped);
 
@@ -643,7 +690,7 @@ struct App
         uint64_t sum = 0;
         uint32_t maxDiff = 0;
         uint64_t alpha = 0;
-        bool black = eightBit;
+        bool black = true;
         if (eightBit)
         {
             for (size_t i = 0; i < expected.size(); i += 4)
@@ -658,7 +705,53 @@ struct App
                 alpha += expected[i + 3] != got[i + 3] ? 1 : 0;
             }
         }
+        if (!eightBit)
+        {
+            for (size_t i = 0; i < size_t(w) * h; ++i)
+            {
+                if (PixelBytes(target.format) == 8)
+                {
+                    alpha += std::memcmp(expected.data() + i * 8 + 6, got + i * 8 + 6, 2) != 0;
+                    uint16_t rgba[4];
+                    std::memcpy(rgba, got + i * 8, sizeof(rgba));
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        facts.nonFinite += (rgba[c] & 0x7C00) == 0x7C00;
+                        black = black && (rgba[c] & 0x7FFF) == 0;
+                    }
+                }
+                else
+                {
+                    alpha += (expected[i * 4 + 3] & 0xC0) != (got[i * 4 + 3] & 0xC0);
+                    uint32_t pixel;
+                    std::memcpy(&pixel, got + i * 4, sizeof(pixel));
+                    black = black && (pixel & 0x3FFFFFFF) == 0;
+                }
+            }
+        }
         const double mae = eightBit ? double(sum) / (double(w) * h * 3) : (exact ? 0.0 : 255.0);
+        const int64_t frame = target.expected[index];
+        if (g_pan != 0 && eightBit && !exact && frame >= int64_t(target.firstFrame) + 16)
+        {
+            std::vector<uint8_t> previous(expected.size());
+            Fill(previous.data(), target.format, w, h, static_cast<uint32_t>(frame - 1));
+            double along = 0.0, norm = 0.0;
+            for (size_t i = 0; i < expected.size(); i += 4)
+            {
+                for (int c = 0; c < 3; ++c)
+                {
+                    const double edit = double(got[i + c]) - double(expected[i + c]);
+                    const double stale = double(previous[i + c]) - double(expected[i + c]);
+                    along += edit * stale;
+                    norm += stale * stale;
+                }
+            }
+            if (norm > 0.0)
+            {
+                facts.trailSum += along / norm;
+                ++facts.trailFrames;
+            }
+        }
         if (phase != nullptr && target.expected[index] >= phaseFrom)
         {
             ++phase->readbacks;
@@ -759,10 +852,14 @@ struct App
         present.swapchainCount = 1;
         present.pSwapchains = &target.swapchain;
         present.pImageIndices = &index;
+        const auto presentStart = std::chrono::steady_clock::now();
         const VkResult result = vkQueuePresentKHR(target.queue, &present);
+        const double presentMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - presentStart).count();
         Require(result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR,
                 "present of " + swapchains[target.facts].name + " returned " + std::to_string(result));
         ++swapchains[target.facts].presents;
+        swapchains[target.facts].maxPresentMs = std::max(swapchains[target.facts].maxPresentMs, presentMs);
 
         Check(vkQueueWaitIdle(target.queue), "wait for presentation");
         if (readback)
@@ -923,7 +1020,11 @@ struct App
         using Ms = std::chrono::milliseconds;
 
         // The game's start window: nothing upscaled, the present host runs the model at present.
-        presentUntil("cold", Clock::now() + Ms(1500), 12);
+        // The input-enabled overlay has a seven-second startup splash. Let it finish before judging the route's
+        // unedited frames; the cold phase itself already expects the present host to change the picture.
+        // First the model's build, off the present path: its frames are carried unchanged until the product is adopted.
+        presentUntil("cold-build", Clock::now() + Ms(2000));
+        presentUntil("cold", Clock::now() + Ms(nrToggle ? 8000 : 1500), 12);
 
         const auto init = Ngx<PFN_NgxInit>("NVSDK_NGX_VULKAN_Init");
         const auto capabilities = Ngx<PFN_NgxParams>("NVSDK_NGX_VULKAN_GetCapabilityParameters");
@@ -1044,12 +1145,53 @@ struct App
         {
             const Clock::time_point lastAsk = upscalerOn(cycle == 0 ? "on" : "on-again", 30);
 
+            // Only this harness window receives these messages. Exercise the production F7 handler, without
+            // global SendInput or a test-only DLL export. The runner requires the actual toggle log and NR-off
+            // blocker, so a backend that ignores the messages fails rather than pretending the toggle happened.
+            const auto toggle = [&]
+            {
+                const LPARAM scan = static_cast<LPARAM>(MapVirtualKeyW(VK_F7, MAPVK_VK_TO_VSC)) << 16;
+                Require(PostMessageW(window, WM_KEYDOWN, VK_F7, 1 | scan) != 0, "post F7 down");
+                for (int i = 0; i < 3; ++i)
+                {
+                    Frame(target);
+                    ++phase->presents;
+                }
+                Require(PostMessageW(window, WM_KEYUP, VK_F7, 1 | scan | (3ll << 30)) != 0, "post F7 up");
+                // F7 draws a two-second toast, plus its fade. Keep those frames in the toggle phase, outside the
+                // byte-exact disabled/route checks; ownership timing is still checked against the toggle log.
+                const auto toastGone = Clock::now() + Ms(3000);
+                while (Clock::now() < toastGone)
+                {
+                    Frame(target);
+                    ++phase->presents;
+                }
+            };
+            if (nrToggle)
+            {
+                Begin(cycle == 0 ? "toggle-off" : "toggle-off-again");
+                toggle();
+            }
+
             // ... and off: nothing evaluated for longer than the present host waits (10 s) before taking the model
             // back: the frames until 9 s after the last ask must be the route's (unedited), those from 12 s on the
             // present host's again.
             presentUntil(cycle == 0 ? "off-waiting" : "off-again-waiting", lastAsk + Ms(9000));
-            presentUntil(cycle == 0 ? "off-handing-back" : "off-again-handing-back", lastAsk + Ms(12000));
-            presentUntil(cycle == 0 ? "off-back" : "off-again-back", lastAsk + Ms(14000), 12);
+            if (nrToggle)
+            {
+                // Hold NR off beyond the quiet deadline: exactly one named blocker per cycle, no hand-back.
+                presentUntil(cycle == 0 ? "nr-disabled" : "nr-disabled-again", lastAsk + Ms(13000), 12);
+                Begin(cycle == 0 ? "toggle-on" : "toggle-on-again");
+                toggle();
+                // The model must return without waiting for another ten-second idle window.
+                presentUntil(cycle == 0 ? "off-handing-back" : "off-again-handing-back", Clock::now() + Ms(3000));
+                presentUntil(cycle == 0 ? "off-back" : "off-again-back", Clock::now() + Ms(1500), 12);
+            }
+            else
+            {
+                presentUntil(cycle == 0 ? "off-handing-back" : "off-again-handing-back", lastAsk + Ms(12000));
+                presentUntil(cycle == 0 ? "off-back" : "off-again-back", lastAsk + Ms(14000), 12);
+            }
         }
 
         // On once more, and the game exits with the route holding the model: its objects go with the device.
@@ -1062,6 +1204,96 @@ struct App
         for (Image* img : { &colour, &depth, &motion, &output })
             FreeImage(*img);
 
+        if (nrToggle)
+        {
+            // The legacy overlay frees its device objects on a new Win32 surface, not on DestroySwapchain or
+            // DestroyDevice. Exercise that public cleanup path before teardown; do not suppress its leak VUID.
+            // No swapchain or present is made on this temporary surface, and both hand-back cycles are over.
+            VkWin32SurfaceCreateInfoKHR info { VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR };
+            info.hinstance = module;
+            info.hwnd = window;
+            VkSurfaceKHR cleanupSurface = VK_NULL_HANDLE;
+            Check(vkCreateWin32SurfaceKHR(instance, &info, nullptr, &cleanupSurface), "overlay cleanup surface");
+            vkDestroySurfaceKHR(instance, cleanupSurface, nullptr);
+        }
+        DestroySwapchain(target);
+        vkDestroyDevice(device, nullptr);
+        vkDestroySurfaceKHR(instance, surface, nullptr);
+        auto destroyDebug = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT"));
+        destroyDebug(instance, messenger, nullptr);
+        vkDestroyInstance(instance, nullptr);
+        DestroyWindow(window);
+        DestroyWindow(owner);
+    }
+
+    // --- --slow-build: the model's build slowed (by the test layer) while presents and swapchain churn go on --------
+
+    void Resize(uint32_t width, uint32_t height)
+    {
+        RECT outer {}, client {};
+        GetWindowRect(window, &outer);
+        GetClientRect(window, &client);
+        SetWindowPos(window, nullptr, 0, 0, width + (outer.right - outer.left) - client.right,
+                     height + (outer.bottom - outer.top) - client.bottom, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        for (int i = 0; i < 10; ++i)
+        {
+            Pump();
+            Sleep(20);
+        }
+    }
+
+    // DOOM Eternal's startup churn, with the layer slowing every allocation, pipeline and NVX module made off the
+    // device's creating thread -- the model's builder -- while this thread presents: a swapchain presented once and
+    // destroyed (#9), its replacement at the same size, a resize to a second size while a build runs, and back.
+    // Every present is timed; none may wait on the model.
+    void RunSlowBuild()
+    {
+        Init();
+        MakeDevice();
+        ProbeValidation();
+
+        VkSurfaceFormatKHR format {};
+        for (const auto& f : offered)
+            if (format.format == VK_FORMAT_UNDEFINED && Sdr(f.format, f.colorSpace))
+                format = f;
+        Require(format.format != VK_FORMAT_UNDEFINED, "the surface offers no SDR RGBA8/BGRA8 format");
+        RECT client {};
+        GetClientRect(window, &client);
+        const uint32_t width = static_cast<uint32_t>(client.right), height = static_cast<uint32_t>(client.bottom);
+
+        using Clock = std::chrono::steady_clock;
+        const auto presentFor = [&](Target& target, int milliseconds)
+        {
+            const auto end = Clock::now() + std::chrono::milliseconds(milliseconds);
+            while (Clock::now() < end)
+                Frame(target);
+        };
+
+        Target target;
+        MakeSwapchain(target, "once", format, graphicsQueue, graphicsFamily);
+        Frame(target); // the build is asked for here, and runs on
+        Check(vkDeviceWaitIdle(device), "idle before destroying the one-present swapchain");
+        DestroySwapchain(target); // destroyed one present after the model was asked for, as #9
+
+        MakeSwapchain(target, "same-size", format, graphicsQueue, graphicsFamily);
+        presentFor(target, 1500);
+
+        Resize(517, 389);
+        MakeSwapchain(target, "resized", format, graphicsQueue, graphicsFamily);
+        presentFor(target, 1500);
+
+        Resize(width, height);
+        MakeSwapchain(target, "back", format, graphicsQueue, graphicsFamily);
+        presentFor(target, 12000);
+
+        // A last size, one present -- a build is asked for and runs, slowed -- and the device destroyed at once: its
+        // destruction waits for the build under way before anything of the model's goes.
+        Resize(600, 400);
+        MakeSwapchain(target, "last", format, graphicsQueue, graphicsFamily);
+        Frame(target);
+
+        Check(vkDeviceWaitIdle(device), "final idle");
         DestroySwapchain(target);
         vkDestroyDevice(device, nullptr);
         vkDestroySurfaceKHR(instance, surface, nullptr);
@@ -1077,6 +1309,8 @@ struct App
     {
         if (route)
             return RunRoute();
+        if (slowBuild)
+            return RunSlowBuild();
 
         Init();
         MakeDevice();
@@ -1099,18 +1333,31 @@ struct App
                     Frames(target);
                 }
             }
+            if (hdr && first.format != VK_FORMAT_UNDEFINED)
+                break; // one SDR -> HDR -> SDR sequence; the normal cases exercise all four SDR formats
         }
         Require(first.format != VK_FORMAT_UNDEFINED, "the surface offers no SDR RGBA8/BGRA8 format");
 
         // One four-byte format that is not SDR, when the surface offers one: refused, carried unchanged.
         for (const auto& f : offered)
         {
-            if (FourBytes(f.format) && !Sdr(f.format, f.colorSpace))
+            if (!hdr && FourBytes(f.format) && !Sdr(f.format, f.colorSpace))
             {
                 MakeSwapchain(target, "not-sdr", f, graphicsQueue, graphicsFamily);
                 Frames(target);
                 break;
             }
+        }
+
+        if (hdr)
+        {
+            for (const auto& f : offered)
+                if (Hdr(f.format, f.colorSpace))
+                {
+                    const std::string name = "hdr-" + std::to_string(f.format);
+                    MakeSwapchain(target, name.c_str(), f, graphicsQueue, graphicsFamily);
+                    Frames(target);
+                }
         }
 
         // From the compute-only family: the round trip and the model on the graphics family, handed over and back.
@@ -1172,7 +1419,10 @@ struct App
                 << ", \"readbacks\": " << s.readbacks << ", \"exact\": " << s.exact
                 << ", \"mae_mean\": " << (s.readbacks ? s.maeSum / s.readbacks : 0.0) << ", \"mae_max\": " << s.maeMax
                 << ", \"max_diff\": " << s.maxDiff << ", \"alpha_changed\": " << s.alphaChanged
-                << ", \"black\": " << s.black << ", \"destroyed\": " << (s.destroyed ? "true" : "false") << "}";
+                << ", \"black\": " << s.black << ", \"nonfinite\": " << s.nonFinite
+                << ", \"destroyed\": " << (s.destroyed ? "true" : "false") << ", \"max_present_ms\": " << s.maxPresentMs
+                << ", \"trail_mean\": " << (s.trailFrames ? s.trailSum / s.trailFrames : 0.0)
+                << ", \"trail_frames\": " << s.trailFrames << "}";
         }
         out << "],\n  \"wdx12_probed\": " << (wdx12Probed ? "true" : "false");
         out << ",\n  \"phases\": [";
@@ -1203,8 +1453,16 @@ int main(int argc, char** argv)
                 app.route = true;
             else if (!strcmp(argv[i], "--wdx12"))
                 app.wdx12 = true;
+            else if (!strcmp(argv[i], "--nr-toggle"))
+                app.nrToggle = true;
+            else if (!strcmp(argv[i], "--hdr"))
+                app.hdr = true;
+            else if (!strcmp(argv[i], "--slow-build"))
+                app.slowBuild = true;
             else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
                 app.frames = static_cast<uint32_t>(std::atoi(argv[++i]));
+            else if (!strcmp(argv[i], "--pan") && i + 1 < argc)
+                g_pan = static_cast<uint32_t>(std::atoi(argv[++i]));
             else
                 Require(false, std::string("unknown argument ") + argv[i]);
         }

@@ -6,7 +6,9 @@
 #include <dlssnr/DlssNr_PresentGuideIdentity.h>
 #include <shaders/dlssnr/DlssNr_Common.h>
 
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <map>
@@ -15,7 +17,14 @@
 
 using HRESULT = long;
 #define FAILED(hr) (((HRESULT) (hr)) < 0)
+#define SUCCEEDED(hr) (((HRESULT) (hr)) >= 0)
 #define IID_PPV_ARGS(pp) 0, reinterpret_cast<void**>(pp)
+
+struct HWND__
+{
+    int unused;
+};
+using HWND = HWND__*;
 
 struct D3D12_RESOURCE_DESC
 {
@@ -38,9 +47,11 @@ struct ID3D12Device
 struct ID3D12GraphicsCommandList
 {
     ID3D12Device* device = nullptr;
+    int getDeviceCalls = 0;
 
     HRESULT GetDevice(int, void** out)
     {
+        ++getDeviceCalls;
         *out = device;
         if (device == nullptr)
             return -1;
@@ -49,8 +60,18 @@ struct ID3D12GraphicsCommandList
     }
 };
 
+// A swapchain answers GetHwnd with its window, or fails (a composition swapchain has none).
 struct IDXGISwapChain3
 {
+    HWND window = nullptr;
+    int hwndCalls = 0;
+
+    HRESULT GetHwnd(HWND* out)
+    {
+        ++hwndCalls;
+        *out = window;
+        return window != nullptr ? 0 : -1;
+    }
 };
 
 #define NVSDK_NGX_Parameter_Output "Output"
@@ -96,6 +117,7 @@ struct Config
 {
     FakeOption<bool> DlssNrEnabled { true };
     FakeOption<uint32_t> DlssNrHookMethod { 2 };
+    FakeOption<bool> DlssNrRequireDlss { false };
     static Config* Instance()
     {
         static Config config;
@@ -112,6 +134,9 @@ inline void FakeLogInfo(const char* format, const std::string& line)
 }
 #define LOG_INFO(...) FakeLogInfo(__VA_ARGS__)
 
+// The renderer's request for a model reset, taken by the next Dispatch.
+inline std::atomic<bool> g_resetOnReturn { false };
+
 namespace DlssNr
 {
 struct PresentGuideClone
@@ -122,7 +147,6 @@ struct PresentGuideClone
 
 static PresentGuideClone g_presentGuideClones[PresentGuides::kRingSize];
 static PresentGuides::Ring g_presentGuideRing;
-static unsigned long long g_nrLastEnhancedRecordedSeq = 0;
 
 static long long g_fakeNowMs = 1000;
 static long long NowMs() { return g_fakeNowMs; }

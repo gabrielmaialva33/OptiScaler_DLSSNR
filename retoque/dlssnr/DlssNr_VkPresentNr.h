@@ -9,16 +9,97 @@
 // Standard library only; Vulkan's values are plain integers, and tests/nr-vk-present-host checks each one repeated
 // here against vulkan_core.h.
 
+#include "DlssNr_VkPresentBuild.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <iterator>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace DlssNr::VkPresentHost
 {
+// Hand-back policy and diagnostics, shared with the host-tier tests. An off/on toggle never resets the route's
+// quiet clock. Diagnostics are per due episode, including reasons that alternate across frames.
+struct HandBackReadiness
+{
+    bool enabled = true;
+    bool hasModel = false;
+    bool retryDelay = false;
+    std::string unavailable;
+};
+
+inline std::string HandBackBlockReason(const HandBackReadiness& state)
+{
+    if (!state.enabled)
+        return "NR off ([DlssNr] Enabled=false)";
+    if (state.hasModel)
+        return "the present host still has a model (waiting for its frames to complete)";
+    if (state.retryDelay)
+        return "retry backoff after an earlier drain failure";
+    return state.unavailable;
+}
+
+class HandBackDiagnostics
+{
+    struct Reason
+    {
+        std::string text;
+        uint64_t firstMs;
+        bool reported = false;
+    };
+    std::vector<Reason> _reasons;
+
+  public:
+    bool Blocked(const std::string& reason, uint64_t nowMs, uint64_t delayMs = 0)
+    {
+        Reason* found = nullptr;
+        for (auto& item : _reasons)
+            if (item.text == reason)
+                found = &item;
+        if (found == nullptr)
+        {
+            _reasons.push_back({ reason, nowMs });
+            found = &_reasons.back();
+        }
+        if (found->reported || nowMs < found->firstMs || nowMs - found->firstMs < delayMs)
+            return false;
+        found->reported = true;
+        return true;
+    }
+    void Reset() { _reasons.clear(); }
+};
+
+// A queue's locks record their holder, so the stall watchdog's line names it (DlssNr_VkPresentBuild.h).
+using QueueMutex = TrackedMutex<std::recursive_timed_mutex>;
+
+struct QueueLocks
+{
+    QueueMutex submit;
+    QueueMutex present;
+    uint32_t family = UINT32_MAX;
+    uint32_t index = UINT32_MAX;
+};
+
+// Called under the current present lock and transport mutex. Never wait for another queue whose presenter may be
+// waiting for that mutex. The caller releases all previously acquired locks on failure by leaving its RAII scope.
+inline const char* TryHandBackQueueLocks(QueueLocks& locks, std::vector<std::unique_lock<QueueMutex>>& held)
+{
+    std::unique_lock<QueueMutex> present(locks.present, std::try_to_lock);
+    if (!present.owns_lock())
+        return "present";
+    std::unique_lock<QueueMutex> submit(locks.submit, std::try_to_lock);
+    if (!submit.owns_lock())
+        return "submit";
+    held.push_back(std::move(present));
+    held.push_back(std::move(submit));
+    return nullptr;
+}
+
 // --- Formats and colour spaces ---------------------------------------------------------------------------------
 
 inline constexpr uint32_t kFormatR8G8B8A8Unorm = 37;
@@ -52,9 +133,11 @@ inline constexpr uint32_t kWorkingFormat = kFormatR16G16B16A16Sfloat;
 // model is shown the sRGB-encoded frame, as the D3D12 present pass shows it (a copy of the backbuffer's own bytes).
 struct ColourPlan
 {
-    bool sdr = false;       // the model may be shown this swapchain
+    uint32_t profile = 0; // 0: SDR/refused, 1: HDR10, 2: scRGB (shared conversion shader)
+    bool Eligible() const { return sdr || profile != 0; }
+    bool sdr = false;       // use the existing display-referred SDR composition
     uint32_t raw = 0;       // the raw image's format; the swapchain's own when !sdr (stage 2's unchanged round trip)
-    std::string refusal;    // why not, when !sdr
+    std::string refusal;    // why not, when !Eligible()
     std::string formatName; // for the lines
 };
 
@@ -81,19 +164,29 @@ inline std::string FormatName(uint32_t format)
     }
 }
 
-// SDR only, as the D3D12 present pass without its HDR conversion (DlssNr_PresentColour.h): eight-bit RGBA or BGRA,
-// UNORM or sRGB, in the sRGB non-linear colour space. Everything else is refused with its format and colour space
-// named, and goes to the screen as the game rendered it.
-inline ColourPlan PlanColour(uint32_t format, uint32_t colourSpace)
+// SDR is eight-bit RGBA/BGRA, UNORM or sRGB, in the sRGB non-linear colour space. With HdrPresent, the two exact
+// HDR profile/format pairs also qualify for the worker-built conversion. Everything else is refused with its format
+// and colour space named, and goes to the screen as the game rendered it.
+inline ColourPlan PlanColour(uint32_t format, uint32_t colourSpace, bool hdrPresent = false)
 {
     ColourPlan plan;
     plan.raw = format;
     plan.formatName = FormatName(format);
 
-    const auto refuse = [&plan, colourSpace](const std::string& what)
+    if (hdrPresent && colourSpace == kColourSpaceHdr10St2084 &&
+        (format == kFormatA2B10G10R10UnormPack32 || format == kFormatA2R10G10B10UnormPack32))
+        plan.profile = 1;
+    else if (hdrPresent && colourSpace == kColourSpaceExtendedSrgbLinear && format == kFormatR16G16B16A16Sfloat)
+        plan.profile = 2;
+    if (plan.profile != 0)
+        return plan;
+
+    const auto refuse = [&plan, colourSpace, hdrPresent](const std::string& what)
     {
-        plan.refusal = what + " (" + plan.formatName + ", colour space " + std::to_string(colourSpace) +
-                       "): the present host's NR takes SDR only; the frame is shown as the game rendered it";
+        plan.refusal =
+            what + " (" + plan.formatName + ", colour space " + std::to_string(colourSpace) +
+            (hdrPresent ? "): unsupported HDR format/colour-space pair; the frame is shown as the game rendered it"
+                        : "): the present host's NR takes SDR only; the frame is shown as the game rendered it");
         return plan;
     };
 
@@ -360,6 +453,7 @@ enum class NrSkip : uint8_t
     Unavailable,    // the model could not be brought up, or faulted: off for this device (the reason is logged)
     Busy,           // as many of the model's frames in flight as its descriptor ring allows
     RecordFailed,   // recording the pass failed; the frame carried unchanged and the model is off
+    Building,       // the model is being built off the present path; the frame carried unchanged
     Count,
 };
 
@@ -391,6 +485,8 @@ inline const char* NrSkipName(NrSkip skip)
         return "model busy";
     case NrSkip::RecordFailed:
         return "record failed";
+    case NrSkip::Building:
+        return "model building";
     default:
         return "none";
     }
@@ -406,6 +502,58 @@ inline constexpr size_t kNrInFlightMax = 4;
 // history is a ghost of the last frame under a moving camera).
 inline bool NrReset(bool firstFrame, bool cut, bool zeroGuideReset) { return firstFrame || cut || zeroGuideReset; }
 
+// --- Synthesized motion (stage 5, [DlssNr] SynthMotion) ------------------------------------------------------------
+
+// A longer gap between two of the estimator's recordings starts its history over: the frame before would be motion
+// between two unrelated pictures (the D3D12 rule, kSynthMotionStaleMs in DlssNr_Dx12.cpp).
+inline constexpr uint64_t kSynthStaleMs = 250;
+
+// FFX's level-6 luma must be at least 4 pixels wide, and the scene-change strata non-empty
+// (SynthMotion::Estimator_Vk::MinWidth/MinHeight): below this the model keeps zero motion at that size.
+inline constexpr uint32_t kSynthMinWidth = 256;
+inline constexpr uint32_t kSynthMinHeight = 128;
+
+// Whether a product asks for the estimator: the key is on, the device has not refused it, and the model's working
+// size -- what the estimator runs at, reading the model's own input -- is large enough.
+inline bool SynthWanted(bool configured, bool deviceRefused, uint32_t workWidth, uint32_t workHeight)
+{
+    return configured && !deviceRefused && workWidth >= kSynthMinWidth && workHeight >= kSynthMinHeight;
+}
+
+// Whether the estimator's history starts over this frame: its first recording, or a gap between its recordings (the
+// D3D12 rule). New images (a new product) start it over themselves (Estimator_Vk::Restart). Not the model's resets nor
+// the host's cut: the model forgets its own history then, so a field spanning a frame it was not shown only reaches a
+// model that ignores it, and restarting the estimator would put six more frames on zero motion. A real change of
+// picture is FFX's scene-change detection's.
+inline bool SynthReset(uint64_t lastMs, uint64_t nowMs) { return lastMs == 0 || nowMs - lastMs > kSynthStaleMs; }
+
+// What the model is told about motion this frame.
+struct MotionGuide
+{
+    bool field = false; // the estimator's field; otherwise the zero guide
+    uint32_t width = 0; // the motion subrect the model reads, from the origin
+    uint32_t height = 0;
+    float scaleX = 1.0f;
+    float scaleY = 1.0f;
+};
+
+// The field, when the estimator has a real one this frame (Ready), otherwise the zero guide; either at the model's
+// working size from the origin, at unit scale. The estimator reads the model's own input, so its field is at the
+// working size in working pixels: what the D3D12 route makes of a frame-size field with its guide resample, whose scale
+// (frame pixels in a working-size texture) both [DlssNr] RenderMotionScale rules give as working over frame. The model
+// never gets a guide larger than its colour, which it would read at the wrong pixels (reduced-scale-guides.md).
+inline MotionGuide ChooseMotionGuide(bool fieldReady, uint32_t workWidth, uint32_t workHeight)
+{
+    return { fieldReady, workWidth, workHeight, 1.0f, 1.0f };
+}
+
+// NrReset with the motion guide in it: a scene cut the estimator read back is a cut, and ZeroGuideReset applies only
+// to a frame that goes out on the zero guide -- real motion leaves it nothing to protect against (the D3D12 rule).
+inline bool NrResetWithMotion(bool firstFrame, bool cut, bool sceneCut, bool zeroGuideReset, bool field)
+{
+    return NrReset(firstFrame, cut || sceneCut, zeroGuideReset && !field);
+}
+
 // --- Counters ----------------------------------------------------------------------------------------------------
 
 struct NrStats
@@ -413,9 +561,10 @@ struct NrStats
     uint64_t evaluated = 0; // frames the model's pass was recorded and submitted for
     uint64_t refused = 0;   // frames the round trip carried and the model was not shown
     std::array<uint64_t, static_cast<size_t>(NrSkip::Count)> skips {};
-    uint64_t resets = 0;    // evaluated frames that started the model's history over
-    uint64_t timed = 0;     // pass GPU times read back
-    double lastGpuMs = 0.0; // the latest of them
+    uint64_t resets = 0;      // evaluated frames that started the model's history over
+    uint64_t synthesized = 0; // evaluated frames whose motion guide was the synthesized field (stage 5)
+    uint64_t timed = 0;       // pass GPU times read back
+    double lastGpuMs = 0.0;   // the latest of them
     double maxGpuMs = 0.0;
     double sumGpuMs = 0.0;
     std::string firstRefusal; // the first refusal's full text
@@ -428,8 +577,8 @@ inline std::string Ms3(double ms)
     return text;
 }
 
-// "NR: evaluated 98, refused 2 (model unavailable 2), history resets 1, pass GPU last 3.512 ms, mean 3.498 ms,
-// max 4.120 ms; first refusal: ..."
+// "NR: evaluated 98, refused 2 (model unavailable 2), history resets 1, motion synthesized 90, pass GPU last 3.512 ms,
+// mean 3.498 ms, max 4.120 ms; first refusal: ..." (motion synthesized only once a field has been handed over)
 inline std::string NrText(const NrStats& s)
 {
     const auto n = [](uint64_t value) { return std::to_string(value); };
@@ -449,6 +598,9 @@ inline std::string NrText(const NrStats& s)
     }
 
     text += ", history resets " + n(s.resets);
+
+    if (s.synthesized != 0)
+        text += ", motion synthesized " + n(s.synthesized);
 
     if (s.timed != 0)
         text += ", pass GPU last " + Ms3(s.lastGpuMs) + " ms, mean " + Ms3(s.sumGpuMs / static_cast<double>(s.timed)) +

@@ -1,10 +1,12 @@
 #include "pch.h"
 
 #include "DlssNr_VkPresentHost.h"
+#include "DlssNrFeature_Dx12.h"
 #include "DlssNr_VkModelOwner.h"
 #include "DlssNr_VkPresentModel.h"
 #include "DlssNr_VkPresentRegistry.h"
 #include "DlssNr_VkPresentTransport.h"
+#include "DlssNr_Session.h"
 
 #include <Config.h>
 #include <State.h>
@@ -17,6 +19,7 @@
 
 #include <intrin.h>
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -26,6 +29,7 @@
 #include <shared_mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -118,6 +122,29 @@ template <typename T> T As(Handle handle) { return reinterpret_cast<T>(static_ca
 // and device inside those calls, and those are exactly the devices this host is for.
 bool Internal() { return ScopedSkipVulkanHooks::Active(); }
 
+// The stall watchdog's activities (DlssNr_VkPresentBuild.h, "Off the present path" in the design note). Every entry
+// point that can hold or wait for a host lock records one; the watchdog thread reads them with atomics only.
+void TagThread()
+{
+    if (ThreadTag() == 0)
+        SetThreadTag(static_cast<uint32_t>(GetCurrentThreadId()));
+}
+
+// One entry point's activity, made the thread's current one so helpers deeper down can name their stage.
+const char* Tagged(const char* entry)
+{
+    TagThread();
+    return entry;
+}
+
+struct HostActivity
+{
+    explicit HostActivity(const char* entry, uint64_t object = 0) : scope(Tagged(entry), object), current(scope) {}
+
+    ActivityScope scope;
+    CurrentActivity current;
+};
+
 bool InOwnModule(const void* address)
 {
     HMODULE module = nullptr;
@@ -204,16 +231,11 @@ void Log(const std::vector<std::string>& lines)
 // not, and the application may be submitting to it from its render thread right then. So every queue the application
 // retrieves gets a lock here, its submits, sparse binds and idle waits take it, and so does the round trip.
 
-struct QueueLocks
-{
-    std::recursive_timed_mutex submit;  // the application's submits, sparse binds and idle waits; a borrower
-    std::recursive_timed_mutex present; // the application's presents through the host; a borrower
-};
-
 struct QueueLockEntry
 {
     VkDevice device = VK_NULL_HANDLE;
-    std::unique_ptr<QueueLocks> locks;
+    std::shared_ptr<QueueLocks>
+        locks; // shared: the model's builder may hold them while vkDestroyDevice erases the entry
 };
 
 std::shared_mutex g_queueLocksMutex;
@@ -226,14 +248,16 @@ QueueLocks* QueueLocksFor(VkQueue queue)
     return found != g_queueLocks.end() ? found->second.locks.get() : nullptr;
 }
 
-void AddQueueLock(VkDevice device, VkQueue queue)
+void AddQueueLock(VkDevice device, VkQueue queue, uint32_t family, uint32_t index)
 {
     std::unique_lock lock(g_queueLocksMutex);
     auto& entry = g_queueLocks[queue];
     if (entry.locks == nullptr || entry.device != device)
     {
         entry.device = device;
-        entry.locks = std::make_unique<QueueLocks>();
+        entry.locks = std::make_shared<QueueLocks>();
+        entry.locks->family = family;
+        entry.locks->index = index;
     }
 }
 
@@ -244,12 +268,19 @@ void EraseQueueLocks(VkDevice device)
         it = it->second.device == device ? g_queueLocks.erase(it) : std::next(it);
 }
 
-template <typename Pfn, typename... Args> VkResult LockedQueueCall(Pfn next, VkQueue queue, Args... args)
+template <typename Pfn, typename... Args>
+VkResult LockedQueueCall(const char* entry, Pfn next, VkQueue queue, Args... args)
 {
     if (QueueLocks* locks = QueueLocksFor(queue))
     {
+        HostActivity activity(entry, H(queue));
+        activity.scope.Stage("waiting for the queue's submit lock", kLockSubmit, locks->submit.Owner());
         std::lock_guard lock(locks->submit);
-        return next(queue, args...);
+        activity.scope.Hold(kLockSubmit, true);
+        activity.scope.Stage("calling down");
+        const VkResult result = next(queue, args...);
+        activity.scope.Hold(kLockSubmit, false);
+        return result;
     }
 
     return next(queue, args...);
@@ -319,6 +350,7 @@ struct SwapchainTransport
     // Stage 3: whether the model may be shown it, and the raw format its bytes are copied through (the sRGB formats'
     // UNORM twins, so nothing is decoded on the way; the swapchain's own format otherwise).
     ColourPlan colour;
+    uint32_t colourSpace = 0;
     std::string nrOff; // the model is off for this swapchain (its working colour could not be made)
     bool nrCut = true; // its next frame of the model starts the history over: the first, or one after a gap
 
@@ -373,6 +405,7 @@ struct DeviceTransport
     VkDevice device = VK_NULL_HANDLE;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     VkInstance instance = VK_NULL_HANDLE;
+    uint32_t apiVersion = 0; // the application's instance asked for it (0: not on record)
     RecordId id = 0;
     DeviceFns fn;
     VkPhysicalDeviceMemoryProperties memory {};
@@ -395,11 +428,31 @@ struct DeviceTransport
     std::vector<std::string> lines; // the model's lines, logged once the transport's lock is released
     HandBackDrain handBack;         // the model taken back from the after-upscale route, while its queues drain
     std::chrono::steady_clock::time_point handBackNotBefore; // after a drain submit failed: not tried again until then
-    bool saidNoQueues = false;                               // a hand-back found no queue to drain, said once
+    HandBackDiagnostics handBackDiagnostics;                 // once per distinct blocker in a due episode
 };
 
-std::mutex g_transportMutex;
+TrackedMutex<std::mutex> g_transportMutex;
 std::unordered_map<VkDevice, std::unique_ptr<DeviceTransport>> g_transport;
+
+// The transport lock, its wait and its holding recorded in the thread's current activity.
+class TransportLock
+{
+  public:
+    TransportLock()
+    {
+        ActivityStage("waiting for the transport lock", kLockTransport, g_transportMutex.Owner());
+        g_transportMutex.lock();
+        ActivityHold(kLockTransport, true);
+        ActivityStage("holding the transport lock");
+    }
+    ~TransportLock()
+    {
+        ActivityHold(kLockTransport, false);
+        g_transportMutex.unlock();
+    }
+    TransportLock(const TransportLock&) = delete;
+    TransportLock& operator=(const TransportLock&) = delete;
+};
 
 // Below OptiScaler's own hooks: with the bundle installed, the vkGetDeviceProcAddr export is its detour and hands out
 // its own functions (Vulkan_wDx12's vkQueueSubmit takes a queue lock of its own; its command-buffer functions track
@@ -469,6 +522,7 @@ void MarkLost(DeviceTransport& dev)
     {
         dev.lost = true;
         dev.off = "the device was lost";
+        DlssNr::SessionGuardDeviceRemoved(); // evidence for the next launch, whatever the game does now
     }
 }
 
@@ -884,7 +938,12 @@ Recorded RecordWork(DeviceTransport& dev, VkCommandBuffer buffer, VkImage image,
     dev.fn.cmdCopyImage(buffer, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, work, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                         1, &region);
 
-    if (nr != nullptr && dev.model != nullptr)
+    if (nr != nullptr && dev.model != nullptr && nr->hdrProfile != 0)
+    {
+        if (!dev.model->Record(*nr))
+            return Recorded::NrFailed;
+    }
+    else if (nr != nullptr && dev.model != nullptr)
     {
         // Into the working colour: a blit converts number by number (and BGRA by channel), from the raw bytes, which
         // are the sRGB formats' UNORM twins, so nothing is decoded. Its earlier frames' reads and writes of the working
@@ -1011,12 +1070,13 @@ uint32_t FormatFeatures(DeviceTransport& dev, uint32_t format)
 
 // Why the device cannot convert the presented image or hold the model's images, or empty when it can: the raw image
 // is blitted from and to, the working colour also sampled and stored, the guides cleared and sampled.
-std::string MissingFormatFeatures(DeviceTransport& dev, uint32_t raw)
+std::string MissingFormatFeatures(DeviceTransport& dev, uint32_t raw, bool hdr = false)
 {
     const uint32_t transfer = kFeatureTransferSrc | kFeatureTransferDst;
     const uint32_t images = kFeatureSampledImage | kFeatureStorageImage | transfer;
     const std::pair<uint32_t, uint32_t> needs[] = {
-        { raw, kFeatureBlitSrc | kFeatureBlitDst | transfer },
+        { raw, hdr ? kFeatureSampledImage | transfer | (raw == kFormatA2R10G10B10UnormPack32 ? kFeatureBlitDst : 0)
+                   : kFeatureBlitSrc | kFeatureBlitDst | transfer },
         { kWorkingFormat, kFeatureBlitSrc | kFeatureBlitDst | images },
         { kFormatR32Sfloat, images },
         { kFormatR16G16Sfloat, images },
@@ -1042,6 +1102,11 @@ void StandDown(DeviceTransport& dev)
         return;
 
     dev.model->Release();
+    if (dev.model->DeviceLost())
+    {
+        MarkLost(dev);
+        return;
+    }
     TakeModelLines(dev);
     dev.model.reset();
     dev.modelSwapchain = 0;
@@ -1054,41 +1119,88 @@ void StandDown(DeviceTransport& dev)
 
 // Every queue of the device the application retrieved, with its locks. The locks outlive the call: they go only at
 // the device's destruction, which no present on it overlaps.
-std::vector<std::pair<VkQueue, QueueLocks*>> DeviceQueues(VkDevice device)
+std::vector<std::pair<VkQueue, std::shared_ptr<QueueLocks>>> DeviceQueues(VkDevice device)
 {
-    std::vector<std::pair<VkQueue, QueueLocks*>> queues;
+    std::vector<std::pair<VkQueue, std::shared_ptr<QueueLocks>>> queues;
     std::shared_lock lock(g_queueLocksMutex);
     for (const auto& [queue, entry] : g_queueLocks)
     {
         if (entry.device == device && entry.locks != nullptr)
-            queues.emplace_back(queue, entry.locks.get());
+            queues.emplace_back(queue, entry.locks);
     }
     return queues;
 }
 
-// Whether a frame of this device could be shown to the model, as far as is known before a present: NR on, the model's
+// Why no frame of this device can be shown to the model (empty means eligible). The caller checks NR on; the model's
 // extensions there, no other route wanting it (with no model here, PresentHostMustYield refuses only for the D3D12
 // route), a carried swapchain whose colour the model may see and whose formats the device can convert. A hand-back the
 // host could not use would only free the after-upscale route's objects for it to build again.
-bool CouldRunModel(DeviceTransport& dev)
+std::string ModelUnavailable(DeviceTransport& dev)
 {
-    if (!Config::Instance()->DlssNrEnabled.value_or_default() || !dev.nrReady || dev.lost || !dev.off.empty() ||
-        dev.instance == VK_NULL_HANDLE || DlssNr::PresentHostMustYield(dev.device).skip != NrSkip::None)
-        return false;
+    if (dev.lost)
+        return "device lost";
+    if (!dev.nrReady)
+        return "model device extensions unavailable: " + dev.nrMissing;
+    if (!dev.off.empty())
+        return "device transport off: " + dev.off;
+    if (dev.instance == VK_NULL_HANDLE)
+        return "the device's instance is not on record";
+    const auto yield = DlssNr::PresentHostMustYield(dev.device);
+    if (yield.skip != NrSkip::None)
+        return "must yield: " + yield.text;
 
+    std::vector<std::string> refusals;
     for (const auto& [handle, sc] : dev.swapchains)
     {
-        if (sc.on && !sc.retired && sc.colour.sdr && sc.nrOff.empty() &&
-            MissingFormatFeatures(dev, sc.colour.raw).empty())
-            return true;
+        const auto colour =
+            PlanColour(sc.colour.raw, sc.colourSpace, Config::Instance()->DlssNrHdrPresent.value_or_default());
+        std::string reason;
+        if (sc.retired)
+            reason = "retired";
+        else if (!sc.on)
+            reason = "transport off: " + sc.off;
+        else if (!colour.Eligible())
+            reason = "colour: " + colour.refusal;
+        else if (!sc.nrOff.empty())
+            reason = "model unavailable: " + sc.nrOff;
+        else
+            reason = MissingFormatFeatures(dev, sc.colour.raw, colour.profile != 0);
+        if (reason.empty())
+            return {};
+        refusals.push_back("swapchain " + Hex(H(handle)) + ": " + reason);
     }
-
-    return false;
+    // Stable across unordered-map iteration and queue changes: the same set of blockers is one diagnostic reason.
+    std::sort(refusals.begin(), refusals.end());
+    std::string reason = "no eligible swapchain";
+    if (refusals.empty())
+        reason += " (none on record)";
+    for (const auto& refusal : refusals)
+        reason += "; " + refusal;
+    return reason;
 }
 
 std::string DeviceName(const DeviceTransport& dev)
 {
     return "DLSS-NR Vulkan present host: device " + Hex(H(dev.device)) + " #" + std::to_string(dev.id);
+}
+
+uint64_t PresentNowMs()
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
+void HandBackBlocked(DeviceTransport& dev, const std::string& reason, uint64_t delayMs = 0)
+{
+    if (dev.handBackDiagnostics.Blocked(reason, PresentNowMs(), delayMs))
+        dev.lines.push_back(DeviceName(dev) + ": hand-back due but not started: " + reason);
+}
+
+std::string QueueName(VkQueue queue, const QueueLocks& locks)
+{
+    return "queue " + Hex(H(queue)) + " family " + std::to_string(locks.family) + " index " +
+           std::to_string(locks.index);
 }
 
 // The after-upscale route went quiet on this device: begin the hand-back and drain every queue of the device behind a
@@ -1102,28 +1214,23 @@ void StartHandBack(DeviceTransport& dev)
         // record means the host came in late, and nothing proves the route's work done.
         dev.handBackNotBefore =
             std::chrono::steady_clock::now() + std::chrono::milliseconds(DlssNr::VkModelOwner::kAfterUpscaleIdleMs);
-        if (!dev.saidNoQueues)
-            dev.lines.push_back(DeviceName(dev) + ": the after-upscale route went quiet, but no queue of the device is "
-                                                  "on record to drain; the model stays with it");
-        dev.saidNoQueues = true;
+        HandBackBlocked(dev, "no queue of the device is on record to drain");
         return;
     }
 
     // Each queue's present lock, then its submit lock, as a borrower takes them, so no other thread submits to it or
     // presents on it between the hand-back beginning and its fence. The presenting queue's present lock is this
     // thread's already (they are recursive).
-    std::vector<std::unique_lock<std::recursive_timed_mutex>> held;
+    std::vector<std::unique_lock<QueueMutex>> held;
     held.reserve(queues.size() * 2);
     for (const auto& [queue, locks] : queues)
     {
-        std::unique_lock<std::recursive_timed_mutex> present(locks->present, std::try_to_lock);
-        if (!present.owns_lock())
+        if (const char* busy = TryHandBackQueueLocks(*locks, held))
+        {
+            HandBackBlocked(dev, QueueName(queue, *locks) + " " + busy + " lock busy (retrying for at least 1 s)",
+                            1000);
             return;
-        std::unique_lock<std::recursive_timed_mutex> submit(locks->submit, std::try_to_lock);
-        if (!submit.owns_lock())
-            return;
-        held.push_back(std::move(present));
-        held.push_back(std::move(submit));
+        }
     }
 
     std::vector<VkFence> fences;
@@ -1138,8 +1245,11 @@ void StartHandBack(DeviceTransport& dev)
     for (size_t i = 0; i < queues.size(); ++i)
     {
         VkFence fence = VK_NULL_HANDLE;
-        if (dev.fn.createFence(dev.device, &fenceInfo, nullptr, &fence) != VK_SUCCESS)
+        const VkResult result = dev.fn.createFence(dev.device, &fenceInfo, nullptr, &fence);
+        if (result != VK_SUCCESS)
         {
+            HandBackBlocked(dev, "fence creation returned " + std::to_string(result) + " for " +
+                                     QueueName(queues[i].first, *queues[i].second));
             destroyFrom(0);
             return;
         }
@@ -1150,6 +1260,7 @@ void StartHandBack(DeviceTransport& dev)
     // everything it recorded before (it last asked kAfterUpscaleIdleMs ago) is ahead of these fences on its queue.
     if (!DlssNr::BeginAfterUpscaleHandBack(dev.device))
     {
+        HandBackBlocked(dev, "BeginAfterUpscaleHandBack refused (owner or quiet state changed)");
         destroyFrom(0);
         return;
     }
@@ -1200,6 +1311,7 @@ void StartHandBack(DeviceTransport& dev)
                             " queue(s) drained");
     }
 
+    dev.handBackDiagnostics.Reset();
     hb.active = true;
     hb.fences = std::move(fences);
 }
@@ -1367,11 +1479,26 @@ bool DrainForDestroy(DeviceTransport& dev, uint64_t budgetNs)
 // kAfterUpscaleIdleMs (the game turned its upscaler off), the hand-back begins, and its drain is followed here.
 void Housekeep(DeviceTransport& dev)
 {
+    if (dev.model != nullptr && dev.model->DeviceLost())
+        MarkLost(dev);
+    if (dev.lost)
+        return;
+
     if (dev.handBack.active)
         PollHandBack(dev);
-    else if (dev.model == nullptr && std::chrono::steady_clock::now() >= dev.handBackNotBefore &&
-             DlssNr::AfterUpscaleIdleOn(dev.device) && CouldRunModel(dev))
-        StartHandBack(dev);
+    else if (DlssNr::AfterUpscaleIdleOn(dev.device))
+    {
+        const bool enabled = Config::Instance()->DlssNrEnabled.value_or_default();
+        const std::string reason = HandBackBlockReason(
+            { enabled, dev.model != nullptr, std::chrono::steady_clock::now() < dev.handBackNotBefore,
+              enabled && dev.model == nullptr ? ModelUnavailable(dev) : std::string() });
+        if (reason.empty())
+            StartHandBack(dev);
+        else
+            HandBackBlocked(dev, reason);
+    }
+    else
+        dev.handBackDiagnostics.Reset();
 
     if (dev.model == nullptr)
         return;
@@ -1381,10 +1508,97 @@ void Housekeep(DeviceTransport& dev)
         StandDown(dev);
 }
 
+// The model's builder's submit (VkPresentModelDevice::submit), on the builder thread, which holds no lock of the
+// host's: `cmd` on the lowest-index queue of `family` the application retrieved. That queue's present lock, then its
+// submit lock, as a borrower takes them -- but in short tries: the present lock is never held while the submit lock is
+// waited for (the queue may be the presenting one, whose next present takes its present lock without a bound), and
+// within kBuildQueueLockWaitMs in all (VK_NOT_READY: nothing submitted). The host's trampoline below its own submit
+// hook, one non-empty batch, the locks given back, then the fence waited for in slices of kBuildSliceMs, up to
+// `timeoutNs` (VK_TIMEOUT), or until `cancelled` (VK_INCOMPLETE: the device is going); in both, the fence is left
+// alone.
+VkResult BuildSubmit(const DeviceFns& fn, VkDevice device, VkCommandBuffer cmd, uint32_t family, uint64_t timeoutNs,
+                     const std::atomic<bool>& cancelled)
+{
+    VkQueue queue = VK_NULL_HANDLE;
+    std::shared_ptr<QueueLocks> locks;
+    for (const auto& [candidate, candidateLocks] : DeviceQueues(device))
+    {
+        if (candidateLocks->family == family && (locks == nullptr || candidateLocks->index < locks->index))
+        {
+            queue = candidate;
+            locks = candidateLocks;
+        }
+    }
+    if (queue == VK_NULL_HANDLE || fn.queueSubmit == nullptr)
+        return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkFence fence = VK_NULL_HANDLE;
+    VkFenceCreateInfo fenceInfo { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    if (fn.createFence(device, &fenceInfo, nullptr, &fence) != VK_SUCCESS)
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+    VkResult result = VK_NOT_READY;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kBuildQueueLockWaitMs);
+    while (result == VK_NOT_READY && !cancelled.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline)
+    {
+        std::unique_lock<QueueMutex> present(locks->present, std::defer_lock);
+        std::unique_lock<QueueMutex> submit(locks->submit, std::defer_lock);
+        ActivityStage("taking the work queue's present lock for the build (short tries)", kLockBorrowedPresent,
+                      locks->present.Owner());
+        if (!present.try_lock_for(std::chrono::milliseconds(kBuildSliceMs)))
+            continue;
+        ActivityHold(kLockBorrowedPresent, true);
+        if (submit.try_lock())
+        {
+            ActivityHold(kLockBorrowedSubmit, true);
+            ActivityStage("submitting the build's GPU work");
+            VkSubmitInfo info { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            info.commandBufferCount = 1;
+            info.pCommandBuffers = &cmd;
+            result = fn.queueSubmit(queue, 1, &info, fence);
+            submit.unlock();
+            ActivityHold(kLockBorrowedSubmit, false);
+        }
+        present.unlock();
+        ActivityHold(kLockBorrowedPresent, false);
+        if (result == VK_NOT_READY)
+        {
+            ActivityStage("the work queue's submit lock is busy: retrying for the build", kLockBorrowedSubmit,
+                          locks->submit.Owner());
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+
+    if (result != VK_SUCCESS)
+    {
+        if (result != VK_ERROR_DEVICE_LOST)
+            fn.destroyFence(device, fence, nullptr); // never submitted; nothing is destroyed on a lost device
+        return result == VK_NOT_READY && cancelled.load(std::memory_order_acquire) ? VK_INCOMPLETE : result;
+    }
+
+    ActivityStage("waiting for the build's GPU work (sliced, bounded)");
+    const uint64_t slice = kBuildSliceMs * 1000000ull;
+    for (uint64_t waited = 0;; waited += slice)
+    {
+        if (cancelled.load(std::memory_order_acquire))
+            return VK_INCOMPLETE;
+        result = fn.waitForFences(device, 1, &fence, VK_TRUE, slice);
+        if (result != VK_TIMEOUT)
+            break;
+        if (waited + slice >= timeoutNs)
+            return VK_TIMEOUT;
+    }
+    if (result == VK_SUCCESS)
+        fn.destroyFence(device, fence, nullptr);
+    return result;
+}
+
 struct NrDecision
 {
     NrSkip skip = NrSkip::None;
     std::string note;
+    uint32_t hdrProfile = 0;
 };
 
 // Whether this present's frame may be shown to the model, decided before anything of it is recorded. With `None`, the
@@ -1401,11 +1615,17 @@ NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workF
         return refuse(NrSkip::Off, "[DlssNr] Enabled is off");
     }
 
-    if (!sc.colour.sdr)
-        return refuse(NrSkip::Colour, sc.colour.refusal);
+    const auto colour =
+        PlanColour(sc.colour.raw, sc.colourSpace, Config::Instance()->DlssNrHdrPresent.value_or_default());
+    const auto observed = PlanColour(sc.colour.raw, sc.colourSpace, true);
+    if (observed.profile != 0)
+        DlssNr::NotePresentHdr(observed.profile == 1 ? DlssNr::PresentColour::Hdr10 : DlssNr::PresentColour::ScRgb,
+                               nullptr, false);
+    if (!colour.Eligible())
+        return refuse(NrSkip::Colour, colour.refusal);
     if (!dev.nrReady)
         return refuse(NrSkip::Extensions, dev.nrMissing);
-    if (std::string missing = MissingFormatFeatures(dev, sc.colour.raw); !missing.empty())
+    if (std::string missing = MissingFormatFeatures(dev, sc.colour.raw, colour.profile != 0); !missing.empty())
         return refuse(NrSkip::FormatFeatures, std::move(missing));
     if (!sc.nrOff.empty())
         return refuse(NrSkip::Unavailable, sc.nrOff);
@@ -1445,6 +1665,12 @@ NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workF
         device.physical = dev.physical;
         device.device = dev.device;
         device.timestampValidBits = workFamily < dev.timestampBits.size() ? dev.timestampBits[workFamily] : 0;
+        device.apiVersion = dev.apiVersion;
+        // The builder's submits: the device's functions by value (they outlive no device: vkDestroyDevice waits for a
+        // build under way before the device goes).
+        device.submit = [fn = dev.fn, d = dev.device](VkCommandBuffer cmd, uint32_t family, uint64_t timeoutNs,
+                                                      const std::atomic<bool>& cancelled)
+        { return BuildSubmit(fn, d, cmd, family, timeoutNs, cancelled); };
         dev.model = std::make_unique<DlssNr::VkPresentModel>(device);
     }
 
@@ -1453,6 +1679,9 @@ NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workF
     // after-upscale route.
     const auto letGo = [&dev]()
     {
+        // A build that lost the device says so: nothing of the device's is freed or called then.
+        if (dev.model->DeviceLost())
+            MarkLost(dev);
         if (dev.model->InFlight() == 0 && !dev.lost)
         {
             dev.model->Release();
@@ -1460,16 +1689,24 @@ NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workF
         }
     };
 
-    const DlssNr::VkPresentAdmission admission = dev.model->Admit(sc.extent.width, sc.extent.height);
+    const DlssNr::VkPresentAdmission admission =
+        dev.model->Admit(sc.extent.width, sc.extent.height, workFamily, colour.profile, colour.raw);
     TakeModelLines(dev);
     if (admission.skip != NrSkip::None)
     {
         if (admission.skip == NrSkip::Unavailable)
             letGo();
+        // The swapchain a build was asked for is the one the model serves from now: another live one of the device
+        // is refused (another swapchain) rather than asking for a build of its own size in turn.
+        if (admission.skip == NrSkip::Building && dev.modelSwapchain != sc.id)
+        {
+            dev.modelSwapchain = sc.id;
+            sc.nrCut = true;
+        }
         return refuse(admission.skip, admission.text);
     }
 
-    if (!EnsureWorkingImage(dev, sc))
+    if (colour.profile == 0 && !EnsureWorkingImage(dev, sc))
     {
         sc.nrOff = "the working colour (" + FormatName(kWorkingFormat) + ") could not be made";
         letGo();
@@ -1482,7 +1719,7 @@ NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workF
         sc.nrCut = true;
     }
 
-    return {};
+    return { NrSkip::None, {}, colour.profile };
 }
 
 // A recording of the model's pass, until it is known to have been submitted: anything else -- a refusal after the
@@ -1578,9 +1815,17 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     // Before any of the refusals below, which return before the transport is looked at: a model on this device stands
     // down when NR is off or another route wants it, whatever becomes of this present.
     {
-        std::lock_guard lock(g_transportMutex);
+        TransportLock lock;
         if (DeviceTransport* dev = FindDevice(prep.device))
+        {
+            ActivityStage("housekeeping (stand-down, hand-back)");
             Housekeep(*dev);
+            // Early refusals below never assign devFound. Flush now, under the transport lock, so a due hand-back's
+            // diagnostics are visible even when no swapchain can be carried. Log only after leaving Prepare.
+            for (std::string& line : dev->lines)
+                prep.warnings.push_back(std::move(line));
+            dev->lines.clear();
+        }
     }
 
     if (info.swapchainCount != 1)
@@ -1610,7 +1855,7 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     }
 
     const VkQueue workQueue = As<VkQueue>(route.workQueue);
-    std::lock_guard lock(g_transportMutex);
+    TransportLock lock;
 
     DeviceTransport* dev = FindDevice(prep.device);
     devFound = dev;
@@ -1625,6 +1870,7 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     scFound = &sc;
     Outcome& out = prep.outcome;
 
+    ActivityStage("polling the ring's fences");
     out.completions += Poll(*dev, sc, times);
     out.ring = static_cast<uint32_t>(sc.ring.size());
     if (!dev->off.empty())
@@ -1633,6 +1879,7 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     // One work image: a round trip on another queue waits until the ring is drained.
     if (sc.lastWorkQueue != VK_NULL_HANDLE && sc.lastWorkQueue != workQueue)
     {
+        ActivityStage("waiting for the ring's fences before a queue change (bounded)");
         for (Slot& slot : sc.ring)
         {
             if (slot.state == SlotState::Pending &&
@@ -1661,6 +1908,7 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
         index = sc.ring.size() - 1;
         break;
     case SlotChoice::WaitOldest:
+        ActivityStage("waiting for the oldest ring slot's fence (bounded)");
         if (!WaitSlot(*dev, sc.ring[index], kSlotWaitNs, out.waitNs, out.completions, times))
             return skip(dev->off.empty() ? Skip::RingBusy : Skip::DeviceOff);
         break;
@@ -1688,6 +1936,7 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
 
     // Stage 3: the model, when this frame may be shown to it, decided before anything is recorded. The swapchain's next
     // frame of the model starts the history over unless this one reaches it.
+    ActivityStage("deciding the model's part (claim, admission)");
     const NrDecision nr = DecideNr(*dev, sc, route.workFamily);
     const bool cut = sc.nrCut;
     sc.nrCut = true;
@@ -1697,7 +1946,8 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     if (nr.skip == NrSkip::None)
     {
         frame.cmd = slot.work;
-        frame.image = sc.working;
+        frame.hdrProfile = nr.hdrProfile;
+        frame.image = frame.hdrProfile != 0 ? sc.work : sc.working;
         frame.view = sc.workingView;
         frame.width = sc.extent.width;
         frame.height = sc.extent.height;
@@ -1713,6 +1963,7 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     }
 
     const bool cross = route.route == Route::CrossFamily;
+    ActivityStage("recording the round trip");
     Recorded work = RecordWork(*dev, slot.work, image, sc.work, sc.extent, route.route, presentFamily, route.workFamily,
                                recording.ticket != 0 ? &frame : nullptr);
     if (work == Recorded::NrFailed)
@@ -1737,20 +1988,28 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     // threads may be submitting to it or presenting on it. Its present lock, then its submit lock, each with a bound,
     // and only now, so a ring wait above never holds them. The presenting queue is the application's own present, whose
     // present lock the hook already holds.
-    std::unique_lock<std::recursive_timed_mutex> borrowedPresent;
-    std::unique_lock<std::recursive_timed_mutex> borrowedSubmit;
+    std::unique_lock<QueueMutex> borrowedPresent;
+    std::unique_lock<QueueMutex> borrowedSubmit;
     if (workQueue != queue)
     {
         if (QueueLocks* locks = QueueLocksFor(workQueue))
         {
             borrowedPresent = std::unique_lock(locks->present, std::defer_lock);
             borrowedSubmit = std::unique_lock(locks->submit, std::defer_lock);
-            if (!borrowedPresent.try_lock_for(std::chrono::milliseconds(kQueueLockWaitMs)) ||
-                !borrowedSubmit.try_lock_for(std::chrono::milliseconds(kQueueLockWaitMs)))
+            ActivityStage("borrowing the work queue's present lock (bounded)", kLockBorrowedPresent,
+                          locks->present.Owner());
+            if (!borrowedPresent.try_lock_for(std::chrono::milliseconds(kQueueLockWaitMs)))
                 return skip(Skip::QueueBusy);
+            ActivityHold(kLockBorrowedPresent, true);
+            ActivityStage("borrowing the work queue's submit lock (bounded)", kLockBorrowedSubmit,
+                          locks->submit.Owner());
+            if (!borrowedSubmit.try_lock_for(std::chrono::milliseconds(kQueueLockWaitMs)))
+                return skip(Skip::QueueBusy);
+            ActivityHold(kLockBorrowedSubmit, true);
         }
     }
 
+    ActivityStage("submitting the round trip");
     if (dev->fn.resetFences(dev->device, 1, &slot.fence) != VK_SUCCESS)
         return skip(Skip::SetupFailed);
 
@@ -1852,6 +2111,7 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     {
         out.nrEvaluated = true;
         out.nrReset = dev->model != nullptr && dev->model->LastFrameReset();
+        out.nrSynthesized = dev->model != nullptr && dev->model->LastFrameSynthesized();
         out.nrSkip = NrSkip::None;
         out.nrNote.clear();
         sc.nrCut = false;
@@ -1878,7 +2138,7 @@ void AfterPresent(const Prepared& prep, VkResult result)
     if (!prep.outcome.transported)
         return;
 
-    std::lock_guard lock(g_transportMutex);
+    TransportLock lock;
 
     DeviceTransport* dev = FindDevice(prep.device);
     if (dev == nullptr)
@@ -2036,8 +2296,40 @@ void AbandonModel(DeviceTransport& dev)
 }
 
 // The device is going: whatever the application left, then everything the host kept. Returns the line.
+// At vkDestroyDevice, before anything of the model's: a build under way is waited for (kBuildDestroyWaitMs, longer than
+// every bound of the builder's own -- a lost device ends it at once, its calls failing), and if it does not end it is
+// orphaned and waited for again (kBuildOrphanWaitMs: every wait of the builder's is sliced and checks the flag). Only a
+// builder stuck inside an opaque NGX call outlasts that, and the device then goes under it, said in the log.
+void EndModelBuild(DeviceTransport& dev)
+{
+    if (dev.model == nullptr || !dev.model->Building())
+        return;
+
+    ActivityStage("waiting for the model's build under way (bounded)");
+    const auto start = std::chrono::steady_clock::now();
+    if (dev.model->WaitBuild(kBuildDestroyWaitMs))
+    {
+        dev.lines.push_back(DeviceName(dev) + ": waited " + std::to_string(Since(start) / 1000000) +
+                            " ms for the model's build under way before the device goes");
+        return;
+    }
+
+    dev.model->Orphan();
+    ActivityStage("waiting for the orphaned model build to step out of the device (bounded)");
+    const bool out = dev.model->WaitBuild(kBuildOrphanWaitMs);
+    dev.lines.push_back(
+        DeviceName(dev) + ": the model's build did not end within " + std::to_string(kBuildDestroyWaitMs / 1000) +
+        " s of the device's destruction; orphaned" +
+        (out ? ", and it stepped out" : ", and it is still inside an NGX call: the device goes anyway"));
+    ActivityStage("tearing the device's objects down");
+}
+
 std::string TeardownDevice(DeviceTransport& dev)
 {
+    EndModelBuild(dev);
+    if (dev.model != nullptr && dev.model->DeviceLost())
+        MarkLost(dev); // a build saw it lost: nothing below is waited for or destroyed
+
     size_t swapchains = 0;
     std::vector<VkSemaphore> semaphores;
     for (auto& [handle, sc] : dev.swapchains)
@@ -2099,7 +2391,9 @@ std::string TeardownDevice(DeviceTransport& dev)
 
     // The model: freed when every frame it recorded was seen complete, abandoned (nothing destroyed) when one never
     // was. Then NGX on the device: shut down after a model freed (or one that stood down earlier, or never existed here
-    // -- the forwarder answers only for the device it initialised), only forgotten after one abandoned.
+    // -- the forwarder answers only for the device it initialised), only forgotten after one abandoned. A build under
+    // way is waited for first, bounded (the builder takes no lock of the host's, so this cannot close a cycle); one
+    // that does not end in time leaves the model in flight, so it is abandoned and its job orphaned.
     std::string model;
     bool forgetOnly = false;
     if (dev.model != nullptr)
@@ -2208,10 +2502,11 @@ void AttachTarget(Targets<Pfn>& set, const std::array<void*, kTargets>& hooks, P
 
 void OnDestroyDevice(PFN_vkDestroyDevice next, VkDevice device, const VkAllocationCallbacks* allocator)
 {
+    HostActivity activity("vkDestroyDevice", H(device));
     std::string line;
     std::vector<std::string> modelLines;
     {
-        std::lock_guard lock(g_transportMutex);
+        TransportLock lock;
         if (DeviceTransport* dev = FindDevice(device))
         {
             line = "DLSS-NR Vulkan present host: device " + Hex(H(device)) + " #" + std::to_string(dev->id) +
@@ -2233,6 +2528,7 @@ void OnDestroyDevice(PFN_vkDestroyDevice next, VkDevice device, const VkAllocati
     if (!line.empty())
         LOG_INFO("{}", line);
 
+    activity.scope.Stage("calling down vkDestroyDevice");
     next(device, allocator);
 }
 
@@ -2247,7 +2543,7 @@ void OnGetQueue(PFN_vkGetDeviceQueue next, VkDevice device, uint32_t family, uin
             g_registry.OnQueue(H(device), family, index, 0, H(*queue));
         }
 
-        AddQueueLock(device, *queue);
+        AddQueueLock(device, *queue, family, index);
     }
 }
 
@@ -2262,7 +2558,7 @@ void OnGetQueue2(PFN_vkGetDeviceQueue2 next, VkDevice device, const VkDeviceQueu
             g_registry.OnQueue(H(device), info->queueFamilyIndex, info->queueIndex, info->flags, H(*queue));
         }
 
-        AddQueueLock(device, *queue);
+        AddQueueLock(device, *queue, info->queueFamilyIndex, info->queueIndex);
     }
 }
 
@@ -2294,6 +2590,8 @@ VkResult OnCreateSwapchain(PFN_vkCreateSwapchainKHR next, VkDevice device, const
     if (info == nullptr || swapchain == nullptr)
         return next(device, info, allocator, swapchain);
 
+    HostActivity activity("vkCreateSwapchainKHR", H(device));
+
     Handle physical = 0;
     bool internal = false;
     {
@@ -2310,7 +2608,7 @@ VkResult OnCreateSwapchain(PFN_vkCreateSwapchainKHR next, VkDevice device, const
     query.flags = info->flags;
 
     {
-        std::lock_guard lock(g_transportMutex);
+        TransportLock lock;
         const DeviceTransport* dev = FindDevice(device);
         query.deviceOn = dev != nullptr && dev->off.empty();
         query.deviceOff = internal         ? "OptiScaler's own device"
@@ -2332,7 +2630,8 @@ VkResult OnCreateSwapchain(PFN_vkCreateSwapchainKHR next, VkDevice device, const
 
     // The work image is in the raw format: the swapchain's own, or its UNORM twin when it is sRGB (stage 3).
     const ColourPlan colour =
-        PlanColour(static_cast<uint32_t>(info->imageFormat), static_cast<uint32_t>(info->imageColorSpace));
+        PlanColour(static_cast<uint32_t>(info->imageFormat), static_cast<uint32_t>(info->imageColorSpace),
+                   Config::Instance()->DlssNrHdrPresent.value_or_default());
 
     if (physical != 0)
     {
@@ -2349,7 +2648,9 @@ VkResult OnCreateSwapchain(PFN_vkCreateSwapchainKHR next, VkDevice device, const
     edited.imageUsage = plan.usage;
     const VkSwapchainCreateInfoKHR* down = plan.transport && plan.added != 0 ? &edited : info;
 
+    activity.scope.Stage("calling down vkCreateSwapchainKHR");
     const VkResult result = next(device, down, allocator, swapchain);
+    activity.scope.Stage("recording the swapchain");
 
     if (result != VK_SUCCESS || *swapchain == VK_NULL_HANDLE)
         return result;
@@ -2384,13 +2685,16 @@ VkResult OnCreateSwapchain(PFN_vkCreateSwapchainKHR next, VkDevice device, const
             line = g_registry.SwapchainLine(H(device), H(*swapchain));
     }
 
-    // What the model may be shown of it (stage 3): SDR only. The round trip runs either way.
+    // What the model may be shown: SDR, or a supported HDR profile with HdrPresent. The round trip runs either way.
     if (!internal && plan.transport)
-        line += colour.sdr ? "; the model may run on it (" + colour.formatName + ", sRGB non-linear)"
-                           : "; the model will not run on it: " + colour.refusal;
+        line += colour.Eligible() ? "; the model may run on it (" + colour.formatName +
+                                        (colour.profile == 1   ? ", HDR10 PQ, Rec.2020)"
+                                         : colour.profile == 2 ? ", scRGB linear)"
+                                                               : ", sRGB non-linear)")
+                                  : "; the model will not run on it: " + colour.refusal;
 
     {
-        std::lock_guard lock(g_transportMutex);
+        TransportLock lock;
         if (DeviceTransport* dev = FindDevice(device))
         {
             SwapchainTransport& sc = dev->swapchains[*swapchain];
@@ -2411,6 +2715,7 @@ VkResult OnCreateSwapchain(PFN_vkCreateSwapchainKHR next, VkDevice device, const
             sc.extent = info->imageExtent;
             sc.id = swapchainId;
             sc.colour = colour;
+            sc.colourSpace = static_cast<uint32_t>(info->imageColorSpace);
 
             // The swapchain it replaces is retired: the model may move on from it.
             if (info->oldSwapchain != VK_NULL_HANDLE)
@@ -2431,6 +2736,7 @@ VkResult OnCreateSwapchain(PFN_vkCreateSwapchainKHR next, VkDevice device, const
 void OnDestroySwapchain(PFN_vkDestroySwapchainKHR next, VkDevice device, VkSwapchainKHR swapchain,
                         const VkAllocationCallbacks* allocator)
 {
+    HostActivity activity("vkDestroySwapchainKHR", H(swapchain));
     if (swapchain != VK_NULL_HANDLE)
     {
         // Its images are about to go: every round trip on them must be over first (bounded; kept if not).
@@ -2438,12 +2744,13 @@ void OnDestroySwapchain(PFN_vkDestroySwapchainKHR next, VkDevice device, VkSwapc
         bool known = false;
         std::vector<std::string> modelLines;
         {
-            std::lock_guard lock(g_transportMutex);
+            TransportLock lock;
             if (DeviceTransport* dev = FindDevice(device))
             {
                 if (const auto found = dev->swapchains.find(swapchain); found != dev->swapchains.end())
                 {
                     known = true;
+                    activity.scope.Stage("retiring the swapchain's slots (bounded drain)");
                     retired = RetireSwapchain(*dev, found->second, true);
                     dev->swapchains.erase(found);
                 }
@@ -2465,12 +2772,13 @@ void OnDestroySwapchain(PFN_vkDestroySwapchainKHR next, VkDevice device, VkSwapc
         if (!line.empty())
             LOG_INFO("{}", line);
 
+        activity.scope.Stage("calling down vkDestroySwapchainKHR");
         next(device, swapchain, allocator);
 
         // After the destroy returned, so an implementation that finishes its pending presents inside it has.
         if (!retired.afterDestroy.empty())
         {
-            std::lock_guard lock(g_transportMutex);
+            TransportLock lock;
             if (DeviceTransport* dev = FindDevice(device); dev != nullptr && !dev->lost)
             {
                 for (const VkSemaphore semaphore : retired.afterDestroy)
@@ -2564,14 +2872,21 @@ VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInf
     if (info == nullptr)
         return next(queue, info);
 
+    HostActivity activity("vkQueuePresentKHR", H(queue));
+
     // For the whole present, the call down included: a thread borrowing this queue for a round trip waits for it.
-    std::unique_lock<std::recursive_timed_mutex> presentLock;
+    std::unique_lock<QueueMutex> presentLock;
     if (QueueLocks* locks = QueueLocksFor(queue))
+    {
+        activity.scope.Stage("waiting for the presenting queue's present lock", kLockPresent, locks->present.Owner());
         presentLock = std::unique_lock(locks->present);
+        activity.scope.Hold(kLockPresent, true);
+    }
 
     const CallerInfo& who = WhoCalled(returnAddress);
 
     PresentCall call;
+    call.nowMs = PresentNowMs();
     call.queue = H(queue);
     call.waitSemaphores = info->waitSemaphoreCount;
     call.swapchainCount = info->swapchainCount;
@@ -2598,7 +2913,10 @@ VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInf
         viewed = g_registry.ViewPresent(H(queue), H(info->pSwapchains[0]), info->pImageIndices[0], view);
     }
 
+    activity.scope.Stage("preparing the round trip");
     const Prepared prep = Prepare(queue, *info, viewed ? &view : nullptr);
+    activity.scope.Hold(kLockBorrowedPresent | kLockBorrowedSubmit, false); // Prepare's own scope gave them back
+    activity.scope.Stage("recording the present");
     call.outcome = prep.outcome;
 
     std::vector<std::string> lines;
@@ -2610,6 +2928,7 @@ VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInf
     Log(prep.warnings);
     Log(lines);
 
+    activity.scope.Stage("calling down vkQueuePresentKHR");
     if (prep.wait == VK_NULL_HANDLE)
         return next(queue, info);
 
@@ -2620,6 +2939,7 @@ VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInf
     local.pWaitSemaphores = &prep.wait;
 
     const VkResult result = next(queue, &local);
+    activity.scope.Stage("after the present");
     AfterPresent(prep, result);
     return result;
 }
@@ -2681,24 +3001,24 @@ template <size_t S> VkResult VKAPI_CALL hkQueuePresentKHR(VkQueue queue, const V
 template <size_t S>
 VkResult VKAPI_CALL hkQueueSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits, VkFence fence)
 {
-    return LockedQueueCall(g_submit.next[S], queue, count, submits, fence);
+    return LockedQueueCall("vkQueueSubmit", g_submit.next[S], queue, count, submits, fence);
 }
 
 template <size_t S>
 VkResult VKAPI_CALL hkQueueSubmit2(VkQueue queue, uint32_t count, const VkSubmitInfo2* submits, VkFence fence)
 {
-    return LockedQueueCall(g_submit2.next[S], queue, count, submits, fence);
+    return LockedQueueCall("vkQueueSubmit2", g_submit2.next[S], queue, count, submits, fence);
 }
 
 template <size_t S>
 VkResult VKAPI_CALL hkQueueBindSparse(VkQueue queue, uint32_t count, const VkBindSparseInfo* binds, VkFence fence)
 {
-    return LockedQueueCall(g_bindSparse.next[S], queue, count, binds, fence);
+    return LockedQueueCall("vkQueueBindSparse", g_bindSparse.next[S], queue, count, binds, fence);
 }
 
 template <size_t S> VkResult VKAPI_CALL hkQueueWaitIdle(VkQueue queue)
 {
-    return LockedQueueCall(g_waitIdle.next[S], queue);
+    return LockedQueueCall("vkQueueWaitIdle", g_waitIdle.next[S], queue);
 }
 
 static_assert(kTargets == 4, "the slot tables below list four instantiations");
@@ -3000,6 +3320,7 @@ VkResult VKAPI_CALL hkCreateDevice(VkPhysicalDevice physical, const VkDeviceCrea
 {
     void* const returnAddress = _ReturnAddress();
     const bool internal = Internal();
+    HostActivity activity("vkCreateDevice");
 
     // Stage 3: on a device the host will carry presents on, the model's device extensions the device offers are
     // appended to a copy of the create info -- exactly the after-upscale route's list, decided before the call and
@@ -3122,11 +3443,13 @@ VkResult VKAPI_CALL hkCreateDevice(VkPhysicalDevice physical, const VkDeviceCrea
     std::string line;
     RecordId id = 0;
     VkInstance instance = VK_NULL_HANDLE;
+    uint32_t instanceApiVersion = 0;
     {
         std::lock_guard lock(g_registryMutex);
         id = g_registry.OnDeviceCreated(H(*device), std::move(desc));
         line = g_registry.DeviceLine(H(*device));
         instance = As<VkInstance>(g_registry.InstanceOf(H(physical)));
+        instanceApiVersion = g_registry.ApiVersionOf(H(physical));
     }
 
     // OptiScaler's own devices get no transport: nothing of theirs is ever transported.
@@ -3134,6 +3457,7 @@ VkResult VKAPI_CALL hkCreateDevice(VkPhysicalDevice physical, const VkDeviceCrea
     {
         auto dev = MakeDeviceTransport(*device, physical, id);
         dev->instance = instance;
+        dev->apiVersion = instanceApiVersion;
         dev->nrReady = extensions.ready && BdaReady(bda);
         dev->nrMissing = !extensions.ready
                              ? "the device was created without the model's extensions: " + JoinNames(extensions.missing)
@@ -3145,7 +3469,7 @@ VkResult VKAPI_CALL hkCreateDevice(VkPhysicalDevice physical, const VkDeviceCrea
         if (!dev->off.empty())
             line += "; round trip off on it: " + dev->off;
 
-        std::lock_guard lock(g_transportMutex);
+        TransportLock lock;
         g_transport[*device] = std::move(dev);
     }
 
@@ -3169,7 +3493,7 @@ VkResult VKAPI_CALL hkCreateDevice(VkPhysicalDevice physical, const VkDeviceCrea
             }
         }
 
-        std::lock_guard lock(g_transportMutex);
+        TransportLock lock;
         if (DeviceTransport* dev = FindDevice(*device); dev != nullptr && below != nullptr)
             dev->fn.queueSubmit = below;
     }
@@ -3304,6 +3628,22 @@ void DlssNr::VkPresentHost::Install(HMODULE vulkan1)
 
     g_installed = true;
     g_module = vulkan1;
+
+    // The stall watchdog: every half second, an activity inside the host for longer than its allowance is logged with
+    // its stage, the locks it holds and, for a lock it waits on, the holder. It reads the table with atomics only and
+    // takes no lock of the host's, so it cannot be caught in the stall it reports. Only with the host installed.
+    std::thread(
+        []()
+        {
+            TagThread();
+            for (;;)
+            {
+                Sleep(500);
+                for (const std::string& line : Activities().Check(ActivityNowMs()))
+                    LOG_WARN("DLSS-NR Vulkan present host: STALL: {}", line);
+            }
+        })
+        .detach();
 
     LOG_INFO("DLSS-NR Vulkan present host (cold NR on zero guides; stage 3 of nr-vulkan-present-host.md): installed "
              "on vulkan-1.dll, {}",

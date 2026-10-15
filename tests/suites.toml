@@ -46,7 +46,7 @@ summary = "What the present host builds and when: tiny frames, resizes, the pass
 [nr-session-guard]
 tier = "host"
 timeout = 60
-summary = "Session guard: the policy table (early, middle, long unclean ends), marker ownership, unreadable and read-only cases, config-off, plus call-site guards."
+summary = "Session guard: the policy table by how the last session ended (normal quit, exit code, exception, device lost, no end seen) and for how long, marker ownership and the probe, unreadable, other-format and read-only cases, the end of the process (fixed buffer, lock tries, nothing after it), config-off, the exact texts, plus guards on the call sites, the exit hook and the project."
 
 [nr-dx11-route]
 tier = "host"
@@ -173,10 +173,25 @@ tier = "wine"
 timeout = 600
 summary = "Drives the production NGX exports on a real D3D12 device and exercises the post-stage settling gate by sweeping the output extent. Runs under the local Proton (--runtime proton); bare wine reaches NR but its feature create returns FAIL_PlatformError. Includes successful shutdown and rejects runs without NR composition."
 
+[nr-session-exit]
+tier = "wine"
+timeout = 900
+summary = "The session guard's exit hook (DlssNr_ProcessEnd.cpp, as shipped) in a real process under the system Wine and the newest GE-Proton's: ExitProcess, exit(), return from main, TerminateProcess on itself (pseudo and real handle), an unhandled access violation (with and without the AeDebug debugger attaching first), a crash filter's own exit code, and terminating another process each reach the hook once with the expected status and the other threads still running; a process killed from outside, and abort()'s fail-fast, record nothing. Never loads OptiScaler.dll, NGX or a game."
+
+[nr-present-guide-identity-msvc]
+tier = "wine"
+timeout = 900
+summary = "nr-present-guide-identity's decision cases and glue slice compiled by MSVC (private prefix copy) and run under Wine. No D3D12, no GPU."
+
 [synth-motion-d3d12]
 tier = "wine"
 timeout = 1800
 summary = "The synthesized-motion estimator (FidelityFX optical flow port) on a real D3D12 device under Wine: endpoint error against known pans, a moving object, static and cut frames, abandon semantics, the axis signs and GPU time; synthesized FG's HUD mask and the UI layer's own mask on the same frames (no scenery marked, precision and recall per element and part, the band around the overlay and the smear set it covers, depth and layer exact, GPU time with the layer off and on); --source nvofa runs the NVIDIA Optical Flow source the same way (SKIP when unavailable). Never loads NGX or a game."
+
+[synth-motion-vk]
+tier = "wine"
+timeout = 1800
+summary = "The Vulkan synthesized-motion estimator (SynthMotion_Vk, the same FidelityFX port compiled to SPIR-V) on a real Vulkan device under Wine with the validation layer's core and synchronization checks: the D3D12 suite's sequences, scores and thresholds (pans and axis signs, a moving object, static, a cut, an abandoned recording, the static overlay), GPU time, and zero validation errors. SKIP when the device cannot run it. Never loads NGX or a game."
 
 [bridge-lifetime]
 tier = "host"
@@ -256,7 +271,7 @@ summary = "Present-time guide snapshot ring selection, completion tracking, and 
 [nr-present-guide-identity]
 tier = "host"
 timeout = 120
-summary = "Present-guide identity, step 0 (log only): every rule of the decision header alone and in order, narrowing only, null swapchain stamps, ring scenarios, the window and its line, the glue sliced from the renderer, and guards that both consumers still read today's slot."
+summary = "Present-guide identity, step 1: every rule alone and in order, rule 6 enforced at the boundary only, narrowing only, ring scenarios, a long run that reads only accepted captures, the window and its line, the source-change reset, the status and the menu line, the glue sliced from the renderer, and guards that both consumers read only the decision's slot."
 
 [repo-privacy]
 tier = "host"
@@ -287,3 +302,8 @@ summary = "LSFG as FSR-FG's interpolator (study branch): DXIL PSV0 reader, LSFG 
 tier = "host"
 timeout = 120
 summary = "LSFG at x3/x4 through the fork of FFX's swapchain (study branch): MfgPacing.h arithmetic under ASan/UBSan (x2 delta equals FFX's, output sets, steady-state schedule, summary), and source guards on the FSRFG routing, the router's forwarding, no FFX interface on the fork, drain-before-free, MIT notices, verbatim bytecode."
+
+[nr-hdr-d3d12]
+tier = "wine"
+timeout = 900
+summary = "Production D3D12 HDR conversion: exact HDR10/scRGB GPU identity, known edits, resource refusals and a real ten-bit swapchain/PQ-support probe; no NGX."

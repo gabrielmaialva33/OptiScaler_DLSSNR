@@ -29,7 +29,7 @@ entry, or the next run tells you.
 | Tier | Needs | Suites |
 |---|---|---|
 | `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `mfg-probe`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `windows-installer`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
-| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback` |
+| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session, and they and `synth-motion-vk` a working Vulkan loader | `nr-gpu-timing-d3d12`, `nr-session-exit`, `synth-motion-d3d12`, `synth-motion-vk`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback`, `nr-present-guide-identity-msvc`, `nr-hdr-d3d12` |
 | `wip` | registered, no runner yet | — |
 
 The wine tier is serial on purpose. These suites compile through the single msvc-wine
@@ -59,10 +59,13 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-detail-measure` — the "Measure detail" CPU tile reduction and statistical aggregation (detail added,
   Laplacian raw, flicker beyond native, OkLab chroma/warmth, and shadow darkening/crush), delta comparisons
   and textual metric generation.
-- `nr-session-guard` — the NR session guard (`DlssNr_SessionGuard.h`): what a marker left by an unclean session
-  means (early end disables and stays blocked until acknowledged, middle ends warn then disable on the second,
-  long ends are not blamed), who owns a marker (live second instance, reused pid), unreadable and read-only
-  cases, and the call-site and session-only-disable source guards. The Windows layer is not exercised.
+- `nr-session-guard` — the NR session guard (`DlssNr_SessionGuard.h`): what a marker left by the last session
+  means, by how it ended (a normal quit leaves none; an exception or a device NR saw lost disables under 10 minutes;
+  an exit code or no end seen disables under 2 minutes and warns up to 10, the second in a row disabling), who owns a
+  marker (live second instance, reused pid, the probe's answers), unreadable, other-format and read-only cases, the
+  end of the process (fixed buffer, bounded lock tries, nothing started after it), the exact menu and log texts, and
+  source guards on the call sites, the exit hook, the at-exit code paths and the project entries. The Windows file
+  I/O is not exercised; the hook is, by `nr-session-exit`.
 - `nr-residual-limit` — the residual limit (`docs/dlssnr/design/residual-limit.md`): the composition's guard
   and limit sliced out of `dlssnr.hlsl` and compiled against HLSL's intrinsics, held against the guard alone (off
   is the guard to the bit; on bounds both ways in stops, only narrows, stays inside the guard, symmetric); the
@@ -85,11 +88,13 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   the panel. No D3D11 device, NGX or DLSS.
 - `nr-present-guides` — selection and completion tracking for the present-time guide snapshot ring
   (`DlssNr_PresentGuideRing.h`), preventing cross-queue GPU waits and DLSS-G deadlocks.
-- `nr-present-guide-identity` — step 0 of `docs/dlssnr/design/present-real-guides.md`, log only: the identity
-  decision (`DlssNr_PresentGuideIdentity.h`) rule by rule and in its first-failing order, that it only ever narrows the
-  ring's pick, the null swapchain stamp, ring scenarios (frame generation, a late copy, portraits, a resize, a second
-  swapchain), the per-window record and its line and rate, and the renderer's glue sliced out and run against fakes.
-  Source guards hold that the present pass and the bridge still read the slot `PickForPresent` gave them. No GPU.
+- `nr-present-guide-identity` — step 1 of `docs/dlssnr/design/present-real-guides.md`: the identity decision
+  (`DlssNr_PresentGuideIdentity.h`) rule by rule and in its first-failing order, rule 6 enforced and not, that it only
+  ever narrows the ring's pick, the null swapchain stamp, ring scenarios (frame generation, a late copy, the wrapped
+  entry's lag, portraits, a resize, a second swapchain), a long run that reads only what the rules accept and never
+  overwrites a read in flight, the per-window record and its line and rate, the source-change reset, the status and
+  the menu's guides line, and the renderer's glue sliced out and run against fakes. Source guards hold that the present
+  pass and the bridge read only the decision's slot. No GPU.
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
   ownership and deferred release against scripted COM/Win32 fakes, and which FG input and output
   the bridge is built for. Also a refused presenter resize and its recovery, the D3D12 overlay's
@@ -153,8 +158,10 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   (stored deflate, CRC-32, Adler-32, the provenance tEXt chunk) and PFM, decoded with Python's `zlib` and checked
   pixel by pixel against readback-shaped sources with padding, every half and R11G11B10 value, the
   request/record/ticket/hand-off state machine over a fake backend (nothing read before completion, nothing freed
-  before it is proven safe), the menu button's table, names and the 64-pair cap, write-then-rename, the record in its
-  three forms with the repository's privacy patterns run over it, and source guards on the pass. No GPU.
+  before it is proven safe), the menu button's table and its order, the record site's refusal order, names and the
+  64-pair cap applied after the write, write-then-rename with the failing step named, the folder in a real read-only
+  directory, the record's exact text from the production builders and in its three forms with the repository's
+  privacy patterns run over it, and source guards on the pass. No GPU.
 - `nr-cadence` — model cadence (`docs/dlssnr/design/model-cadence.md`): the production scheduler (age
   in presents the pass ran at, the held reset, forced model frames, every refusal with its reason, off
   allocating nothing) and the production per-pixel rules -- the header the shader includes -- over
@@ -233,8 +240,15 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 **Wine tier.**
 
+- `nr-session-exit` — the session guard's exit hook (`DlssNr_ProcessEnd.cpp`, built as shipped) in a real process
+  under the system Wine and the newest GE-Proton's: every way a process ends itself reaches the hook once, with the
+  status the design note predicts and the other threads still running; a process killed from outside, and
+  `abort()`'s fail-fast, record nothing. Never loads OptiScaler.dll, NGX or a game.
 - `nr-gpu-timing-d3d12` — real D3D12 timestamp queries in an isolated prefix. It
   never loads NGX and never launches a game.
+- `nr-present-guide-identity-msvc` — `nr-present-guide-identity`'s decision cases and its glue slice, compiled by
+  MSVC in a private copy of the prefix and run under Wine: the same checks through the compiler and standard library
+  the DLL ships with. No D3D12.
 - `dlssnr-loopback` — drives the production NGX exports, NR composition, resolution changes
   and shutdown on a real GPU under Proton.
 - `synth-motion-d3d12` — the synthesized-motion estimator on a real D3D12 device: endpoint
@@ -243,6 +257,10 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   overlay, its depth and UI layer exact).
   `--source nvofa` runs the NVIDIA Optical Flow source through the same sequences, and skips
   when `nvofapi64.dll` or its shaders are unavailable. No NGX, no game.
+- `synth-motion-vk` — the same estimator on Vulkan (`SynthMotion_Vk`, its SPIR-V from the same sources) on a real
+  device under Wine, with core and synchronization validation on (each proved active) and zero errors required: the
+  D3D12 suite's frames, sequences and scores (`synth-motion-d3d12/sequences.h`), judged by its `judge()`, a pan and the
+  cut also three frames in flight, and GPU time. SKIP when the device cannot run it. No NGX, no game.
 - `vulkan-overlay` — builds a real DLL and drives real Vulkan to exercise overlay
   lifetime.
 - `vulkan-present-host` — the production DLL from `build-local.sh`, uninstrumented, under a Win32 Vulkan application,
@@ -260,7 +278,11 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   cross-family, an extent not a multiple of eight, working scale 0.5) -- every read-back exact with `ApplyModel` off,
   changed by about three eight-bit steps with it on -- and refused, with every read-back exact, for a device without
   `VK_NVX_binary_import` (the test layer hides it), the kit's old forwarder, and no model (SKIP without the kit or a
-  local Proton). No game or FG.
+  local Proton). Stage 5 (`nr-synth-motion`, `[DlssNr] SynthMotion`): the picture panning, the estimator made with every
+  product off the present path and its field the model's motion guide after each swapchain's warm-up, validation
+  clean, at native and at half the working size (the field at the model's working size); `nr-pan-zero` is the same pan
+  on zero motion, and both report how much of the unmoved previous frame the
+  model's edit carries. No game or FG.
 
 **Not a suite.** `nr-before-upscale/verify-invariants.py` is a one-shot evidence
 script pinned to baseline commit `660303ec`. `run.py` does not call it and

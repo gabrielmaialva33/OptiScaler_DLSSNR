@@ -1,9 +1,121 @@
 # HDR10 and scRGB at present: decode to linear, run the pass, re-encode with the original as reference
 
-Status: v1 implemented on `feat/hdr-present`, 2026-10-13, default off; not built, not run in a game, not
-measured on an HDR display (section 10 says what the code does where it differs from the text below). Revises the
+Status: v1 is present in the baseline; the D3D12 completion is implemented, still default off, on
+`feat/hdr-present-conversion` (section 11, immediately below). The historical v1 decisions in sections 1–10 are
+superseded where section 11 or the maintainer’s current task differs. Revises the
 2026-09 note of the same name. Line numbers on our side are against `93730d39` (branch `docs/design-hdr-capture`); on
 upstream's and NeuRotic's side against the commits named.
+
+## 11. Completion build plan (2026-10-14, `feat/hdr-present-conversion`)
+
+This task starts at `6f8831a2`, which already contains v1 selection, DXIL conversion, integration and host maths
+checks. Complete and validate that implementation; do not copy NeuRotic code or modify the Vulkan runtime.
+The maintainer's current instruction supersedes v1's fixed-white and DXIL-only decisions in sections 1–10.
+
+1. Preserve the existing profile table and the exact SDR/default-off path. Audit HDR failure paths and resource
+   lifetime against native D3D12, including unknown swapchain descriptions, stale colour observations across NR
+   toggles, SRV/UAV dimensions, supported formats, resource flags, sample count, device identity and aliasing.
+   Keep the 256-byte CBV allocation/view and prove descriptor reuse is bounded by completed present recordings.
+2. Query the current output's `DISPLAYCONFIG_SDR_WHITE_LEVEL`: match its monitor's GDI device name to an active
+   display path, then query that path's target adapter/id. Convert `SDRWhiteLevel * 80 / 1000` to nits; unavailable,
+   ambiguous or unusable results use 203 nits. Cache by monitor and refresh on monitor changes and at most every
+   five seconds while HDR frames arrive, so display/white changes are noticed without per-frame topology queries
+   or edits to upstream window procedures. Pass the resolved white to the existing linear-HDR frame override;
+   Paper white remains its sole multiplier. Log and show the actual value and source. No query on SDR/off frames.
+3. Keep PQ absolute (10,000 nits) and scRGB linear Rec.709 (80 nits/unit), retain signed wide-gamut coordinates,
+   and bind the untouched encoded original at reconstruction. Rebuild the conversion DXIL and SPIR-V from the
+   same HLSL and commit bytecode plus matching headers. The SPIR-V is build-checked only, not wired into Vulkan.
+   Keep `DlssNrConstants` and `dlssnr.hlsl` byte-identical unless a demonstrated defect requires otherwise; new
+   conversion fields, if needed, append to both matching layouts. Extend nr-invariants to require both binaries.
+4. Extend host tests for white selection/fallback/cache and log/status text, existing profile/math/off-path cases,
+   and native descriptor preconditions. Add a serial real-D3D12 Wine harness using the production conversion
+   class: HDR10/scRGB untouched and known-edit read-backs, valid descriptors, bounded fences, and an HDR10
+   swapchain when the runtime advertises support. Report unsupported HDR presentation separately from successful
+   texture math; never infer native debug-layer or HDR-display correctness from Proton.
+5. Run clang-format22, nr-invariants and the full memory-capped host tier. Gate and lock every shader compiler,
+   build and Wine invocation against running games. Build serially with file redirection, then run GPU coverage.
+   Obtain an independent read-only review of the final diff, resolve important findings and repeat affected checks.
+   Commit code/tests/docs separately; report the build ID and exact Crimson Desert/native-Windows validation plan.
+
+Official contracts used for the audit: [SDR white units](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_sdr_white_level),
+[active display paths](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-querydisplayconfig),
+and [256-byte CBV sizing](https://learn.microsoft.com/en-us/windows/win32/direct3d12/creating-descriptors).
+
+### 11.1 As built and reviewed
+
+The existing profile table remains: full-range RGB PQ/Rec.2020 plus R10G10B10A2 is HDR10;
+FP16 linear Rec.709 is scRGB (including the FP16 default when no colour space was set). Unknown/stale
+observations, unsupported profiles and format mismatches decline. Eight-bit SDR and `HdrPresent=false` retain
+their previous decisions and rendering path. Successful swapchain mutations while NR is disabled now invalidate
+old observations, preventing a stale PQ record after an off/on cycle. Failed `GetDesc1` with conversion enabled
+leaves the frame original instead of silently treating it as SDR.
+
+HDR10 decodes ST2084 and Rec.2020 into signed linear Rec.709 FP16, one unit = 80 nits. scRGB already has those
+units. NR uses the existing linear-HDR composition. Reconstruction binds the original encoded frame: unchanged
+pixels and alpha retain original codes, edited pixels are re-encoded to the original format. No NeuRotic source
+was copied. The baseline HLSL math and main `DlssNrConstants`/`dlssnr.hlsl` remain unchanged. Recompiling the
+conversion produced byte-identical DXIL; a new SPIR-V binary/header is committed and byte-checked but has no
+Vulkan runtime consumer in this change.
+
+The native D3D12 host now obtains the monitor from `GetContainingOutput` (window-monitor fallback), matches its
+GDI source name to exactly one active display path and queries the target's SDR white. Valid policy values are
+80–480 nits; unavailable, ambiguous or out-of-range results use 203 nits. Cache refresh is five seconds or a
+monitor change. This is the OS SDR white, not the game's HDR paper-white metadata. It becomes
+`frame.PresentWhite = nits / 80`; the existing Paper white slider is the multiplier. The D3D11 bridge has no
+swapchain context in its host interface and deliberately retains the explicit 203-nit fallback. Its conversion,
+resource preflight and truthful submission status are covered, but no display query is added to upstream code.
+
+HDR resource preflight validates actual native backbuffer shape before scratch allocation/copy, then both
+conversion directions before barriers/descriptors. Inputs must be single-slice, single-mip, single-sample 2D
+textures of matching extent and required typed formats on the same device; SRV inputs cannot deny shader access,
+outputs must allow UAV access and cannot alias inputs. Support includes TEXTURE2D, shader loads and typed UAV
+stores. The conversion uses two SRVs, one UAV and a 256-byte CBV. Its 32 descriptor/constant slots exceed the
+native caller's maximum eight live conversion dispatches (four fenced present recordings); bridge recording is
+fenced separately. A new caller must preserve this lifetime contract. Submission status becomes successful only
+after encode and submission, or the bridge's execution confirmation. Independent read-only review found and
+resolved the stale observation, description failure, early barrier/copy and premature status gaps; final review
+found no remaining blocker. This is source review, not native-driver validation.
+
+### 11.2 Observable behavior and remaining acceptance runs
+
+The conversion-on log format is:
+
+```text
+DLSS-NR present: HDR conversion on, {} at {}x{}: linear Rec.709 FP16, SDR white {:.1f} nits ({}) x Paper white; original codes bound for reconstruction
+```
+
+The profile is `HDR10 (PQ, Rec.2020)` or `scRGB (FP16, linear)`; source is `Windows SDR white` or
+`203-nit fallback`. The line appears after a submitted conversion and on profile/white changes. Existing texture
+creation and return-to-SDR lines remain. New decline/status text is `HDR swapchain description unavailable; the
+frame stays original`, `HDR conversion resource contract unavailable; the frame stays original`, and
+`HDR conversion did not produce a submitted frame`. The menu shows actual white and source, not a hardcoded
+successful-conversion claim. Current HDR/NR switches also gate the green status and multiplier immediately;
+HookMethod=2 with inactive HDR shows an original-frame explanation instead of describing HDR as sRGB.
+
+Validation adds display-white units/fallback/cache cases, a bridge rejection before any command or feature
+creation, native integration source guards and SPIR-V/header parity. The real D3D12 harness in
+`tests/nr-hdr-d3d12` executes production conversion/pipeline/descriptor code: 8,192 pixels per format round-trip
+bit-exact including alpha; 3,200 known edited pixels per format match the reference (HDR10 within one code),
+untouched exterior stays exact; 40 dispatches wrap the descriptor ring with fences; invalid resource contracts
+are rejected. It separately creates and presents a real ten-bit swapchain. On this workstation PQ presentation
+is **SKIP: not advertised by runtime/display**, the query uses **203-nit fallback**, and the native debug layer
+is unavailable. Texture conversion PASS does not imply HDR scanout, real OS-white success, NR-model quality or
+production-hook integration. The full host tier and exact build/commit evidence are recorded in the handoff report.
+
+Crimson Desert acceptance (Claude deploys): use `HookMethod=2`, `HdrPresent=true`, NR enabled and in-game HDR on.
+Confirm the build ID first. The log must name the actual HDR10/scRGB profile and game resolution, conversion
+textures, and a submitted-conversion line above; the menu must show the same white/source. Under this Proton
+setup expect 203-nit fallback unless its display APIs expose a valid value. Test HDR off/on, NR off/on, resolution
+changes, strength zero and HUD/letterbox/highlight/saturated-colour scenes. Strength zero and untouched UI must
+look unchanged; SDR must remain the old path; declined resources must leave the game original. Record both
+conversion timing and NR cost. A successful allocation line alone is not acceptance.
+
+Rafael's native Windows run must use the debug layer (GPU-based validation where practical) and check zero
+CBV/SRV/UAV/barrier/copy/device-removal errors, actual HDR10 and scRGB displays, valid OS-white query and refresh
+after the Windows SDR-white slider/monitor changes, fullscreen output selection, resize/toggle lifetime and
+production NR image quality. Run the standalone harness against system D3D12/DXGI (omit staged Proton DLLs)
+and then the game. Real HDR metadata/scanout and the model's visual output remain manual acceptance gates;
+keep the feature default off until those runs are measured.
 
 ## 1. The answer
 
@@ -600,3 +712,41 @@ Where the code differs from sections 4 to 7, and why:
   recovery now acts on these frames when the ini enables it.
 - **Not written**: the wine-tier `tests/nr-hdr-d3d12` (the identity test on a real D3D12 device) and the
   `dlssnr-loopback` leg. The host tier covers the maths, the decision, the record and the bridge's sequence.
+
+## 12. Vulkan present integration (2026-10-15)
+
+The Vulkan present host now consumes the existing `DlssNr_PresentHdr_Shader_Vk.h`. Its profile comes from each
+swapchain's format and colour space: either packed ten-bit channel order with HDR10 ST2084, or FP16 with extended
+sRGB linear. `[DlssNr] HdrPresent=false` keeps the previous refusal and SDR remains on its previous blit/composition
+path. With conversion enabled an unsupported pair is still carried unchanged.
+
+The model builder creates the original-format reference, linear FP16 and encoded-output images, the pipeline, two
+immutable descriptor sets and two aligned 16-byte uniform records. Nothing of the conversion is allocated, mapped or
+rewritten at present. Profile and raw format join the build key, so SDR/HDR changes retire the previous product and
+request a new build; presents continue unchanged during the build. All three images and the descriptor/pipeline
+bundle follow the model's completion tickets. Device loss abandons both current and retired products, including a
+loss reported by a completed build before the present path adopts it.
+
+Recording copies the transport image into the original reference, decodes PQ/Rec.2020 into linear Rec.709 scRGB units
+(or copies linear scRGB), runs the existing composition and real model, re-encodes with the original bound, and
+copies the encoded result back into the transport image. Its entry/exit layout remains `TRANSFER_DST_OPTIMAL`.
+The transport still owns every application wait, work submit and present signal; the conversion adds no submit,
+semaphore or queue wait. The original alpha and reference-bypass contract are those of the shared shader in section
+11. Synthesized motion continues to consume the model's encoded proxy.
+
+There is no DXGI output on this route. No Wine/Vulkan SDR-white query was established as a reliable equivalent of
+`DISPLAYCONFIG_SDR_WHITE_LEVEL`, so Vulkan uses **203 nits**, explicitly named as the fallback in its submitted-frame
+log, multiplied by Paper white. The profile's linear composition uses the existing reversible transfer and optional
+highlight recovery. No fields of `DlssNrConstants` or the main composition cbuffer changed; no shader arithmetic or
+bytecode changed for this integration.
+
+Per-format checks require sampled and transfer-source/destination support for the reference, plus storage and
+formatless storage-write support for FP16 and the encoded output, and legal image usage and dimensions. A2R10
+is presentable/sampleable but lacks storage support on the local NVIDIA driver: it uses an A2B10 encoded output
+and a same-size nearest blit that reorders channels, with source/destination blit support checked as well. A conversion-specific capability/allocation
+failure declines that product. It does not permanently poison a later SDR product on the same device. Device loss
+and model faults remain terminal.
+
+Vulkan's existing pass GPU interval includes decode and encode. It does **not** report a separately measured
+conversion interval as the D3D12 present host does. See `nr-vulkan-present-host.md` for validation evidence and the
+remaining game/native-Windows checks.

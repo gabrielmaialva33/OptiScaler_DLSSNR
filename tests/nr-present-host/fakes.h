@@ -526,11 +526,21 @@ inline ID3D12Resource* g_lastPassColour = nullptr;
 
 inline bool CapturedPresentGuides(ID3D12GraphicsCommandList*, ID3D12Resource**, ID3D12Resource**, DlssNrFrameInfo*,
                                   ID3D12CommandQueue* = nullptr, const void* = nullptr, unsigned int = 0,
-                                  unsigned int = 0)
+                                  unsigned int = 0, bool* gameGuidesHold = nullptr)
 {
+    if (gameGuidesHold != nullptr)
+        *gameGuidesHold = false;
     return false;
 }
 inline void AbandonCapturedGuides() {}
+// What a frame without the game's guides ran on: the last answer, for the cases that care.
+inline int g_fallbackNotes = 0;
+inline bool g_lastFallbackSynthesized = false;
+inline void NotePresentGuideFallback(bool synthesized)
+{
+    ++g_fallbackNotes;
+    g_lastFallbackSynthesized = synthesized;
+}
 inline int GuideRestState(bool) { return (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE; }
 
 // The pass, reduced to the decisions the host cares about: it declines when off, declines below the

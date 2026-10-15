@@ -894,7 +894,7 @@ is off).
   before the pass, compute write -> transfer read after it; every earlier frame's use of the working colour is in the
   source scope of its UNDEFINED transition.
 - **What the model may be shown** (`PlanColour`, `DlssNr_VkPresentNr.h`): RGBA8/BGRA8, UNORM or sRGB, in the sRGB
-  non-linear colour space -- SDR only, as the D3D12 present pass without its HDR conversion. HDR10, scRGB, HLG, ten-bit,
+  non-linear colour space -- SDR only in stage 3 without `HdrPresent` (see the 2026-10-15 HDR integration below). HDR10, scRGB, HLG, ten-bit,
   float and any other format are refused with format and colour space named (`an HDR10 swapchain (PQ, Rec.2020)
   (A2B10G10R10_UNORM_PACK32, colour space 1000104008): the present host's NR takes SDR only; the frame is shown as the
   game rendered it`), on the creation line and as the window's first refusal, and the round trip carries them unchanged.
@@ -1264,6 +1264,55 @@ then edited every judged post-hand-back frame, and freed the route's objects bef
 cases had zero host validation errors and six occurrences each of the model's already-allowed
 `VUID-vkCmdDraw-None-09600`. This proves the hook-chain regression in the harness, not a new DOOM game run.
 
+### Second DOOM cycle: hand-back diagnostics and a window heartbeat
+
+The 2026-10-14 run on `c8d9df7f` (the parity branch's integration of `da4988a1`) proves the first hand-back:
+at 22:23:10.473 the host drained four queues in 5 ms and resumed NR at 3440x1440. At 22:24:43 it stood down again.
+The last exposure-change message is at 22:24:59.768; `ReleaseFeature(1000000)` is logged at 22:25:12.212, then
+nothing through the reported continued rendering and quit. There is no second new-queue line after 22:24:43.
+
+This does not identify a second-cycle runtime defect. Exposure is logged only after a change above its threshold,
+not at every evaluate. F7 turning NR off returns before the route asks for the model and also prevents the host
+from taking it back; continued evaluates at stable exposure can instead keep the route non-idle. The release line
+precedes an unbounded `vkDeviceWaitIdle` and two 500 ms sleeps in upstream; it is not proof that release returned.
+Release does not relinquish the NR owner token. The existing real-hook harness already releases its NGX feature
+after the last evaluate on each of two cycles and successfully hands the model back.
+
+The diagnostic change preserves ownership and the ten-second quiet window. Once a hand-back is due, it names each
+blocking reason once per due episode: NR off, a model still present, retry backoff, unavailable device/model/instance,
+a yielding route, or no eligible swapchain (with individual reasons). It also names no recorded queues, fence-create
+failure and a refused begin. A busy queue names its handle, family, index and present/submit lock, after one second
+of failed attempts; changing reasons cannot produce one line per frame. Success or no longer being due resets the
+episode. Re-enabling NR incurs no new quiet window. Messages queued by Housekeep are flushed before early present
+refusals, too; previously such a message could stay queued until a transport path reached the later flush.
+
+Queue locking stays try-only. Present already holds its own present lock and the transport mutex; another present
+may hold another queue's present lock while waiting for that transport mutex. Waiting for that queue here would
+close a cycle. Acquiring each queue's present then submit lock with try-lock, retaining them only for a successful
+attempt, gives them all back on any refusal and retries at the next present. It adds no timed wait to a present and
+makes progress once the locks are free, but cannot promise fairness against continuous contention. No observed
+lock failure in this DOOM log justifies changing that policy or submitting without the required synchronization.
+
+Each window additionally emits its usual cumulative transport/NR counters on the first present at least 60 seconds
+after its previous line, with reason `60 s heartbeat`. Event/decade lines reset that deadline. No presents means no
+heartbeat; a long gap emits one current line, not catch-up lines. The clock is monotonic and tests inject its value.
+
+Validation on build `bfe1b517` (`20261014_224714`): all 49 host suites passed in the memory-capped scope.
+The host suite covers F7-off readiness while already quiet, immediate admission on re-enable, real present/submit
+mutex contention with one delayed diagnostic and progress after release, and fake-clock heartbeat boundaries.
+`nr-route-quiet` and `nr-route-quiet-wdx12` passed both NGX-release cycles. The new `nr-route-toggle-wdx12`
+passed both release/F7-off/F7-on cycles through the real wDx12 hook: exactly one NR-off blocker per cycle,
+hand-back starting 96.698/100.320 ms after re-enable and draining in 96/98 ms, exact disabled/route read-backs,
+and changed post-hand-back frames. All three have zero host validation errors; the six already classified
+`nv.ngx.*` model reports per case remain separately counted.
+
+The toggle case enables the legacy overlay to exercise its actual F7 handler, using window-local messages.
+Its first run exposed the overlay's missing device-exit cleanup (54 live objects), unrelated to hand-back.
+The harness now creates/destroys a temporary Win32 surface after all measured phases to invoke the overlay's
+existing cleanup path; validation suppresses no leak report. Startup splash and F7-toast frames are kept outside
+the byte-exact route/disabled checks. This tests real input and ownership transitions, not ordinary overlay exit,
+concurrent game queues or DOOM's exact call sequence. No second-cycle stall was reproduced and no game was deployed.
+
 ### What the next DOOM Eternal run should show
 
 Deployed with `nvngx.dll_dlssnr.dll` from the same build, `[DlssNr] Enabled=true`, `VulkanPresentHost=true`, as for the
@@ -1297,7 +1346,7 @@ one has no `dlssnr_vk_shutdown`) and the model beside `winmm.dll`; the bundle on
   none` and one of `bufferDeviceAddress already enabled`, `enabled by the host`, or `off in the application's create
   info, not edited`.
 - Its swapchain's creation line `; the model may run on it (B8G8R8A8_UNORM, sRGB non-linear)` -- or, with the game's
-  HDR on, `; the model will not run on it: an HDR10 swapchain ...`, and nothing else changes.
+  HDR on with `HdrPresent=false`, `; the model will not run on it: an HDR10 swapchain ...`, and nothing else changes.
 - At the first present: `the model initialised on device ... (cold ...)`, `the model's images built for 3440x1440
   (working 3440x1440)`, `the model's feature is up at 3440x1440`, `the model runs at present on ...` (the first present
   is slow: NGX and the model come up inside it).
@@ -1311,6 +1360,295 @@ one has no `dlssnr_vk_shutdown`) and the model beside `winmm.dll`; the bundle on
   (returned 1)`.
 - Turning DLSS on in the game makes the after-upscale route ask for the model: one `the model stood down and was freed`,
   then refusals counted as `after-upscale route`, and the route's own `DLSS-NR Vulkan:` lines take over.
+
+## Off the present path: the model's builds, and a stall watchdog (design, 2026-10-14)
+
+### The hang
+
+One launch in eight of DOOM Eternal on builds `c8d9df7f` and `35600ea3` stopped at startup
+(`OptiScaler_51708542978.log`). The host came up cold on the 841x671 start window and carried 183 presents. The game
+then made swapchain #9 at 3440x1440; at its first present (the 185th) the model's images were rebuilt for that size
+inside the present, and #9 was destroyed after that one present. #11 replaced it, and at its first present (186,
+22:37:55.305) the model's feature was created at 3440x1440, again inside the present. Then nothing: no further present,
+CPU near 0, GPU 0%. 56 threads slept in Win32 waits (ntsync) and 14 in futexes (std::mutex/SRW), CUDA's threads in
+poll. No stacks: `ptrace_scope=1`. The seven other launches went through the same churn and reached 1000 presents in
+about 4 s.
+
+What the log does prove is where the host was: the last thing it did was build a 3440x1440 feature inside
+`vkQueuePresentKHR`, with the presenting queue's present lock and `g_transportMutex` held, and record that feature's
+initialisation into the round trip's own command buffer, in front of the first evaluate. Every review since stage 3
+listed exactly this as a risk ("the first frame brings the core and the model up inside the game's present, holding
+that queue's present lock and the transport's lock"). Two mechanisms fit an idle GPU and idle CPU, and neither can be
+told apart without stacks:
+
+- **A wait inside NGX under the present.** NGX's feature creation, its device initialisation and the driver core's
+  bring-up are opaque. Any CPU wait in them for GPU work (a queue or device idle, a fence of their own) waits behind the
+  game's queued frame, which waits on an acquire whose image only the presentation engine releases -- and the
+  presentation engine is waiting for the very present the host is inside. Everything idles.
+- **A lock cycle through the host's locks.** NGX or CUDA threads, or the game's swapchain thread, needing something a
+  thread inside the host holds while that thread waits on them. The audit below lists the waits that could close one.
+
+So the rule is the reviews' rule, now applied: **nothing opaque or unbounded runs under the host's locks.**
+
+### What moves off the present path
+
+A process-wide **builder thread** (in `DlssNrFeature_Vk.cpp`, beside the model it builds) does everything that brings
+the model up or resizes it:
+
+- once per device: the forwarder, the model's NGX initialisation on the device (`dlssnr_vk_init`), the driver core's
+  bring-up (`NVNGXProxy::InitVulkan`) and its capability block, the float slot, the timestamp pool, the composition
+  pass (pipelines, descriptor pool, constant ring) and its placeholder image's one-time layout;
+- per size: the six images, the zero guides' clear, and the feature's creation (`g_fwd.create`), recorded into a
+  command buffer of the builder's own, submitted on a queue of the work family through the host, and waited for on
+  a fence of its own. The product is handed over only when its GPU work is seen complete.
+
+The present path keeps what has to be in the frame: evaluate, encode, downsample, resolve, the blits, the round trip.
+While a build is queued or running, every frame of that device is carried unchanged and counted as `model building`;
+the frame after the product is adopted starts the model's history over. A new size (841x671 -> 3440x1440, a
+working-scale change) is a new build; the old feature and images retire to the existing list and are freed once the
+frames that used them are seen complete -- as before, but no longer while a build runs (below).
+
+The builder submits through the host (`VkPresentModelDevice::submit`, given to the model at its creation): the queue of
+the work family with the lowest index the application retrieved, its present lock then its submit lock as a borrower
+takes them -- in short tries, never holding the present lock while it waits for the submit lock (the queue may be the
+presenting one, whose next present takes its present lock without a bound), 2 s in all -- the host's trampoline below
+its own submit hook with one non-empty `VkSubmitInfo` (Vulkan_wDx12 rejects a null array, `da4988a1`), the locks
+released before the fence is waited for, and the fence waited for in 50 ms slices up to 10 s, the orphan flag checked
+between slices. A build whose GPU work does not complete in 10 s fails and leaks what it made rather than free it under
+the GPU; the model is then off on the device, with the reason. Locks that stay busy free everything and ask for the
+build again at a later frame; a lost device during a build marks the device lost on the host, so nothing of it is
+freed or called afterwards.
+
+### The build's state machine (`DlssNr_VkPresentBuild.h`, standard library only)
+
+Per device model, one product (built for a key: frame size, working size, work family) and at most one job. At each
+eligible frame, before any model call: a job **queued or running** -> carry the frame (`model building`); a job
+**done** -> adopt its product (its lines too), then decide again; a job **failed** -> latch the failure (`model
+unavailable`, logged once), never retried for the device, as every latched failure; **no job**: product built for this
+frame's key -> run the model; otherwise -> retire the current product and request a job for this key. A request
+while one runs is not queued behind it: the running one finishes, is adopted, and the next frame asks again if the
+key moved (the game's resize churn costs at most one extra build).
+
+The builder runs one job at a time, so NGX's create and initialisation calls never overlap each other. They must
+not overlap the present path's own NGX calls either, so while a job is queued or running the present path makes none
+for that model: no evaluate (frames are carried), no release of retired features (deferred to the first frame after
+the job), no release of the model. Discarding a recording makes no NGX call any more (no feature is created in one).
+
+### Ownership, stand-down and hand-back
+
+The token is claimed, as now, in `DecideNr` before the model is asked for anything, so a job only ever runs for the
+device that holds the model. A queued or running job counts as in flight: `StandDown` and the hand-back's "no model
+here" wait for it exactly as they wait for frames, so the after-upscale route is refused (`this route waits`) until
+the job is over, then the host frees the model and releases the token. A build takes a few hundred milliseconds
+(DOOM's 3440x1440 images took about 125 ms to allocate and its feature about 30 ms to create, both inside the
+present before),
+so a stand-down that lands on a build is that much later; nothing else about the token changes. The route's own NGX
+calls (on the game's thread, inside its upscaler) never overlap a job: a job runs only while the host holds the token.
+
+At `vkDestroyDevice`, a job under way is waited for before anything of the model's is freed, the lost branch included
+(15 s: longer than the builder's own bounds together, so a merely slow GPU never orphans one; the builder never takes
+the transport lock, so the wait cannot close a cycle; the watchdog names the destroy after 2 s and the build after 5).
+A job that does not end in time is orphaned and waited for again (5 s): every wait of the builder's is sliced and
+checks the flag, so it steps out of the device at its next step or slice and forgets, never frees, what it made; only
+a builder stuck inside an opaque NGX call outlasts that, and the log says the device went under it. A job whose last
+reference goes forgets what is left in it (its destructor), so an abandoned model's or an orphaned job's objects are
+never destroyed after the fact. A job only queued counts as nothing in flight: giving the model up calls it off.
+
+### The lock-order audit (swapchain churn, other threads)
+
+The host's locks, in order: a queue's present lock (blocking, first thing in `vkQueuePresentKHR`), the transport lock,
+a borrowed queue's present then submit lock (try, bounded), the registry lock (innermost, never across a call). The
+model's: `g_vkMutex` (the after-upscale route), `g_ownerMutex` (innermost), the forwarder's load lock. What waits
+without a bound while holding one of ours, before this change and after:
+
+| Wait | Holding | Before | After |
+|---|---|---|---|
+| NGX device init, core bring-up, feature creation (opaque) | present lock + transport | every cold start and every resize | builder thread, no lock of ours (`g_presentNgxMutex` guards only the two device records, never an NGX call) |
+| image allocation, pipeline creation | present lock + transport | every resize | builder thread |
+| NGX feature release (stand-down, retired sets) | present lock + transport | as now | as now: after every frame of it was seen complete; never while a build runs |
+| the route's free at a hand-back's finish | present lock + transport, `g_vkMutex` try-locked | as now | as now (the route's lock is try-only; its free mirrors the stand-down's) |
+| `g_vkMutex` in `AfterUpscaleDeviceGone` | transport (in `vkDestroyDevice`) | blocking | blocking; the watchdog names it |
+| the presenting queue's present lock | nothing | blocking | blocking: held by another present on that queue, or the builder's bounded submit |
+| the transport lock | a present lock | blocking | blocking: every holder's work is now bounded |
+| `vkQueuePresentKHR`'s call down | the present lock | the driver's | the driver's |
+
+Swapchain churn on another thread: `vkCreateSwapchainKHR` and `vkDestroySwapchainKHR` take the transport lock and
+retire a swapchain's slots with a bounded drain (2 s), then call down outside it. A swapchain destroyed one present
+after the model's images were built for it (#9) retires one slot, drained in about a millisecond in the log; the model
+is the device's, not the swapchain's, so nothing of it is freed there, and the next swapchain at the same size takes
+it over. After this change that present has no model work at all (a build is running), and the destroy cannot wait
+for the build. NGX's and CUDA's own threads take none of our locks unless they call a hooked Vulkan function: a queue
+submit, bind or idle wait takes that queue's submit lock, which a present holds only around its own round-trip
+submits (bounded) and the builder only around its one submit; a present or swapchain call from them would be taken
+like the game's.
+
+No cycle needs more than these; the remaining blocking waits (a present lock, the transport lock, `g_vkMutex` at
+device destruction) are waits for holders whose work is now bounded or is the game's own, and the watchdog names them
+if that ever stops being true.
+
+### The stall watchdog
+
+A host thread, started by `Install` after its gate (so it does not exist with `VulkanPresentHost` off), wakes every
+half second and reads a table of activities with atomics only -- it takes none of the host's locks, so it cannot be
+caught in the stall it reports. Every host entry point that can hold or wait for a host lock registers one: the
+present hook, swapchain creation and destruction, device creation and destruction, the queue-call hooks (submit,
+sparse bind, idle wait) around their submit lock, and the builder's job. Each records its thread id (Windows'), when
+it entered, the stage it is in ("waiting for the transport lock", "retiring the swapchain's slots", "calling down
+vkQueuePresentKHR", "creating the feature (NGX)", ...) and the host locks it holds. The transport lock and the queues'
+present and submit locks record their owner thread. An activity inside the host for more than 2 s is logged once,
+then every 10 s while it lasts, with all of that, and for a lock it waits on, the thread holding it and that
+thread's stage:
+
+```
+DLSS-NR Vulkan present host: STALL: thread 1652 in vkQueuePresentKHR for 2.0 s: waiting for the transport lock (held by thread 1700, in vkDestroySwapchainKHR for 2.1 s: retiring the swapchain's slots); holds the present lock of queue 0x...
+```
+
+The next hang names itself in `OptiScaler.log` without a debugger, provided the log can still be written (spdlog is
+called from the watchdog's own thread, outside every host lock).
+
+### Tests
+
+- Host tier: the build state machine (carry while queued or running, adopt then decide again, latch a failure once,
+  a request per key change, a resize churn of three sizes costing at most one extra build), the activity table and
+  its lines (2 s, once then every 10 s, the holder named, slots reused), lock-owner tracking with recursion; source
+  guards: `Admit` and `Record` make no NGX init, create, core bring-up or image allocation; the builder never takes
+  the transport lock; the present path makes no NGX call while a job runs; the build's submit takes the queue's locks
+  with bounded waits and never under the transport lock; the watchdog starts only after `Install`'s gate and takes no
+  lock.
+- Wine tier: a case with the model's build slowed artificially -- the test layer delays memory allocation, compute
+  pipeline creation and the NVX module loads on any thread that is not presenting -- while the application presents
+  and recreates its swapchain (one swapchain destroyed after one present, as #9): no `vkQueuePresentKHR` may take
+  longer than a bound far below the build, every frame during the build is carried unchanged (exact read-backs), and
+  the model runs once its product is adopted.
+- An independent read-only review.
+
+## Stage 5: synthesized motion at the Vulkan present (design, 2026-10-15)
+
+### Why
+
+On zero guides the model is told that nothing moved, so under a moving camera its history drags the last frame
+behind the new one: ghosts and doubled edges (Generation Zero showed it first, on the D3D11 host;
+synthesized-motion.md). `[DlssNr] ZeroGuideReset` trades that for no history at all. The D3D12 present routes already
+answer it with `[DlssNr] SynthMotion`: a per-pixel motion field estimated from consecutive finished frames, the FidelityFX
+optical-flow port in `retoque/shaders/synth_motion/` (`SynthMotion::Estimator_Dx12`, measured 0.63 ms at 3440x1440 on the
+RTX 4090 in `tests/synth-motion-d3d12`). Stage 5 gives the Vulkan present host the same estimator, on Vulkan.
+
+### The estimator on Vulkan (`SynthMotion::Estimator_Vk`, `retoque/shaders/synth_motion/`)
+
+The same passes, the same resources and the same output contract as `Estimator_Dx12` (its README): a field of
+`R16G16_SFLOAT` at the colour's extent, `.rg` the displacement from the current frame to the previous one in colour
+pixels, +x right, +y down; zero on a reset, during FFX's five warm-up frames after one, on a scene cut, and per pixel
+where the expand's static-overlay rule keeps a HUD still. Only the binding model changes:
+
+- **Shaders.** The same HLSL compiled by dxc to SPIR-V (`-spirv`, Vulkan 1.1 for the search's subgroup arithmetic), under
+  `VK_MODE` (`precompile/build.sh`, the prefix's `dxc.exe`; `*_Shader_Vk.spv` and `*_Shader_Vk.h` beside the `.cso`,
+  which `nr-invariants` holds equal). The derived callbacks' two constant buffers (FFX's `cbOF` and, for the pyramid,
+  `cbOF_SPD`) become one 64-byte push constant block read through the same accessors; our expand and clear passes'
+  constants likewise. The UAV registers `u0..u7` are bindings 0..7 and the colour `t0` binding 8
+  (`-fvk-u-shift`/`-fvk-t-shift`); the colour is a sampled image read with loads, no sampler. Every storage image names
+  its view's format (`[[vk::image_format("r8ui")]]` for the luma, `rg16i` the flow, `rg16f` the field, `r32ui`/`r32f`
+  the scene-change textures): a format-less declaration would need storage reads and writes without format, a device
+  feature or `VK_KHR_format_feature_flags2` the game may not have, and the scene-change atomics need a declared R32
+  format anyway. The capabilities left are `Shader`, `StorageImageExtendedFormats` (core since 1.0) and, in the search
+  only, `GroupNonUniform`/`GroupNonUniformArithmetic` (Vulkan 1.1). The pyramid takes SPD's no-wave path
+  (`FFX_SPD_NO_WAVE_OPERATIONS`): dxc compiles its quad operations in a compute shader with
+  `SPV_KHR_compute_shader_derivatives` (`DerivativeGroupLinearKHR`), an extension and feature no game enables. The
+  DXIL does not change: every edit is under `VK_MODE`, and `build.sh` rebuilt the `.cso` byte for byte.
+- **Descriptors.** Push descriptors (`vkCmdPushDescriptorSetKHR`): `VK_KHR_push_descriptor` is one of the model's
+  extensions the host already adds at device creation. Every dispatch pushes its own nine bindings, so there is no
+  descriptor set, pool or ring to keep alive while frames are in flight.
+- **Resources.** As on D3D12, in `GENERAL` for their whole life: two luma pyramids (`R8_UINT`, 7 levels), two flow
+  pyramids (`R16G16_SINT`, 8x8 blocks), the final level-0 flow, the four scene-change textures, the field, and a
+  host-visible buffer of eight slots for the scene-change bit. A memory barrier (compute to compute) follows each
+  dispatch.
+- **History.** `ConfirmExecuted` / `AbandonRecording` as on D3D12: the previous frame's luma advances only when the
+  frame's work was submitted (`Submitted`); a dropped recording (`Discarded`) leaves the estimator where it was, a scene
+  cut it raised still owed. The scene-change bit is copied into a read-back slot owned by the frame's ticket (the first
+  free one: a frame that never completes keeps its slot and the others go round it) and read when the host sees that
+  frame's fence signalled (`Completed`), not guessed from a slot's age; it raises `SceneCut()` at the next recording, so
+  one frame after the cut at the earliest and more with frames in flight (the D3D12 estimator's: three). FFX counts its
+  warm-up frames as scene changes, so their bits are ignored, and so is a bit from before a reset. Eight slots, above
+  the four frames the host keeps in flight.
+
+### Built off the present path
+
+Its pipelines are device-level and made by the first build that asks for them; its images are at the model's working
+size and made by every build whose key asks for them (the build key gains "synthesized motion on"), their move into
+`GENERAL` and their clear recorded into the build's own command buffer and waited for with the rest. Turning
+`SynthMotion` on or off live is a new key: a rebuild, frames carried meanwhile. Nothing of the estimator is created on
+the present path. A build that could not make it latches the estimator off for the device and is adopted as the
+product the frame wants: the key is asked again after an adoption, so it is never rebuilt to ask for it again (the
+first version did, the independent review found).
+
+### Where it runs, and what the model is told
+
+In the round trip's work buffer, on the model's own input: after the encode (and, below native, the downsample) and
+before the model's evaluate, inside the pass's timestamps (the window's pass GPU time includes it). On this SDR route
+the encode is the identity (passthrough), so its proxy is the presented frame in the working colour's
+`R16G16B16A16_SFLOAT`, and the estimator reads it in `GENERAL`. Its field is therefore at the model's working size, in
+working pixels: the model's own grid. When the estimator is `Ready`, the model's motion guide is that field instead of
+the zero field, the subrect the working size from the origin, at scale 1. That is what the D3D12 route makes of its
+frame-size field with its guide resample (frame pixels in a working-size texture, scaled by working over frame under
+both `[DlssNr] RenderMotionScale` rules). The first design handed the frame-size field to the model below native, a
+guide larger than its colour, which the model reads at the wrong pixels (reduced-scale-guides.md); the review caught it
+before any game ran it. Depth stays zero.
+
+The model's history resets on the host's own cut (a new swapchain, a gap) or on the estimator's scene cut, and
+`ZeroGuideReset` keeps applying only to frames that go out on the zero field, as on D3D12. The estimator's own history
+starts over only after a gap of more than 250 ms between its recordings, and with new images (the D3D12 rule): not on
+the model's resets or the host's cut, when the model forgets its own history anyway; restarting it there would put six
+more frames on zero motion. These rules are standard-library functions in `DlssNr_VkPresentNr.h` (`SynthWanted`,
+`SynthReset`, `ChooseMotionGuide`, `NrResetWithMotion`).
+
+`SynthMotionSource=nvofa` is D3D12 only; the Vulkan present host always uses the FidelityFX port. Frame generation does
+not exist on this route.
+
+### When it is not used
+
+The estimator needs an application instance and a device of Vulkan 1.1 (the SPIR-V is 1.3, and the search's subgroup
+arithmetic), subgroups of 32 or 64 with arithmetic in compute, compute groups of 256 threads, nine push descriptors,
+storage and transfer on the five formats (atomics on `R32_UINT`), and a working size of at least 256x128 (FFX's level
+6). Missing a device's part, the model runs on the zero field and the model's lines say why, once ("synthesized motion
+is off on this device: ..."); below the size, that size's product is built without it. A failure of the estimator
+itself (a pipeline or an image that will not be made) does the same; it never turns NR off.
+
+### Tests
+
+- `tests/synth-motion-vk` (wine): the production `Estimator_Vk` on a real Vulkan device under Wine, no NGX, no
+  OptiScaler.dll, on the D3D12 loopback's sequences (`tests/synth-motion-d3d12/sequences.h`, shared) and judged by its
+  `judge()`: uniform pans in several directions and sizes (endpoint error, each axis' sign), a moving object over a
+  static background, a static frame (zero), a cut (a zero field, `SceneCut`), an abandoned recording (two steps on the
+  next frame), the static overlay rule (a crosshair and a HUD over a pan stay zero), a pan and the cut with three
+  frames in flight (each fence seen late, as in the host), and GPU time at 1920x1080 and 3440x1440. The colour is the
+  host's working format (`R16G16B16A16_SFLOAT`) in `GENERAL`. The validation layer's core and synchronization checks on,
+  a negative control for each proving them active, zero errors required.
+- `tests/nr-vk-present-host` (host): the build key with the estimator, the guide choice (field or zeros), its scale
+  and the reset rule as standard-library functions; source guards for the ordering (blit, estimator, encode) and the
+  confirm/abandon pairing.
+- `tests/vulkan-present-host` (wine, the real model): `nr-synth-motion`, the moving picture with `SynthMotion=true`,
+  the model's motion guide the field; validation clean, the estimator's lines, read-backs edited.
+
+### Measured (2026-10-15)
+
+- `tests/synth-motion-vk`, RTX 4090 under winevulkan, validation (core and synchronization, both proved active) on:
+  every pan exact (endpoint error 0.000, 100% within 1 px, both signs current-to-previous), three frames in flight
+  included; the moving object and the static frame exact; the static overlay at 0.131 / 0.224 px mean on its clear
+  pixels with 0.0% / 0.3% smeared (the D3D12 estimator's: 0.131 / 0.218, 0.0% / 0.3%); the cut a zero field with
+  `SceneCut()` at t=9, t=11 in flight (D3D12: t=11); the abandoned frame's successor two steps; zero validation
+  errors. GPU time with clocks unlocked varies run to run on this machine: 0.80 to 1.08 ms at 1920x1080 and 1.79 to
+  3.13 ms at 3440x1440 (the D3D12 estimator the same hour, unlocked: 0.86 and 2.63 ms; locked, in September: 0.63 ms
+  at 3440x1440). The first six frames after a reset cost about a third of the rest (the search writes zero vectors).
+- `tests/vulkan-present-host` `nr-synth-motion`, the real model under Proton: three swapchains of 40 frames with the
+  picture panning 4 px a frame; 108 frames evaluated, 96 on the field (the 6 warm-up frames of each of the two products,
+  632x446 and 517x389; the second swapchain at 632x446 continues the estimator's history), the first field at scale
+  1.000 x 1.000; zero validation errors of the host's. `nr-synth-motion-half`, the same at WorkingScale 0.5: the
+  estimator's images and the field at 316x223 and 259x195, the model's working sizes, 96 of 108 on the field. Against
+  `nr-pan-zero`, the same pan on zero motion, the share of the unmoved previous frame in the model's edit is 0.051; on
+  the field 0.031, and 0.014 at half size: on this synthetic picture the model ghosts little either way, so the numbers
+  say the field is used and moves the history the right way, not how much a game gains.
+- Independent review (read-only, 2026-10-15): two major findings, both fixed before the stage was handed over -- the
+  frame-size field below native (now estimated on the model's input), and a second build when the estimator latched
+  off at adoption -- and nine minor ones, fixed or answered in the commit that follows it.
 
 ## Decision and stop conditions
 
@@ -1333,3 +1671,106 @@ Local documentation links, whitespace and the fourteen-suite registry listing we
 suites themselves were not run for this documentation change.
 Eventual C++ uses the pinned `/usr/lib/llvm20/bin/clang-format`; this documentation needs no build. (2026-10-14:
 the pin is clang-format 22 through `uvx` now, and stage 1's C++ is clean under it.)
+
+
+## HDR present conversion (2026-10-15 build plan)
+
+Reuse Retoque's shared HDR conversion SPIR-V. With HdrPresent on, admit packed ten-bit UNORM with
+HDR10_ST2084, and R16G16B16A16_SFLOAT with EXTENDED_SRGB_LINEAR. Preserve the existing refusal and SDR
+path when off; reject all other pairs. Keep a named 203-nit fallback: no reliable Vulkan SDR-white source is
+established. The D3D12 counterpart was reported successful by Gabriel in Crimson Desert, HDR10 at 3440x1440,
+about 0.12 ms conversion under Proton/Wayland; that is not Vulkan-host validation.
+
+The model's off-present worker owns the entire HDR product: immutable decode/encode descriptor sets and
+constants, pipeline, original encoded image, FP16 linear image and encoded output. BuildKey includes profile
+and raw format, so resize/colour changes rebuild before adoption. Every product follows the model's existing
+submitted-ticket retirement and abandon-on-loss path. No conversion allocation or pipeline build on present.
+
+The host retains its plain transfer round trip, ownership transfers and semaphore contract. HDR skips the SDR
+blits: Record receives the raw transfer image, copies into the owned original, decodes into signed Rec.709
+FP16 (80 nits/unit), runs the existing linear-HDR NR composition, re-encodes with the original bound, and copies
+back. All transfer/compute dependencies are explicit. Immutable descriptors need no per-frame update or new
+ring; images are serialized on the existing work queue. SynthMotion keeps reading the model's encoded proxy.
+Check sampled/storage/transfer and format-less storage-write capabilities before creating a product.
+
+Host tests cover profile pairs, off behavior, rebuild identity and lifecycle wiring; the real-model harness will
+probe local Proton Wayland/HDR surface support and exercise conversion under synchronization validation. If
+HDR surfaces are unavailable, report that explicitly and validate actual offscreen HDR-format images instead.
+Obtain independent read-only resource/queue/lifetime review and run the capped host suite, gated/locked build
+and Wine tests before committing/reporting. No deployment.
+
+Format-less writes follow the [Vulkan image interface contract](https://docs.vulkan.org/spec/latest/chapters/interfaces.html)
+and per-format [format feature requirements](https://docs.vulkan.org/spec/latest/chapters/formats.html).
+
+
+### HDR as built and measured
+
+Implemented on `feat/hdr-present-vulkan` from `34e9c5a7`. The shared shader and main composition constants are
+unchanged. Both HDR shader targets were regenerated after correcting their consumer comment; DXIL, SPIR-V and
+both generated headers remained byte-identical. `nr-invariants` now also compares the Vulkan conversion's four
+16-byte-record scalars with the shared HLSL cbuffer. Uniform record offsets respect the device's alignment.
+
+The original image needs sampling and transfers, not storage. On the local NVIDIA driver, A2R10G10B10 is offered
+for HDR presentation but lacks storage-image support. That profile therefore encodes to A2B10G10R10 and performs a
+same-size nearest blit to reorder channels into the raw image; both blit format capabilities are checked. The
+identity control below measured exact original codes after this path. This measured result is not a promise about
+all drivers' numeric UNORM blit conversions. Unsupported capabilities leave the game frame unchanged and name the
+reason. A conversion-only build failure is remembered for that profile/format/extent; a different product, including
+SDR, can rebuild. A lost device remains terminal.
+
+Independent read-only review found and prompted a fix to a loss-handoff gap: cleanup must observe a completed
+worker's lost-device result even before adopting it. Retired cleanup now checks it; release checks before and after
+adoption; abandonment retains the result; housekeeping tells the transport before further work. Normal HDR
+products retire on the same submitted tickets as the model, with no additional semaphore or queue ownership path.
+
+The first successful GPU validation used GE-Proton11-7, Wayland/HDR enabled, the RTX 4090 and the real NVIDIA model.
+The local surface offered all three supported combinations: format 97 / colour space 1000104002 (scRGB), and formats
+58 and 64 / colour space 1000104008 (HDR10). These were **real WSI swapchains**, not a simulated or offscreen fallback.
+Core and synchronization validation were active and proved by the harness's deliberate validation probe.
+HDR inputs span four alpha levels; readbacks check every alpha, reject all-black frames and non-finite FP16 RGB.
+The HDR `mae` field remains an equality sentinel (0 or 255), not a colour-error measurement.
+
+| Case | Evidence |
+|---|---|
+| `nr-hdr-control` | Decode, real model, identity resolve and encode; each HDR profile's readbacks exact with `ApplyModel=false`. |
+| `nr-hdr` | Model edits reach each of the three HDR profiles; original alpha preserved; SDR before and after HDR works. |
+| `nr-hdr-off` | All HDR frames exact and refused for colour, no HDR resources or submitted-conversion log. |
+| `nr-hdr-half-synth` | All three HDR profiles run at half working size; synthesized fields used after warm-up. |
+| `nr-control`, `nr`, `nr-synth-motion` | Existing SDR identity, model edits, cross-family transport and synthesized-motion regressions pass. |
+| Full host tier | All 49 suites PASS in the capped systemd scope, including HDR math and the extended NR invariants/source guards. |
+
+There were no host validation errors. The harness still reports NVIDIA's pre-existing
+`VUID-vkCmdDraw-None-09600`, specifically attributed to a named `nv.ngx.*` image, separately; it does not suppress a
+new VUID or a report on host resources. The pass GPU interval includes HDR conversion, model and resolve; no
+standalone Vulkan conversion-time claim is made.
+
+The successful HDR sequence destroys/drains the old swapchain before creating its replacement. GE-Proton11-7's
+Wayland colour-management protocol aborted an overlapping replacement with `wp_color_manager_v1: CM Surface already
+exists`, before the HDR pass ran. Existing SDR cases retain `oldSwapchain` overlap coverage. Consequently HDR
+cross-family operation and overlapping/in-flight HDR swapchain retirement are source-reviewed, not established by
+this WSI run. Device-loss cleanup is also source-guarded/reviewed, not a driver-loss injection result.
+
+New lines (prefix shown without the logger's timestamp/function):
+
+```text
+DLSS-NR Vulkan present host: HDR conversion resources built off the present path for WIDTHxHEIGHT, FORMAT
+DLSS-NR Vulkan present host: HDR conversion on, HDR10 (PQ, Rec.2020) at WIDTHxHEIGHT: linear Rec.709 FP16, SDR white 203.0 nits (203-nit fallback) x Paper white; original codes bound for reconstruction
+DLSS-NR Vulkan present host: HDR conversion on, scRGB (FP16, linear) at WIDTHxHEIGHT: linear Rec.709 FP16, SDR white 203.0 nits (203-nit fallback) x Paper white; original codes bound for reconstruction
+DLSS-NR Vulkan present host: the model is off on this device: HDR conversion format capabilities unavailable; the frame stays original
+DLSS-NR Vulkan present host: the model is off on this device: HDR conversion resources could not be built; the frame stays original
+```
+
+The first line is emitted after adoption of the worker's completed log; the submitted conversion line occurs once
+per built product, only after its recording was submitted. The swapchain creation line also names HDR10/scRGB when
+eligible. No SDR-white source is guessed: the white source is always explicitly `203-nit fallback` on Vulkan.
+
+DOOM Eternal remains the next game check, with `PROTON_ENABLE_WAYLAND=1 PROTON_ENABLE_HDR=1`, in-game HDR,
+`[DlssNr] VulkanPresentHost=true`, `Enabled=true`, `HdrPresent=true`. With DLSS/upscaler evaluations absent, expect
+HDR10 colour space 1000104008, off-present build followed by the conversion line, and increasing NR evaluated
+counters. DLSS on should yield to the after-upscale route; after it goes quiet the existing hand-back precedes the
+host's return. Check F7 off/on, SDR/HDR toggles, resize/alt-tab, highlights, saturated colours, HUD and repeated DLSS
+cycles. This task did not deploy or run DOOM and makes no game-visual-quality claim.
+
+Rafael's native Windows run must repeat real HDR10/scRGB validation and readbacks (especially A2R10's reorder),
+exercise resize/overlapping swapchains and teardown, and judge game colour/highlights/HUD. The current tests cover
+API correctness and numerical identity/control properties, not the appearance of the real game's edited frame.

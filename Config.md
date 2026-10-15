@@ -388,11 +388,12 @@ there.
 
 ```ini
 [DlssNr]
-; Keep NR off for one session after a session that ended without closing while NR ran (crash, killed
-; hang). A marker file retoque_nr_session.state beside the log records it; the ini is never rewritten.
-; Off by default: under Proton, DOOM Eternal and Crimson Desert left the marker behind after ordinary quits
-; (their exits never reach DLL_PROCESS_DETACH), so every short session read as a crash. Opt-in until a
-; better exit signal exists (docs/dlssnr/design/session-guard.md, "Measured").
+; Keep NR off for one session after a session that ended badly while NR ran (crash, killed hang, lost
+; graphics device). A marker file retoque_nr_session.state beside the log records it; a normal quit, seen
+; by a hook on NtTerminateProcess however the game ends itself, removes it; the ini is never rewritten.
+; Off by default until a game run confirms the exit signal: the first version, which saw an exit only at
+; DLL_PROCESS_DETACH, read every short DOOM Eternal and Crimson Desert session under Proton as a crash
+; (docs/dlssnr/design/session-guard.md).
 ; true or false - Default (auto) is false
 SessionGuard=auto
 
@@ -432,11 +433,13 @@ HookMethod=auto
 VulkanPresentHost=auto
 
 ; The D3D12 present pass only (HookMethod=2, and Auto once it has moved to present): require the game's
-; own depth and motion, captured from its upscaler. On, a frame with none ready is shown as the game
-; rendered it; off, the pass runs on constant depth and no motion (or on SynthMotion's estimate), which is
-; right for a title whose upscaler is not DLSS. The D3D11 bridge's present host does not read this: it
-; uses the game's depth and motion when the game's upscaler runs through OptiScaler's D3D11-on-D3D12
-; bridge (dlss_12 and the other _12 upscalers), and constant depth and no motion (or SynthMotion's
+; own depth and motion, captured from its upscaler. A capture is used only on a frame it can be shown to
+; belong to (docs/dlssnr/design/present-real-guides.md). On, a frame with none of its own -- none ready,
+; or a capture that is not this frame's -- is shown as the game rendered it; off, the pass runs on
+; constant depth and no motion (or on SynthMotion's estimate), which is right for a title whose upscaler
+; is not DLSS. The D3D11 bridge's present host does not read this: it uses the game's depth and motion
+; when the game's upscaler runs through OptiScaler's D3D11-on-D3D12 bridge (dlss_12 and the other _12
+; upscalers) and the capture is the frame's own, and constant depth and no motion (or SynthMotion's
 ; estimate) otherwise.
 ; true or false - Default (auto) is false
 RequireDlss=auto
@@ -445,13 +448,15 @@ RequireDlss=auto
 ; history over every frame. With zero motion the model believes nothing moved and blends the new frame
 ; with where things used to be -- ghosts and doubled edges whenever the camera moves, worst in fast
 ; first-person titles. On, there is no history to ghost from, at the cost of the model's temporal
-; smoothing. No effect when real guides are captured.
+; smoothing. No effect when real guides are captured, nor on the odd frame whose capture is refused while
+; the game's guides are otherwise in use (docs/dlssnr/design/present-real-guides.md, step 1).
 ; true or false - Default (auto) is false
 ZeroGuideReset=auto
 
 ; Present hosts with no upscaler to take depth and motion from (the D3D11 bridge, a D3D12 title on
-; HookMethod=2 with no DLSS): estimate the motion from the frames themselves and give it to the model
-; instead of zero motion, so its history follows a moving camera rather than ghosting behind it.
+; HookMethod=2 with no DLSS, the Vulkan present host): estimate the motion from the frames themselves
+; and give it to the model instead of zero motion, so its history follows a moving camera rather than
+; ghosting behind it.
 ; Experimental: an estimate from colour alone is coarse at thin edges and text, and it costs a little
 ; GPU time per frame. Depth stays constant. ZeroGuideReset no longer applies to a frame that has it.
 ; true or false - Default (auto) is false
@@ -492,7 +497,8 @@ PeripheryWork=auto
 ; cores. nvofa is NVIDIA's Optical Flow Accelerator (RTX 20 and later), a fixed-function engine that
 ; leaves the shader cores to the model; it needs nvofapi64.dll (the NVIDIA driver on Windows,
 ; dxvk-nvapi under Proton), its field arrives one frame late, and it has no scene-cut detection. When
-; it is unavailable the log says why once and ffx is used. Read when the estimator is built.
+; it is unavailable the log says why once and ffx is used. Read when the estimator is built. D3D12
+; only: the Vulkan present host always runs ffx.
 ; auto, ffx or nvofa - Default (auto) is ffx
 SynthMotionSource=auto
 

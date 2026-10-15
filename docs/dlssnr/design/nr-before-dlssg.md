@@ -516,8 +516,8 @@ counts game presents and reads 1:1 at any multiplier. `PresentSync=auto` does no
 `true` still does). The game's tags are left alone (H1). `HookMethod=2` reaches the boundary only when it was set
 before the game started (the detours are installed with `sl.interposer.dll`); set later, the interim refusal still
 applies. Not done: H2 for comparison, resize draining at the interposer (the real resize still passes the wrapped
-swapchain's own handling below it), the guide identity's two-presenter view of the proxy and the wrapped swapchain
-(log only).
+swapchain's own handling below it). The guide identity's two-presenter view of the proxy and the wrapped swapchain,
+open here, is settled by present-real-guides.md's step 1: the presenter is the swapchain's window, so the two are one.
 
 **Step 1 measured (2026-10-14, build `9f97f708`, Crimson Desert, same setup, the game's DLSS-G at 3x).** The boundary
 went live at the first frames and stayed live for the session ("present: at the game's own Present, ahead of its frame

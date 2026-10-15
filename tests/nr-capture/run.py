@@ -323,7 +323,11 @@ with tempfile.TemporaryDirectory(prefix='nr-capture-') as temp:
     # Privacy: no generated text matches the repository's patterns, though the inputs carried a home path, a user
     # profile, a Wine home and a tailnet host.
     generated = {'provenance.txt': line, 'provenance.json': (out / 'provenance.json').read_text(),
-                 'provenance.png tEXt': tagged or ''}
+                 'provenance.png tEXt': tagged or '', 'record_exact.txt': (out / 'record_exact.txt').read_text(),
+                 'record_exact.json': (out / 'record_exact.json').read_text()}
+    exact_line = (out / 'record_exact.txt').read_text()
+    if dict(item.split('=', 1) for item in exact_line.split(';')) != json.loads(generated['record_exact.json']):
+        fail("the production builders' line and sidecar disagree")
     for name, png in pngs.items():
         generated[f'{name} tEXt'] = ' '.join(png['text'].values())
     for label, text in generated.items():
@@ -387,12 +391,25 @@ for name, text in (('DlssNr_Capture.h', burst_h), ('DlssNr_PairCapture.cpp', cap
 if 'D3D12_RESOURCE_STATE_COPY_DEST' not in readback_h or 'TypedForCopy' not in readback_h:
     fail('DlssNr_Readback.h lost the readback heap state or the typed footprint')
 
-# The record never takes a path: every value set comes from something that is not one, and the executable goes in
-# only as its sanitised stem.
-for match in re.finditer(r'\.Set\("(\w+)",\s*([^;]*)\);', code_cpp):
-    key, value = match.group(1), match.group(2)
+# The record never takes a path: the backend fills the builders' inputs (FillFrameRecord, FillWriteRecord, whose exact
+# text test.cpp holds) from things that are not one, sets no key of its own, and the executable goes in only as its
+# sanitised stem.
+if '.Set(' in code_cpp:
+    fail('DlssNr_PairCapture.cpp sets a record key itself; every key goes through FillFrameRecord or FillWriteRecord')
+assigned = re.findall(r'\b(frameRecord|writeRecord)\.(\w+(?:\[\d\])?)\s*=\s*([^;]*);', code_cpp)
+if len(assigned) < 25:
+    fail(f'found only {len(assigned)} record input assignments; the scan no longer matches the code')
+for _, field, value in assigned:
     if re.search(r'path|Path|directory|wstring|DllPath|ExePath|\.string\(\)', value):
-        fail(f'the record key {key} is set from {value.strip()!r}, which may be a path')
+        fail(f'the record input {field} is set from {value.strip()!r}, which may be a path')
+for builder in ('inline void FillFrameRecord(', 'inline void FillWriteRecord('):
+    for value in re.findall(r'r\.Set\("\w+",\s*([^;]*)\);', body_of(code_h, builder)):
+        if not re.fullmatch(r'\s*(?:"[^"]*"|in\.[\w\[\]\.]+|[\w:]+\(in\.[\w\[\]\.]+(?:\.\w+\(\))?\)|'
+                            r'in\.\w+ \? "1" : "0")\s*', value):
+            fail(f'{builder} sets a value from {value.strip()!r}: only its inputs and literals may reach the record')
+for struct in ('struct FrameRecordInputs', 'struct WriteRecordInputs'):
+    if re.search(r'path|wstring', strip_comments(body_of(code_h, struct))):
+        fail(f'{struct} has a field that may hold a path')
 if code_cpp.count('ExePath()') != 1 or 'SanitizeExeStem(Util::ExePath().stem().wstring())' not in code_cpp:
     fail('the executable name must reach the capture only through SanitizeExeStem of its stem')
 if 'DllPath()' in code_cpp and 'payload.directory = Util::DllPath()' not in code_cpp:
@@ -425,8 +442,19 @@ metadata = renderer[renderer.index('DlssNr::GpuTiming::Metadata TimingMetadata('
 if 'TimingContract(cfg, passes,' not in metadata[:metadata.index('\n}\n')]:
     fail('TimingMetadata must build its contract with TimingContract, so the two cannot drift')
 trigger = body_of(renderer, 'void CheckCaptureTrigger()')
-if 'RequestPairCapture()' not in trigger or '"burst"' not in trigger:
+if 'RequestPairCapture(&why)' not in trigger or '"burst"' not in trigger:
     fail('the trigger file must ask for the pair, and for the raw burst when it says "burst"')
+if 'already under way' in trigger:
+    fail('the trigger file must log the reason the request was not taken, not assume one')
+contract = body_of(renderer, 'std::string TimingContract(')
+if 'scale={}' not in contract or 'preset={}' not in contract or 'render={}x{}' not in contract:
+    fail("the capture's settings (TimingContract) must carry the working scale, the preset and the sizes")
+if site >= 0:
+    guarded = re.sub(r'\s+', ' ', dispatch[site:dispatch.index('facts);', site) + 400])
+    if not re.search(r'Wanted\(\)\) \{ try \{', guarded) or \
+            'catch (const std::exception& e) { DlssNr::PairCapture::AbandonAfterError(e.what()); } catch (...) { ' \
+            'DlssNr::PairCapture::AbandonAfterError(nullptr); }' not in guarded:
+        fail('the record site must be inside try, and a throw must withdraw the capture (AbandonAfterError)')
 shutdown = body_of(renderer, 'void Shutdown()\n{')
 if 'PairCapture::Shutdown();' not in shutdown:
     fail('DlssNr::Shutdown must let the capture release what is proven done')
@@ -441,8 +469,10 @@ pack = {line.split('\t')[0] for line in (root / 'retoque/translations/optional/p
     encoding='utf-8').splitlines() if line and not line.startswith('#')}
 reasons = []
 for source in (capture_h, capture_cpp, (nr / 'dlssnr/DlssNr_ImageFile.h').read_text()):
-    reasons += re.findall(r'constexpr const char\* k(?:Reason\w*|Refusal\w*|\w+Words) = "((?:\\.|[^"\\])*)"', source)
-if len(reasons) < 15:
+    joined = re.sub(r'"\s*\n\s*"', '', source)  # a literal continued on the next line is one literal
+    reasons += re.findall(r'constexpr const char\* k(?:Reason\w*|Refusal\w*|\w+Words)\s*=\s*"((?:\\.|[^"\\])*)"',
+                          joined)
+if len(reasons) < 19:
     fail(f'found only {len(reasons)} reason literals; the scan no longer matches the code')
 for reason in reasons:
     if reason not in pack:
@@ -455,6 +485,47 @@ for token in ('FindModel', 'Describe(', 'TimingModelIdentity', 'file_size', 'exi
         fail(f'AtRecordSite calls {token}: file work belongs on the writer thread')
 if 'NgxInfo::FindModel()' not in body_of(code_cpp, 'const ModelFacts& ModelFactsOnce()'):
     fail("the model's facts must be found on the writer thread (ModelFactsOnce)")
+
+# The writer: the folder is checked before anything is computed, and the cap runs only after the pair was written, so a
+# write that fails costs no older pair.
+write_pair = body_of(code_cpp, 'const char* WritePair(')
+ensure = write_pair.find('EnsureDirectory(p.directory')
+if ensure < 0 or not ensure < write_pair.find('MeanOf(') or not ensure < write_pair.find('AdapterFor('):
+    fail('WritePair must check the folder (EnsureDirectory) before the means, the adapter and the model')
+if write_pair.count('RotateFolder(') != 1 or 'RotationVictims(' in write_pair or \
+        write_pair.find('RotateFolder(p.directory, kMaxPairs, stem)') < write_pair.rfind('WriteViaTemporary(') or \
+        'if (!ok)' not in write_pair[:write_pair.find('RotateFolder(')]:
+    fail('the cap must run once, after the pair was written (RotateFolder, protecting the new stem), never before')
+writes = write_pair[write_pair.find('bool ok = false;'):write_pair.find('if (!ok)')]
+if 'try' not in writes or 'catch (...)' not in writes:
+    fail('a throw while the files are written must count as a failed write, so the pair is removed')
+writer_run = body_of(code_cpp, 'void Writer::Run()')
+if not re.search(r'try\s*\{\s*failure = WritePair\(', writer_run) or 'catch (...)' not in writer_run:
+    fail('nothing may leave the writer thread: WritePair must run inside try with a catch (...)')
+if 'snprintf' in body_of(code_h, 'inline std::string FormatNumber(') or \
+        'std::to_chars' not in body_of(code_h, 'inline std::string FormatNumber('):
+    fail("FormatNumber must not depend on the locale the game's CRT is in (std::to_chars, never snprintf)")
+
+# Idle: until the first request nothing of the capture exists; the pass's two calls are one relaxed load each, and
+# nothing else reaches the session before a request has set g_used.
+for signature in ('void Poll()', 'bool Wanted()', 'void AbandonAfterError(', 'void Shutdown()',
+                  'PairCaptureStatus GetPairCaptureStatus()'):
+    body = body_of(code_cpp, signature) if signature != 'bool Wanted()' else \
+        code_cpp[code_cpp.index('bool Wanted()'):code_cpp.index(';', code_cpp.index('bool Wanted()'))]
+    first = body.find('g_used.load(')
+    if first < 0 or (body.find('TheSession()') >= 0 and body.find('TheSession()') < first):
+        fail(f'{signature} must read g_used before it touches the session')
+if code_cpp.count('g_used.store(') != 1 or 'g_used.store(true' not in body_of(code_cpp, 'bool RequestPairCapture('):
+    fail('only a request may bring the capture into existence (g_used), and only there')
+request = body_of(code_cpp, 'bool RequestPairCapture(')
+if 'DlssNrUseProxy' not in request or 'kReasonProxy' not in request:
+    fail('a request under the driver proxy must be refused at once: no frame of the pass can take it')
+menu_capture = strip_comments(body_of((nr / 'dlssnr/DlssNr_Menu.cpp').read_text(),
+                                      'static void RenderPairCapture('))
+if 'ReasonStillApplies(status.reason, in)' not in menu_capture:
+    fail("the menu must not show a setting's refusal once the setting is off (ReasonStillApplies)")
+if not 0 <= menu_capture.find('DlssNrEnabled') < menu_capture.find('GetPairCaptureStatus()'):
+    fail('the menu must ask the capture nothing while NR is off')
 if 'TimingModelIdentity' in dispatch[site:site + 3000]:
     fail('the record site must not read the model file (TimingModelIdentity) on the render thread')
 

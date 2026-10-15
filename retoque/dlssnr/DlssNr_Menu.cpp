@@ -183,8 +183,8 @@ static bool RenderPresentHdr(Config* config)
                "\n\nOn, each frame is decoded to linear light, the pass runs on it as on any HDR"
                "\nframe, and it is encoded back with the game's own frame as the reference: every"
                "\npixel the pass leaves alone -- the interface, at strength zero -- keeps its exact"
-               "\ncode. The model is shown 203 nits (the BT.2408 reference white) times Paper white"
-               "\nas its white."
+               "\ncode. The model uses the display's Windows SDR white level times Paper white,"
+               "\nor 203 nits when the display query is unavailable."
                "\n\nExperimental: not yet measured on a real HDR display. HLG, studio-range or YCbCr"
                "\nPQ and other colour spaces stay declined.");
 
@@ -194,9 +194,10 @@ static bool RenderPresentHdr(Config* config)
     const float multiplier = config->DlssNrWhitePointScale.value_or_default();
     const float shown = std::isfinite(multiplier) && multiplier > 0.0f ? multiplier : 1.0f;
 
-    if (hdr.converted && profile != nullptr)
+    const bool converted = on && config->DlssNrEnabled.value_or_default() && hdr.converted;
+    if (converted && profile != nullptr)
         ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f), Localization::Tr("%s, SDR white %.0f nits x %.2f"),
-                           profile, DlssNr::PresentHdr::kSdrWhiteNits, shown);
+                           profile, hdr.whiteNits, shown);
     else if (!on && profile != nullptr)
         ImGui::TextDisabled(Localization::Tr("Off: this %s swapchain is shown as the game rendered it."), profile);
     else if (hdr.reason != nullptr)
@@ -204,8 +205,9 @@ static bool RenderPresentHdr(Config* config)
     else
         ImGui::TextDisabled("%s", Localization::Tr("Waiting for a frame..."));
 
-    if (!hdr.converted)
+    if (!converted)
         return false;
+    ImGui::TextDisabled("%s", Localization::Tr(hdr.whiteFromDisplay ? "Windows SDR white" : "203-nit fallback"));
 
     // The display's SDR white times this is the white the model is shown; the composition divides by it and
     // multiplies back, so it moves what the model sees, never where an untouched pixel lands. A quarter to four is the
@@ -220,7 +222,7 @@ static bool RenderPresentHdr(Config* config)
         config->DlssNrWhitePointScale = 1.0f;
 
     HelpMarker("The same Paper white as on any other frame, measured here against the display's"
-               "\nSDR white of 203 nits: 1.00 shows the model 203 nits as white. Raise it if the"
+               "\nSDR white shown above: 1.00 uses that value. Raise it if the"
                "\ngame's own HDR paper white is set brighter, lower it if darker. It changes what"
                "\nthe model is shown, not the frame where the pass leaves it alone.");
 
@@ -233,9 +235,13 @@ static bool RenderPresentHdr(Config* config)
 // capture, disabled with the reason wherever a press could not give the pair.
 static void RenderPairCapture(Config* config, bool nativeVulkan)
 {
+    // NR off: no button (ButtonFor's first row), and nothing of the capture is asked for.
+    if (!config->DlssNrEnabled.value_or_default())
+        return;
+
     const auto status = DlssNr::GetPairCaptureStatus();
     PairCapture::ButtonInputs in;
-    in.enabled = config->DlssNrEnabled.value_or_default();
+    in.enabled = true;
     in.nativeVulkan = nativeVulkan;
     in.d3d12Ran = DlssNr::IsRunning();
     in.proxy = config->DlssNrUseProxy.value_or_default();
@@ -266,7 +272,7 @@ static void RenderPairCapture(Config* config, bool nativeVulkan)
         ImGui::TextDisabled("%s", Localization::Tr(button.reason));
     else if (status.ok && !status.lastStem.empty())
         ImGui::TextDisabled(Localization::Tr("Saved %s (the pair and its .json)"), status.lastStem.c_str());
-    else if (status.reason != nullptr)
+    else if (status.reason != nullptr && PairCapture::ReasonStillApplies(status.reason, in))
         ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", Localization::Tr(status.reason));
 }
 
@@ -613,7 +619,14 @@ void RenderMenu(Config* config, float menuResScale)
 
         bool enabled = config->DlssNrEnabled.value_or_default();
         if (ImGui::Checkbox(Localization::Label("Enable Neural Rendering"), &enabled))
-            config->DlssNrEnabled = enabled;
+        {
+            // On is the same statement as the session guard's "Enable anyway" (it only sets the value when the guard
+            // has nothing standing), so its notice does not outlive the checkbox.
+            if (enabled)
+                SessionGuardEnableAnyway();
+            else
+                config->DlssNrEnabled = false;
+        }
 
         HelpMarker("Synthesises detail in the upscaler's output, before frame generation sees it."
                    "\n\nNeeds two similarly named files beside OptiScaler, one character apart:"
@@ -629,8 +642,28 @@ void RenderMenu(Config* config, float menuResScale)
             if (guard.action == SessionGuard::Action::Disable)
                 ImGui::TextWrapped(
                     "%s", Localization::Tr("Neural Rendering is off for this session. Your settings are unchanged."));
-            ImGui::TextWrapped("%s", Localization::Tr(SessionGuardReasonText(guard.reason)));
+            ImGui::TextWrapped("%s", Localization::Tr(SessionGuardReasonText(guard)));
             ImGui::PopStyleColor();
+
+            // The numbers behind it, dimmed: how the session ended and how long the model had run. A standing block
+            // carries none.
+            switch (guard.end)
+            {
+            case SessionGuard::End::Crashed:
+                ImGui::TextDisabled(Localization::Tr("Exception 0x%08X after the model had run for %lld s."),
+                                    guard.code, (long long) guard.ranSeconds);
+                break;
+            case SessionGuard::End::ExitCode:
+                ImGui::TextDisabled(Localization::Tr("Exit code %u after the model had run for %lld s."), guard.code,
+                                    (long long) guard.ranSeconds);
+                break;
+            case SessionGuard::End::Vanished:
+            case SessionGuard::End::DeviceRemoved:
+                ImGui::TextDisabled(Localization::Tr("The model had run for %lld s."), (long long) guard.ranSeconds);
+                break;
+            default:
+                break;
+            }
 
             if (guard.action == SessionGuard::Action::Disable &&
                 ImGui::SmallButton(Localization::Label("Enable anyway")))
@@ -773,11 +806,12 @@ void RenderMenu(Config* config, float menuResScale)
                 if (ImGui::Checkbox(Localization::Label("Require DLSS temporal inputs"), &requireDlss))
                     config->DlssNrRequireDlss = requireDlss;
 
-                HelpMarker("Present needs the game's depth and motion to reproject its history. With this "
-                           "on, a frame that has no temporal inputs yet is shown as the game rendered "
-                           "it. With it off, the pass runs on dummy temporals -- constant depth, no "
-                           "motion -- and treats the scene as standing still, which is right for a "
-                           "title whose upscaler is not DLSS.");
+                HelpMarker("Present needs the game's depth and motion to reproject its history, and uses "
+                           "them only on the frame they were captured for. With this on, a frame that "
+                           "has none -- none captured yet, or one that cannot be shown to be its own -- "
+                           "is shown as the game rendered it. With it off, the pass runs on dummy "
+                           "temporals -- constant depth, no motion -- and treats the scene as standing "
+                           "still, which is right for a title whose upscaler is not DLSS.");
 
                 bool synthMotion = config->DlssNrSynthMotion.value_or_default();
                 if (ImGui::Checkbox(Localization::Label("Synthesized motion"), &synthMotion))
@@ -836,6 +870,14 @@ void RenderMenu(Config* config, float menuResScale)
                     ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", status);
                 else if (status != nullptr && status[0] != '\0')
                     ImGui::TextUnformatted(status);
+
+                // The guides the present route ran on over the last second, and what the identity rules refused
+                // (present-real-guides.md, step 1). Read-only, and only while a present host is deciding: not on the
+                // upscaled route (HookMethod=1, Auto's), unless a D3D11 bridge host built at HookMethod=2 still runs,
+                // and not with the pass off.
+                const std::string guides = DlssNr::PresentGuidesLine();
+                if (!guides.empty())
+                    ImGui::TextWrapped("%s", guides.c_str());
             }
         }
 
@@ -1402,10 +1444,15 @@ void RenderMenu(Config* config, float menuResScale)
         }
         else if (config->DlssNrHookMethod.value_or_default() == 2)
         {
-            ImGui::TextDisabled(
-                Localization::Tr("Hook method is set to Present: the swapchain backbuffer is already\n"
-                                 "tone-mapped and display-referred sRGB. White point and exposure mapping\n"
-                                 "controls are bypassed."));
+            const auto hdr = DlssNr::GetPresentHdrStatus();
+            if (hdr.available && hdr.seen)
+                ImGui::TextDisabled(
+                    Localization::Tr("HDR present conversion is inactive; the game's original frame is shown."));
+            else
+                ImGui::TextDisabled(
+                    Localization::Tr("Hook method is set to Present: the swapchain backbuffer is already\n"
+                                     "tone-mapped and display-referred sRGB. White point and exposure mapping\n"
+                                     "controls are bypassed."));
         }
         else
         {

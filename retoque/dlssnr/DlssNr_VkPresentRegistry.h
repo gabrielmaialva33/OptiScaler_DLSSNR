@@ -144,6 +144,7 @@ struct SwapchainDesc // the VkSwapchainCreateInfoKHR the driver was given
 // One vkQueuePresentKHR, as the hook saw it before calling down.
 struct PresentCall
 {
+    uint64_t nowMs = 0; // monotonic time, supplied by the caller (tests use a fake clock)
     Handle queue = 0;
     uint32_t waitSemaphores = 0;
     uint32_t swapchainCount = 0;
@@ -264,6 +265,7 @@ class Registry
         std::vector<RecordId> swapchainIds; // distinct, ever presented here
         std::vector<RecordId> deviceIds;    // distinct, ever presented here
         uint64_t nextDecade = 10;
+        uint64_t lastReportMs = 0;
         bool reported = false;
         Identity last;
 
@@ -658,12 +660,16 @@ class Registry
                     why = std::to_string(window.presents) + " presents";
             }
 
+            if (why.empty() && call.nowMs >= window.lastReportMs && call.nowMs - window.lastReportMs >= 60000)
+                why = "60 s heartbeat";
+
             if (why.empty())
                 continue;
 
             lines.push_back(Line(window, why, call.swapchains[i], *swapchain, owner, ownerHandle, call));
 
             window.reported = true;
+            window.lastReportMs = call.nowMs;
             window.last = now;
             window.waitsMin = UINT32_MAX;
             window.waitsMax = 0;

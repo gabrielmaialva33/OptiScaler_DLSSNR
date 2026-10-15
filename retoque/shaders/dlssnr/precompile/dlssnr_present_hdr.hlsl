@@ -17,8 +17,8 @@
 // DlssNr_PresentHdr_Dx12.cpp picks the header up through __has_include; without it the conversion reports itself
 // unavailable, an HDR swapchain stays declined, and the menu offers nothing.
 //
-// No SPIR-V target yet: there is no Vulkan present host to consume it (design section 5.3). The bindings carry the
-// VK_MODE spellings already, so that target is a build step when the host exists, not a rewrite.
+// Also rebuilt as SPIR-V with -spirv -D VK_MODE. DlssNr_PresentHdr_Vk.h consumes it for the Vulkan present host;
+// that host builds the immutable conversion bundle on its model worker, and records both modes around NR.
 
 #ifdef VK_MODE
 [[vk::binding(0, 0)]]

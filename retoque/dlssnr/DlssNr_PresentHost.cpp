@@ -172,6 +172,7 @@ void PresentHost::_ReleaseBuilt()
     _sourceFormat = 0;
     _recorded = false;
     _recordedPass = false;
+    _hdrRecordedProfile = 0;
     _resetOwed = true;
     _motionResetOwed = true;
 }
@@ -436,6 +437,7 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
 {
     _recorded = false;
     _recordedPass = false;
+    _hdrRecordedProfile = 0;
     _motionRecorded = false;
 
     if (_failed || device == nullptr || cmdList == nullptr || source == nullptr)
@@ -547,6 +549,8 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         return false;
     }
 
+    const uint32_t hdrShaderProfile =
+        decision.profile == PresentColour::Hdr10 ? PresentHdr::kProfileHdr10 : PresentHdr::kProfileScRgb;
     // The HDR conversion's pass, on the first HDR frame and then for the host's life: built after _Ensure, which
     // releases what it rebuilds. A device that cannot store to this format from a shader declines the frame here,
     // before the frame's list carries anything (section 5.4: asked of the device, not assumed).
@@ -559,6 +563,11 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
                                  : !_hdr->IsInit()                    ? PresentColourText::kNotBuilt
                                  : !_hdr->Supports(sourceDesc.Format) ? PresentColourText::kNoTypedStore
                                                                       : nullptr;
+        if (hdrRefusal == nullptr &&
+            (!_hdr->ValidResources(source, source, _toWorking->Buffer(), hdrShaderProfile, PresentHdr::kModeDecode) ||
+             !_hdr->ValidResources(source, _toWorking->Buffer(), _fromWorking->Buffer(), hdrShaderProfile,
+                                   PresentHdr::kModeEncode)))
+            hdrRefusal = PresentColourText::kResourceContract;
         if (hdrRefusal != nullptr)
         {
             _resetOwed = true;
@@ -567,7 +576,7 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
             return false;
         }
 
-        NotePresentHdr(decision.profile, nullptr, true);
+        NotePresentHdr(decision.profile, nullptr, false);
     }
 
     // The guides' zeros and the model's creation happen once, on this host's own lists, before the
@@ -602,8 +611,6 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     // HDR: the source decoded into the working colour as linear Rec.709 in scRGB units, in place of the plain
     // conversion, and both dispatches timed as one conversion sample (finished before the caller closes the list).
     std::optional<GpuTiming::Conversion> hdrTiming;
-    const uint32_t hdrShaderProfile =
-        decision.profile == PresentColour::Hdr10 ? PresentHdr::kProfileHdr10 : PresentHdr::kProfileScRgb;
     bool convertedIn = false;
     if (hdr)
     {
@@ -655,8 +662,9 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     ID3D12Resource* capturedMotion = nullptr;
     DlssNrFrameInfo captured {};
 
+    bool gameGuidesHold = false;
     if (CapturedPresentGuides(cmdList, &capturedDepth, &capturedMotion, &captured, queue, this, sourceWidth,
-                              sourceHeight))
+                              sourceHeight, &gameGuidesHold))
     {
         // The capture describes its own guides -- their subrects, their motion encoding, whether depth
         // is inverted -- and none of that is knowable from here. What stays is this host's account of
@@ -698,11 +706,17 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         }
     }
 
+    // What a frame without the game's guides runs on, for the status line and the menu's guides line.
+    if (capturedMotion == nullptr)
+        NotePresentGuideFallback(motion != _guides.Motion());
+
     // Zero guides tell the model nothing moved, and it blends each frame with its history accordingly:
     // ghosts and doubled edges under a moving camera (Generation Zero, 2026-09-24). Opt-in, because a
     // slow isometric camera (Divinity) was measured fine with history, and history is what smooths.
-    // Keyed on the motion, not the depth: synthesized motion keeps the zero depth and needs no reset.
-    if (motion == _guides.Motion() && Config::Instance()->DlssNrZeroGuideReset.value_or_default())
+    // Keyed on the motion, not the depth: synthesized motion keeps the zero depth and needs no reset. Not on a single
+    // frame whose game guides were refused while they still hold the history (present-real-guides.md, D3): that
+    // frame is a miss, not a scene without motion, and a reset there would undo what the game's guides built.
+    if (motion == _guides.Motion() && Config::Instance()->DlssNrZeroGuideReset.value_or_default() && !gameGuidesHold)
     {
         // Policy only if nothing real was already owed: a host rebuilt at the same size carries a genuine
         // reset in from PresentFrameDefaults, and that one must still read as a cut.
@@ -758,6 +772,7 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     Transition(cmdList, _fromWorking->Buffer(), _outputState, D3D12_RESOURCE_STATE_COPY_SOURCE);
 
     _recordedPass = true;
+    _hdrRecordedProfile = hdr ? static_cast<uint32_t>(decision.profile) : 0;
     return true;
 }
 
@@ -778,6 +793,8 @@ void PresentHost::ConfirmExecuted()
 
     if (_recordedPass)
     {
+        if (_hdrRecordedProfile != 0)
+            NotePresentHdr(static_cast<PresentColour>(_hdrRecordedProfile), nullptr, true);
         // The model has seen a frame, so the next one has a history to continue from, and the serial
         // counts frames the model actually saw rather than frames that went past.
         _resetOwed = false;
@@ -786,6 +803,7 @@ void PresentHost::ConfirmExecuted()
 
     _recorded = false;
     _recordedPass = false;
+    _hdrRecordedProfile = 0;
 }
 
 void PresentHost::AbandonRecording()
@@ -810,6 +828,7 @@ void PresentHost::AbandonRecording()
 
     _recorded = false;
     _recordedPass = false;
+    _hdrRecordedProfile = 0;
 }
 
 } // namespace DlssNr

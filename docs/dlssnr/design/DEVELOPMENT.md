@@ -65,8 +65,8 @@ control, no missing one.
 | 2 scan | ≥1 anchor, none selected | **Trim (x the scan)** + Reset only (Paper white hidden; Anchor captures the trimmed effective white) | Anchor here; table rows (× delete, `>` = active); readout |
 | 2 scan | ≥1 anchor, row selected | **Paper white (editing point N)** + Trim + Reset | as above; selected row shows `[editing]` |
 | 2 scan | exactly 1 anchor | + **"the number runs the other way"** checkbox | (checkbox hidden at 0 or ≥2 anchors) |
-| any | present frames of an HDR10 or scRGB swapchain being converted (`HdrPresent` on, `GetPresentHdrStatus().converted`) | **Paper white (x the display's SDR white)** + Reset only -- the same stored value as Paper white, labelled for what it multiplies; Source combo, Trim, scan rows, highlight guard and recovery hidden | **HDR output (HDR10 and scRGB)** checkbox above it; green readout "HDR10, SDR white 203 nits x 1.00" |
-| any | a present host sees a ten-bit or FP16 swapchain the switch acts on, not converting (switch off, or declined) | the row of the source above, unchanged | **HDR output** checkbox; readout "Off: this HDR10 swapchain is shown as the game rendered it." or the decline reason (amber). No checkbox at all on an SDR swapchain, in a build without the conversion's shader, or two seconds after the last such frame |
+| any | present frames of an HDR10 or scRGB swapchain being converted (`HdrPresent` on, `GetPresentHdrStatus().converted`) | **Paper white (x the display's SDR white)** + Reset only -- the same stored value as Paper white, labelled for what it multiplies; Source combo, Trim, scan rows, highlight guard and recovery hidden | **HDR output (HDR10 and scRGB)** checkbox above it; green readout "HDR10, SDR white N nits x 1.00" with the queried value/source (203-nit fallback when unavailable; bridge uses the fallback) |
+| any | a present host sees a ten-bit or FP16 swapchain the switch acts on, not converting (switch off, or declined) | at HookMethod=2, no white/source controls and an inactive HDR explanation; otherwise the row of the source above | **HDR output** checkbox; readout "Off: this HDR10 swapchain is shown as the game rendered it." or the decline reason (amber). No checkbox at all on an SDR swapchain, in a build without the conversion's shader, or two seconds after the last such frame |
 
 The two HDR rows sit above the source rows (docs/dlssnr/design/hdr-present-conversion.md section 5.5); the
 checkbox is `RenderPresentHdr` in `DlssNr_Menu.cpp`.
@@ -118,12 +118,38 @@ are checked top to bottom and the first that applies wins.
 | handed to the writer | shown, disabled | "Writing the files..." |
 | the capture folder could not be created this session | shown, disabled | "The capture folder could not be created (see the log)." |
 | a recording never completed this session (given up) | shown, disabled | "The GPU never confirmed the copies; nothing was written, and the capture is off for this session." |
-| otherwise | shown, **enabled** | "Saved <stem> (the pair and its .json)" after a capture; the last refusal or failure in amber; nothing before the first |
+| otherwise | shown, **enabled** | "Saved <stem> (the pair and its .json)" after a capture; the last refusal or failure in amber, except a refusal for Compare, the debug view or the proxy once that setting is off (`ReasonStillApplies`); nothing before the first |
 
 Invariant checks against this table: absent wherever there is no frame of the pass to capture (rule 2); one control
-(rule 3); every disabled row says why. A frame format the files cannot hold is refused when the press reaches a
-frame and the reason shown on the line, not predicted before the press: predicting it would cost a store on every
-frame, and the capture's idle cost is one load (comparison-capture.md, section 4.7).
+(rule 3); every disabled row says why. A frame format the files cannot hold, or a surface that is not a single-sample
+2D texture, is refused when the press reaches a frame (`RefusalFor`, settings before surfaces), and the reason is
+shown on the line. It is not predicted before the press: predicting it would cost a store on every frame, and before
+the first request the capture's idle cost is one relaxed load per call site (comparison-capture.md, section 4.7).
+
+### 2.4 Status → present guides line (`DlssNr_Menu.cpp`, `PresentGuidesLine`)
+
+One read-only line under the status line (present-real-guides.md, step 1). `GuidesLine` in
+`DlssNr_PresentGuideIdentity.h` writes it from the last second of a present host's outcomes, and
+`tests/nr-present-guide-identity` holds every row; the menu only draws it. Rows are checked top to bottom.
+
+| State | Line |
+|-------|------|
+| `[DlssNr] Enabled` off, native Vulkan, or the D3D11 route line in its no-pass row | **none** |
+| no present host decided in the last two seconds (the upscaled route at HookMethod=1 or Auto's, the pass declined before its pick; a D3D11 bridge host built at HookMethod=2 keeps deciding after a switch to 1, and its line stays, truthfully) | **none** |
+| every present of the second skipped (nothing captured since the last capture used) | "Guides: no new frame from the upscaler; frames are shown as the game drew them" |
+| the game's guides used on every frame the pass ran on | "Guides: the game's depth and motion, on every frame" ("..., on every frame the pass ran on" when some skipped) |
+| the game's guides on some frames | "Guides: the game's depth and motion on U of P frames; R refused (reason), N with none" (+ ", shown as the game drew them" when the D3D12 pass waited on them) |
+| none used, and the D3D12 pass waited (`RequireDlss`) | "Guides: none the rules accept yet; frames are shown as the game drew them" |
+| none used, the last frame without them ran on synthesized motion | "Guides: synthesized motion" |
+| none used, otherwise (zeros; the D3D11 bridge never waits, whatever `RequireDlss` says) | "Guides: zero (no motion)" |
+
+The last three add "; the game's refused on R of P frames (reason)" when the rules refused any, and every row but the
+first two and the skip row adds "; S with no new frame from the upscaler" when some presents skipped. The reason is
+the most frequent refusal of the second. "Waited" is what the host reported doing, not the setting: the D3D12 pass's
+`RequireDlss` skip reports it, and a frame that ran on zeros or synthesized motion reports that instead.
+
+Invariant checks against this table: it is a statement, not a control, and it exists only while a present host is
+deciding (rule 2); the status line above it never names the guides from `g_temporalValid` (`nr-invariants`, section 6).
 
 ---
 

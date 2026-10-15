@@ -26,6 +26,21 @@
 // gZero forces zeros (the estimator has no trustworthy field this frame). FFX already writes zero
 // vectors on a scene change and on the first frames after a reset, so this is belt and braces.
 
+#if defined(VK_MODE)
+// One push constant block, and storage images of named formats (nr-vulkan-present-host.md, "Stage 5").
+struct SynthMotionExpandConstants
+{
+    uint2 gExtent;
+    uint2 gFlowSize;
+    uint gZero;
+    uint3 gPad;
+};
+[[vk::push_constant]] SynthMotionExpandConstants gExpand;
+#define gExtent gExpand.gExtent
+#define gFlowSize gExpand.gFlowSize
+#define gZero gExpand.gZero
+#define SM_VK_FORMAT(format) [[vk::image_format(format)]]
+#else
 cbuffer SynthMotionExpand : register(b0)
 {
     uint2 gExtent;   // colour extent
@@ -33,13 +48,15 @@ cbuffer SynthMotionExpand : register(b0)
     uint gZero;
     uint3 gPad;
 };
+#define SM_VK_FORMAT(format)
+#endif
 
-RWTexture2D<int2> r_flow : register(u0);
-RWTexture2D<float2> rw_motion : register(u1);
+SM_VK_FORMAT("rg16i") RWTexture2D<int2> r_flow : register(u0);
+SM_VK_FORMAT("rg16f") RWTexture2D<float2> rw_motion : register(u1);
 // Level-0 luma, R8_UINT at the colour extent, read through UAVs like every internal texture of the
 // estimator (synth_motion_callbacks.h). u2 is this frame's, u3 the previous frame's.
-RWTexture2D<uint> r_luma : register(u2);
-RWTexture2D<uint> r_luma_previous : register(u3);
+SM_VK_FORMAT("r8ui") RWTexture2D<uint> r_luma : register(u2);
+SM_VK_FORMAT("r8ui") RWTexture2D<uint> r_luma_previous : register(u3);
 
 // 4 levels of mean absolute difference, over weights that sum to 16.
 static const uint kZeroFloor = 64;

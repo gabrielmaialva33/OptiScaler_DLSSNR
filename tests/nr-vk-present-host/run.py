@@ -17,6 +17,7 @@ dlssnr = root / 'retoque/dlssnr'
 registry = (dlssnr / 'DlssNr_VkPresentRegistry.h').read_text()
 transport = (dlssnr / 'DlssNr_VkPresentTransport.h').read_text()
 nr = (dlssnr / 'DlssNr_VkPresentNr.h').read_text()
+build = (dlssnr / 'DlssNr_VkPresentBuild.h').read_text()
 owner = (dlssnr / 'DlssNr_VkModelOwner.h').read_text()
 model_h = (dlssnr / 'DlssNr_VkPresentModel.h').read_text()
 feature_vk = (dlssnr / 'DlssNrFeature_Vk.cpp').read_text()
@@ -112,10 +113,13 @@ print('PASS: every fork QueueSubmit/QueueSubmit2/KHR call avoids literal zero co
 # --- Source guards ----------------------------------------------------------------------------------------------
 
 # The headers are standard library only (the registry includes the transport header, the transport header the cold-NR
-# one), so this suite compiles them as production does.
-for text in (nr, owner):
+# one, the cold-NR one the build's), so this suite compiles them as production does.
+for text in (build, owner):
     includes = sorted(l.strip() for l in text.splitlines() if l.startswith('#include'))
     assert all(re.fullmatch(r'#include <\w+>', l) for l in includes), includes
+includes = sorted(l.strip() for l in nr.splitlines() if l.startswith('#include'))
+assert includes[0] == '#include "DlssNr_VkPresentBuild.h"', includes
+assert all(re.fullmatch(r'#include <\w+>', l) for l in includes[1:]), includes
 includes = sorted(l.strip() for l in transport.splitlines() if l.startswith('#include'))
 assert includes[0] == '#include "DlssNr_VkPresentNr.h"', includes
 assert all(re.fullmatch(r'#include <\w+>', l) for l in includes[1:]), includes
@@ -228,7 +232,7 @@ assert 'if (prep.wait == VK_NULL_HANDLE) return next(queue, info);' in flat(pres
 prepare = code(function(host, 'Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView* view)'))
 # Lock order: the presenting queue's present lock (the hook, first), the transport's, then a borrowed queue's present and
 # submit locks, try-locked only after the ring and the recording, so no wait above holds them.
-assert prepare.index('std::lock_guard lock(g_transportMutex)') < prepare.index('try_lock_for')
+assert prepare.index('TransportLock lock;') < prepare.index('try_lock_for')
 assert prepare.index('RecordWork(') < prepare.index('try_lock_for')
 assert prepare.index('WaitSlot(') < prepare.index('try_lock_for')
 assert prepare.index('borrowedPresent.try_lock_for') < prepare.index('borrowedSubmit.try_lock_for')
@@ -296,7 +300,7 @@ for block in blocks:
 assert prepare.index('DecideNr(') < prepare.index('RecordWork(') < prepare.index('try_lock_for')
 record = code(function(host, 'Recorded RecordWork('))
 assert record.index('cmdCopyImage(buffer, image,') < record.index('cmdBlitImage(buffer, work,') < \
-    record.index('dev.model->Record(*nr)') < record.index('cmdBlitImage(buffer, nr->image,') < \
+    record.rindex('dev.model->Record(*nr)') < record.index('cmdBlitImage(buffer, nr->image,') < \
     record.index('cmdCopyImage(buffer, work,')
 # A model frame counts only once its work buffer was submitted: exactly the two submits that carry it, each on success.
 assert prepare.count('recording.Submitted(slot);') == 2
@@ -337,7 +341,7 @@ decide = code(function(host, 'NrDecision DecideNr('))
 assert decide.index('->Admit(') < decide.index('dev.modelSwapchain = sc.id;')
 assert decide.index('DlssNrEnabled') < decide.index('StandDown(dev)')
 assert decide.index('PresentHostMustYield') < decide.index('ClaimModelForPresentHost') < decide.index('->Admit(')
-for cheap in ('sc.colour.sdr', 'dev.nrReady', 'MissingFormatFeatures('):
+for cheap in ('colour.Eligible()', 'dev.nrReady', 'MissingFormatFeatures('):
     assert decide.index(cheap) < decide.index('ClaimModelForPresentHost'), cheap
 # Present semaphores of a destroyed swapchain are freed after the destroy returned, never before it.
 destroy = host[host.index('void OnDestroySwapchain('):]
@@ -352,23 +356,27 @@ assert after_upscale.index('ClaimModelForAfterUpscale(device)') < after_upscale.
 assert after_upscale.index('colour == nullptr || depth == nullptr || motion == nullptr') < \
     after_upscale.index('ClaimModelForAfterUpscale(device)')
 assert 'g_vk.' not in code(model), 'the present model must not touch the after-upscale route\'s state'
-record_model = code(function(feature_vk, 'bool VkPresentModel::Record(const VkPresentNrFrame& frame)'))
-assert 'encode.Passthrough = 1u;' in record_model and 'encode.HighlightRecovery = 0u;' in record_model
+record_model = code(function(feature_vk, 'bool VkPresentModel::Record(const VkPresentNrFrame& input)'))
+assert 'encode.Passthrough = frame.hdrProfile != 0 ? 0u : 1u;' in record_model
+assert 'PresentHdr::kSdrWhiteScRgb * scale' in record_model
 # One set of constants, the encode's; the downsample and the resolve are copies of it, so the passthrough gate holds in
 # every place the shader reproduces the encode.
 assert re.findall(r'DlssNrConstants (\w+)', record_model) == ['encode', 'down', 'resolve'], record_model
 assert 'DlssNrConstants down = encode;' in record_model and 'DlssNrConstants resolve = encode;' in record_model
-admit = code(function(feature_vk, 'VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height)'))
+admit = code(function(feature_vk, 'VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height, '))
 assert 'std::clamp(DlssNr::WorkingScale(), 0.25f, 1.0f)' in admit  # never above native on zero guides
-assert admit.index('pending.size() >= VkPresentHost::kNrInFlightMax') < admit.index('LoadForwarderShared()')
-assert 'old.waitFor = m.pending;' in admit and 'DeviceWaitIdle' not in code(model)
+retire = code(function(feature_vk, '    void RetireProduct()'))
+assert 'old.waitFor = pending;' in retire and 'DeviceWaitIdle' not in code(model)
 completed = code(function(feature_vk, 'std::optional<double> VkPresentModel::Completed(uint64_t ticket)'))
 assert 'm.FreeRetired();' in completed and 'VK_QUERY_RESULT_WAIT_BIT' not in completed
 release = code(function(feature_vk, 'void VkPresentModel::Release()'))
 assert 'Shutdown' not in release, 'NGX goes with the device (ShutdownPresentNgx), not with the model'
 # The pass's slot ring: a frame is admitted only while the oldest one in flight is less than a ring behind it.
 assert 'm.dispatches + 3 - oldest > kPresentPassSlots' in admit
-assert release.index('if (!m.pending.empty())') < release.index('g_fwd.release(')
+# A queued job is called off first; a running one, frames in flight or a build-lost device abandon instead of freeing.
+assert release.index('m.CancelQueued();') < \
+    release.index('if (!m.pending.empty() || m.JobState() == BuildState::Running || m.Lost())') < \
+    release.index('g_fwd.release(')
 abandon = code(function(feature_vk, 'void VkPresentModel::Abandon()'))
 assert not re.search(r'\bvk[A-Z]\w*\(|g_fwd\.|Destroy', abandon), abandon
 # The model's calls go through the forwarder (its __try isolation), and its fault ends it.
@@ -381,24 +389,61 @@ assert 'using PFN_NrVkShutdown1 = int(__cdecl*)(void*, unsigned int*);' in forwa
 assert 'using PFN_Shutdown1 = NVSDK_NGX_Result (*)(VkDevice, unsigned int*);' in feature_vk
 assert 'VULKAN_Shutdown1()(' not in code(model) and 'shutdown(device, &remaining);' in feature_vk
 
+# HDR conversion is a per-build product, never a present-thread allocation. Its fixed descriptor sets and uniform
+# records are read-only across frames; replacement follows the same completion tickets as the feature and images.
+hdr = (root / 'retoque/shaders/dlssnr/DlssNr_PresentHdr_Vk.h').read_text()
+hdr_record = code(function(hdr, '    void Record('))
+assert not re.search(r'vk(?:Create|Allocate|Update|Map|Wait)', hdr_record)
+assert 'VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT' in hdr
+assert 'vkGetPhysicalDeviceImageFormatProperties(' in hdr
+assert 'minUniformBufferOffsetAlignment' in hdr and 'mode * stride, 16' in hdr
+run_hdr = code(function(feature_vk, 'void RunBuild('))
+assert run_hdr.index('job.hdr.Create(') < run_hdr.index('job.dev.submit')
+assert 'job.lost = job.lost || job.hdr.lost;' in run_hdr
+for signature in ('void FreeBuild(',):
+    assert 'hdr.Destroy(' in code(function(feature_vk, signature))
+assert 'hdr = {};' in code(function(feature_vk, 'void ForgetBuild('))
+assert 'old.hdr = hdr;' in retire and 'hdr = {};' in retire
+assert 'm.hdr.Destroy(' in release and 'm.hdr = {};' in abandon
+assert 'if (Building() || Lost())' in code(function(feature_vk, '    void FreeRetired()'))
+loss = code(function(feature_vk, '    bool Lost() const'))
+assert loss.index('JobState()') < loss.index('state == BuildState::Done') < loss.index('job->lost')
+assert 'state == BuildState::Failed' in loss
+assert 'return _impl->Lost();' in code(function(feature_vk, 'bool VkPresentModel::DeviceLost() const'))
+assert release.index('(void) m.Adopt();') < release.rindex('if (m.Lost())') < release.index('m.FreeRetired();')
+assert 'm.hdrFailure' in admit and 'm.hdrFailure.reset();' in admit
+assert 'm.hdr.Record(cmd, m.width, m.height, PresentHdr::kModeDecode)' in record_model
+assert 'm.hdr.Record(cmd, m.width, m.height, PresentHdr::kModeEncode)' in record_model
+assert record_model.index('PresentHdr::kModeDecode') < record_model.index('g_fwd.evaluate(') < record_model.index('PresentHdr::kModeEncode')
+assert 'VK_IMAGE_LAYOUT_UNDEFINED' in record_model  # discarded recordings leave no stale layout bookkeeping
+assert 'HdrCopy(cmd, m.hdrEncoded.image, input.image, m.width, m.height)' in record_model
+assert '203.0 nits (203-nit fallback)' in feature_vk
+print('PASS: HDR resource lifetime, immutable descriptors, formatless per-format checks, worker-only allocation and decode/model/encode order')
+
 # The way back from the after-upscale route (DOOM Eternal, 2026-10-14; DlssNr_VkModelOwner.h). Begun only with no
 # model of the host's on the device and the route quiet there; followed at every present, before any refusal.
 housekeep_flat = flat(housekeep)
-assert re.search(r'if \(dev\.handBack\.active\) PollHandBack\(dev\); else if \(dev\.model == nullptr && .*'
-                 r'DlssNr::AfterUpscaleIdleOn\(dev\.device\) && CouldRunModel\(dev\)\) StartHandBack\(dev\);',
-                 housekeep_flat), housekeep_flat
-assert housekeep.index('StartHandBack(dev)') < housekeep.index('if (dev.model == nullptr)')
-could_run = code(function(host, 'bool CouldRunModel(DeviceTransport& dev)'))
-for needed in ('DlssNrEnabled', 'dev.nrReady', 'dev.lost', 'sc.colour.sdr', 'sc.nrOff.empty()', '!sc.retired',
-               'PresentHostMustYield(dev.device)', 'MissingFormatFeatures(dev, sc.colour.raw).empty()'):
+assert housekeep.index('AfterUpscaleIdleOn(dev.device)') < housekeep.index('HandBackBlockReason(') < \
+    housekeep.index('StartHandBack(dev);')
+assert 'HandBackBlocked(dev, reason);' in housekeep and 'dev.handBackDiagnostics.Reset();' in housekeep
+assert 'handBackNotBefore =' not in housekeep  # F7 off does not postpone the already-due hand-back
+could_run = code(function(host, 'std::string ModelUnavailable(DeviceTransport& dev)'))
+for needed in ('dev.nrReady', 'dev.lost', 'PlanColour(', 'sc.nrOff.empty()', 'sc.retired',
+               'PresentHostMustYield(dev.device)', 'MissingFormatFeatures(dev, sc.colour.raw,'):
     assert needed in could_run, needed
-# Never waits: every queue's present and submit locks try-locked (a refusal tries again at the next present); the
-# fences made before the hand-back begins, and submitted only after it began, each on an empty batch.
+assert 'DlssNrEnabled.value_or_default()' in housekeep
+# The real try-only lock helper is shared with host tests; StartHandBack's RAII vector releases earlier locks.
 start_hb = code(function(host, 'void StartHandBack(DeviceTransport& dev)'))
-assert start_hb.count('std::try_to_lock') == 2 and 'try_lock_for' not in start_hb and '.lock()' not in start_hb
-assert start_hb.index('locks->present, std::try_to_lock') < start_hb.index('locks->submit, std::try_to_lock')
-assert start_hb.index('try_to_lock') < start_hb.index('createFence(') < \
+try_locks = code(function(nr, 'inline const char* TryHandBackQueueLocks('))
+assert try_locks.count('std::try_to_lock') == 2 and 'try_lock_for' not in try_locks and '.lock()' not in try_locks
+assert try_locks.index('locks.present, std::try_to_lock') < try_locks.index('locks.submit, std::try_to_lock')
+assert start_hb.index('TryHandBackQueueLocks(') < start_hb.index('createFence(') < \
     start_hb.index('BeginAfterUpscaleHandBack(') < start_hb.index('queueSubmit(')
+assert 'HandBackBlocked(dev,' in start_hb and '1000);' in start_hb
+assert 'fence creation returned' in function(host, 'void StartHandBack(DeviceTransport& dev)')
+assert prepare.index('Housekeep(*dev);') < prepare.index('prep.warnings.push_back(std::move(line));', prepare.index('Housekeep(*dev);')) < \
+    prepare.index('return skip(Skip::MultiSwapchain);')
+assert 'call.nowMs = PresentNowMs();' in present_hook
 assert 'dev.fn.queueSubmit(queues[submitted].first, 1, &submitInfo, fences[submitted])' in start_hb
 assert start_hb.index('queueSubmit(') < start_hb.index('held.clear();')
 # A failed drain submit calls the hand-back off; a lost device destroys nothing, fences included.
@@ -476,9 +521,166 @@ print('PASS: the way back (begun only with no model here and the route quiet sin
       'signalled and the token was released, without a device-wide wait; the route records nothing before it asks; '
       'the device going ends it, the route freed only where the GPU is proven done)', flush=True)
 
+# --- Off the present path (DOOM Eternal's startup hang, 2026-10-14) -------------------------------------------------
+# Nothing opaque or unbounded runs under the host's locks: the present path neither initialises NGX, brings the core up,
+# creates the pass, allocates the model's images nor creates a feature; the builder thread does, and takes no lock of the
+# host's or the route's. While a job is queued or running, the present path makes no NGX call for the model.
+for name, text in (('Admit', admit), ('Record', record_model)):
+    for forbidden in ('g_fwd.init', 'g_fwd.create', 'g_fwd.probe', 'NVNGXProxy::', 'CreateImageOn(', 'DlssNr_Vk>(',
+                      'vkCreate', 'vkAllocate', 'LoadForwarderShared', 'vkCmdClearColorImage'):
+        assert forbidden not in text, (name, forbidden)
+assert admit.index('DecideBuild(') < admit.index('m.Adopt();') and 'm.Request(want);' in admit
+assert admit.index('DecideBuild(') < admit.index('pending.size() >= VkPresentHost::kNrInFlightMax')
+assert re.search(r'return \{ NrSkip::Building,', admit)
+assert 'm.Building()' in record_model.split('return false;')[0]  # no evaluate while a job runs
+free_retired = code(function(feature_vk, '    void FreeRetired()'))
+assert re.match(r'\{\s*if \(Building\(\) \|\| Lost\(\)\)\s*return;', free_retired), free_retired
+builder_part = code(feature_vk[feature_vk.index("// --- The model's builds, off the present path"):
+                               feature_vk.index('struct VkPresentModel::Impl')])
+run_build = code(function(feature_vk, 'void RunBuild(PresentBuildJob& job)'))
+for needed in ('g_fwd.init(', 'NVNGXProxy::InitVulkan(', 'g_fwd.create(', 'CreateImageOn(', 'job.dev.submit(',
+               'make_unique<DlssNr_Vk>(', 'job.pass->Prepare(cmd)', 'vkCmdClearColorImage('):
+    assert needed in run_build, needed
+# Its only CPU wait for the GPU is the host's submit (bounded); it never touches the route's state or locks.
+for forbidden in ('g_vk.', 'g_vkMutex', 'g_ownerMutex', 'DeviceWaitIdle', 'QueueWaitIdle', 'WaitForFences', 'Sleep('):
+    assert forbidden not in builder_part, forbidden
+assert builder_part.count('std::thread(') == 1 and 'std::thread(' in code(function(feature_vk, '    void Post('))
+# Orphaned (the device lost or destroyed): what the job made is forgotten, never freed.
+assert re.search(r"if \(job\.orphaned\.load\(std::memory_order_acquire\) \|\| job\.lost \|\| !free\)\s*ForgetBuild\(job\);",
+                 run_build)
+# The GPU's own work is waited for before the product is handed over; a timeout or a lost device frees nothing.
+assert re.search(r'if \(submitted == VK_TIMEOUT\)\s*return stop\([^;]*,\s*false\);', run_build, re.S)
+assert re.search(r'if \(submitted == VK_ERROR_DEVICE_LOST\)\s*\{\s*job\.lost = true;\s*return stop\([^;]*, false\);',
+                 run_build, re.S)
+assert re.search(r'if \(submitted == VK_INCOMPLETE\)\s*return stop\([^;]*, false\);', run_build, re.S)
+# The model's state is the present path's; the builder's product is handed over only once the job's state says so.
+adopt = code(function(feature_vk, '    bool Adopt()'))
+assert "over->state.load(std::memory_order_acquire) == BuildState::Failed" in adopt
+assert 'job->state.store(job->failure.empty() ? BuildState::Done : BuildState::Failed,' in flat(builder_part)
+# Releasing and abandoning respect a job under way: never freed under the builder; abandoned orphans it.
+abandon_model_fn = code(function(feature_vk, 'void VkPresentModel::Abandon()'))
+assert 'm.job->orphaned.store(true, std::memory_order_release);' in abandon_model_fn
+assert 'return _impl->pending.size() + (_impl->JobState() == BuildState::Running ? 1 : 0);' in flat(feature_vk)
+# A job is forgotten, never destroyed, when its last reference goes; an orphaned one's product is forgotten by the
+# builder and never handed over.
+assert 'PresentBuildJob::~PresentBuildJob() { ForgetBuild(*this); }' in feature_vk
+run_builder = code(function(feature_vk, '    void Run()'))
+assert run_builder.index('RunBuild(*job);') < run_builder.index('ForgetBuild(*job);')
+# The NGX device records' lock is never held across an NGX call.
+for block in re.findall(r'std::lock_guard<std::mutex> lock\(g_presentNgxMutex\);(.*?)\n\s*\}', run_build, re.S):
+    assert 'NVNGXProxy::' not in block and 'ShutdownPresentCore' not in block and 'g_fwd.' not in block, block
+
+# The host: the builder's submit takes the work queue's locks as a borrower, bounded, never the transport lock, and
+# waits for its fence only after giving them back; at vkDestroyDevice a build under way is waited for, bounded, before
+# anything of the model's is freed; the model is asked with the round trip's work family.
+build_submit = code(function(host, 'VkResult BuildSubmit(const DeviceFns& fn, VkDevice device, VkCommandBuffer cmd,'))
+# Short tries: the present lock bounded per slice, the submit lock never waited for while the present lock is held,
+# nothing taken blocking, never the transport lock; the fence waited for in slices after both locks are given back,
+# and the orphan flag checked between slices.
+assert 'present.try_lock_for(std::chrono::milliseconds(kBuildSliceMs))' in build_submit
+assert 'submit.try_lock()' in build_submit and 'submit.try_lock_for' not in build_submit
+assert '.lock()' not in build_submit and 'TransportLock' not in build_submit and 'g_transportMutex' not in build_submit
+assert build_submit.index('submit.try_lock()') < build_submit.index('fn.queueSubmit(queue, 1, &info, fence)') < \
+    build_submit.index('present.unlock();') < build_submit.index('waitForFences(')
+assert re.search(r'if \(cancelled\.load\(std::memory_order_acquire\)\)\s*return VK_INCOMPLETE;', build_submit)
+assert 'fn.waitForFences(device, 1, &fence, VK_TRUE, slice)' in build_submit
+assert re.search(r'if \(result != VK_ERROR_DEVICE_LOST\)\s*fn\.destroyFence', build_submit)
+assert re.search(r'if \(result == VK_SUCCESS\)\s*fn\.destroyFence\(device, fence, nullptr\);\s*return result;',
+                 build_submit)
+assert 'dev.model->Admit(sc.extent.width, sc.extent.height, workFamily, colour.profile, colour.raw)' in decide
+# vkDestroyDevice: a build under way is ended -- waited for, then orphaned and waited for again -- before anything,
+# the lost branch included; a build that lost the device marks it lost there and in DecideNr.
+end_build = code(function(host, 'void EndModelBuild(DeviceTransport& dev)'))
+assert end_build.index('WaitBuild(kBuildDestroyWaitMs)') < end_build.index('Orphan();') < \
+    end_build.index('WaitBuild(kBuildOrphanWaitMs)')
+assert teardown.index('EndModelBuild(dev);') < teardown.index('if (dev.lost)') < teardown.index('InFlight()')
+assert re.search(r'if \(dev\.model->DeviceLost\(\)\)\s*MarkLost\(dev\);', decide)
+
+# The stall watchdog: started only once Install is past its gate and installed; it reads the activity table and logs,
+# and takes no lock.
+install_body = code(function(host, 'void DlssNr::VkPresentHost::Install(HMODULE vulkan1)'))
+assert install_body.index('DlssNrVulkanPresentHost.value_or_default()') < install_body.index('g_installed = true;') < \
+    install_body.index('std::thread(')
+watchdog = install_body[install_body.index('std::thread('):]
+for forbidden in ('lock', 'Lock', 'Mutex', 'mutex'):
+    assert forbidden not in watchdog, forbidden
+assert 'Activities().Check(ActivityNowMs())' in watchdog and 'Sleep(500)' in watchdog
+# Every entry point that can hold or wait for a host lock records an activity.
+for name in ('VkResult OnPresent(', 'void OnDestroyDevice(', 'void OnDestroySwapchain(', 'VkResult OnCreateSwapchain(',
+             'VkResult LockedQueueCall('):
+    assert 'HostActivity activity(' in code(function(host, name)), name
+assert 'g_transportMutex.lock()' in code(function(host, '    TransportLock()'))
+assert 'std::lock_guard lock(g_transportMutex)' not in code(host)
+
+print('PASS: off the present path (Admit and Record build nothing; the builder does it all, takes no lock of the '
+      "host's or the route's, hands over only once its GPU work is seen complete; no NGX call while a job runs; the "
+      "build's submit borrows the work queue's locks bounded; vkDestroyDevice waits for a build; the watchdog takes "
+      'no lock and starts only installed)', flush=True)
+
 print('PASS: stage-3 guards (decided before recording, counted on submit, seen complete on a fence, freed only idle, '
       'abandoned on loss; after-upscale route asks first; passthrough encode; semaphores freed after the destroy)',
       flush=True)
+
+# --- Stage 5: synthesized motion at the present ------------------------------------------------------------------
+# The estimator (SynthMotion_Vk.*) is made off the present path like the rest of the product -- its pipelines and its
+# images by the builder, their initialisation in the build's own command buffer -- and only recorded on it: before the
+# encode reads the working colour, its field the model's motion guide once Ready, its history advanced on submit,
+# dropped on a discard, its scene-change bit read when the frame's fence was seen.
+synth_vk = (root / 'retoque/shaders/synth_motion/SynthMotion_Vk.cpp').read_text()
+synth_vk_h = (root / 'retoque/shaders/synth_motion/SynthMotion_Vk.h').read_text()
+for forbidden in ('LOG_', 'QueueSubmit', 'WaitIdle', 'WaitForFences', 'vkGetFenceStatus', 'Sleep('):
+    assert forbidden not in code(synth_vk), forbidden
+for name, text in (('Admit', admit), ('Record', record_model)):
+    for forbidden in ('CreateVkImages(', 'CreateVkPipelines(', 'VkUnsupported('):
+        assert forbidden not in text, (name, forbidden)
+# The estimator at the model's working size; and an adoption that latched it off is the product this frame wants (the
+# want is asked again after it), never a second build asking for it again.
+assert 'SynthWanted(synthConfigured, !m.synthOff.empty(), workWidth, workHeight)' in flat(admit)
+assert admit.index('const bool retry = m.Adopt();') < \
+    admit.index('want.synth = VkPresentHost::SynthWanted(synthConfigured, !m.synthOff.empty(), workWidth, workHeight);') \
+    < admit.index('continue;', admit.index('const bool retry = m.Adopt();'))
+assert 'job.synthOff = SynthMotion::VkUnsupported(pd, job.dev.apiVersion);' in run_build
+assert run_build.index('CreateVkPipelines(d, job.synthPipelines') < run_build.index('vkBeginCommandBuffer(cmd')
+assert run_build.index('vkBeginCommandBuffer(cmd') < \
+    run_build.index('SynthMotion::CreateVkImages(d, pd, k.workWidth, k.workHeight, cmd, job.synthImages, job.synthOff)') < \
+    run_build.index('g_fwd.create(') < run_build.index('job.dev.submit(')
+free_build = code(function(feature_vk, 'void FreeBuild(PresentBuildJob& job)'))
+assert 'DestroyVkImages(d, job.synthImages);' in free_build and 'DestroyVkPipelines(job.synthPipelines);' in free_build
+forget_build = code(function(feature_vk, 'void ForgetBuild(PresentBuildJob& job)'))
+assert 'job.synthImages = SynthMotion::VkImages {};' in forget_build and 'Destroy' not in forget_build
+assert 'old.synth = synthImages;' in retire and 'estimator.Restart();' in retire
+free_set = code(function(feature_vk, '    void Free(RetiredSet& set)'))
+assert 'SynthMotion::DestroyVkImages(dev.device, set.synth);' in free_set
+# The estimator reads the model's own input (the encode's proxy, downsampled below native), so its field is on the
+# model's grid; the model then gets the field or the zero guide, both at the working size.
+assert record_model.index('m.pass->Dispatch(cmd, encode,') < record_model.index('modelInput = &m.proxySmall;') < \
+    record_model.index('m.estimator.Record(cmd, m.synthPipelines, m.synthImages, modelInput->view,') < \
+    record_model.index('ChooseMotionGuide(fieldReady, m.workWidth, m.workHeight)') < record_model.index('g_fwd.evaluate(')
+assert 'SynthReset(m.lastSynthMs, now)' in record_model
+assert 'NrResetWithMotion(m.reset, frame.cut, sceneCut,' in flat(record_model)
+assert 'motionGuide, &m.output.ngx' in flat(record_model) and 'guide.width, guide.height, 0, 0, 0, 0' in flat(record_model)
+assert 'guide.scaleX, guide.scaleY);' in flat(record_model)
+# Confirmed with the submit, abandoned with a discard, its scene-change bit read only at completion.
+submitted = code(function(feature_vk, 'void VkPresentModel::Submitted(uint64_t ticket)'))
+discarded = code(function(feature_vk, 'void VkPresentModel::Discarded(uint64_t ticket)'))
+assert 'm.estimator.ConfirmExecuted();' in submitted and 'AbandonRecording' not in submitted
+assert 'm.estimator.AbandonRecording();' in discarded and 'ConfirmExecuted' not in discarded
+assert 'm.estimator.Completed(ticket, m.synthImages);' in completed
+assert 'DestroyVkImages(m.dev.device, m.synthImages);' in release and 'DestroyVkPipelines(m.synthPipelines);' in release
+assert 'm.synthImages = SynthMotion::VkImages {};' in abandon and 'm.synthPipelines = SynthMotion::VkPipelines {};' in abandon
+# The host counts a frame on the field, and hands the model the instance's version (the estimator needs 1.1).
+assert 'out.nrSynthesized = dev->model != nullptr && dev->model->LastFrameSynthesized();' in host
+assert 'device.apiVersion = dev.apiVersion;' in host
+# The project builds the estimator, and its SPIR-V is the committed one (nr-invariants checks the headers).
+for item in (r'<ClCompile Include="..\retoque\shaders\synth_motion\SynthMotion_Vk.cpp" />',
+             r'<ClInclude Include="..\retoque\shaders\synth_motion\SynthMotion_Vk.h" />'):
+    assert item in project, item
+assert 'kVkReadbackSlots = 8;' in synth_vk_h and 'kNrInFlightMax = 4;' in nr  # a slot per frame in flight, and more
+
+print('PASS: stage-5 guards (the estimator made by the builder at the working size, its images initialised in the '
+      'build\'s buffer; recorded on the model\'s own input, its field the motion guide once Ready; an adoption that '
+      'latched it off is not rebuilt; confirmed on submit, dropped on discard, its cut read at completion; freed with '
+      'the product, forgotten on abandon; it logs, submits and waits for nothing)', flush=True)
 
 # The present hook goes in at a device's swapchain creation, after the bundle's own (installed in its vkCreateDevice),
 # so it runs first: application -> NR -> overlay -> present.
@@ -507,7 +709,8 @@ for item in (r'<ClCompile Include="..\retoque\dlssnr\DlssNr_VkPresentHost.cpp" /
              r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentTransport.h" />',
              r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentNr.h" />',
              r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentModel.h" />',
-             r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkModelOwner.h" />'):
+             r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkModelOwner.h" />',
+             r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentBuild.h" />'):
     assert item in project, item
 
 print('PASS: source guards (one gated call site ahead of the skip; only the usage and the waits edited, each where the '
@@ -521,7 +724,7 @@ assert (vulkan / 'vulkan/vulkan.h').exists(), 'external/vulkan is not checked ou
 
 with tempfile.TemporaryDirectory(prefix='optiscaler-nr-vk-present-host-') as directory:
     binary = Path(directory) / 'cases'
-    subprocess.run(['g++', '-std=c++20', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+    subprocess.run(['g++', '-std=c++20', '-pthread', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
                     '-fno-sanitize-recover=all', '-fno-omit-frame-pointer', '-I', str(vulkan), '-I', str(dlssnr),
                     str(here / 'cases.cpp'), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

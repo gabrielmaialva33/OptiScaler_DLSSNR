@@ -31,11 +31,48 @@ inline constexpr double kPqPeakNits = 10000.0;
 inline constexpr double kScRgbUnitNits = 80.0;
 inline constexpr double kPqPeakScRgb = kPqPeakNits / kScRgbUnitNits; // 125
 
-// BT.2408's reference white. There is no query of the display in v1 (design section 4.3): the white the model is shown
-// as 1.0 is this, in scRGB units, times the Paper white slider. It decides what the model sees, never where an
-// untouched pixel lands -- the composition divides by it and multiplies back.
+// BT.2408 fallback when the target's DISPLAYCONFIG_SDR_WHITE_LEVEL cannot be used. This changes what the model
+// sees, not the reference reconstruction: composition divides by the same white that it multiplies back.
 inline constexpr float kSdrWhiteNits = 203.0f;
-inline constexpr float kSdrWhiteScRgb = kSdrWhiteNits / 80.0f; // 2.5375
+inline constexpr float kSdrWhiteScRgb = kSdrWhiteNits / 80.0f;
+struct WhiteLevel
+{
+    float nits = kSdrWhiteNits;
+    bool fromDisplay = false;
+};
+inline WhiteLevel SelectSdrWhite(uint32_t level, bool queried)
+{
+    // Windows reports thousandths of an 80-nit unit. The supported SDR slider range is 80..480 nits;
+    // reject failed/stub/implausible answers rather than normalizing the model against zero or garbage.
+    if (!queried || level < 1000 || level > 6000)
+        return {};
+    return { static_cast<float>(level) * 0.08f, true };
+}
+inline const char* WhiteSource(WhiteLevel white)
+{
+    return white.fromDisplay ? "Windows SDR white" : "203-nit fallback";
+}
+class WhiteCache
+{
+    uintptr_t _monitor = 0;
+    uint64_t _at = 0;
+    bool _known = false;
+    WhiteLevel _value;
+
+  public:
+    bool NeedsRefresh(uintptr_t monitor, uint64_t now) const
+    {
+        return !_known || monitor != _monitor || now < _at || now - _at >= 5000;
+    }
+    void Store(uintptr_t monitor, uint64_t now, WhiteLevel value)
+    {
+        _monitor = monitor;
+        _at = now;
+        _known = true;
+        _value = value;
+    }
+    WhiteLevel Value() const { return _value; }
+};
 
 // Rec.2020 to Rec.709 and back, linear light, D65 white, row-major (out = M * in). tests/nr-hdr-math derives both
 // from the primaries and holds these, and the shader's, to the derivation.

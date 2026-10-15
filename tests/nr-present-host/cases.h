@@ -16,7 +16,7 @@ struct Rig
     ID3D12Resource source;
     std::vector<std::unique_ptr<ID3D12GraphicsCommandList>> frameLists;
     ID3D12Resource* lastOutput = nullptr; // what the host handed back on the last frame, before it was confirmed
-    DlssNr::PresentHost host; // last, so it is torn down while the device that owns its lists still exists
+    DlssNr::PresentHost host;             // last, so it is torn down while the device that owns its lists still exists
 
     void Size(uint32_t width, uint32_t height, DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM)
     {
@@ -60,6 +60,7 @@ void Fresh(bool enabled = true)
     g_formatsWithoutStore.clear();
     g_formatQueries = 0;
     g_committedMade = 0;
+    g_hdrResourcesValid = true;
     Config::Instance()->DlssNrEnabled.value = enabled;
     Config::Instance()->DlssNrZeroGuideReset.value = false;
     Config::Instance()->DlssNrSynthMotion.value = false;
@@ -306,24 +307,26 @@ int main()
             record.colourSpace = space;
             return record;
         };
-        const DXGI_FORMAT formats[] = { DXGI_FORMAT_R8G8B8A8_UNORM,         DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
-                                        DXGI_FORMAT_B8G8R8X8_UNORM,         DXGI_FORMAT_R10G10B10A2_UNORM,
-                                        DXGI_FORMAT_R10G10B10A2_TYPELESS,   DXGI_FORMAT_R16G16B16A16_FLOAT,
+        const DXGI_FORMAT formats[] = { DXGI_FORMAT_R8G8B8A8_UNORM,        DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+                                        DXGI_FORMAT_B8G8R8X8_UNORM,        DXGI_FORMAT_R10G10B10A2_UNORM,
+                                        DXGI_FORMAT_R10G10B10A2_TYPELESS,  DXGI_FORMAT_R16G16B16A16_FLOAT,
                                         DXGI_FORMAT_R16G16B16A16_TYPELESS, DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM };
         const DXGI_COLOR_SPACE_TYPE spaces[] = {
-            DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,         DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709,
-            DXGI_COLOR_SPACE_RGB_STUDIO_G22_NONE_P709,       DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
-            DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,  DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020,
+            DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,           DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709,
+            DXGI_COLOR_SPACE_RGB_STUDIO_G22_NONE_P709,         DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+            DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,    DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020,
             DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020,
-            DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020, DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020,
-            DXGI_COLOR_SPACE_RGB_STUDIO_G24_NONE_P709 };
+            DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020,  DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020,
+            DXGI_COLOR_SPACE_RGB_STUDIO_G24_NONE_P709
+        };
 
         // Off: PresentColourRefusal on the colour space the host always passed, the same literal, whatever the record.
         for (const auto format : formats)
             for (const auto space : spaces)
-                for (const auto& record : { Record(false, false, false, DXGI_FORMAT_UNKNOWN),
-                                            Record(true, true, true, format, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020),
-                                            Record(true, false, true, DXGI_FORMAT_R8G8B8A8_UNORM, space) })
+                for (const auto& record :
+                     { Record(false, false, false, DXGI_FORMAT_UNKNOWN),
+                       Record(true, true, true, format, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020),
+                       Record(true, false, true, DXGI_FORMAT_R8G8B8A8_UNORM, space) })
                 {
                     const auto decision = DlssNr::ResolvePresentColour(format, record, false, space);
                     const char* legacy = DlssNr::PresentColourRefusal(format, space);
@@ -337,7 +340,8 @@ int main()
         const auto R10 = DXGI_FORMAT_R10G10B10A2_UNORM;
         const auto F16 = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
-        for (const auto format : { DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8X8_UNORM })
+        for (const auto format :
+             { DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8X8_UNORM })
         {
             assert(On(format, Record(true, true, true, format, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)).profile ==
                    PresentColour::Sdr);
@@ -351,16 +355,19 @@ int main()
         for (const auto space : { DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_RGB_STUDIO_G22_NONE_P709,
                                   DXGI_COLOR_SPACE_RGB_STUDIO_G24_NONE_P709 })
             assert(On(R10, Record(true, true, true, R10, space)).profile == PresentColour::Sdr);
-        for (const auto space : { DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020, DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,
-                                  DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020 })
+        for (const auto space :
+             { DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020, DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,
+               DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020 })
             assert(On(R10, Record(true, true, true, R10, space)).reason == Text::kPqVariant);
         assert(On(R10, Record(true, true, true, R10, DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709)).reason ==
                Text::kTenBitLinear);
-        for (const auto space : { DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020, DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020,
-                                  DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020 })
+        for (const auto space :
+             { DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020, DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020,
+               DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020 })
             assert(On(R10, Record(true, true, true, R10, space)).reason == Text::kOtherSpace);
-        CASE("HdrPresent on, ten bits: full-range PQ is HDR10, the Rec.709 gamma spaces and none set are SDR, studio or "
-             "YCbCr PQ, linear, HLG and Rec.2020 gamma are declined, each with its reason");
+        CASE(
+            "HdrPresent on, ten bits: full-range PQ is HDR10, the Rec.709 gamma spaces and none set are SDR, studio or "
+            "YCbCr PQ, linear, HLG and Rec.2020 gamma are declined, each with its reason");
 
         assert(On(F16, Record(true, true, false, F16)).profile == PresentColour::ScRgb);
         assert(On(F16, Record(true, true, true, F16, DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709)).profile ==
@@ -381,24 +388,27 @@ int main()
         assert(On(DXGI_FORMAT_R10G10B10A2_TYPELESS, Record(true, true, true, DXGI_FORMAT_R10G10B10A2_TYPELESS,
                                                            DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))
                    .reason == Text::kTypeless);
-        assert(On(DXGI_FORMAT_R16G16B16A16_TYPELESS, Record(true, true, false, DXGI_FORMAT_R16G16B16A16_TYPELESS)).reason ==
-               Text::kTypeless);
+        assert(On(DXGI_FORMAT_R16G16B16A16_TYPELESS, Record(true, true, false, DXGI_FORMAT_R16G16B16A16_TYPELESS))
+                   .reason == Text::kTypeless);
         // Another format keeps the switch-off answer for the colour space the host passes.
         assert(On(DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM, Record(true, true, true, R10)).reason ==
                DlssNr::PresentColourRefusal(DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM,
                                             DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020));
-        CASE("HdrPresent on: no record, a resize to another format since the colour space was set, a record for another "
-             "format, and a typeless format are declined; an unlisted format answers as with the switch off");
+        CASE(
+            "HdrPresent on: no record, a resize to another format since the colour space was set, a record for another "
+            "format, and a typeless format are declined; an unlisted format answers as with the switch off");
 
-        const DlssNr::PresentColourDecision sdr {}, hdr10 { PresentColour::Hdr10 }, declined { PresentColour::Declined,
-                                                                                                 Text::kResized };
+        const DlssNr::PresentColourDecision sdr {}, hdr10 { PresentColour::Hdr10 },
+            declined { PresentColour::Declined, Text::kResized };
         assert(!DlssNr::ReportsHdrStatus(DXGI_FORMAT_R8G8B8A8_UNORM, hdr10, true));
         assert(!DlssNr::ReportsHdrStatus(R10, sdr, true) && DlssNr::ReportsHdrStatus(R10, hdr10, false));
         assert(DlssNr::ReportsHdrStatus(F16, declined, true) && !DlssNr::ReportsHdrStatus(F16, declined, false));
-        CASE("the menu hears of a swapchain the switch acts on, or one it declines with the switch on; never of eight bits");
+        CASE("the menu hears of a swapchain the switch acts on, or one it declines with the switch on; never of eight "
+             "bits");
     }
 
-    // --- the D3D12 route's colour record (DlssNr_SwapchainColour.h) ---------------------------------------------------
+    // --- the D3D12 route's colour record (DlssNr_SwapchainColour.h)
+    // ---------------------------------------------------
     {
         DlssNr::SwapchainColour::Book book;
         int windowA = 0, windowB = 0;
@@ -410,24 +420,28 @@ int main()
 
         book.Created(&windowA, DXGI_FORMAT_R10G10B10A2_UNORM);
         auto record = book.Lookup(&windowA);
-        assert(record.known && record.valid && !record.colourSpaceSet && record.format == DXGI_FORMAT_R10G10B10A2_UNORM);
+        assert(record.known && record.valid && !record.colourSpaceSet &&
+               record.format == DXGI_FORMAT_R10G10B10A2_UNORM);
         book.Resized(&windowA, DXGI_FORMAT_R16G16B16A16_FLOAT);
         record = book.Lookup(&windowA);
         assert(record.valid && !record.colourSpaceSet && record.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
-        CASE("the record: a creation knows the format and no colour space; with none set, the default follows a resize");
+        CASE(
+            "the record: a creation knows the format and no colour space; with none set, the default follows a resize");
 
         book.ColourSpaceSet(&windowA, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
         book.Resized(&windowA, DXGI_FORMAT_R10G10B10A2_UNORM);
         record = book.Lookup(&windowA);
-        assert(record.valid && record.colourSpaceSet && record.colourSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+        assert(record.valid && record.colourSpaceSet &&
+               record.colourSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
         book.Resized(&windowA, DXGI_FORMAT_R8G8B8A8_UNORM);
         assert(!book.Lookup(&windowA).valid);
         book.Resized(&windowA, DXGI_FORMAT_R10G10B10A2_UNORM);
         assert(!book.Lookup(&windowA).valid);
         book.ColourSpaceSet(&windowA, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
         assert(book.Lookup(&windowA).valid);
-        CASE("the record: a resize that keeps the format keeps the colour space; one that changes it leaves it unknown, "
-             "even after changing back, until the next SetColorSpace1");
+        CASE(
+            "the record: a resize that keeps the format keeps the colour space; one that changes it leaves it unknown, "
+            "even after changing back, until the next SetColorSpace1");
 
         book.Created(&windowB, DXGI_FORMAT_R16G16B16A16_FLOAT);
         book.Created(&windowA, DXGI_FORMAT_R10G10B10A2_UNORM);
@@ -435,9 +449,15 @@ int main()
         assert(record.valid && !record.colourSpaceSet && record.format == DXGI_FORMAT_R10G10B10A2_UNORM);
         assert(book.Lookup(&windowB).format == DXGI_FORMAT_R16G16B16A16_FLOAT);
         CASE("the record: a new swapchain on a window forgets what the old one was told; windows are their own");
+        book.Clear();
+        assert(!book.Lookup(&windowA).known && !book.Lookup(&windowB).known);
+        book.ColourSpaceSet(&windowA, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        assert(book.Lookup(&windowA).colourSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        CASE("the record: NR-off changes invalidate prior observations; a later successful note restores them");
     }
 
-    // --- HDR10 and scRGB at present: the D3D11 bridge's host (section 5.2) --------------------------------------------
+    // --- HDR10 and scRGB at present: the D3D11 bridge's host (section 5.2)
+    // --------------------------------------------
     {
         Fresh();
         Rig r;
@@ -447,7 +467,8 @@ int main()
         assert(g_hdrPassesBuilt == 0 && g_hdrDispatches.empty() && g_transferBuffersMade == 0);
         assert(!DlssNr::g_notedHdr.empty() && DlssNr::g_notedHdr.back().profile == DlssNr::PresentColour::Hdr10 &&
                DlssNr::g_notedHdr.back().reason == nullptr && !DlssNr::g_notedHdr.back().converted);
-        CASE("HdrPresent off: an HDR10 swapchain is declined as before, nothing HDR is built, and the menu hears of it");
+        CASE(
+            "HdrPresent off: an HDR10 swapchain is declined as before, nothing HDR is built, and the menu hears of it");
 
         Config::Instance()->DlssNrHdrPresent.value = true;
         const auto built = g_hdrPassesBuilt;
@@ -478,7 +499,8 @@ int main()
         assert(g_hdrDispatches.size() == 2 && g_hdrDispatches[0].profile == DlssNr::PresentHdr::kProfileScRgb);
         assert(DlssNr::g_lastPassFrame.ColourIsLinearHdr && DlssNr::g_lastPassFrame.PresentQuantRel == 0.0f);
         assert(DlssNr::GpuTiming::g_conversionsWhole == whole + 1);
-        CASE("HdrPresent on, FP16 never told a colour space: scRGB, converted, its FP16 unit kept, timed as one sample");
+        CASE(
+            "HdrPresent on, FP16 never told a colour space: scRGB, converted, its FP16 unit kept, timed as one sample");
 
         DlssNr::g_refuseModel = true;
         const auto finished = DlssNr::GpuTiming::g_conversionsFinished;
@@ -486,7 +508,8 @@ int main()
         assert(g_hdrDispatches.size() == 3 && g_hdrDispatches.back().mode == DlssNr::PresentHdr::kModeDecode);
         assert(DlssNr::GpuTiming::g_conversionsFinished == finished + 1 &&
                DlssNr::GpuTiming::g_conversionsWhole == whole + 1);
-        CASE("the model refusing: decoded, never encoded, the source shown as it is, the timing sample closed unfinished "
+        CASE("the model refusing: decoded, never encoded, the source shown as it is, the timing sample closed "
+             "unfinished "
              "on the open list");
     }
     {
@@ -508,6 +531,13 @@ int main()
         CASE("HdrPresent on, a device without typed UAV store for the format: declined, said, nothing dispatched");
 
         g_hdrSupports = true;
+        g_hdrResourcesValid = false;
+        assert(!r.Frame());
+        assert(r.frameLists.back()->recorded == 0 && g_hdrDispatches.empty() && DlssNr::g_creations.empty());
+        assert(!DlssNr::g_notedHdr.back().converted &&
+               DlssNr::g_notedHdr.back().reason == DlssNr::PresentColourText::kResourceContract);
+        CASE("invalid HDR resources are declined before barriers, model creation or dispatch");
+        g_hdrResourcesValid = true;
         assert(r.Frame());
         r.Size(1920, 1080, DXGI_FORMAT_R16G16B16A16_FLOAT); // a resize to FP16, and no SetColorSpace1 after it
         const auto dispatches = g_hdrDispatches.size();
