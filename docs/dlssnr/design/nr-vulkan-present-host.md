@@ -1361,6 +1361,167 @@ one has no `dlssnr_vk_shutdown`) and the model beside `winmm.dll`; the bundle on
 - Turning DLSS on in the game makes the after-upscale route ask for the model: one `the model stood down and was freed`,
   then refusals counted as `after-upscale route`, and the route's own `DLSS-NR Vulkan:` lines take over.
 
+## Off the present path: the model's builds, and a stall watchdog (design, 2026-10-14)
+
+### The hang
+
+One launch in eight of DOOM Eternal on builds `c8d9df7f` and `35600ea3` stopped at startup
+(`OptiScaler_51708542978.log`). The host came up cold on the 841x671 start window and carried 183 presents. The game
+then made swapchain #9 at 3440x1440; at its first present (the 185th) the model's images were rebuilt for that size
+inside the present, and #9 was destroyed after that one present. #11 replaced it, and at its first present (186,
+22:37:55.305) the model's feature was created at 3440x1440, again inside the present. Then nothing: no further present,
+CPU near 0, GPU 0%. 56 threads slept in Win32 waits (ntsync) and 14 in futexes (std::mutex/SRW), CUDA's threads in
+poll. No stacks: `ptrace_scope=1`. The seven other launches went through the same churn and reached 1000 presents in
+about 4 s.
+
+What the log does prove is where the host was: the last thing it did was build a 3440x1440 feature inside
+`vkQueuePresentKHR`, with the presenting queue's present lock and `g_transportMutex` held, and record that feature's
+initialisation into the round trip's own command buffer, in front of the first evaluate. Every review since stage 3
+listed exactly this as a risk ("the first frame brings the core and the model up inside the game's present, holding
+that queue's present lock and the transport's lock"). Two mechanisms fit an idle GPU and idle CPU, and neither can be
+told apart without stacks:
+
+- **A wait inside NGX under the present.** NGX's feature creation, its device initialisation and the driver core's
+  bring-up are opaque. Any CPU wait in them for GPU work (a queue or device idle, a fence of their own) waits behind the
+  game's queued frame, which waits on an acquire whose image only the presentation engine releases -- and the
+  presentation engine is waiting for the very present the host is inside. Everything idles.
+- **A lock cycle through the host's locks.** NGX or CUDA threads, or the game's swapchain thread, needing something a
+  thread inside the host holds while that thread waits on them. The audit below lists the waits that could close one.
+
+So the rule is the reviews' rule, now applied: **nothing opaque or unbounded runs under the host's locks.**
+
+### What moves off the present path
+
+A process-wide **builder thread** (in `DlssNrFeature_Vk.cpp`, beside the model it builds) does everything that brings
+the model up or resizes it:
+
+- once per device: the forwarder, the model's NGX initialisation on the device (`dlssnr_vk_init`), the driver core's
+  bring-up (`NVNGXProxy::InitVulkan`) and its capability block, the float slot, the timestamp pool, the composition
+  pass (pipelines, descriptor pool, constant ring) and its placeholder image's one-time layout;
+- per size: the six images, the zero guides' clear, and the feature's creation (`g_fwd.create`), recorded into a
+  command buffer of the builder's own, submitted on a queue of the work family through the host, and waited for on
+  a fence of its own. The product is handed over only when its GPU work is seen complete.
+
+The present path keeps what has to be in the frame: evaluate, encode, downsample, resolve, the blits, the round trip.
+While a build is queued or running, every frame of that device is carried unchanged and counted as `model building`;
+the frame after the product is adopted starts the model's history over. A new size (841x671 -> 3440x1440, a
+working-scale change) is a new build; the old feature and images retire to the existing list and are freed once the
+frames that used them are seen complete -- as before, but no longer while a build runs (below).
+
+The builder submits through the host (`VkPresentModelDevice::submit`, given to the model at its creation): the queue of
+the work family with the lowest index the application retrieved, its present lock then its submit lock as a borrower
+takes them -- in short tries, never holding the present lock while it waits for the submit lock (the queue may be the
+presenting one, whose next present takes its present lock without a bound), 2 s in all -- the host's trampoline below
+its own submit hook with one non-empty `VkSubmitInfo` (Vulkan_wDx12 rejects a null array, `da4988a1`), the locks
+released before the fence is waited for, and the fence waited for in 50 ms slices up to 10 s, the orphan flag checked
+between slices. A build whose GPU work does not complete in 10 s fails and leaks what it made rather than free it under
+the GPU; the model is then off on the device, with the reason. Locks that stay busy free everything and ask for the
+build again at a later frame; a lost device during a build marks the device lost on the host, so nothing of it is
+freed or called afterwards.
+
+### The build's state machine (`DlssNr_VkPresentBuild.h`, standard library only)
+
+Per device model, one product (built for a key: frame size, working size, work family) and at most one job. At each
+eligible frame, before any model call: a job **queued or running** -> carry the frame (`model building`); a job
+**done** -> adopt its product (its lines too), then decide again; a job **failed** -> latch the failure (`model
+unavailable`, logged once), never retried for the device, as every latched failure; **no job**: product built for this
+frame's key -> run the model; otherwise -> retire the current product and request a job for this key. A request
+while one runs is not queued behind it: the running one finishes, is adopted, and the next frame asks again if the
+key moved (the game's resize churn costs at most one extra build).
+
+The builder runs one job at a time, so NGX's create and initialisation calls never overlap each other. They must
+not overlap the present path's own NGX calls either, so while a job is queued or running the present path makes none
+for that model: no evaluate (frames are carried), no release of retired features (deferred to the first frame after
+the job), no release of the model. Discarding a recording makes no NGX call any more (no feature is created in one).
+
+### Ownership, stand-down and hand-back
+
+The token is claimed, as now, in `DecideNr` before the model is asked for anything, so a job only ever runs for the
+device that holds the model. A queued or running job counts as in flight: `StandDown` and the hand-back's "no model
+here" wait for it exactly as they wait for frames, so the after-upscale route is refused (`this route waits`) until
+the job is over, then the host frees the model and releases the token. A build takes a few hundred milliseconds
+(DOOM's 3440x1440 images took about 125 ms to allocate and its feature about 30 ms to create, both inside the
+present before),
+so a stand-down that lands on a build is that much later; nothing else about the token changes. The route's own NGX
+calls (on the game's thread, inside its upscaler) never overlap a job: a job runs only while the host holds the token.
+
+At `vkDestroyDevice`, a job under way is waited for before anything of the model's is freed, the lost branch included
+(15 s: longer than the builder's own bounds together, so a merely slow GPU never orphans one; the builder never takes
+the transport lock, so the wait cannot close a cycle; the watchdog names the destroy after 2 s and the build after 5).
+A job that does not end in time is orphaned and waited for again (5 s): every wait of the builder's is sliced and
+checks the flag, so it steps out of the device at its next step or slice and forgets, never frees, what it made; only
+a builder stuck inside an opaque NGX call outlasts that, and the log says the device went under it. A job whose last
+reference goes forgets what is left in it (its destructor), so an abandoned model's or an orphaned job's objects are
+never destroyed after the fact. A job only queued counts as nothing in flight: giving the model up calls it off.
+
+### The lock-order audit (swapchain churn, other threads)
+
+The host's locks, in order: a queue's present lock (blocking, first thing in `vkQueuePresentKHR`), the transport lock,
+a borrowed queue's present then submit lock (try, bounded), the registry lock (innermost, never across a call). The
+model's: `g_vkMutex` (the after-upscale route), `g_ownerMutex` (innermost), the forwarder's load lock. What waits
+without a bound while holding one of ours, before this change and after:
+
+| Wait | Holding | Before | After |
+|---|---|---|---|
+| NGX device init, core bring-up, feature creation (opaque) | present lock + transport | every cold start and every resize | builder thread, no lock of ours (`g_presentNgxMutex` guards only the two device records, never an NGX call) |
+| image allocation, pipeline creation | present lock + transport | every resize | builder thread |
+| NGX feature release (stand-down, retired sets) | present lock + transport | as now | as now: after every frame of it was seen complete; never while a build runs |
+| the route's free at a hand-back's finish | present lock + transport, `g_vkMutex` try-locked | as now | as now (the route's lock is try-only; its free mirrors the stand-down's) |
+| `g_vkMutex` in `AfterUpscaleDeviceGone` | transport (in `vkDestroyDevice`) | blocking | blocking; the watchdog names it |
+| the presenting queue's present lock | nothing | blocking | blocking: held by another present on that queue, or the builder's bounded submit |
+| the transport lock | a present lock | blocking | blocking: every holder's work is now bounded |
+| `vkQueuePresentKHR`'s call down | the present lock | the driver's | the driver's |
+
+Swapchain churn on another thread: `vkCreateSwapchainKHR` and `vkDestroySwapchainKHR` take the transport lock and
+retire a swapchain's slots with a bounded drain (2 s), then call down outside it. A swapchain destroyed one present
+after the model's images were built for it (#9) retires one slot, drained in about a millisecond in the log; the model
+is the device's, not the swapchain's, so nothing of it is freed there, and the next swapchain at the same size takes
+it over. After this change that present has no model work at all (a build is running), and the destroy cannot wait
+for the build. NGX's and CUDA's own threads take none of our locks unless they call a hooked Vulkan function: a queue
+submit, bind or idle wait takes that queue's submit lock, which a present holds only around its own round-trip
+submits (bounded) and the builder only around its one submit; a present or swapchain call from them would be taken
+like the game's.
+
+No cycle needs more than these; the remaining blocking waits (a present lock, the transport lock, `g_vkMutex` at
+device destruction) are waits for holders whose work is now bounded or is the game's own, and the watchdog names them
+if that ever stops being true.
+
+### The stall watchdog
+
+A host thread, started by `Install` after its gate (so it does not exist with `VulkanPresentHost` off), wakes every
+half second and reads a table of activities with atomics only -- it takes none of the host's locks, so it cannot be
+caught in the stall it reports. Every host entry point that can hold or wait for a host lock registers one: the
+present hook, swapchain creation and destruction, device creation and destruction, the queue-call hooks (submit,
+sparse bind, idle wait) around their submit lock, and the builder's job. Each records its thread id (Windows'), when
+it entered, the stage it is in ("waiting for the transport lock", "retiring the swapchain's slots", "calling down
+vkQueuePresentKHR", "creating the feature (NGX)", ...) and the host locks it holds. The transport lock and the queues'
+present and submit locks record their owner thread. An activity inside the host for more than 2 s is logged once,
+then every 10 s while it lasts, with all of that, and for a lock it waits on, the thread holding it and that
+thread's stage:
+
+```
+DLSS-NR Vulkan present host: STALL: thread 1652 in vkQueuePresentKHR for 2.0 s: waiting for the transport lock (held by thread 1700, in vkDestroySwapchainKHR for 2.1 s: retiring the swapchain's slots); holds the present lock of queue 0x...
+```
+
+The next hang names itself in `OptiScaler.log` without a debugger, provided the log can still be written (spdlog is
+called from the watchdog's own thread, outside every host lock).
+
+### Tests
+
+- Host tier: the build state machine (carry while queued or running, adopt then decide again, latch a failure once,
+  a request per key change, a resize churn of three sizes costing at most one extra build), the activity table and
+  its lines (2 s, once then every 10 s, the holder named, slots reused), lock-owner tracking with recursion; source
+  guards: `Admit` and `Record` make no NGX init, create, core bring-up or image allocation; the builder never takes
+  the transport lock; the present path makes no NGX call while a job runs; the build's submit takes the queue's locks
+  with bounded waits and never under the transport lock; the watchdog starts only after `Install`'s gate and takes no
+  lock.
+- Wine tier: a case with the model's build slowed artificially -- the test layer delays memory allocation, compute
+  pipeline creation and the NVX module loads on any thread that is not presenting -- while the application presents
+  and recreates its swapchain (one swapchain destroyed after one present, as #9): no `vkQueuePresentKHR` may take
+  longer than a bound far below the build, every frame during the build is carried unchanged (exact read-backs), and
+  the model runs once its product is adopted.
+- An independent read-only review.
+
 ## Decision and stop conditions
 
 Prefer this experiment over implementing the D3D11 dual-swapchain host first. It removes an entire
