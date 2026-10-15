@@ -206,6 +206,7 @@ for name in ('Prepared Prepare(', 'void AfterPresent(', 'Retired RetireSwapchain
              'void PollHandBack(', 'bool EndHandBack('):
     held = code(function(host, name))
     assert 'LOG_' not in held and 'next(' not in held, name
+assert 'LOG_' not in code(function(host, 'bool DrainForDestroy('))
 
 # Nothing that can reach Vulkan, or OptiScaler's delay-loaded import of vulkan-1.dll (whose first use runs the loader
 # hook and Install, which takes the same lock), is called with g_installMutex held.
@@ -273,7 +274,7 @@ assert teardown.index('InFlight()') < teardown.index('Release()') < teardown.ind
 assert teardown.count('AbandonModel(dev);') == 2 and teardown.count('model->Abandon()') == 1
 # The token goes back and NGX on the device goes with it whatever became of the model (stood down earlier included);
 # on a lost device or with frames never completed, NGX is only forgotten.
-assert 'DlssNr::ShutdownPresentNgx(dev.device, forgetOnly, dev.lines);' in teardown
+assert 'DlssNr::ShutdownPresentNgx(dev.device, unproven, dev.lines);' in teardown
 abandon_model = code(function(host, 'void AbandonModel(DeviceTransport& dev)'))
 assert 'ShutdownPresentNgx(dev.device, true, dev.lines)' in abandon_model and 'ReleaseModelFromPresentHost' in abandon_model
 # Whatever becomes of a present, a model on its device stands down when NR is off or another route asks: before the
@@ -372,9 +373,19 @@ for name, text in (('TeardownDevice', teardown), ('AbandonModel', abandon_model)
     assert text.index('EndHandBack(dev') < text.index('AfterUpscaleDeviceGone(dev.device') < \
         text.index('ShutdownPresentNgx(dev.device'), name
 assert 'EndHandBack(dev, 0);' in abandon_model and 'AfterUpscaleDeviceGone(dev.device, true, dev.lines);' in abandon_model
-# The route's objects are freed at the device's destruction only where nothing says the GPU may still be busy.
-assert ('AfterUpscaleDeviceGone(dev.device, dev.lost || forgetOnly || abandoned != 0 || !drained, dev.lines);'
-        in teardown)
+# The route's objects are freed, and NGX shut down, at the device's destruction only where the GPU is proven done:
+# nothing of the host's unproven and every queue drained now behind fences of its own, within a bound (no device-wide
+# wait, which a hung GPU would make unbounded under the transport's lock).
+assert ('const bool unproven = dev.lost || forgetOnly || abandoned != 0 || !drained || !DrainForDestroy(dev, kDrainNs);'
+        in flat(teardown))
+assert teardown.index('DrainForDestroy(') < teardown.index('AfterUpscaleDeviceGone(dev.device, unproven, dev.lines);') \
+    < teardown.index('ShutdownPresentNgx(dev.device, unproven, dev.lines);')
+drain_destroy = flat(code(function(host, 'bool DrainForDestroy(DeviceTransport& dev, uint64_t budgetNs)')))
+assert 'if (dev.lost || queues.empty()) return false;' in drain_destroy
+assert drain_destroy.index('queueSubmit(queue, 0, nullptr, fence)') < drain_destroy.index('waitForFences(')
+# Fences destroyed only once seen signalled (or never submitted): a failed wait keeps them.
+after_wait = drain_destroy[drain_destroy.index('waitForFences('):]
+assert after_wait.index('if (result != VK_SUCCESS) return false;') < after_wait.index('destroyFence(')
 
 # The route's side (DlssNrFeature_Vk.cpp). Its lock never waited for under the host's; the token released before
 # anything is freed, and nothing freed unless the hand-back finished; freed without a device-wide wait (the drain proved
@@ -389,12 +400,13 @@ assert 'DeviceWaitIdle' not in free_route and 'g_fwd.release(g_vk.feature)' in f
 assert 'g_vk.floatSlotKnown = false;' in free_route
 shutdown_vk = code(function(feature_vk, 'void ShutdownVk(bool deviceAlive)'))
 assert shutdown_vk.index('vkDeviceWaitIdle(g_vk.device)') < shutdown_vk.index('FreeRouteObjects();')
-assert code(feature_vk).count('FreeRouteObjects();') == 2
+assert code(feature_vk).count('FreeRouteObjects();') == 3
 # The idle clock counts from the end of the route's recording: a guard right after its claim stamps it when the evaluate
 # returns, whatever path it takes.
 claimed = flat(after_upscale)
-assert claimed.index('if (!ClaimModelForAfterUpscale(device)) return;') < claimed.index('} recordingDone;') < \
-    claimed.index('g_vk.instance = instance;')
+assert claimed.index('std::lock_guard<std::mutex> lock(g_vkMutex);') < \
+    claimed.index('if (!ClaimModelForAfterUpscale(device)) return;') < claimed.index('} recordingDone;') < \
+    claimed.index('g_vk.instance = instance;')  # destroyed before the route's lock: the stamp is under it
 assert re.search(r'~RecordingDone\(\)\s*\{\s*std::lock_guard<std::mutex> lock\(g_ownerMutex\);\s*'
                  r'g_owner\.AfterUpscaleDone\(OwnerNowMs\(\)\);', after_upscale)
 # The route records nothing before it asks: a hand-back it did not call off saw everything it recorded drained.
@@ -404,13 +416,13 @@ assert not re.search(r'vkCmd|cmdBuffer\)|\(void\*\) cmdBuffer|->Dispatch|g_fwd\.
 # Taking the token from nobody, the route finds the forwarder's float slot again for its own parameter block.
 claim = code(function(feature_vk, 'bool ClaimModelForAfterUpscale(VkDevice device)'))
 assert re.search(r'if \(!held\)\s*\{\s*g_vk\.floatSlotKnown = false;', claim)
-# The device's destruction frees the route's objects on it once the device is idle (ShutdownVk(true): before NGX is
-# shut down on it), or only forgets them (ShutdownVk(false)) when it is lost or its GPU may be busy; then the token goes
-# back. That is the one ShutdownVk(true) of the file.
+# The device's destruction frees the route's objects on it (the host drained the device first; before NGX is shut down
+# on it), or only forgets them (ShutdownVk(false)) when it is lost or its GPU was not proven done; then the token goes
+# back. Nothing in the file waits for a whole device but ShutdownVk(true), which nothing calls.
 gone = code(function(feature_vk, 'void AfterUpscaleDeviceGone(VkDevice device, bool forgetOnly, '))
 assert re.search(r'if \(forgetOnly\)\s*\{\s*ShutdownVk\(false\);', gone), gone
-assert gone.index('ShutdownVk(false);') < gone.index('ShutdownVk(true);') < gone.index('g_owner.DeviceGone(')
-assert code(feature_vk).count('ShutdownVk(true)') == 1
+assert gone.index('ShutdownVk(false);') < gone.index('FreeRouteObjects();') < gone.index('g_owner.DeviceGone(')
+assert 'DeviceWaitIdle' not in gone and code(feature_vk).count('ShutdownVk(true)') == 0
 
 print('PASS: the way back (begun only with no model here and the route quiet since its last recording ended; queues '
       'try-locked, fences made before and submitted after the hand-back began; the route freed only once every fence '

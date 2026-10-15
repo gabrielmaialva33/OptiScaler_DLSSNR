@@ -97,9 +97,10 @@ Source guards:
   and the token released first, never after a failed drain submit, without a device-wide wait; the route records
   nothing before it asks, and a guard right after its claim ends its recording window when the evaluate returns; it
   finds the forwarder's float slot again when it takes the token from nobody; the device going ends a hand-back before
-  the route's objects go and before NGX is shut down -- freed after the device is idle (the file's one
-  `ShutdownVk(true)`), only forgotten when the device is lost or work on it was never seen complete -- and its token
-  with them.
+  the route's objects go and before NGX is shut down -- freed once the host drained every queue of the device behind
+  fences of its own within a bound (`DrainForDestroy`; no device-wide wait anywhere), only forgotten, and NGX only
+  forgotten too, when the device is lost, work on it was never seen complete or the drain did not finish -- and its
+  token with them.
 - The application's waits are consumed only by a submit that ran: recording precedes it, every refusal comes before
   it; the work queue's lock is taken before the transport's; nothing of the host's own is logged or called down while
   the transport's lock is held (what the model's or the route's frees log underneath it, as a stand-down's release
