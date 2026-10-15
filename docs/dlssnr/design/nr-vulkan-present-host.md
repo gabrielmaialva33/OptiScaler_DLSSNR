@@ -1650,6 +1650,256 @@ itself (a pipeline or an image that will not be made) does the same; it never tu
   frame-size field below native (now estimated on the model's input), and a second build when the estimator latched
   off at adoption -- and nine minor ones, fixed or answered in the commit that follows it.
 
+## Stage 4: the present host beside frame generation (design, 2026-10-15)
+
+Stages 1 to 3 and 5 were proven with frame generation off, and "Relationship to the other hosts and FG" made that the
+first acceptance: `vkQueuePresentKHR` carries generated frames as well as rendered ones, on pacer threads, with no
+"real frame" bit, and the marker's history (`8e021bff`: 18 minutes clean, then a device lost at the first menu toggle,
+Streamline reporting "Wait on gpu fence timed out after 500ms") blames exactly an insertion in front of a pacer's
+present. Stage 4 is the item that closes it: a real/generated-frame policy, the instrumentation the pacer experiment
+("What settles the marker question", item 4) is read from, and the state the host is in until the experiment has been
+run in games. Branch `feat/vulkan-present-host-fg` from `a1b86054`.
+
+### The two shapes, at the Vulkan boundary
+
+**(a) The game's own DLSS-G under vkd3d-proton (Crimson Desert, marked).** The game presents through DXGI.
+Streamline's DLSS-G turns each rendered frame into two or more DXGI presents, the real one and the generated ones,
+paced from its own thread; vkd3d-proton turns every DXGI present into one `vkQueuePresentKHR` on its own Vulkan
+swapchain, from its own present path. At the Vulkan boundary every present is vkd3d-proton's (caller `d3d12core.dll`),
+on the same queue and swapchain, real or generated alike: **no field of the call tells them apart**, and which thread
+calls is vkd3d-proton's business, not Streamline's (the trace below records it; nothing here relies on it). What the
+process does know is that DLSS-G is on, from the same three signals the D3D12 present pass already reads
+(`PresentBoundary::Inputs`): the mode last sent to Streamline's DLSS-G is not off, the game's NGX DLSS-G evaluate
+reported a `DLSSG.MultiFrameCount`, or OptiScaler's own D3D12 frame generation output is active. And the placement is
+already settled for this shape: the D3D12 present pass runs NR on the real frame ahead of DLSS-G (`nr-before-dlssg.md`),
+and the Vulkan host already refuses the model there ("the D3D12 route has the model running in this process").
+
+**(b) OptiScaler's own Vulkan frame generation (upstream `e7e28a2a`, merged 2026-10-13).** Streamline DLSS-G calls of a
+native Vulkan game are the input (`[FrameGen] FGInput=dlssg`), FSR-FG the output (`FGOutput=fsrfg`). The game's
+swapchain is then FFX's frame-generation swapchain: a handle and images of FFX's, which the game acquires and presents
+its real frame into on its own queue; FFX's presenter presents the real and the generated frames to the driver's
+swapchain, which FFX created, from a queue OptiScaler reserved for it at `vkCreateDevice`. Here identification is
+exact and costs two lookups: `State::currentVkFG->OwnsSwapchain(swapchain)` is the game's present of a real frame,
+`currentVkFG->OwnsQueue(queue)` is FFX's present of a real or generated one. The bundle's own present hook already
+tells FFX's presents apart this way.
+
+**DOOM Eternal cannot generate frames on shape (b).** Upstream's Vulkan frame generation takes Streamline DLSS-G as
+its only input, and DOOM Eternal calls NGX DLSS, not Streamline (no `sl.interposer.dll` in its directory). With
+`FGInput=dlssg` and `FGOutput=fsrfg` OptiScaler still builds the FSR-FG output at `vkCreateDevice` and its swapchain
+replaces the game's, so DOOM shows the routing (the game presenting into FFX's swapchain, FFX's presenter presenting
+the driver's) with real frames only, never a generated one. A title that generates on shape (b) needs a native Vulkan
+game with Streamline DLSS-G; none is installed on this machine (2026-10-15).
+
+### The policy
+
+NR runs on real frames only, once each, before frame generation makes anything from them. A generated frame is never
+shown to the model: it is made from frames the model already edited (or from unedited ones, if the model was not
+there), and editing it again would cost a second evaluation per frame and give the model a history it did not produce.
+
+| Shape | Where NR belongs | Until stage 4 is proven (default) | `VulkanPresentFgTransport=true` (the experiment's submission-only arm) |
+|---|---|---|---|
+| (a) game DLSS-G, vkd3d-proton | the D3D12 present pass, ahead of DLSS-G (already) | every present of every host device goes down untouched: no copy, no submit, no semaphore of the host's; the model stands down | the round trip on every present, no NR |
+| (b) OptiScaler Vulkan FG | the game's present into FFX's swapchain (a real frame), before FFX interpolates | the game's presents and FFX's go down untouched; the model stands down on the device | the round trip on FFX's presents, no NR (the game's into FFX's swapchain stay untouched: the host never sees that swapchain made, "Stage 4 as built") |
+| none active | unchanged (stages 2, 3, 5) | unchanged | unchanged |
+
+"Untouched" is stage 1's observation: the present is counted and goes down with the caller's own present info. The
+host's queue-call hooks stay installed (their per-queue locks are uncontended when the host borrows no queue), which is
+the "NR-only observation" arm of the pacer experiment with the overlay absent. The unsupported state says so once per
+device: `frame generation active (<shape>): NR at present is off on this device until stage 4 is proven; its presents
+go down untouched`. The window lines count it as a transport skip, `frame generation N`.
+
+When frame generation comes on mid-session, the model stands down at the next present on the device (released once its
+frames are seen complete, as for NR off), and comes back, rebuilt, when frame generation goes off. Shape (a)'s signals
+are process-wide, so they apply to every device the host carries. Shape (b)'s are per present and hold as long as
+FSR-FG's swapchain carries the game's frames, whether or not it is generating at the moment: OptiScaler's menu can pause
+FSR-FG, but the game still presents into FFX's swapchain and FFX's presenter still presents, so for the host it is
+still frame generation's.
+
+**Why not run NR in shape (b) now.** The placement is clear and identification exact, but no harness or game here
+makes a generated frame on it, so the policy's only risk -- the host's submit on the game's queue beside FFX's
+presenter, which consumes the same frames -- cannot be measured. It is stage 4's next step once a Streamline DLSS-G
+Vulkan title has run the experiment's transport arm clean. Shape (a) needs no NR of the host's at all.
+
+**Cost.** Per present: the three process-wide signals (two loads and a pointer read) and, with an FSR-FG output, a scan
+of its three extra queues and one handle compare. Untouched presents cost nothing more. With frame generation off,
+nothing changes.
+
+### Instrumentation: the pacer trace
+
+`[DlssNr] VulkanPresentTrace=false`, read at startup with the host. Off, nothing below exists. On (with
+`VulkanPresentHost`), the host keeps, per swapchain, everything the pacer experiment's list asks for, and logs one line
+per swapchain every 10 s while it presents (and a last one when it is destroyed):
+
+```text
+DLSS-NR Vulkan present host (trace): swapchain 0x... #N on device #D, 10.0 s: 1203 presents (120.3/s); threads tid 1234 "vkd3d_queue" 1203 (caller d3d12core.dll); queues 0x... 1203; waits 1-1 (1203), host signals 1203, untouched 0; present ids 5..1207 (gaps 0, out of order 0); frame time p50 8.31 p95 8.42 p99 9.10 max 25.03 ms, over twice the median 2; present call p50 0.21 p99 0.48 max 3.02 ms; results VK_SUCCESS 1203; GPU completions 1203, ring 2, max CPU wait 0.000 ms; frame generation none; Streamline fence timeouts 0, pacer 0, warnings 0, errors 0
+```
+
+- **Threads and identities**: the presenting thread's id and name (`GetThreadDescription`, read once per thread: vkd3d-
+  proton names its threads), its caller module, the queue, the swapchain and device records.
+- **Waits and signals**: the application's wait count per present, how many presents went down on the host's own
+  semaphore (a round trip) and how many untouched; the present ids (`VkPresentIdKHR`), with gaps and reversals.
+- **GPU completion**: round trips seen complete, ring depth, the longest CPU wait for a slot.
+- **The frame-time tail**: present-to-present intervals on the swapchain, every present (real and generated alike),
+  p50/p95/p99/max and the count over twice the median; the present call's own duration, the host's work and the call
+  down included; the results returned.
+- **Streamline**: OptiScaler's Streamline log callback (both SDK generations) hands each message to the host, which
+  counts fence timeouts ("timed out"), pacer messages ("pacer"), and warnings and errors, and keeps the last one. A
+  one-line call in `hooks/Streamline_Hooks.cpp`; it returns at once unless the trace is on. The marked baseline, with the
+  host off, reads Streamline's own lines from `OptiScaler.log` instead (the callback writes them at every log level).
+- **Frame generation**: the shape each present was classified as.
+
+The trace's own cost when on: a lock and a few vector appends per present, and a sort of the window's intervals every
+10 s. Its lock is a leaf: nothing is called under it.
+
+### The pacer experiment (test plan)
+
+In each title, the same scene (a fixed walk and a camera pan, the menu opened and closed five times, a load, a resize or
+fullscreen toggle, frame generation toggled off and on in the game's menu), at least 20 minutes per session (the
+history's failure came after 18), three sessions per arm. Every arm with `[Log] LogLevel=2`, `VulkanPresentTrace=true`
+where the host is on, MangoHud's frame-time log where it is not, and the same build.
+
+| Arm | Keys | What it isolates |
+|---|---|---|
+| 0. Marked baseline | host off (`VulkanPresentHost=false`) | the title and its frame generation as deployed |
+| 1. Observation | host on, frame generation on (default) | the host's hooks and locks beside the pacer, nothing inserted |
+| 2. Submission only | host on, `VulkanPresentFgTransport=true` | the round trip (copy, submit, semaphore) in front of every present, no NR |
+| 3. NR only (shape (b), later) | the real-frame policy | NR on the game's present, FFX's untouched |
+
+Read from the log alone: Streamline fence timeouts and pacer messages (must be zero in arms 1 and 2 where arm 0 has
+none), `VK_ERROR_DEVICE_LOST` or any present result other than success/suboptimal, the trace's frame-time p99 and max
+against arm 0's (MangoHud) and against arm 1's, the presenting threads (does a second thread appear with frame
+generation on, and is it the one that times out?), and GPU completions keeping pace with presents. A reproducible
+timeout in arm 2 and none in arm 1 says the insertion is the hazard, as the marker's history diagnosed; none in either,
+across the sessions, is the evidence stage 4 needs to let the round trip, then NR on real frames, run beside frame
+generation.
+
+### Tests
+
+- Host tier (`tests/nr-vk-present-host`): the classification and the carry decision for every signal combination and
+  both keys; the trace's aggregation (threads, waits, ids, percentiles, the line), the Streamline classifier; source
+  guards that the classification runs before any transport, that untouched presents go down with the caller's own info,
+  that the model stands down, that the trace is inert when off and calls nothing under its lock; the two keys' four
+  points.
+- Wine tier (`tests/vulkan-present-host`): OptiScaler's FSR-FG output in the harness (no marker, `FGInput=dlssg`,
+  `FGOutput=fsrfg`, FFX's Vulkan DLL from the local kit): the game's presents and FFX's identified and carried
+  untouched, the unsupported line, no model built, no validation report but FSR-FG's own; the same with the experiment
+  key (the round trip on FFX's presents, no NR); and the trace on a carried run (its lines parse, its counts match the
+  application's). No Streamline and no generated frame can run here: shape (a), and frames that FSR-FG generates, are
+  the game runs' to show.
+
+### Stage 4 as built (2026-10-15)
+
+`retoque/dlssnr/DlssNr_VkPresentFg.h` (standard library only) holds the shape (`ClassifyFg`), the carry
+(`DecideFg`), the unsupported line, Streamline's classifier and the trace (`PacerTrace`). The host reads the facts in
+`FgFactsFor`: the three process-wide signals exactly as `PresentBoundary::Inputs` reads them, and
+`State::currentVkFG->OwnsQueue/OwnsSwapchain`. `Prepare` classifies before anything else of the transport; with frame
+generation it skips the hand-back and stand-down housekeeping (`Housekeep`), polls the device's rings, stands the model
+down (`StandDown`), logs the line once per device and shape, and then either returns `Skip::FrameGeneration` before
+any other refusal (untouched: no wait spent, no info edited) or, in the experiment arm, carries the present with NR
+refused as `frame generation` before `DecideNr` is asked. A new transport skip `frame generation` and NR skip `frame
+generation` count both in the window and destruction lines. Two keys, both read at `Install` (a change needs a
+restart), both four-point: `[DlssNr] VulkanPresentTrace` and `VulkanPresentFgTransport`, default off; `Install` says
+what they did when either is on. `hooks/Streamline_Hooks.cpp` gains one line in each SDK generation's log callback,
+`DlssNr::VkPresentHost::NoteStreamline(level, message)`, ahead of its repeat filter, so a repeated timeout is still
+counted; it returns at once unless the trace is on. The trace's own lock and the Streamline counts' lock are leaves:
+the counts are copied before the trace's lock is taken, and the line is logged after it is released.
+
+What the harness showed of shape (b) (`nr-fg-vk`, `nr-fg-vk-transport`; FFX API from the local kit, GE-Proton11-7,
+RTX 4090):
+
+- **FSR-FG's swapchain is built and presents, but nothing is generated**: with no DLSS-G input FFX's presenter presents
+  each real frame once. The cases prove the identification and both arms' validity, not pacing and not generated
+  frames.
+- **The two streams are told apart exactly, by queue and swapchain, not by thread.** FFX's own presents and the game's
+  presents into FFX's swapchain both run on the application's thread (FFX's presenter thread does not present when no
+  frame is generated) and both reach the host with caller `amd_fidelityfx_vk.dll`; FFX's go to a queue OptiScaler
+  reserved (`OwnsQueue`), the game's to the game's queue on FFX's swapchain (`OwnsSwapchain`). Thread identity would
+  have misfiled them; the trace records it anyway, for the games.
+- **FFX's swapchain is on record, the game's proxy is not.** FFX creates its driver swapchain through the host's
+  creation hook (nested in the game's call), so it has an id, images and the round trip. The proxy the game presents
+  into is answered by the bundle's creation hook above the host, so the host first meets it at a present
+  (`which the host never saw created`), and its destruction never reaches the host either: the trace closes that
+  stream at `vkDestroyDevice`. **This is what stage 4's NR-on-real-frames step must solve first**: the real frame of
+  shape (b) is an image of FFX's that the host does not know. Its placement (the game's present into FFX's swapchain)
+  stands; the way in is either the bundle telling the host of the proxy's images, or the host reading the frame at
+  FFX's present before it is interpolated, through FFX's own callback.
+- **FSR-FG on Vulkan needs timeline semaphores on the device.** Without them OptiScaler logs `Device created without
+  timeline semaphores, can't use FG with it`, builds no swapchain of FFX's, and the host sees no frame generation. The
+  harness enables them with `--fg` (Vulkan 1.2).
+- **The bundle dies with `[Menu] OverlayMenu=false` and FG on**: `hkvkCreateSwapchainKHR` hands FSR-FG's swapchain to
+  `MenuOverlayVk::CreateSwapchain` unconditionally, but the overlay never got its device (`DeviceCreated` runs only
+  with the menu on), and the process dies in `CreateVulkanObjects`. Upstream code, not changed here; the cases and the
+  game runs keep the menu on.
+- **FFX's own validation reports**, made with the host carrying nothing at all: a dynamic line width its UI pipeline
+  does not declare, a storage usage on an sRGB format, an image used in GENERAL from UNDEFINED, objects alive at
+  `vkDestroyDevice`, and a mip count over the limit. The transport arm adds none.
+- The round trip around FFX's presents (cross-family in the harness, three submits each) costs about 0.3 ms of drain
+  at retirement, as on any other swapchain.
+
+DOOM Eternal makes no generated frame on shape (b) ("The two shapes" above), and Streamline DLSS-G does not run in the
+harness, so neither arm can be proven here beyond its validity. The default is therefore the unsupported state:
+frame generation set aside, NR off on that device, every present untouched.
+
+### Game test plan (stage 4)
+
+Gabriel plays, the coordinator deploys. Every run with `[Log] LogToFile=true` and `LogLevel=2`. A key the deployed
+ini already has is replaced in place, never inserted again (the parser keeps the last one); the deployed inis
+(2026-10-15) predate `VulkanPresentTrace` and `VulkanPresentFgTransport`, and Crimson Desert's `VulkanPresentHost`
+too, so those are added once to `[DlssNr]` after checking the section has no line for them. The build id on the
+menu's title confirms the DLL. Both new keys are read only at startup.
+
+**DOOM Eternal** (`winmm.dll`, no marker, a native Vulkan title; DLSS off in the game so the present host owns the
+model, as in stages 3 and 5):
+
+1. FG off, the trace on. `[DlssNr] Enabled=true VulkanPresentHost=true SynthMotion=true VulkanPresentTrace=true`,
+   `[FrameGen]` left at `auto`, `[Menu] OverlayMenu=true`. Expect, as before: `the model runs at present`, the window
+   lines carrying with `NR: evaluated N`; and new: the install line naming `the pacer trace is on`, and every 10 s per
+   swapchain `DLSS-NR Vulkan present host (trace): swapchain 0x... #N on device #D, 10.0 s: ... presents` with
+   `frame generation none`, `untouched 0`, `host signals` equal to the presents, `results VK_SUCCESS` (and
+   `VK_SUBOPTIMAL_KHR` at a resize), and a frame-time tail comparable to MangoHud's. No `frame generation active`
+   line. Play 10 minutes: walk, pan, menu five times, a load.
+2. FG on (OptiScaler's Vulkan FSR-FG output). As 1, plus `[FrameGen] Enabled=true FGInput=dlssg FGOutput=fsrfg`, and
+   `amd_fidelityfx_vk.dll` beside `winmm.dll` (from the release; OptiScaler logs `Can't load amd_fidelityfx_vk.dll, FSR
+   FG won't be available` without it). Keep `OverlayMenu=true` (with it false the process dies at the first swapchain,
+   above). Expect one of two outcomes, both recorded:
+   - `Device created without timeline semaphores, can't use FG with it`: DOOM's device does not enable them, no FSR-FG
+     swapchain is made, and the run is run 1 again (no `frame generation active` line, NR at present as before).
+   - Or `FSRFG_Vk::CreateSwapchain Swapchain context creation result: The operation was successful`, then
+     `frame generation active (OptiScaler's Vulkan FSR-FG output, its own present): NR at present is off on this device
+     until stage 4 is proven; its presents go down untouched` (and possibly the same for `the game's present into it`),
+     `a present of swapchain 0x..., which the host never saw created`, no `the model runs at present` (if the model had
+     come up before the swapchain it stands down: `the model stood down and was freed`), window lines with `skipped N (frame generation N)`,
+     and trace lines with `frame generation FSR-FG output` and one `(not on record)` with `frame generation FSR-FG
+     input`. The picture is the game's without NR, and no frame is generated (DOOM has no DLSS-G input); what this run
+     shows is that the routing survives a real title. Note the menu, alt-tab and a resize.
+3. Optional, FG on with `VulkanPresentFgTransport=true`: the same, with `its presents keep the round trip without NR`,
+   FFX's swapchains `transported N` and trace `host signals N, untouched 0`. Any `VK_ERROR_DEVICE_LOST` or a present
+   result other than success or suboptimal ends the run and is the finding.
+
+**Crimson Desert** (`dxgi.dll`, the marker `optiscaler_skip_vulkan_hooks` present, `HookMethod=2`, the D3D12 present
+pass running NR ahead of DLSS-G):
+
+1. FG off in the game, the host and trace on: `[DlssNr] VulkanPresentHost=true VulkanPresentTrace=true` beside the
+   deployed `Enabled=true HookMethod=2 HdrPresent=true`. Expect: vkd3d-proton's
+   swapchain (caller `d3d12core.dll`) carried by the round trip with the model refused there (`the D3D12 route has the
+   model running in this process`), NR visible from the D3D12 pass as before, trace lines with `frame generation none`,
+   the presenting thread and its name (`threads tid N "..." (caller d3d12core.dll)`), and Streamline's counters (all
+   0 expected). 10 minutes.
+2. FG on in the game (DLSS-G 2x), same ini. Expect within a frame or two of turning it on `frame generation active
+   (the game's DLSS-G): NR at present is off on this device until stage 4 is proven; its presents go down untouched`,
+   window lines with `skipped N (frame generation N)`, trace lines with `frame generation game DLSS-G`, `untouched` equal
+   to the presents and `host signals 0`, presents per second about twice the rendered rate, and the threads list: does a
+   second presenting thread appear with DLSS-G on? NR stays visible (the D3D12 pass, ahead of DLSS-G). Read
+   `Streamline fence timeouts` and `pacer`: they must stay 0. Toggle FG off and on twice; the line appears once per
+   device, and the carry resumes when FG is off. 20 minutes (the history's failure came after 18), with the menu
+   opened five times.
+3. Optional, the experiment's submission-only arm: run 2 with `VulkanPresentFgTransport=true`. Expect `its presents
+   keep the round trip without NR`, `transported` equal to the presents, trace `host signals` equal to the presents.
+   This is the arm that puts the host's submit in front of DLSS-G's pacer: any `Wait on gpu fence timed out`
+   (counted as `Streamline fence timeouts N`) or `VK_ERROR_DEVICE_LOST` is the marker's failure reproduced and ends the
+   experiment for this title. Three 20-minute sessions clean, against runs 2's, are the first evidence the design asks
+   for; this plan does not ask for them yet.
+
 ## Decision and stop conditions
 
 Prefer this experiment over implementing the D3D11 dual-swapchain host first. It removes an entire
