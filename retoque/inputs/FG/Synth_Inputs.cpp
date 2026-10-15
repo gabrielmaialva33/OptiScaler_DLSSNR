@@ -9,6 +9,7 @@
 #include <shaders/synth_motion/SynthMotion_Dx12.h>
 #include <shaders/synth_motion/SynthMotion_Handoff.h>
 #include <shaders/synth_motion/SynthOverlay_Dx12.h>
+#include <dlssnr/DlssNr_Dred.h>
 
 #include <algorithm>
 #include <chrono>
@@ -288,6 +289,10 @@ bool SynthInputs::_EnsureOwnList(ID3D12Device* device)
 
     _ownFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
+    // Named for a DRED breadcrumb with [DlssNr] Dred on (dlssnr/DlssNr_Dred.h); otherwise left as they were.
+    DlssNr::Dred::Name(_ownList, L"Retoque synthesized FG input list");
+    DlssNr::Dred::Name(_ownAllocator, L"Retoque synthesized FG input allocator");
+
     if (_ownFenceEvent == nullptr || FAILED(_ownList->Close()))
     {
         if (_ownFenceEvent != nullptr)
@@ -435,6 +440,9 @@ bool SynthInputs::_EnsureFrameLists(ID3D12Device* device)
         SafeRelease(_frameFence);
         return false;
     }
+
+    for (UINT i = 0; i < kFrameLists; ++i)
+        DlssNr::Dred::Name(_frameLists[i], L"Retoque synthesized FG input frame list", (int) i);
 
     // Identity only: everything here is released before the device can go.
     _frameDevice = device;

@@ -1607,7 +1607,7 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
         return o_CreateDevice(pFactory, pAdapter, MinimumFeatureLevel, riid, ppDevice);
     }
 
-    DlssNr::Dred::EnableBeforeDeviceCreation();
+    DlssNr::Dred::EnableBeforeDeviceCreation(pFactory);
 
 #ifdef ENABLE_DEBUG_LAYER_DX12
     LOG_WARN("Debug layers active!");

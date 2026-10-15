@@ -92,8 +92,9 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   Source guards hold that the present pass and the bridge still read the slot `PickForPresent` gave them. No GPU.
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
   ownership and deferred release against scripted COM/Win32 fakes, and which FG input and output
-  the bridge is built for. Also a refused presenter resize and its recovery, and the D3D12 overlay's
-  render-target release under the present-thread race that caused it. Also a second swapchain taking the
+  the bridge is built for. Also a refused presenter resize and its recovery, the D3D12 overlay's
+  render-target release under the present-thread race that caused it, and what a flip-model presenter needs
+  on native Windows (two buffers at least, its overlay let go on an NR-only bridge). Also a second swapchain taking the
   window over: the old wrapper's surrender, and its `Present`, resizes, fullscreen and release afterwards.
   No GPU coverage.
 - `bridge-window` — the takeover's device-free header (`retoque/with_dx12/Dx11wDx12_Window.h`): live bridges

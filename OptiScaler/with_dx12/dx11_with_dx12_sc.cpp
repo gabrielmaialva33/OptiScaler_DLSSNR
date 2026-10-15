@@ -10,6 +10,7 @@
 #include <hudfix/Hudfix_Dx11.h>
 #include <resource_tracking/ResTrack_dx11.h>
 #include <shaders/synth_motion/SynthMotion_Handoff.h>
+#include <dlssnr/DlssNr_Dred.h>
 
 #include <Util.h>
 #include <Config.h>
@@ -150,6 +151,33 @@ UINT PresenterResizeFlags(IDXGISwapChain1* presenter, UINT gameFlags)
         return flags;
 
     return (flags & ~fixedAtCreation) | (desc.Flags & fixedAtCreation);
+}
+
+UINT PresenterResizeBufferCount(UINT gameCount)
+{
+    // Flip model takes no fewer than two buffers, in ResizeBuffers as at creation, where PrepareDx12InteropDesc already
+    // raises the game's count to two. A blt-model game with one buffer may name that count again when it resizes,
+    // which the hidden swapchain, the game's own, takes and the presenter cannot. Zero keeps the count it has.
+    return gameCount == 1 ? 2 : gameCount;
+}
+
+DXGI_FORMAT PresenterResizeFormat(DXGI_FORMAT gameFormat)
+{
+    // Metal: Hellsinger names R8G8B8A8_UNORM_SRGB in its resizes. Flip model has no sRGB buffer, so the presenter was
+    // created with the UNORM sibling and is resized with it too. That was not what the presenter refused, though: with
+    // this in place (b1ab84bc) it still answered the game's first resize with 80070057 (Rafael's RTX 3060, 2026-10-14,
+    // second run). The likeliest argument left is the buffer count: an sRGB swapchain can only be blt model, whose
+    // count may be one (PresenterResizeBufferCount). That run logged at level 2, so the arguments were not in it; the
+    // refusal line in _ResizePresenter now names every one the presenter was given.
+    switch (gameFormat)
+    {
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    default:
+        return gameFormat;
+    }
 }
 
 void MatchHiddenToPresenter(IDXGISwapChain* hidden, IDXGISwapChain1* presenter)
@@ -550,29 +578,47 @@ bool Dx11wDx12SC::_PresenterDrawsOverlay() const
            !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
 }
 
+// Whether this wrapper's Present draws the overlay onto the plain presenter it owns, with no other presenter current
+// for frame generation and no frame generation object but its own (or none): the overlay's render targets are then
+// this presenter's buffers, and the frame generation object CleanupRenderTarget pauses is this wrapper's.
+//
+// _OwnsOverlay is false on an NR-only bridge: _OwnsFgPresenter needs a frame generation object, and currentFGSwapchain
+// names the plain presenter rather than nothing. So the overlay kept its references through every resize there, and
+// a flip-model presenter refuses ResizeBuffers while one is out. Metal: Hellsinger on native Windows (Rafael's RTX
+// 3060, build b1ab84bc, 2026-10-14): the presenter took one resize at its own size before the overlay had drawn; once
+// it had, the resizes at its own size were refused, the last with 887A0001. vkd3d-proton refuses the same, but there
+// the game's resizes at an unchanged size are skipped (IsSame) unless one is owed, so only a real size change would
+// have shown it.
+bool Dx11wDx12SC::_DrawsOwnOverlay() const
+{
+    const auto& state = State::Instance();
+    return state.currentFGSwapchain == _fgSwapChain && state.currentFG == _fg && !_PresenterDrawsOverlay() &&
+           _OwnsPresenter();
+}
+
 // What a resize owes the overlay and frame generation before the presenter's buffers change.
 //
 // On the plain presenter the overlay's render targets are the presenter's own buffers and only this thread draws
-// them, so they are let go here. On a frame generation presenter they belong to the real swapchain inside the
-// backend, and the backend draws them from its own present path -- DLSS-G from a present thread of its own, while
-// interpolating. Letting them go from here raced that thread: Generation Zero with DLSS-G on this bridge
-// (2026-09-29) re-created them on Streamline's present thread in the middle of this cleanup, the cleanup then
-// cleared the overlay's init state over them, and the cleanup inside the real swapchain's resize, which checks
-// that state, kept them. vkd3d-proton refuses a ResizeBuffers while any buffer is referenced, so the backend's
-// resize failed and DLSS-G was left with no buffers. That cleanup in WrappedIDXGISwapChain4::ResizeBuffers runs
-// inside the backend's resize, after the backend has stopped presenting (Streamline flushes first), which is
-// where upstream's native D3D12 path lets them go too. Frame generation is still paused here, as the overlay
-// cleanup did.
+// them, so they are let go here (_DrawsOwnOverlay, which an NR-only bridge needs: _OwnsOverlay is false there). On a
+// frame generation presenter they belong to the real swapchain inside the backend, and the backend draws them from
+// its own present path -- DLSS-G from a present thread of its own, while interpolating. Letting them go from here
+// raced that thread: Generation Zero with DLSS-G on this bridge (2026-09-29) re-created them on Streamline's present
+// thread in the middle of this cleanup, the cleanup then cleared the overlay's init state over them, and the cleanup
+// inside the real swapchain's resize, which checks that state, kept them. vkd3d-proton refuses a ResizeBuffers while
+// any buffer is referenced, so the backend's resize failed and DLSS-G was left with no buffers. That cleanup in
+// WrappedIDXGISwapChain4::ResizeBuffers runs inside the backend's resize, after the backend has stopped presenting
+// (Streamline flushes first), which is where upstream's native D3D12 path lets them go too. Frame generation is still
+// paused here, as the overlay cleanup did.
 void Dx11wDx12SC::_ReleaseOverlayForResize()
 {
-    if (!_OwnsOverlay())
-        return;
-
-    if (!_PresenterDrawsOverlay())
+    if (_DrawsOwnOverlay() || (_OwnsOverlay() && !_PresenterDrawsOverlay()))
     {
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
         return;
     }
+
+    if (!_OwnsOverlay())
+        return;
 
     auto fg = State::Instance().currentFG;
     if (fg != nullptr && fg->FrameGenerationContext() != nullptr && fg->IsActive())
@@ -807,8 +853,9 @@ Dx11wDx12::Window::Surrender Dx11wDx12SC::_SurrenderPresenter()
         _id, (size_t) _handle);
 
     // The overlay's render targets are this presenter's buffers, and on the plain presenter only this wrapper's Present
-    // draws them. Not through _ReleaseOverlayForResize: _OwnsOverlay is false for a bridge without a frame generation
-    // object, which is every NR-only bridge, and these must go before the presenter can.
+    // draws them. Not through _ReleaseOverlayForResize: its plain-presenter test (_DrawsOwnOverlay) wants the presenter
+    // FGHooks names, and a wrapper with no frame generation object is taken over without it. These must go before the
+    // presenter can.
     if (!deviceLost)
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
 
@@ -1256,9 +1303,11 @@ HRESULT Dx11wDx12SC::_ResizePresenter(UINT bufferCount, UINT width, UINT height,
         return result;
     }
 
-    LOG_ERROR("Dx11wDx12SC {}: the presenter refused ResizeBuffers: {:X}. Its size is unchanged and the hidden "
-              "swapchain is left to match it; up to {} resizes at its own size follow from Present",
-              _id, (UINT) result, kRefusedResizeRetries);
+    // Every argument, so a refusal names its cause at the default log level.
+    LOG_ERROR("Dx11wDx12SC {}: the presenter refused ResizeBuffers (count {}, {}x{}, format {}, flags {:X}): {:X}. Its "
+              "size is unchanged and the hidden swapchain is left to match it; up to {} resizes at its own size follow "
+              "from Present",
+              _id, bufferCount, width, height, (UINT) format, flags, (UINT) result, kRefusedResizeRetries);
 
     _presenterResizeOwed = true;
     _presenterResizeRefused = true;
@@ -1416,6 +1465,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     UINT hiddenHeight = Height;
     Dx11wDx12::ResolveZeroExtent(_handle, hiddenWidth, hiddenHeight, _fgSwapChain != nullptr ? _fgSwapChain : _real);
     const UINT presenterFlags = Dx11wDx12::PresenterResizeFlags(_fgSwapChain, SwapChainFlags);
+    const DXGI_FORMAT presenterFormat = Dx11wDx12::PresenterResizeFormat(NewFormat);
+    const UINT presenterCount = Dx11wDx12::PresenterResizeBufferCount(BufferCount);
 
     // If Width and Height were 0x0 and the window is tiny (< 16), ResolveZeroExtent kept the current buffer
     // size in hiddenWidth/hiddenHeight. Hand those to the presenter as well so DXGI does not collapse it to 1x1.
@@ -1429,8 +1480,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         presenterHeight = hiddenHeight;
     }
 
-    const bool skipFgResize = !_presenterResizeOwed &&
-                              IsSame(_fgSwapChain, BufferCount, hiddenWidth, hiddenHeight, NewFormat, presenterFlags);
+    const bool skipFgResize = !_presenterResizeOwed && IsSame(_fgSwapChain, presenterCount, hiddenWidth, hiddenHeight,
+                                                              presenterFormat, presenterFlags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
     _presenterRecoveryArmed = true;
@@ -1479,12 +1530,20 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         }
         else
         {
-            fgResult = _ResizePresenter(BufferCount, presenterWidth, presenterHeight, NewFormat, presenterFlags);
+            fgResult =
+                _ResizePresenter(presenterCount, presenterWidth, presenterHeight, presenterFormat, presenterFlags);
         }
     }
 
     // A presenter that refused leaves both swapchains as they were, still agreeing, so the hidden one is
     // not touched; the game has the error.
+    //
+    // The hidden swapchain takes the game's count, format and flags as given. Every creation site makes it from the
+    // game's own description (realDesc = localDesc), not from the presenter's (PrepareDx12InteropDesc), so it has the
+    // game's swap effect and the game's count, and what the game names in a resize is what its own swapchain would
+    // take: a blt-model one with a single buffer resizes to one buffer. The exception is [V-Sync] OverrideVsync, which
+    // makes that description flip model with tearing before both swapchains exist; there the hidden swapchain can
+    // refuse the game's count and flags as it did before, and that is not handled here.
     HRESULT realResult = fgResult;
     if (SUCCEEDED(fgResult))
     {
@@ -1731,6 +1790,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     UINT hiddenHeight = Height;
     Dx11wDx12::ResolveZeroExtent(_handle, hiddenWidth, hiddenHeight, _fgSwapChain != nullptr ? _fgSwapChain : _real);
     const UINT presenterFlags = Dx11wDx12::PresenterResizeFlags(_fgSwapChain, SwapChainFlags);
+    const DXGI_FORMAT presenterFormat = Dx11wDx12::PresenterResizeFormat(Format);
+    const UINT presenterCount = Dx11wDx12::PresenterResizeBufferCount(BufferCount);
 
     // If Width and Height were 0x0 and the window is tiny (< 16), ResolveZeroExtent kept the current buffer
     // size in hiddenWidth/hiddenHeight. Hand those to the presenter as well so DXGI does not collapse it to 1x1.
@@ -1744,8 +1805,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         presenterHeight = hiddenHeight;
     }
 
-    const bool skipFgResize =
-        !_presenterResizeOwed && IsSame(_fgSwapChain, BufferCount, hiddenWidth, hiddenHeight, Format, presenterFlags);
+    const bool skipFgResize = !_presenterResizeOwed && IsSame(_fgSwapChain, presenterCount, hiddenWidth, hiddenHeight,
+                                                              presenterFormat, presenterFlags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
     _presenterRecoveryArmed = true;
@@ -1793,10 +1854,12 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         }
         else
         {
-            fgResult = _ResizePresenter(BufferCount, presenterWidth, presenterHeight, Format, presenterFlags);
+            fgResult =
+                _ResizePresenter(presenterCount, presenterWidth, presenterHeight, presenterFormat, presenterFlags);
         }
     }
 
+    // The hidden swapchain takes the game's arguments as given, as in ResizeBuffers.
     HRESULT realResult = fgResult;
     if (SUCCEEDED(fgResult))
     {
@@ -1908,6 +1971,8 @@ bool Dx11wDx12SC::_InitInteropObjects()
             LOG_ERROR("CreateCommandAllocator[{}] failed: {:X}", i, (UINT) result);
             return false;
         }
+
+        DlssNr::Dred::Name(_copyAllocators[i], L"Retoque bridge interop allocator", (int) i);
     }
 
     for (UINT i = 0; i < copyAllocatorCount; ++i)
@@ -1923,6 +1988,9 @@ bool Dx11wDx12SC::_InitInteropObjects()
             return false;
         }
 
+        // What a DRED breadcrumb calls this list, with [DlssNr] Dred on: everything the bridge records per frame --
+        // the neural pass, the synthesized frame-generation inputs and the copy to the presenter -- goes on it.
+        DlssNr::Dred::Name(_copyCommandLists[i], L"Retoque bridge interop list", (int) i);
         _copyCommandLists[i]->Close();
     }
 
@@ -2149,7 +2217,12 @@ HRESULT Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
     const auto result =
         WaitForBridgeFence(_copyFence, _dx12Device, _copyFenceEvent, _copyAllocatorFenceValues[slot], 5000);
     if (FAILED(result))
+    {
         LOG_ERROR("bridge slot {} fence {} wait failed: {:X}", slot, _copyAllocatorFenceValues[slot], (UINT) result);
+
+        // Often the first place a removed bridge device shows. Once per process, and nothing unless asked for.
+        DlssNr::Dred::Report(_dx12Device);
+    }
     return result;
 }
 
@@ -2216,21 +2289,26 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     // the synthesized FG input after it takes that field instead of estimating again.
     SynthMotion::Handoff::BeginBaseFrame();
 
-    if (_nrHost != nullptr &&
-        _nrHost->Record(_dx12Device, _copyCommandLists[copySlot], _openedDx11BackBuffers[copySlot],
-                        D3D12_RESOURCE_STATE_COPY_SOURCE, _dx12CommandQueue))
+    // Each span below is a DRED breadcrumb context with [DlssNr] Dred on, and nothing otherwise.
+    if (_nrHost != nullptr)
     {
-        // An idle host kept for the neural toggle counts from the first frame it actually ran.
-        State::Instance().nrPresentHostActive = true;
+        DlssNr::Dred::ScopedEvent event(_copyCommandLists[copySlot], L"Retoque bridge: DLSS-NR present host");
+        if (_nrHost->Record(_dx12Device, _copyCommandLists[copySlot], _openedDx11BackBuffers[copySlot],
+                            D3D12_RESOURCE_STATE_COPY_SOURCE, _dx12CommandQueue))
+        {
+            // An idle host kept for the neural toggle counts from the first frame it actually ran.
+            State::Instance().nrPresentHostActive = true;
 
-        if (auto* composed = _nrHost->Output(); composed != nullptr)
-            transferSource = composed;
+            if (auto* composed = _nrHost->Output(); composed != nullptr)
+                transferSource = composed;
+        }
     }
 
     // Frame generation's stand-in depth and motion, when this bridge feeds it. Only their one-time
     // clear is ever recorded, sized to the presenter's backbuffer; Present hands them to FG.
     if (_synthInputs != nullptr)
     {
+        DlssNr::Dred::ScopedEvent event(_copyCommandLists[copySlot], L"Retoque bridge: synthesized FG inputs");
         const auto fgDesc = fgBackBuffer->GetDesc();
         _synthInputs->RecordInit(_dx12Device, _copyCommandLists[copySlot], (UINT) fgDesc.Width, fgDesc.Height,
                                  fgDesc.Format);
@@ -2246,7 +2324,10 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
                                     D3D12_RESOURCE_STATE_COPY_SOURCE, transferSource, D3D12_RESOURCE_STATE_COPY_SOURCE);
     }
 
-    _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, transferSource);
+    {
+        DlssNr::Dred::ScopedEvent event(_copyCommandLists[copySlot], L"Retoque bridge: copy to the presenter");
+        _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, transferSource);
+    }
 
     TransitionResource(_copyCommandLists[copySlot], fgBackBuffer, D3D12_RESOURCE_STATE_COPY_DEST,
                        D3D12_RESOURCE_STATE_PRESENT);

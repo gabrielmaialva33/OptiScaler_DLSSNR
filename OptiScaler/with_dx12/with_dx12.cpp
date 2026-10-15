@@ -281,6 +281,7 @@ ID3D12CommandQueue* WithDx12::CreateD3D12CommandQueue(ID3D12Device* dx12Device)
         return nullptr;
     }
 
+    DlssNr::Dred::Name(commandQueue, L"Retoque D3D12 interop queue");
     return commandQueue;
 }
 
