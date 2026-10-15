@@ -17,7 +17,8 @@ PATTERNS = [
     ('home path', re.compile(r'/home/[a-z_][a-z0-9_.-]*/')),
     ('home path (Wine Z: drive)', re.compile(r'[Zz]:\\+home\\+[a-z_]', re.IGNORECASE)),
     ('Windows user profile', re.compile(r'[A-Za-z]:\\+Users\\+(?!Public\b|Default\b|<|%|\$|\{)[A-Za-z0-9]')),
-    ('mounted library path', re.compile(r'/(?:mnt|run/media|media)/[A-Za-z0-9_-]+/[A-Za-z]')),
+    # Not inside a URL: a host name ends right before the slash there (media.githubusercontent.com/media/...).
+    ('mounted library path', re.compile(r'(?<![\w.])/(?:mnt|run/media|media)/[A-Za-z0-9_-]+/[A-Za-z]')),
     ('tailnet address', re.compile(r'\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b')),
     ('tailnet host name', re.compile(r'\b[a-z0-9-]+\.ts\.net\b')),
     ('LAN address', re.compile(r'\b192\.168\.\d{1,3}\.\d{1,3}\b')),
@@ -62,7 +63,7 @@ def self_test():
         'home path': ('see /home/someone/.local/share', 'see ~/.local/share'),
         'home path (Wine Z: drive)': (r'Z:\home\someone\x', r'Z:$(pwd)'),
         'Windows user profile': (r'C:\Users\someone\AppData', r'C:\Users\%USERNAME%\AppData'),
-        'mounted library path': ('/mnt/games/SteamLibrary', '<library>/steamapps'),
+        'mounted library path': ('/mnt/games/SteamLibrary', 'https://media.example.com/media/Org/Repo'),
         'tailnet address': ('ssh 100.101.102.103', 'version 100.0.1.2'),
         'tailnet host name': ('desk.tail1234.ts.net', 'tsnet'),
         'LAN address': ('192.168.1.20', '192.168'),
