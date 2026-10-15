@@ -520,9 +520,12 @@ miss, the route the status names, the zero-to-game change, generated frames of a
   reach the pass (the boundary sees none, the FG hook sees base frames, the wrapped entry declines under the game's
   DLSS-G), but a game's own FSR3 or XeSS frame generation that OptiScaler does not replace still presents every frame
   through the wrapped entry. The skip covers those after a capture that was used, and, since step 1, after one that
-  was refused: when the refused pick is the newest capture recorded, it counts as decided on, so the presents after it
-  with nothing newer skip as they would after a use. A refused older pick (a newer capture still being copied) does
-  not, so that capture is not passed over.
+  was refused for good: when the refused pick is the newest capture recorded and the reason lives in the capture
+  (`SettlesNewest`: device, output base, ambiguous, lag, stale, subrect), it counts as decided on, so the presents
+  after it with nothing newer skip as they would after a use; those presents would have refused it again. A refused
+  older pick (a newer capture still being copied) does not, nor does a refusal that turns on the present (extent,
+  swapchain: a resize under way, another window's present), so a capture the next present could accept is not passed
+  over.
 - **The presenter is the swapchain's window** (`PresentGuidePresenter`, `GetHwnd`, the swapchain pointer when there is
   no window), for the D3D12 pass. The game's Streamline proxy at the boundary and the swapchain beneath it are then one
   presenter, not two that refuse each other on rule 3 (nr-before-dlssg.md's test plan asks for this). A recreated
@@ -564,6 +567,11 @@ miss, the route the status names, the zero-to-game change, generated frames of a
 - **Today's skip.** Its test is unchanged (newest recorded against the newest at the last use, or at the last refusal
   of the newest), so step 0's "skipped but would pass" can still happen (zero in every session so far), and is still
   counted.
+- **An alternation keeps the history on the game's side.** A title that misses the game's guides on up to three
+  frames between uses (a copy completing every other frame, say) never holds the other side for four frames, so it
+  gets neither the source reset nor `ZeroGuideReset` on those frames. The window line shows it as `consumed` (or
+  another reason) refusals among the uses. Left so: that is what a debounce is for; a share threshold can come if a
+  title shows it.
 - **When a use is counted.** A use is recorded when the read is tracked, before the list is known to execute. A list
   that is then dropped (the pass failing, a submission that fails) leaves the capture counted as used: rule 5 refuses
   it if it is offered again, and the window and the status say "used". The bridge's abandoned recording is the same.
@@ -610,8 +618,9 @@ gone.
   enforced on N | N used the game's depth and motion, 0 refused, 0 skipped with no new capture, 0 had none` with the
   lag histogram all at `1:` and captures per frame all at `1:`. Toggling DLSS-G on and off changes none of it.
 - One `history restarts on the game's depth and motion` line where captures start, if the pass ran on the title screen
-  before the first upscaler evaluate (it does at the boundary). None after it in steady play. One around a menu or a
-  cutscene would mean the guides were refused, or absent, for four frames in a row there: the window line says which.
+  before the first upscaler evaluate (it does at the boundary). None after it in steady play. A menu or a cutscene where
+  the upscaler stops makes the pass skip, which is no change of source and logs nothing; a restart line there would
+  mean the guides were refused for four frames in a row: the window line says which rule.
 - The menu, under the status line: "Guides: the game's depth and motion, on every frame".
 - On screen, what step 1 of nr-before-dlssg.md measured: no flicker, NR on every frame. Step 1 changes which captures
   may be read, and in the step 0 data that is the one start-up frame.
@@ -628,7 +637,8 @@ the menu after start-up (so the boundary is not installed) with DLSS-G off throu
   narrowing over random cases with a table oracle, the late copy and the wrapped entry's lag at both settings, a
   20,000-frame run on the production ring that reads the decision's slot and checks that it never names a capture
   refused earlier for a reason that cannot improve and that a slot being read is never overwritten, step 1's window and
-  line, an untracked read and `MarkUsed`, `SourceHistory`, the status word and its texts; the renderer's glue sliced
+  line, which refusals settle the newest capture (and that a settled one is never accepted by a later present with
+  nothing newer), an untracked read and `MarkUsed`, `SourceHistory`, the status word and its texts; the renderer's glue sliced
   out and run against fakes (the window as presenter, the proxy and the wrapped swapchain as one presenter, inert on an
   empty ring, use, consumed, skip, lag at and below the boundary, the change from zeros to the game's guides and back
   with its log lines and the hold `ZeroGuideReset` waits on, the status and the menu line, waiting reported by the
