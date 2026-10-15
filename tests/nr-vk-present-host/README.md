@@ -1,12 +1,12 @@
-# Vulkan present host, stages 1 to 3 (host tier)
+# Vulkan present host, stages 1 to 5 (host tier)
 
 Run `python3 tests/nr-vk-present-host/run.py`. Pure Python source guards, then the production
-`retoque/dlssnr/DlssNr_VkPresentRegistry.h`, `DlssNr_VkPresentTransport.h`, `DlssNr_VkPresentNr.h` and
-`DlssNr_VkModelOwner.h`, as they are, compiled with g++ C++20, ASan/UBSan and `-Werror` against the real Vulkan headers
+`retoque/dlssnr/DlssNr_VkPresentRegistry.h`, `DlssNr_VkPresentTransport.h`, `DlssNr_VkPresentNr.h`,
+`DlssNr_VkModelOwner.h` and `DlssNr_VkPresentFg.h`, as they are, compiled with g++ C++20, ASan/UBSan and `-Werror` against the real Vulkan headers
 in `external/vulkan`, and driven by `cases.cpp`.
 
-Design: `docs/dlssnr/design/nr-vulkan-present-host.md`, sections "Stage 1 as built", "Stage 2 as built" and "Stage 3
-as built".
+Design: `docs/dlssnr/design/nr-vulkan-present-host.md`, sections "Stage 1 as built", "Stage 2 as built", "Stage 3
+as built" and "Stage 4: the present host beside frame generation".
 
 ## What this covers
 
@@ -146,6 +146,26 @@ Off the present path (DOOM Eternal's startup hang, 2026-10-14; `DlssNr_VkPresent
   a job runs; a job in flight keeps the model and its token; the build's submit borrows the work queue's locks bounded,
   never the transport lock, and waits for its fence after giving them back; vkDestroyDevice waits for a build, bounded;
   the watchdog starts only after `Install`'s gate and takes no lock; every entry point records an activity.
+
+Beside frame generation (stage 4; `DlssNr_VkPresentFg.h`):
+
+- The shape, from the facts the D3D12 route reads (Streamline's DLSS-G mode, NGX DLSS-G's interpolation count, the
+  current FG feature active and not paused) and the FG output's own (a present on a queue FSR-FG reserved, into a
+  swapchain it made, into the one it replaced): none, the game's DLSS-G, OptiScaler's D3D12 FG, its Vulkan FSR-FG
+  output's own presents, the game's presents into FSR-FG; what each decides: carried as before only with none,
+  untouched otherwise, the round trip without NR with `VulkanPresentFgTransport`; the unsupported line's exact words
+  in both arms.
+- Streamline's log lines sorted: a timeout at any level, the pacer's lines from warnings up, warnings and errors
+  counted, the last one kept short.
+- The pacer trace: nothing until a swapchain's 10 s window ends, then one line with its presents, threads (name and
+  calling module), queues, waits, host signals and untouched presents, present ids with gaps and reorderings, the
+  frame-time and call-time percentiles and the frames over twice the median, results, GPU completions, the ring and
+  the longest CPU wait, the shape and Streamline's counts since the swapchain's first present; flushed at destruction
+  and, per device and for streams never on record, at `vkDestroyDevice`.
+- Source guards: the frame-generation branch runs before housekeeping and before the multi-swapchain check, so a set
+  aside present edits nothing and spends no wait; the experiment arm refuses the model before `DecideNr`; the trace
+  is fed only with its key and its two locks are leaves (nothing of the host's, Vulkan's or the log's under them); the
+  Streamline callbacks feed it before their repeat filter; the two keys' four config points.
 
 ## What this does not cover
 

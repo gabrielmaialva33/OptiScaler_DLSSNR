@@ -103,7 +103,7 @@ USAGE_TRANSFER_SRC, USAGE_TRANSFER_DST, USAGE_STORAGE = 0x1, 0x2, 0x8
 QUEUE_GRAPHICS, QUEUE_COMPUTE, QUEUE_TRANSFER = 0x1, 0x2, 0x4
 SKIP_ORDER = ['observe only', 'device off', 'multi-swapchain present', 'image unknown', 'no acquire seen',
               'too many waits', 'no route', 'work queue changed', 'ring busy', 'queue busy', 'setup failed',
-              'record failed', 'submit failed']
+              'record failed', 'submit failed', 'frame generation']
 ROUTE_ORDER = ['same queue', 'cross-family', 'concurrent']
 
 
@@ -956,10 +956,25 @@ NR_CASES = {
     # Its control: the same panning picture on zero motion. What the model makes of a pan it is told is still, for the
     # two read-back means to be set side by side.
     'nr-pan-zero': (True, None, False, 'build', True, None),
+    # Stage 4's pacer trace on an ordinary run (every present carried): its lines and counts against the application's.
+    'nr-trace': (True, None, True, 'build', True, None),
+    'nr-fg-vk': (True, None, False, 'build', True, None),
+    'nr-fg-vk-transport': (True, None, False, 'build', True, None),
 }
+
+# Stage 4: OptiScaler's own Vulkan frame generation (shape (b) of "Stage 4" in the design note) in the harness: the bundle's
+# Vulkan hooks on (no marker) and its menu on (with OverlayMenu=false the bundle still hands FSR-FG's swapchain to the
+# Vulkan overlay, which never got its device, and the process dies in MenuOverlayVk::CreateSwapchain), FSR-FG as the output of a DLSS-G input that never comes (so the FG
+# swapchain replaces the game's and FFX's presenter presents every real frame, and no frame is generated), and FFX's
+# Vulkan DLL from the local kit beside OptiScaler (linked, never copied).
+FG_SECTIONS = '[FrameGen]\nEnabled=true\nFGInput=dlssg\nFGOutput=fsrfg\n'
+NR_FG = {'nr-fg-vk', 'nr-fg-vk-transport'}
 
 # More of the [DlssNr] section, for the cases that need it.
 NR_INI = {
+    'nr-trace': 'VulkanPresentTrace=true\n',
+    'nr-fg-vk': 'VulkanPresentTrace=true\n',
+    'nr-fg-vk-transport': 'VulkanPresentTrace=true\nVulkanPresentFgTransport=true\n',
     'nr-hdr-off': 'HdrPresent=false\n',
     'nr-hdr-half-synth': 'HdrPresent=true\nSynthMotion=true\n',
     'nr-hdr-control': 'HdrPresent=true\n',
@@ -983,6 +998,8 @@ NR_TIMING = {
     'nr-synth-motion': ({}, ['--pan', '4', '--frames', '40']),
     'nr-synth-motion-half': ({}, ['--pan', '4', '--frames', '40']),
     'nr-pan-zero': ({}, ['--pan', '4', '--frames', '40']),
+    'nr-fg-vk': ({}, ['--fg', '--frames', '24']),
+    'nr-fg-vk-transport': ({}, ['--fg', '--frames', '24']),
 }
 # The longest a present may take in nr-build-slow, while the model's build takes seconds: the round trip, the validation
 # layer and the call down at this harness's rate, nothing of the model's build.
@@ -1004,7 +1021,8 @@ def nr_proton():
 def nr_files(dll):
     """What the cold-NR cases need, and what of it is missing on this machine."""
     files = dict(model=KIT / 'nvngx_dlssnr.dll', old=KIT / 'nvngx.dll_dlssnr.dll', built=dll.parent / 'nvngx.dll_dlssnr.dll',
-                 core=[NGX_CORE / '_nvngx.dll', NGX_CORE / 'nvngx.dll'], proton=nr_proton())
+                 core=[NGX_CORE / '_nvngx.dll', NGX_CORE / 'nvngx.dll'], proton=nr_proton(),
+                 ffx=KIT / 'OptiScaler/amd_fidelityfx_vk.dll')
     missing = [str(f) for f in (files['model'], files['old'], files['built'], *files['core']) if not f.exists()]
     if files['proton'] is None:
         missing.append('a local Proton')
@@ -1052,9 +1070,14 @@ def execute_nr(name, dll, redist, files):
     # Into the one [DlssNr] section, never a second one.
     extra = f'ApplyModel={str(apply_model).lower()}\n' + (f'WorkingScale={scale}\n' if scale is not None else '') + \
         NR_INI.get(name, '')
+    fg = name in NR_FG
     ini = ini_for(False, True, True, True, level=1).replace('VulkanPresentHost=true\n', 'VulkanPresentHost=true\n' + extra)
+    if fg:
+        ini += FG_SECTIONS
+        (work / 'amd_fidelityfx_vk.dll').symlink_to(files['ffx'])
+    else:
+        (work / MARKER).write_text('')
     (work / 'OptiScaler.ini').write_text(ini)
-    (work / MARKER).write_text('')
     with (OUT / f'{name}.log').open('w') as log:
         knobs, args = NR_TIMING.get(name, ({}, []))
         no_game()
@@ -1071,7 +1094,7 @@ def execute_nr(name, dll, redist, files):
             (l for l in reversed(run_log.splitlines()) if l.startswith('FAIL: ')), 'no reason written')
         raise RuntimeError(f'{name}: application failed (exit {process.returncode}): {reason}; see '
                            f'{OUT / (name + ".log")} and {log_path}')
-    if facts.get('validation_active') is not True or facts.get('validation_errors') != 0:
+    if facts.get('validation_active') is not True or (facts.get('validation_errors') != 0 and name not in NR_FG):
         raise RuntimeError(f'{name}: validation was not proved active and clean')
     return facts, log
 
@@ -1134,6 +1157,89 @@ def check_hdr(name, facts, log):
         problems.append('model not freed at device destruction')
     action = 'conversion with real model' if enabled else 'HdrPresent off, HDR readbacks exact'
     return problems, f'{len(hdr)} HDR swapchains, {action}, original alpha preserved; 0 host validation errors'
+
+
+# What the validation layer reports of FSR-FG's own frame-generation swapchain and OptiScaler's FG output, with the host
+# carrying every present untouched (no submit of the host's at all), measured 2026-10-15 with FFX API 3.1.4 from the
+# local kit: its UI composition pipeline's line width, a storage usage on an sRGB format, its replacement back buffers'
+# layout, and the objects left at vkDestroyDevice. The transport arm may add nothing to it.
+FG_VUIDS = {'VUID-VkGraphicsPipelineCreateInfo-pDynamicStates-00749', 'VUID-VkImageCreateInfo-imageCreateMaxMipLevels-02251',
+            'VUID-VkImageViewCreateInfo-usage-02275', 'VUID-vkCmdDraw-None-09600', 'VUID-vkDestroyDevice-device-05137'}
+
+
+def check_fg(name, facts, log):
+    """Stage 4, shape (b): OptiScaler's Vulkan FSR-FG output in the harness. FFX's presenter presents FFX's own swapchain
+    (made through the host's creation hook, so on record) from a queue OptiScaler reserved for it; the game presents into
+    FFX's swapchain, which the host never saw created. Every one of them is frame generation's: untouched by default, with
+    the round trip and no NR in the transport arm; never the model. The trace names both streams."""
+    transport = 'VulkanPresentFgTransport=true' in NR_INI.get(name, '')
+    problems = []
+
+    def need(condition, message):
+        if not condition:
+            problems.append(message)
+
+    lines = log.splitlines()
+    need(any('FSRFG_Vk::CreateSwapchain Swapchain context creation result: The operation was successful' in l
+             for l in lines), 'FSR-FG made no frame-generation swapchain: the shape was not exercised')
+    said = [l for l in lines if 'frame generation active (' in l and 'NR at present is off on this device' in l]
+    need(len(said) >= 1, 'no frame-generation line')
+    need(all(('keep the round trip without NR' in l) == transport for l in said), f'frame-generation lines: {said}')
+    need(any("OptiScaler's Vulkan FSR-FG output, its own present" in l for l in said),
+         'FSR-FG\'s own presents were not identified')
+    for words in ('the model is being built', 'the model runs at present', "the model's feature is up"):
+        need(not any(words in l for l in lines), f'the model came up beside frame generation: {words!r}')
+    need(any('which the host never saw created' in l for l in lines),
+         'the game\'s presents into FFX\'s swapchain were not seen as such')
+
+    gone = [l for l in lines if 'DLSS-NR Vulkan present host: swapchain ' in l and ' destroyed after ' in l]
+    need(len(gone) >= 3, f'{len(gone)} of FFX\'s swapchains retired, expected three (one per harness swapchain)')
+    carried = untouched = 0
+    for line in gone:
+        m = re.search(r'destroyed after (\d+) presents; transported (\d+), skipped (\d+)(?: \(([^)]*)\))?, waits taken '
+                      r'over \d+, submits (\d+)', line)
+        if m is None:
+            problems.append(f'destruction line unparsed: {line[:200]}')
+            continue
+        presents, transported, skipped, skips, submits = (int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                                                          counts(m.group(4)), int(m.group(5)))
+        if transport:
+            need(transported == presents and submits >= presents, f'transport arm, not every present carried: {line[:240]}')
+            nr = line[line.index('; NR: ') + 2:] if '; NR: ' in line else ''
+            problems.extend(nr_problems('FFX swapchain', nr, 0, presents, {'frame generation': presents}))
+            carried += transported
+        else:
+            need(transported == 0 and submits == 0 and skips == {'frame generation': presents},
+                 f'not every present untouched: {line[:240]}')
+            untouched += skipped
+
+    # The trace: FFX's stream on record, the game's into FFX's swapchain not; both classified.
+    traces = [l for l in lines if 'DLSS-NR Vulkan present host (trace): swapchain ' in l]
+    need(any('frame generation FSR-FG output' in l and '(not on record)' not in l for l in traces),
+         'no trace line for FSR-FG\'s own presents')
+    need(any('frame generation FSR-FG input' in l and '(not on record)' in l for l in traces),
+         'no trace line for the game\'s presents into FSR-FG')
+    for line in traces:
+        need(re.search(r'; frame time (?:none|p50 [\d.]+ p95 [\d.]+ p99 [\d.]+ max [\d.]+ ms, over twice the median \d+);',
+                       line) is not None, f'trace line unparsed: {line[:240]}')
+        need(re.search(r'; threads tid \d+', line) is not None, f'trace line without a thread: {line[:240]}')
+        need(re.search(r'; Streamline fence timeouts 0, pacer 0, warnings 0, errors 0', line) is not None,
+             f'Streamline in a harness without it: {line[:240]}')
+        if transport and '(not on record)' not in line:
+            need(' untouched 0' in line and 'host signals 0' not in line, f'transport arm trace: {line[:240]}')
+        elif not transport:
+            need('host signals 0' in line, f'untouched arm trace with a host signal: {line[:240]}')
+
+    validation = (OUT / 'cases' / name / 'validation.txt')
+    reported = set(re.findall(r'\b(?:VUID|SYNC-HAZARD)-[\w-]+', validation.read_text(errors='replace'))) \
+        if validation.exists() else set()
+    need(reported <= FG_VUIDS, f'validation reports beyond FSR-FG\'s own: {sorted(reported - FG_VUIDS)}')
+    summary = (f'{len(gone)} FFX swapchains; ' +
+               (f'{carried} presents carried through the round trip without NR (the experiment arm)' if transport else
+                f'{untouched} presents untouched') +
+               f'; the game\'s presents into FFX\'s swapchain counted, not carried; no model; {len(traces)} trace lines; '
+               f'validation: FSR-FG\'s own {",".join(sorted(reported)) or "none"} set aside, none of the host\'s')
+    return problems, summary
 
 
 def check_build_slow(name, facts, log):
@@ -1245,6 +1351,30 @@ def check_nr(name, facts, log):
             problems.append(message)
 
     lines = log.splitlines()
+    # Stage 4's pacer trace: only with its key; then one line per swapchain at its end (these runs are shorter than its
+    # 10 s window), the presents adding up to the application's, every one carried on the host's signal, from the
+    # application's own thread.
+    trace_on = 'VulkanPresentTrace=true' in NR_INI.get(name, '')
+    traces = [l for l in lines if 'DLSS-NR Vulkan present host (trace): ' in l]
+    if not trace_on:
+        need(not traces, f'trace lines without VulkanPresentTrace: {traces[:1]}')
+    else:
+        counted = 0
+        for line in traces:
+            m = re.search(r': (\d+) presents .*; waits \d+-\d+ \(\d+\), host signals (\d+), untouched (\d+);', line)
+            need(m is not None, f'trace line unparsed: {line[:240]}')
+            if m is None:
+                continue
+            counted += int(m.group(1))
+            need(m.group(1) == m.group(2) and m.group(3) == '0', f'trace: not every present on the host signal: {line[:240]}')
+            need('(caller vk-present-host-nr.exe)' in line and 'frame generation none' in line and
+                 re.search(r'; frame time p50 [\d.]+ p95 [\d.]+ p99 [\d.]+ max [\d.]+ ms', line) is not None and
+                 '; results VK_SUCCESS' in line and 'Streamline fence timeouts 0, pacer 0, warnings 0, errors 0' in line,
+                 f'trace line: {line[:300]}')
+        need(counted == sum(s['presents'] for s in facts['swapchains']),
+             f'trace counted {counted} presents, the application made {sum(s["presents"] for s in facts["swapchains"])}')
+        need(len([l for l in traces if '(destroyed)' in l]) == len(facts['swapchains']),
+             f'{len(traces)} trace lines for {len(facts["swapchains"])} swapchains')
     need(sum(1 for l in lines if INSTALL_LINE in l) == 1, 'expected one install line')
     # The stall watchdog: silent, but in nr-stall-watch, where the test layer holds the 30th present 2.6 s below the
     # host's hook: then one line naming the present, its stage, and the present lock it holds.
@@ -1741,6 +1871,10 @@ def main():
             results['cases'][name] = {'status': 'SKIP', 'problems': [f'missing: {", ".join(missing)}']}
             print(f'SKIP: {name}: missing {", ".join(missing)}', flush=True)
             continue
+        if name in NR_FG and not files['ffx'].exists():
+            results['cases'][name] = {'status': 'SKIP', 'problems': [f'missing: {files["ffx"]}']}
+            print(f'SKIP: {name}: missing {files["ffx"]} (FidelityFX\'s Vulkan DLL, for FSR-FG)', flush=True)
+            continue
         try:
             if name in ROUTE_CASES:
                 facts, log = execute_route(name, dll, redist, files)
@@ -1748,6 +1882,7 @@ def main():
             else:
                 facts, log = execute_nr(name, dll, redist, files)
                 checker = (check_hdr if name.startswith('nr-hdr') else
+                           check_fg if name in NR_FG else
                            check_build_slow if name == 'nr-build-slow' else check_nr)
                 problems, summary = checker(name, facts, log)
             results['cases'][name] = {'status': 'FAIL' if problems else 'PASS', 'problems': problems,

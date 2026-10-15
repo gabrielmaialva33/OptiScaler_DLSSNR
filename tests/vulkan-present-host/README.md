@@ -1,4 +1,4 @@
-# Vulkan present host, stages 1 to 3 (wine tier)
+# Vulkan present host, stages 1 to 5 (wine tier)
 
 Run from the repository root on Linux with Wine, a graphical session, working Vulkan, the native Khronos validation
 layer, a host `g++` and the repository's msvc-wine toolchain, after `./build-local.sh Release`:
@@ -9,8 +9,8 @@ python3 tests/vulkan-present-host/run.py --only marker # one case
 python3 tests/vulkan-present-host/run.py --dll PATH    # another build (default x64/out/OptiScaler.dll)
 ```
 
-Design: `docs/dlssnr/design/nr-vulkan-present-host.md`, "Stage 1 as built", "Stage 2 as built" and "Stage 3 as
-built". The host-tier half is `tests/nr-vk-present-host`.
+Design: `docs/dlssnr/design/nr-vulkan-present-host.md`, "Stage 1 as built", "Stage 2 as built", "Stage 3 as
+built" and "Stage 4: the present host beside frame generation". The host-tier half is `tests/nr-vk-present-host`.
 
 The stage-1 and stage-2 cases below run with `[DlssNr] Enabled` on and no model files beside the DLL, so on stage 3's
 build every carried present is refused by the model (`model unavailable`, `nvngx.dll_dlssnr.dll was not found beside
@@ -277,9 +277,41 @@ What they showed on 2026-10-14 (GE-Proton11-7, RTX 4090, driver 615.78.08, model
 eight-bit steps on average on this picture, and the cross-family route carries it from the compute-only family like
 any other frame.
 
+## Frame generation and the pacer trace (stage 4)
+
+Stage 4 does not run NR beside frame generation: a device whose presents belong to frame generation is set aside
+(`frame generation active (<shape>): NR at present is off on this device until stage 4 is proven`), and with
+`[DlssNr] VulkanPresentFgTransport=true` its presents take the round trip without the model (the pacer experiment's
+submission-only arm). `[DlssNr] VulkanPresentTrace=true` writes one `DLSS-NR Vulkan present host (trace):` line per
+swapchain every 10 s and at its end. Three cases:
+
+| Case | Shape | Must hold |
+|---|---|---|
+| `nr-trace` | an ordinary cross-family run, `VulkanPresentTrace=true` | trace lines only with the key (every other cold-NR case holds that there are none); one `(destroyed)` line per swapchain; the presents they count add up to the application's; every one on the host's signal (`host signals` equal to the presents, `untouched 0`), from the application's thread (`caller vk-present-host-nr.exe`), `frame generation none`, a frame-time tail, `results VK_SUCCESS` and Streamline's counters at 0 |
+| `nr-fg-vk` | OptiScaler's Vulkan FSR-FG output, `nr.cpp --fg --frames 24` | FFX's frame-generation swapchain made (`FSRFG_Vk::CreateSwapchain ... successful`); the frame-generation line naming `OptiScaler's Vulkan FSR-FG output, its own present`, and one for the game's presents into FFX's swapchain `which the host never saw created`; every one of FFX's swapchains destroyed with `transported 0, skipped N (frame generation N)` and no submit; the model never built; trace lines for both streams (FFX's on record, the game's `(not on record)`), `host signals 0` |
+| `nr-fg-vk-transport` | the same with `VulkanPresentFgTransport=true` | every one of FFX's presents carried (`transported` equal to the presents) with NR refused for `frame generation` on each; the experiment wording on the frame-generation line; FFX's trace lines `untouched 0`; no validation report the untouched arm does not make |
+
+The FG cases run with no skip marker (the bundle's Vulkan hooks are what makes the FG swapchain), `[Menu]
+OverlayMenu=true` (with it false the bundle still hands FSR-FG's swapchain to the Vulkan overlay, which never got its
+device, and the process dies in `MenuOverlayVk::CreateSwapchain`: upstream code, not fixed here), and `[FrameGen]
+Enabled=true FGInput=dlssg FGOutput=fsrfg`. `amd_fidelityfx_vk.dll` is linked beside OptiScaler from
+`$DLSSNR_KIT/OptiScaler/` (SKIP without it). `nr.cpp --fg` makes a Vulkan 1.2 instance and enables
+`timelineSemaphore` (without it OptiScaler logs `Device created without timeline semaphores, can't use FG with it`) and
+does not fail on validation reports: the runner holds them to `FG_VUIDS`, the five FFX and FG-output reports the
+untouched arm makes with no submit of the host's at all (2026-10-15, FFX API from the kit), and fails on any other.
+
+What the harness can and cannot show of it. The DLSS-G input never comes (no Streamline here), so FSR-FG generates
+nothing: FFX's presenter presents every real frame, on the application's own thread, through a queue OptiScaler
+reserved. That proves the classification, the untouched default and the transport arm's validity; it says nothing
+about pacing (FFX's frame times here are about 1 s or 94 ms) and nothing about generated frames. The host sees FFX's
+own swapchain created (its creation goes through the host's hook) but not the game's proxy swapchain, whose creation
+the bundle answers above the host, and whose destruction never reaches it either: the trace closes those streams at
+`vkDestroyDevice`. Streamline DLSS-G (shape (a), Crimson Desert) cannot be run here at all.
+
 ## What this does not cover
 
-- No real game, no Streamline or DLSS-G pacer, no FG. The translated cases are one minimal title each, with no
+- No real game, no Streamline or DLSS-G pacer, no generated frame: the FG cases exercise OptiScaler's FSR-FG output
+  with no DLSS-G input, so every frame FFX presents is real. The translated cases are one minimal title each, with no
   menu opened, no upscaler and no Streamline; NR runs only in the cold-NR cases, on a synthetic picture, so nothing
   here judges image quality or motion (the guides are zeros: a moving camera smears).
 - Cold NR: no RGBA8 or non-SDR swapchain (the surface offers none here; the colour plan is held on the host tier), no

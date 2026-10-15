@@ -224,7 +224,7 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-vk-extensions` — the Vulkan device-extension merge the NR hook hands `vkCreateDevice`,
   compiled against the real Vulkan headers: `VK_KHR_` and `VK_EXT_buffer_device_address` never
   leave it together, and the one the game asked for is the one kept.
-- `nr-vk-present-host` — the Vulkan present host's stages 1 to 3 (`docs/dlssnr/design/nr-vulkan-present-host.md`):
+- `nr-vk-present-host` — the Vulkan present host's stages 1 to 5 (`docs/dlssnr/design/nr-vulkan-present-host.md`):
   the registry header (`DlssNr_VkPresentRegistry.h`) through its state machine -- records with ids of their own, a
   reused handle as a new record, two devices with the same swapchain handle value, destroys taking their children,
   unknown and internal objects, the window, creation and destruction lines field for field -- and the transport's
@@ -234,7 +234,12 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   usage and a transported present's waits ever edited; no refusal after a wait is spent; locks in order; drains
   before frees. Stage 3: the colour plan, the device's extensions and bufferDeviceAddress, the model's counters and
   lines, the one-owner arbiter; guards that a model frame is decided before recording, counted on submit, seen
-  complete on a fence, freed only idle and abandoned on a lost device. No Vulkan or Wine.
+  complete on a fence, freed only idle and abandoned on a lost device. Stage 4 (`DlssNr_VkPresentFg.h`): the
+  frame-generation shape from the state the D3D12 route reads and the FG output's own facts, the carry decided for
+  each (untouched, or the round trip without NR in the pacer experiment), the unsupported line's text, Streamline's
+  log lines sorted into fence timeouts, pacer lines, warnings and errors, and the pacer trace's windows, percentiles
+  and flushes; guards that the frame-generation branch comes before housekeeping and before any edit, that the trace
+  is off unless its key is on, that its locks are leaves, and the Streamline call sites. No Vulkan or Wine.
 - `nr-zero-guides` — zero depth and motion for a host with no engine buffers, and the
   two-heap clear contract.
 
@@ -282,7 +287,10 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   product off the present path and its field the model's motion guide after each swapchain's warm-up, validation
   clean, at native and at half the working size (the field at the model's working size); `nr-pan-zero` is the same pan
   on zero motion, and both report how much of the unmoved previous frame the
-  model's edit carries. No game or FG.
+  model's edit carries. Stage 4: `nr-trace` holds the pacer trace's counts to the application's, and `nr-fg-vk`
+  (`-transport`) runs OptiScaler's Vulkan FSR-FG output with no DLSS-G input: every present set aside as frame
+  generation (or carried without NR in the experiment arm), never the model, validation reports only FSR-FG's own. No
+  game, no Streamline and no generated frame.
 
 **Not a suite.** `nr-before-upscale/verify-invariants.py` is a one-shot evidence
 script pinned to baseline commit `660303ec`. `run.py` does not call it and

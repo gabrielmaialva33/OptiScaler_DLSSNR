@@ -226,7 +226,8 @@ present = code(function(host, 'VkResult OnPresent(PFN_vkQueuePresentKHR next, Vk
                               'const VkPresentInfoKHR* info, void* returnAddress)'))
 assert re.findall(r'\blocal\.(\w+)\s*=', present) == ['waitSemaphoreCount', 'pWaitSemaphores'], present
 assert 'local.waitSemaphoreCount = 1;' in present and 'local.pWaitSemaphores = &prep.wait;' in present
-assert 'if (prep.wait == VK_NULL_HANDLE) return next(queue, info);' in flat(present)
+assert 'if (prep.wait == VK_NULL_HANDLE) { result = next(queue, info); }' in flat(present)
+assert flat(present).count('next(queue,') == 3  # info == nullptr, untouched, the local copy
 
 # The application's waits are consumed only by a submit that ran; everything that can refuse is decided before it.
 prepare = code(function(host, 'Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView* view)'))
@@ -681,6 +682,70 @@ print('PASS: stage-5 guards (the estimator made by the builder at the working si
       'build\'s buffer; recorded on the model\'s own input, its field the motion guide once Ready; an adoption that '
       'latched it off is not rebuilt; confirmed on submit, dropped on discard, its cut read at completion; freed with '
       'the product, forgotten on abandon; it logs, submits and waits for nothing)', flush=True)
+
+# --- Stage 4: beside frame generation, and the pacer trace -------------------------------------------------------
+# What frame generation makes or takes is decided before anything of the transport; until stage 4 is proven its presents
+# go down untouched (or keep only the round trip, in the experiment arm), the model stands down, no hand-back begins,
+# and never NR. The trace is inert unless its key is on, and nothing is called under its lock or Streamline's.
+fg_h = (dlssnr / 'DlssNr_VkPresentFg.h').read_text()
+includes = sorted(l.strip() for l in fg_h.splitlines() if l.startswith('#include'))
+assert all(re.fullmatch(r'#include <\w+>', l) for l in includes), includes
+prepare_flat = flat(prepare)
+assert prepare_flat.index('prep.fg = ClassifyFg(FgFactsFor(queue,') < prepare_flat.index('TransportLock lock;') < \
+    prepare_flat.index('if (fgCarry == FgCarry::Untouched) return skip(Skip::FrameGeneration);') < \
+    prepare_flat.index('if (info.swapchainCount != 1) return skip(Skip::MultiSwapchain);') < \
+    prepare_flat.index('ChooseRoute(query)')
+assert 'const FgCarry fgCarry = DecideFg(prep.fg, g_fgTransport.load(std::memory_order_relaxed));' in prepare_flat
+fg_branch = prepare[prepare.index('if (fgCarry == FgCarry::Normal)'):prepare.index('if (fgCarry == FgCarry::Untouched)')]
+assert re.search(r'if \(fgCarry == FgCarry::Normal\)\s*\{\s*Housekeep\(\*dev\);\s*\}', fg_branch), fg_branch
+for needed in ('StandDown(*dev);', 'Poll(*dev, sc, times)', 'FgUnsupportedText(prep.fg, fgCarry == FgCarry::TransportOnly)',
+               'PollHandBack(*dev);'):
+    assert needed in fg_branch, needed
+assert 'StartHandBack' not in fg_branch
+assert ('fgCarry == FgCarry::TransportOnly ? NrDecision { NrSkip::FrameGeneration, FgUnsupportedText(prep.fg, true) } '
+        ': DecideNr(*dev, sc, route.workFamily)') in prepare_flat
+facts_fn = code(function(host, 'FgFacts FgFactsFor(VkQueue queue, VkSwapchainKHR swapchain)'))
+for needed in ('state.dlssgLastSetMode != sl::DLSSGMode::eOff', 'state.dlssgDetectedInterpolationCount',
+               'fg->IsActive() && !fg->IsPaused()', 'vk->OwnsQueue(queue)', 'vk->OwnsSwapchain(swapchain)'):
+    assert needed in facts_fn, needed
+# Inert when off: the trace in the present, destroy-swapchain and destroy-device hooks only under the key, Streamline's
+# note returning first thing; the two keys read at Install, after the gate.
+present_body = code(function(host, 'VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, '))
+assert "if (g_traceOn.load(std::memory_order_relaxed) && info->swapchainCount >= 1" in present_body
+assert present_body.index('result = next(queue, info);') < present_body.index('g_trace.Add(sample, streamline)')
+for name in ('void OnDestroySwapchain(', 'void OnDestroyDevice('):
+    body = code(function(host, name))
+    assert 'if (g_traceOn.load(std::memory_order_relaxed)' in body, name
+note = code(function(host, 'void DlssNr::VkPresentHost::NoteStreamline(int level, const char* message)'))
+assert re.match(r'\{\s*if \(!g_traceOn\.load\(std::memory_order_relaxed\) \|\| message == nullptr\)\s*return;', note), note
+install_flat = flat(code(function(host, 'void DlssNr::VkPresentHost::Install(HMODULE vulkan1)')))
+assert install_flat.index('DlssNrVulkanPresentHost.value_or_default()') < \
+    install_flat.index('g_traceOn.store(Config::Instance()->DlssNrVulkanPresentTrace.value_or_default()') < \
+    install_flat.index('g_fgTransport.store(Config::Instance()->DlssNrVulkanPresentFgTransport.value_or_default()')
+# The trace's and Streamline's locks are leaves: their blocks call only the trace's and the counts' own functions.
+for lock in ('g_traceMutex', 'g_streamlineMutex'):
+    blocks = re.findall(r'std::lock_guard lock\(' + lock + r'\);(.*?)\n\s*\}', code(host), re.S)
+    assert blocks, lock
+    for block in blocks:
+        calls = set(re.findall(r'\b([A-Za-z_][\w:.]*)\s*\(', block))
+        assert calls <= {'g_trace.Add', 'g_trace.Flush', 'g_trace.FlushDevice', 'g_streamline.Add', 'H', 'static_cast'}, \
+            (lock, calls)
+# Streamline's two log callbacks hand every message over, before the repeat filter, and nothing else of them changed.
+streamline_hooks = (root / 'OptiScaler/hooks/Streamline_Hooks.cpp').read_text()
+notes = [m.start() for m in re.finditer(r'DlssNr::VkPresentHost::NoteStreamline\(', streamline_hooks)]
+assert len(notes) == 2, notes
+for at in notes:
+    assert streamline_hooks.index('streamlineRepeats.Observe', at) - at < 600
+assert '#include <dlssnr/DlssNr_VkPresentHost.h>' in streamline_hooks
+# The two keys: four points each (nr-invariants checks reading, saving and the shipped ini; here the defaults).
+assert 'CustomOptional<bool> DlssNrVulkanPresentTrace { false };' in config_h
+assert 'CustomOptional<bool> DlssNrVulkanPresentFgTransport { false };' in config_h
+assert re.search(r'^VulkanPresentTrace=auto$', ini, re.M) and re.search(r'^VulkanPresentFgTransport=auto$', ini, re.M)
+assert r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentFg.h" />' in project
+
+print('PASS: stage-4 guards (frame generation decided before the transport; untouched or the round trip only, never '
+      'NR; the model stands down, no hand-back begins; the trace inert unless its key is on, its locks leaves; '
+      'Streamline handed over before the repeat filter; the keys and the project)', flush=True)
 
 # The present hook goes in at a device's swapchain creation, after the bundle's own (installed in its vkCreateDevice),
 # so it runs first: application -> NR -> overlay -> present.
