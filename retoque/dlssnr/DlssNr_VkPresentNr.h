@@ -490,6 +490,65 @@ inline constexpr size_t kNrInFlightMax = 4;
 // history is a ghost of the last frame under a moving camera).
 inline bool NrReset(bool firstFrame, bool cut, bool zeroGuideReset) { return firstFrame || cut || zeroGuideReset; }
 
+// --- Synthesized motion (stage 5, [DlssNr] SynthMotion) ------------------------------------------------------------
+
+// A longer gap between two of the estimator's recordings starts its history over: the frame before would be motion
+// between two unrelated pictures (the D3D12 rule, kSynthMotionStaleMs in DlssNr_Dx12.cpp).
+inline constexpr uint64_t kSynthStaleMs = 250;
+
+// FFX's level-6 luma must be at least 4 pixels wide, and the scene-change strata non-empty
+// (SynthMotion::Estimator_Vk::MinWidth/MinHeight): below this the model keeps zero motion at that size.
+inline constexpr uint32_t kSynthMinWidth = 256;
+inline constexpr uint32_t kSynthMinHeight = 128;
+
+// Whether a product for a frame of this size asks for the estimator: the key is on, the device has not refused it.
+inline bool SynthWanted(bool configured, bool deviceRefused, uint32_t width, uint32_t height)
+{
+    return configured && !deviceRefused && width >= kSynthMinWidth && height >= kSynthMinHeight;
+}
+
+// Whether the estimator's history starts over this frame: the model's own (a new product, a discarded frame), the
+// host's cut (a new swapchain served, the model back after a gap), or a gap between its own recordings.
+inline bool SynthReset(bool modelReset, bool cut, uint64_t lastMs, uint64_t nowMs)
+{
+    return modelReset || cut || lastMs == 0 || nowMs - lastMs > kSynthStaleMs;
+}
+
+// What the model is told about motion this frame.
+struct MotionGuide
+{
+    bool field = false; // the estimator's field; otherwise the zero guide
+    uint32_t width = 0; // the motion subrect the model reads, from the origin
+    uint32_t height = 0;
+    float scaleX = 1.0f;
+    float scaleY = 1.0f;
+};
+
+// The field, when the estimator has a real one this frame (Ready): the whole frame, current to previous in frame
+// pixels, handed as it is. The model reads its scale in pixels of the motion texture it is handed (the D3D12 route's
+// GuideMatch::ModelMotionScale, [DlssNr] RenderMotionScale on, the default), which is the frame's: 1. With the key off,
+// the conversion it replaced, working over frame (GuideMatch::LegacyMotionScale). Otherwise the zero guide, at the
+// working size, at unit scale: nothing moved, so the scale has nothing to scale.
+inline MotionGuide ChooseMotionGuide(bool fieldReady, uint32_t width, uint32_t height, uint32_t workWidth,
+                                     uint32_t workHeight, bool renderMotionScale)
+{
+    if (!fieldReady || width == 0 || height == 0)
+        return { false, workWidth, workHeight, 1.0f, 1.0f };
+
+    if (renderMotionScale)
+        return { true, width, height, 1.0f, 1.0f };
+
+    return { true, width, height, static_cast<float>(workWidth) / static_cast<float>(width),
+             static_cast<float>(workHeight) / static_cast<float>(height) };
+}
+
+// NrReset with the motion guide in it: a scene cut the estimator read back is a cut, and ZeroGuideReset applies only
+// to a frame that goes out on the zero guide -- real motion leaves it nothing to protect against (the D3D12 rule).
+inline bool NrResetWithMotion(bool firstFrame, bool cut, bool sceneCut, bool zeroGuideReset, bool field)
+{
+    return NrReset(firstFrame, cut || sceneCut, zeroGuideReset && !field);
+}
+
 // --- Counters ----------------------------------------------------------------------------------------------------
 
 struct NrStats
@@ -497,9 +556,10 @@ struct NrStats
     uint64_t evaluated = 0; // frames the model's pass was recorded and submitted for
     uint64_t refused = 0;   // frames the round trip carried and the model was not shown
     std::array<uint64_t, static_cast<size_t>(NrSkip::Count)> skips {};
-    uint64_t resets = 0;    // evaluated frames that started the model's history over
-    uint64_t timed = 0;     // pass GPU times read back
-    double lastGpuMs = 0.0; // the latest of them
+    uint64_t resets = 0;      // evaluated frames that started the model's history over
+    uint64_t synthesized = 0; // evaluated frames whose motion guide was the synthesized field (stage 5)
+    uint64_t timed = 0;       // pass GPU times read back
+    double lastGpuMs = 0.0;   // the latest of them
     double maxGpuMs = 0.0;
     double sumGpuMs = 0.0;
     std::string firstRefusal; // the first refusal's full text
@@ -512,8 +572,8 @@ inline std::string Ms3(double ms)
     return text;
 }
 
-// "NR: evaluated 98, refused 2 (model unavailable 2), history resets 1, pass GPU last 3.512 ms, mean 3.498 ms,
-// max 4.120 ms; first refusal: ..."
+// "NR: evaluated 98, refused 2 (model unavailable 2), history resets 1, motion synthesized 90, pass GPU last 3.512 ms,
+// mean 3.498 ms, max 4.120 ms; first refusal: ..." (motion synthesized only once a field has been handed over)
 inline std::string NrText(const NrStats& s)
 {
     const auto n = [](uint64_t value) { return std::to_string(value); };
@@ -533,6 +593,9 @@ inline std::string NrText(const NrStats& s)
     }
 
     text += ", history resets " + n(s.resets);
+
+    if (s.synthesized != 0)
+        text += ", motion synthesized " + n(s.synthesized);
 
     if (s.timed != 0)
         text += ", pass GPU last " + Ms3(s.lastGpuMs) + " ms, mean " + Ms3(s.sumGpuMs / static_cast<double>(s.timed)) +

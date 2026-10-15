@@ -402,6 +402,7 @@ struct DeviceTransport
     VkDevice device = VK_NULL_HANDLE;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     VkInstance instance = VK_NULL_HANDLE;
+    uint32_t apiVersion = 0; // the application's instance asked for it (0: not on record)
     RecordId id = 0;
     DeviceFns fn;
     VkPhysicalDeviceMemoryProperties memory {};
@@ -1635,6 +1636,7 @@ NrDecision DecideNr(DeviceTransport& dev, SwapchainTransport& sc, uint32_t workF
         device.physical = dev.physical;
         device.device = dev.device;
         device.timestampValidBits = workFamily < dev.timestampBits.size() ? dev.timestampBits[workFamily] : 0;
+        device.apiVersion = dev.apiVersion;
         // The builder's submits: the device's functions by value (they outlive no device: vkDestroyDevice waits for a
         // build under way before the device goes).
         device.submit = [fn = dev.fn, d = dev.device](VkCommandBuffer cmd, uint32_t family, uint64_t timeoutNs,
@@ -2078,6 +2080,7 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     {
         out.nrEvaluated = true;
         out.nrReset = dev->model != nullptr && dev->model->LastFrameReset();
+        out.nrSynthesized = dev->model != nullptr && dev->model->LastFrameSynthesized();
         out.nrSkip = NrSkip::None;
         out.nrNote.clear();
         sc.nrCut = false;
@@ -3404,11 +3407,13 @@ VkResult VKAPI_CALL hkCreateDevice(VkPhysicalDevice physical, const VkDeviceCrea
     std::string line;
     RecordId id = 0;
     VkInstance instance = VK_NULL_HANDLE;
+    uint32_t instanceApiVersion = 0;
     {
         std::lock_guard lock(g_registryMutex);
         id = g_registry.OnDeviceCreated(H(*device), std::move(desc));
         line = g_registry.DeviceLine(H(*device));
         instance = As<VkInstance>(g_registry.InstanceOf(H(physical)));
+        instanceApiVersion = g_registry.ApiVersionOf(H(physical));
     }
 
     // OptiScaler's own devices get no transport: nothing of theirs is ever transported.
@@ -3416,6 +3421,7 @@ VkResult VKAPI_CALL hkCreateDevice(VkPhysicalDevice physical, const VkDeviceCrea
     {
         auto dev = MakeDeviceTransport(*device, physical, id);
         dev->instance = instance;
+        dev->apiVersion = instanceApiVersion;
         dev->nrReady = extensions.ready && BdaReady(bda);
         dev->nrMissing = !extensions.ready
                              ? "the device was created without the model's extensions: " + JoinNames(extensions.missing)

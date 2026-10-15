@@ -20,7 +20,9 @@
 //
 // What it owns, per owner rather than shared with the after-upscale route: the parameter block, the feature, the
 // composition pass and its descriptor/constant ring, the proxy, keep and output images, two zero guides (constant
-// depth, zero motion, at the model's working size, cleared once), and a timestamp pool. What it shares, because there
+// depth, zero motion, at the model's working size, cleared once), a timestamp pool, and with [DlssNr] SynthMotion the
+// synthesized-motion estimator (stage 5: SynthMotion::Estimator_Vk, its pipelines and its images), whose field
+// replaces the zero motion guide once it has one. What it shares, because there
 // is one of each in the process: the forwarder (nvngx.dll_dlssnr.dll, its fault isolation and float slot) and NGX's
 // initialisation on a device. VkModelOwner keeps the two routes from both using them.
 //
@@ -46,6 +48,7 @@ struct VkPresentModelDevice
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     uint32_t timestampValidBits = 0; // of the work queue's family; 0: the pass is not timed
+    uint32_t apiVersion = 0;         // the application's instance asked for it: the estimator needs 1.1 (stage 5)
 
     // The builder's way to a queue, the host's: `cmd` submitted on a queue of `family` with that queue's present and
     // submit locks taken as a borrower takes them, in short tries (VK_NOT_READY when they stay busy: nothing
@@ -126,6 +129,10 @@ class VkPresentModel
     // Whether the frame Record last made starts the model's history over.
     bool LastFrameReset() const { return _lastReset; }
 
+    // Whether the frame Record last made told the model the synthesized field ([DlssNr] SynthMotion, stage 5), not
+    // the zero motion guide.
+    bool LastFrameSynthesized() const { return _lastSynthesized; }
+
     // What the model has to say (built, initialised, off and why), for the host to log once its lock is released.
     std::vector<std::string> TakeLines();
 
@@ -141,6 +148,7 @@ class VkPresentModel
   private:
     std::unique_ptr<Impl> _impl;
     bool _lastReset = false;
+    bool _lastSynthesized = false;
 };
 
 // One owner of the model in the process (DlssNr_VkModelOwner.h), for the present host. Before a frame it would run the

@@ -23,8 +23,9 @@ namespace DlssNr::VkPresentHost
 {
 // --- The build ---------------------------------------------------------------------------------------------------
 
-// What a product is built for: the frame, the model's working size, and the queue family its GPU work ran on (its
-// images and feature are used there without an ownership transfer).
+// What a product is built for: the frame, the model's working size, the queue family its GPU work ran on (its
+// images and feature are used there without an ownership transfer), and whether it carries the synthesized-motion
+// estimator's images ([DlssNr] SynthMotion, stage 5: turning it on or off is a rebuild, frames carried meanwhile).
 struct BuildKey
 {
     uint32_t width = 0;
@@ -32,6 +33,7 @@ struct BuildKey
     uint32_t workWidth = 0;
     uint32_t workHeight = 0;
     uint32_t family = UINT32_MAX;
+    bool synth = false;
 
     bool operator==(const BuildKey&) const = default;
 };

@@ -402,6 +402,7 @@ struct Outcome
     NrSkip nrSkip = NrSkip::None; // transported and not shown to the model: why
     std::string nrNote;           // the refusal's full text
     bool nrReset = false;         // an evaluated frame that started the model's history over
+    bool nrSynthesized = false;   // an evaluated frame whose motion guide was the synthesized field
     uint32_t nrTimed = 0;         // pass GPU times read back during this call, from earlier frames seen complete
     double nrLastGpuMs = 0.0;
     double nrMaxGpuMs = 0.0;
@@ -457,6 +458,7 @@ struct TransportStats
             {
                 ++nr.evaluated;
                 nr.resets += o.nrReset ? 1 : 0;
+                nr.synthesized += o.nrSynthesized ? 1 : 0;
             }
             else if (o.nrSkip != NrSkip::None)
             {
