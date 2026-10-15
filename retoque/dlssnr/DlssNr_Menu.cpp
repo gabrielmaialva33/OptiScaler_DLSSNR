@@ -613,7 +613,14 @@ void RenderMenu(Config* config, float menuResScale)
 
         bool enabled = config->DlssNrEnabled.value_or_default();
         if (ImGui::Checkbox(Localization::Label("Enable Neural Rendering"), &enabled))
-            config->DlssNrEnabled = enabled;
+        {
+            // On is the same statement as the session guard's "Enable anyway" (it only sets the value when the guard
+            // has nothing standing), so its notice does not outlive the checkbox.
+            if (enabled)
+                SessionGuardEnableAnyway();
+            else
+                config->DlssNrEnabled = false;
+        }
 
         HelpMarker("Synthesises detail in the upscaler's output, before frame generation sees it."
                    "\n\nNeeds two similarly named files beside OptiScaler, one character apart:"

@@ -48,7 +48,7 @@ thread that ends it, before the end happens:
 |---|---|---|
 | `ExitProcess` / `exit()` / return from `main` | `RtlExitUserProcess`: `NtTerminateProcess(NULL, code)` stops every other thread, then the DLL detach, then `NtTerminateProcess(self, code)` | **ended itself**, with `code` (the first call) |
 | `TerminateProcess(GetCurrentProcess(), code)` (engines that skip their own teardown) | `NtTerminateProcess(-1, code)`; no DLL detach at all | **ended itself**, with `code` |
-| Unhandled exception, default handling | the thread-start filter ends it: `NtTerminateProcess(-1, exception code)` (Wine `call_unhandled_exception_handler`; Windows the same after WER) | **ended itself**, with the exception code |
+| Unhandled exception, default handling | the thread-start filter ends it: `NtTerminateProcess(-1, exception code)` (Wine `call_unhandled_exception_handler`; Windows the same after WER). Under Wine the AeDebug debugger (`winedbg --auto`, in every prefix) attaches and dumps first; the end still comes through here (measured) | **ended itself**, with the exception code |
 | The game's own crash handler ends it | whatever it calls: its own `TerminateProcess(self, n)` or `ExitProcess(n)` | ended itself with `n` (see "What this still gets wrong") |
 | Steam "Stop", Proton or wineserver killing the prefix, a hang the user kills, a crash handler process killing it, OOM or `SIGKILL` | nothing: the call is made in another process, or no code runs at all | **no end seen** |
 | Fail-fast: `__fastfail`, which the CRT's `abort()` and `std::terminate` use; the kernel's stack-overflow kill | nothing in user mode, on Windows and on Wine alike (measured) | no end seen |
@@ -64,8 +64,7 @@ Status classes, from the NTSTATUS severity bits: **0** is a normal quit; **0x800
 error severities: `0xC0000005` access violation, `0xC000001D` illegal instruction, `0x80000003` breakpoint, a crash
 reporter's own `0xFFFF....`) is an exception, read as a crash; **anything else** is the program's own exit code.
 An MSVC program's unhandled C++ exception goes to `std::terminate` and so to fail-fast: no end seen, not a recorded
-code. `exit(-1)` lands in the crash class;
-that is accepted, since it is not a normal quit either.
+code. `exit(-1)` lands in the crash class; that is accepted, since it is not a normal quit either.
 
 Candidates that were considered for the signal and not taken:
 
@@ -82,7 +81,8 @@ Candidates that were considered for the signal and not taken:
 A GPU fault caused by the model typically shows up as a removed D3D12 device or a lost Vulkan device, and the game's
 reaction varies: a crash (recorded as one), a hang the user kills (no end seen), or an error box and a quit, possibly
 with exit code 0. So when NR itself sees the device gone while it owns a marker, the marker is rewritten at once
-with `removed=1`, and a removal outranks whatever end follows. Two places, both in the module: the D3D12 evaluate's
+with `removed=1`, and a removal outranks whatever end follows: NR stopping afterwards (a Vulkan device is destroyed
+after it is lost, and that frees the model) keeps that marker instead of removing it. Two places, both in the module: the D3D12 evaluate's
 `GetDeviceRemovedReason` check, which already runs before every NR evaluate (`DlssNr_Dx12.cpp`), and the Vulkan
 present host's `MarkLost`. The Vulkan after-upscale route has no device-lost check of its own and adds none here.
 
@@ -99,26 +99,36 @@ Ended    the process is ending itself; nothing more is written, whatever thread 
 |---|---|---|---|
 | (start) | `SessionGuard=false` | nothing read or written | Idle |
 | (start) | NR off at start | nothing read or written | Armed |
-| (start) | no marker, unreadable marker, or an inactive one | (a standing block is re-shown) | Armed |
+| (start) | no marker, unreadable marker, or an inactive one | a standing block is rewritten unchanged, then re-shown | Armed |
+| (start) | an inactive marker with a standing block that cannot be rewritten | no verdict (nothing could ever clear it) | Idle |
 | (start) | active marker, no recorded end, its process alive with the same creation time, or the probe cannot tell | write nothing, ever | Idle |
 | (start) | stale active marker | classify (Policy), persist the verdict, then apply it | Armed |
 | (start) | stale marker, verdict cannot be written | no verdict | Idle |
-| Armed | first NR success | hook `NtTerminateProcess` (once per process), then write the marker | Running |
+| Armed | NR success | hook `NtTerminateProcess` (once per process), then write the marker, `first` = NR's first success in this process | Running |
 | Armed | hook does not attach, or the marker cannot be written | one info line | Idle |
 | Running | NR success | heartbeat at most every 30 s | Running |
 | Running | NR saw its device removed or lost | rewrite with `removed=1`, once | Running |
-| Running | NR turned off, or the model's fault latch | remove the marker | Armed |
+| Running | NR turned off, the model's fault latch, or a route freeing the model | remove the marker, unless it holds a removal (then stay); strikes kept | Armed |
 | Running | the process ends itself, status 0, no removal | delete the marker (if that fails: write an inactive one) | Ended |
 | Running | the process ends itself, otherwise | rewrite: `ended=1`, `code`, last beat = now | Ended |
 | Armed, Idle | the process ends itself | nothing written | Ended |
 | Running | `DLL_PROCESS_DETACH` at exit and the hook never fired (fallback) | delete the marker, as version 1 | Armed |
 
 `Ended` is what keeps a render thread from starting a fresh marker between the hook and the moment
-`NtTerminateProcess(NULL)` stops it.
+`NtTerminateProcess(NULL)` stops it. The end may store it without the lock (when it gives up waiting for it), so every
+later transition is a compare-exchange that never moves out of `Ended`; a first marker written while the end gave up
+is taken back.
+
+**The session's clock.** NR may stop and start again within one process: a toggle, or the Vulkan routes handing the
+model between them after 10 s without an upscaler evaluate (a pause menu). Stopping removes the marker, so a crash
+while NR is off is not NR's; starting again writes a new one whose `first` is still NR's first success in this
+process, and whose strikes are the session's. Without that, a crash five minutes after a pause menu an hour in would
+read as "soon after the model started".
 
 ## Policy
 
-On the next start with NR enabled, a stale marker is classified by how it ended and by `ran = beat - first`:
+On the next start with NR enabled, a stale marker is classified by how it ended and by `ran = beat - first`, the
+time from NR's first success in that process to its last heartbeat or its end:
 
 | How it ended | ran under 120 s | 120 s to 10 min | 10 min or more |
 |---|---|---|---|
@@ -149,15 +159,23 @@ rows: Steam "Stop" after an evening's play must not cost the user NR the next ti
 - **Steam "Stop" within 2 minutes** disables, as in version 1: one click.
 - **A device removal the game survives and NR does not see** (the Vulkan after-upscale route, or a game that quits
   before the next NR evaluate) is not evidence.
-- **Contention at the end.** The end takes the guard's lock with a few short retries and never waits longer. If a
-  heartbeat write was in flight on another thread at that instant (a window of about a millisecond every 30 s),
-  nothing is written and the marker reads as "no end seen". The exit is never delayed by more than a few
-  milliseconds for it.
+- **Contention at the end.** The end takes the guard's lock with up to seven 1 ms pauses and never waits longer. If a
+  heartbeat write was in flight on another thread at that instant (a window of about a millisecond every 30 s) and
+  stays blocked (in `ExitProcess` the ending thread holds the loader and PEB locks a file call may want), nothing is
+  written and the marker reads as "no end seen": under 2 minutes, a disable that was not earned. The exit is delayed
+  by about 7 ms for it under Wine, and up to about 110 ms on Windows at the default timer resolution.
+- **A fault in the end's own file calls** (they convert paths on the process heap, which a crash may have damaged)
+  is swallowed by a `__try` around the callback: nothing is recorded, the end reads as "no end seen", and the game's
+  own crash reporter and exit status are untouched.
+- **The hook is attached through a Detours transaction from the render thread** at NR's first success. Another part
+  of OptiScaler installing a hook lazily on another thread at that instant would see its transaction refused, or this
+  one would; the window is a few microseconds once per session, and a refused attach here turns the guard off.
 - **A handle to itself opened without query access**, used to terminate itself, is not recognised (`GetProcessId`
   fails on it); the end then reads as "no end seen". No engine is known to do this.
 - **Two Wine prefixes sharing one game directory** cannot be told apart by pid; accepted, as in version 1.
-- **Under Proton with a debugger configured** (winedbg as AeDebug), an unhandled exception may be ended by the
-  debugger from outside; it then reads as "no end seen", which is still unclean.
+- **A debugger that ends the process itself.** Wine's default (`winedbg --auto`) was measured to leave the end to the
+  process, which records it; a debugger configured to terminate the process from outside would make it "no end
+  seen", which is still unclean.
 - **A hook on an ntdll syscall stub** is the kind of thing anti-cheat integrity checks look at. OptiScaler is not for
   anti-cheat titles in the first place, and this hook exists only with the guard on, in a session where NR ran.
 
@@ -171,7 +189,7 @@ retoque-nr-session 2
 active=1
 pid=4242
 created=133790000000000000   process creation time, FILETIME ticks
-first=1760000000             unix seconds of the first NR success
+first=1760000000             unix seconds of NR's first success in this process
 beat=1760000620              unix seconds of the last heartbeat, or of the end
 streak=1                     consecutive unclean sessions so far
 blocked=0
@@ -186,12 +204,15 @@ consistency rules: `ended=1` only on an active marker; `code=0` unless `ended=1`
 
 Writes go to a temporary sibling (`.tmp`) and replace the marker in one step with `MoveFileExW(..., REPLACE_EXISTING)`,
 falling back to a direct write; Parse rejects a half-written file. Under Wine the replace is a `rename(2)` on the
-Unix side, atomic on the same filesystem. Any failure is swallowed (one info line at runtime, none at the end).
+Unix side, atomic on the same filesystem. The `.tmp` is deleted after any failure, a partial one included. Any failure
+is swallowed: one info line per session at runtime (none for the write that persists a verdict at start, whose own
+line says so), none at the end.
 
 At the end, inside `NtTerminateProcess`: no logging, no heap allocation of the guard's own (the text is built in a
 256-byte stack buffer, the paths were made at start), and no lock waited on beyond a few 1 ms retries. In the
 `ExitProcess` path the hook runs before any other thread is stopped, so a heap or file lock held by another thread is
-released normally; the caller holds the PEB lock, which file calls on the same thread take recursively.
+released normally; the caller holds the loader lock and the PEB lock (`RtlExitUserProcess` takes both and keeps
+them), which file calls on the same thread take recursively.
 
 **Stale or live.** A marker with `ended=1` is stale by construction: the process said it was ending. Otherwise the
 probe asks whether `pid` is alive and, if so, whether its creation time equals `created`:
@@ -216,7 +237,7 @@ In the NR card, under the enable checkbox, while a verdict stands:
 
 - **Disabled:** "Neural Rendering is off for this session. Your settings are unchanged.", the reason, a dimmed line
   with the numbers, and an **Enable anyway** button. The button clears the block and the strikes and turns NR on
-  for now; the ini is untouched either way.
+  for now; the ini is untouched either way. Ticking the enable checkbox is the same statement and does the same.
 - **Notice:** the reason and the numbers, no button; NR stays on.
 
 | How it ended | Reason line | Numbers line |
@@ -238,8 +259,8 @@ ran 95 s, 1 unclean in a row); Neural Rendering is off for this session (the ini
 not blamed gets one `INFO` line. The disable uses `DlssNrEnabled.set_volatile_value(false)`, the existing "do not
 save this" assignment, so `SaveIni` keeps writing what the user had. Never rewrites the ini.
 
-**How to clear it:** "Enable anyway", or turn NR on with the checkbox or the toggle key (the first NR success clears
-the block), or delete `retoque_nr_session.state`, or set `SessionGuard=false`.
+**How to clear it:** "Enable anyway" or the enable checkbox, or the toggle key (the first NR success clears the
+block), or delete `retoque_nr_session.state`, or set `SessionGuard=false`.
 
 ## Config
 
@@ -256,7 +277,11 @@ The default flips to true only after a game run shows the exit signal works wher
 1. DOOM Eternal and Crimson Desert, NR running for about a minute each, quit from the game's menu. Afterwards
    `retoque_nr_session.state` must be **absent** (a normal quit, status 0). If it is present with `ended=1`, the
    `code=` line is the game's exit code, and the policy's exit-code row decides whether that title needs a rule. If
-   it is present with `ended=0`, the process was ended from outside and the guard cannot serve that title.
+   it is present with `ended=0`, the process was ended from outside and the guard cannot serve that title. For DOOM
+   (Vulkan) an absent file has a second possible cause: the route freeing its model when the game destroys its
+   device, which removes the marker as NR stopping. If the log ends with `DLSS-NR Vulkan: the after-upscale route's
+   objects on the device freed before it goes`, that is what happened, and the hook was not tested by that quit;
+   Crimson Desert (D3D12) has no such path.
 2. One game stopped from Steam ("Stop") within a minute: the next launch must show the "ended without closing" notice
    with the button, and the log's `WARN` line.
 3. Restart once more without touching anything: "An earlier session ended without closing..." (the block stands);
@@ -266,7 +291,10 @@ The default flips to true only after a game run shows the exit signal works wher
 
 - Default-identical when off: with `SessionGuard` false, or `Enabled` false at start, nothing is read or written and
   no hook is installed; with NR turned on later, the hook and the marker start at the first NR success. The hook is
-  installed only in a session where NR actually ran and the marker could be written.
+  installed only in a session where NR actually ran, just before the first marker write; in a folder that write then
+  fails in, it stays, inert (it acts only while a marker is owned).
+- The enable checkbox, turned on, now goes through the same call as "Enable anyway", which only sets the value when
+  the guard has nothing standing: with the guard off, the same assignment as before.
 - No control for a thing that does not exist: the notice, the numbers line and the button exist only while a verdict
   does.
 - The per-frame cost is one atomic load when no marker is owned, and one uncontended lock, a clock read and a
@@ -283,7 +311,8 @@ The default flips to true only after a game run shows the exit signal works wher
 
 `tests/nr-session-exit` builds the shipped `DlssNr_ProcessEnd.cpp` into a small program and ends it every way the
 table above lists, under the system Wine (11.19) and under GE-Proton11-7's own (11.0 Staging, the build the test
-games run on), reading what the hook saw from a file it writes. First run, 2026-10-15, 22 of 22:
+games run on), reading what the hook saw from a file it writes. First run, 2026-10-15, 22 of 22; with the
+default-handling crash added after review, 24 of 24:
 
 - `ExitProcess(0)` and `(3)`, `exit(5)`, return 6 from `main`, `TerminateProcess` on itself with 0 and 7 through the
   pseudo-handle and 9 through a real handle, an unhandled access violation (`0xC0000005`), and a crash filter that
@@ -292,6 +321,10 @@ games run on), reading what the hook saw from a file it writes. First run, 2026-
   second call after the DLL detach is not recorded again.
 - A watched child killed from outside by its parent recorded nothing; the parent's own termination of that child
   was not taken for its own end; its own `ExitProcess(0)` was recorded once.
+- The same access violation without `SEM_NOGPFAULTERRORBOX`, as a game has it, with the crash dialog off as Proton
+  sets it: under the system Wine, winedbg attached and printed its backtrace, and the process still ended through the
+  hook with `0xC0000005`; GE-Proton's run recorded the same. So the "crashed" row holds for a game's default
+  handling, not only for a process that turned the debugger off.
 - `abort()` recorded nothing and the process ended with `0xC0000409`: Wine ends a fail-fast below user mode, as
   Windows does. The first draft of this note expected a recorded `0xC0000409`; the table above is corrected. For the
   guard it is "no end seen", which is unclean, so nothing changes in the policy.

@@ -226,8 +226,9 @@ inline bool Parse(std::string_view text, Marker& out)
 }
 
 // The status a process ended itself with, by its NTSTATUS severity: warning and error severities (0x80000000 and up)
-// are exceptions -- access violation, fail-fast, heap corruption, breakpoint, an unhandled C++ exception, a crash
-// reporter's own code. Below that it is the program's own exit code; 0 is a normal quit.
+// are exceptions -- an access violation or illegal instruction reaching the default end, a breakpoint, a crash
+// reporter's own code. Below that it is the program's own exit code; 0 is a normal quit. (Fail-fast, which abort() and
+// an MSVC program's unhandled C++ exception end in, never reaches the hook: it ends below user mode.)
 inline bool IsExceptionStatus(uint32_t status) { return status >= 0x80000000u; }
 
 // How the previous session ended, strongest evidence first.
@@ -422,6 +423,15 @@ template <class Env> class Guard
 
         if (!previous.active)
         {
+            // A standing block is applied only if it can still be cleared: a marker that can no longer be written
+            // (a read-only file or folder since) would otherwise keep NR off on every launch, and "Enable anyway"
+            // could not remove it.
+            if (previous.blocked && !_env.Write(Serialize(previous)))
+            {
+                _verdict.reason = Reason::CannotPersist;
+                return _verdict;
+            }
+
             _mode = Mode::Armed;
             if (previous.blocked)
             {
@@ -532,22 +542,32 @@ template <class Env> class Guard
             // The exit watch first: a marker nobody can clear at a normal quit is version 1's false positive.
             if (!_env.WatchExit())
             {
-                _mode = Mode::Idle; // no protection, and no further attempts
+                Move(Mode::Armed, Mode::Idle); // no protection, and no further attempts
                 return;
             }
+
+            // The session's clock: NR may stop and start again within one process (a route handing the model to
+            // another, a toggle), and how long it has run is counted from its first success in this process.
+            if (_sessionFirst == 0)
+                _sessionFirst = now;
 
             _marker = {};
             _marker.active = true;
             _marker.pid = _env.SelfPid();
             _marker.created = _env.SelfCreated();
-            _marker.first = _marker.beat = now;
+            _marker.first = std::min(_sessionFirst, now);
+            _marker.beat = now;
             _marker.streak = _carriedStreak;
             if (!_env.Write(Serialize(_marker)))
             {
-                _mode = Mode::Idle; // cannot write: no protection, and no further attempts
+                Move(Mode::Armed, Mode::Idle); // cannot write: no protection, and no further attempts
                 return;
             }
-            _mode = Mode::Running;
+
+            // The end may have given up on the lock while this write held it, and marked the guard Ended without it.
+            // Then this marker is one nobody will clear: take it back.
+            if (!Move(Mode::Armed, Mode::Running))
+                _env.Remove();
             return;
         }
 
@@ -575,29 +595,32 @@ template <class Env> class Guard
         _env.Write(Serialize(_marker));
     }
 
-    // NR stopped running (turned off, faulted): the session ended clean.
+    // NR stopped running (turned off, faulted, or its model freed by a route): a crash from now on is not NR's, so the
+    // marker goes. Not the strikes or the session's clock: they belong to the session, which has not ended. And not a
+    // marker that holds evidence: a device NR saw lost stays on record for whatever end follows (a Vulkan device is
+    // destroyed after it is lost, and that frees the model).
     void NoteOff()
     {
         if (_mode != Mode::Running) // lock-free in the common case: no marker owned
             return;
 
         std::lock_guard<std::mutex> lock(_mutex);
-        if (_mode != Mode::Running)
+        if (_mode != Mode::Running || _marker.removed)
             return;
 
         _env.Remove();
-        _carriedStreak = 0;
-        _removedNoted = false;
-        _mode = Mode::Armed;
+        Move(Mode::Running, Mode::Armed);
     }
 
     // The process is ending itself with `status` (the hook on NtTerminateProcess, on the thread that ends it). Status 0
     // with no removal is a normal quit: the marker goes. Anything else is recorded for the next launch. Every mode
     // ends in Ended, so no other thread starts a marker in the moment before it is stopped.
     //
-    // Never waits for the lock beyond kEndLockTries short pauses: in ExitProcess the caller holds the PEB lock, and a
-    // heartbeat write on another thread may be blocked on it while holding ours. Then nothing is written and the
-    // marker reads as "no end seen" -- a false notice at worst, never a hung exit.
+    // Never waits for the lock beyond kEndLockTries short pauses: in ExitProcess the caller holds the loader and PEB
+    // locks, and a heartbeat write on another thread may be blocked on one of them while holding ours. Then nothing is
+    // written and the marker reads as "no end seen" -- a false verdict at worst (a disable under 2 minutes), never a
+    // hung exit. The Ended stored without the lock stays: every later transition is a compare-exchange from a mode
+    // that is not Ended.
     void NoteProcessEnd(uint32_t status)
     {
         if (_mode == Mode::Ended)
@@ -651,8 +674,7 @@ template <class Env> class Guard
             return;
 
         _env.RemoveAtExit();
-        _carriedStreak = 0;
-        _mode = Mode::Armed;
+        Move(Mode::Running, Mode::Armed);
     }
 
     // The user vouched for NR. Clears the block and the strikes; the caller turns NR on.
@@ -666,8 +688,7 @@ template <class Env> class Guard
         _carriedStreak = 0;
         _env.Remove();
         _verdict.action = Action::None;
-        if (_mode == Mode::Idle)
-            _mode = Mode::Armed;
+        Move(Mode::Idle, Mode::Armed);
     }
 
     Verdict Last() const
@@ -696,6 +717,9 @@ template <class Env> class Guard
         Ended,
     };
 
+    // Every transition after Begin: never over Ended, which the end may store without the lock.
+    bool Move(Mode from, Mode to) { return _mode.compare_exchange_strong(from, to); }
+
     static End HowItEnded(const Marker& m)
     {
         if (m.removed)
@@ -714,6 +738,7 @@ template <class Env> class Guard
     Marker _marker;
     Verdict _verdict;
     uint32_t _carriedStreak = 0;
+    int64_t _sessionFirst = 0; // unix seconds of NR's first success in this process; 0 before it
     bool _blocked = false;
 };
 } // namespace DlssNr::SessionGuard

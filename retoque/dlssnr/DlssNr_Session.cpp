@@ -32,6 +32,7 @@ struct WinEnv
 {
     std::wstring marker;
     std::wstring temporary;
+    bool reportWrites = false; // off during Begin, whose own line says a verdict could not be written
     bool reportedWrite = false;
     bool reportedWatch = false;
 
@@ -67,13 +68,10 @@ struct WinEnv
     // rename(2), atomic on one filesystem). A direct write if the move fails; Parse refuses a torn one.
     bool WriteBytes(const char* text, size_t size)
     {
-        bool ok = false;
-        if (WriteFileBytes(temporary.c_str(), text, size))
-        {
-            ok = MoveFileExW(temporary.c_str(), marker.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE;
-            if (!ok)
-                DeleteFileW(temporary.c_str());
-        }
+        bool ok = WriteFileBytes(temporary.c_str(), text, size) &&
+                  MoveFileExW(temporary.c_str(), marker.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE;
+        if (!ok)
+            DeleteFileW(temporary.c_str()); // a partial one too (a full disk)
 
         if (!ok)
             ok = WriteFileBytes(marker.c_str(), text, size);
@@ -83,7 +81,7 @@ struct WinEnv
     bool Write(const std::string& text)
     {
         const bool ok = !text.empty() && WriteBytes(text.data(), text.size());
-        if (!ok && !reportedWrite)
+        if (!ok && reportWrites && !reportedWrite)
         {
             reportedWrite = true;
             LOG_INFO("DLSS-NR session guard: cannot write {} (error {}); a read-only folder leaves the guard inert",
@@ -196,6 +194,7 @@ void SessionGuardBegin()
     }
 
     const auto verdict = TheGuard().Begin(true, config->DlssNrEnabled.value_or_default());
+    Env().reportWrites = true;
 
     switch (verdict.reason)
     {

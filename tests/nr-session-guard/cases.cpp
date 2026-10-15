@@ -453,14 +453,15 @@ int main()
         CHECK(!stored.active && stored.blocked && stored.streak == 1);
         CHECK(guard.Blocked());
 
-        // The block holds across launches until acknowledged: a second launch is disabled again, nothing rewritten,
-        // and no end or numbers come with it.
+        // The block holds across launches until acknowledged: a second launch is disabled again, the marker rewritten
+        // unchanged (the proof it can still be cleared), and no end or numbers come with it.
         FakeEnv second = env;
         const int writes = second.writes;
+        const std::string before = second.text;
         Guard<FakeEnv> next(second);
         const auto again = next.Begin(true, true);
         CHECK(again.action == Action::Disable && again.reason == Reason::StillBlocked && again.end == End::None);
-        CHECK(second.writes == writes);
+        CHECK(second.writes == writes + 1 && second.text == before);
 
         // And NR never starts a marker while blocked and off.
         next.NoteOff();
@@ -797,21 +798,100 @@ int main()
         CHECK(env.removes == 1);
     }
 
-    // NR toggled off and on in one session: the second run is a new marker, not a continuation, and a removal noted
-    // in the first run does not carry over.
+    // NR stopped and started again in one process (a toggle, or a Vulkan route handing the model to another): the
+    // marker goes while NR is off, so a crash then is not NR's; the new marker continues the session's clock and keeps
+    // the strikes, so a crash five minutes after a pause menu an hour in is not "soon after the model started".
+    {
+        FakeEnv env;
+        Leave(env, 300); // one strike carried in from the last launch
+        Guard<FakeEnv> guard(env);
+        CHECK(guard.Begin(true, true).action == Action::Notice);
+        guard.NoteEvaluated();
+        const int64_t first = env.now;
+        env.now += 3600;
+        guard.NoteEvaluated();
+        guard.NoteOff();
+        CHECK(!env.exists && !guard.OwnsMarker());
+        env.now += 30;
+        guard.NoteEvaluated();
+        CHECK(Stored(env).first == first && Stored(env).streak == 1 && Stored(env).active);
+        env.now += 300;
+        guard.NoteProcessEnd(0xC0000005u);
+        Guard<FakeEnv> next(env);
+        const auto v = next.Begin(true, true);
+        // Long, so alone it would be a notice; it is the second in a row, because the strike survived the stop.
+        CHECK(v.end == End::Crashed && v.ranSeconds == 3600 + 30 + 300 && v.reason == Reason::RepeatedEnd);
+        CHECK(v.action == Action::Disable && v.streak == 2);
+
+        // Stopped, and the process ends while NR is off: nothing recorded, whatever the status.
+        FakeEnv quiet;
+        Guard<FakeEnv> g2(quiet);
+        g2.Begin(true, true);
+        g2.NoteEvaluated();
+        g2.NoteOff();
+        g2.NoteProcessEnd(0xC0000005u);
+        CHECK(!quiet.exists && quiet.exitWrites == 0);
+    }
+
+    // A device NR saw lost stays on record when NR then stops (a Vulkan device is destroyed after it is lost, which
+    // frees the model and calls NoteOff): the end that follows keeps it, even a normal quit.
     {
         FakeEnv env;
         Guard<FakeEnv> guard(env);
         guard.Begin(true, true);
         guard.NoteEvaluated();
+        env.now += 50;
         guard.NoteDeviceRemoved();
-        env.now += 500;
         guard.NoteOff();
-        env.now += 500;
+        CHECK(env.removes == 0 && Stored(env).removed && guard.OwnsMarker());
+        env.now += 10;
+        guard.NoteProcessEnd(0);
+        CHECK(Stored(env).ended && Stored(env).removed && Stored(env).code == 0);
+        Guard<FakeEnv> next(env);
+        const auto v = next.Begin(true, true);
+        CHECK(v.end == End::DeviceRemoved && v.action == Action::Disable && v.ranSeconds == 60);
+    }
+
+    // A standing block whose marker can no longer be written (a read-only file or folder since): not applied, since
+    // nothing could ever clear it.
+    {
+        FakeEnv env;
+        Leave(env, 0, 1, false, true);
+        env.writable = false;
+        Guard<FakeEnv> guard(env);
+        const auto v = guard.Begin(true, true);
+        CHECK(v.action == Action::None && v.reason == Reason::CannotPersist && !guard.Blocked());
         guard.NoteEvaluated();
-        CHECK(Stored(env).first == env.now && Stored(env).streak == 0 && !Stored(env).removed);
-        guard.NoteDeviceRemoved(); // and it can be noted again in the new run
-        CHECK(Stored(env).removed);
+        CHECK(!guard.OwnsMarker() && env.watches == 0);
+
+        // Writable: applied, and the marker was rewritten unchanged.
+        FakeEnv ok;
+        Leave(ok, 0, 1, false, true);
+        const std::string before = ok.text;
+        Guard<FakeEnv> g2(ok);
+        CHECK(g2.Begin(true, true).reason == Reason::StillBlocked && ok.writes == 1 && ok.text == before);
+    }
+
+    // The end gives up on the lock while the first marker write holds it: the Ended it stored without the lock stays,
+    // and the marker that write made is taken back, since nobody would clear it.
+    {
+        FakeEnv env;
+        Guard<FakeEnv> guard(env);
+        guard.Begin(true, true);
+        std::atomic<bool> hold { true };
+        std::atomic<bool> entered { false };
+        env.holdWrite = &hold;
+        env.inWrite = &entered;
+        std::thread first([&] { guard.NoteEvaluated(); });
+        while (!entered.load())
+            std::this_thread::yield();
+        guard.NoteProcessEnd(0);
+        CHECK(guard.HasEnded() && env.pauses == kEndLockTries - 1);
+        hold = false;
+        first.join();
+        env.holdWrite = nullptr;
+        env.inWrite = nullptr;
+        CHECK(guard.HasEnded() && !guard.OwnsMarker() && !env.exists && env.removes == 1);
     }
 
     // Enable anyway: clears the block and the strikes, and the marker file.

@@ -26,14 +26,26 @@ bool IsSelf(HANDLE process)
     return GetProcessId(process) == GetCurrentProcessId();
 }
 
+// A fault inside the callback (its file calls can allocate from a heap a crash has damaged) must not start the game's
+// crash reporter at a quit or replace the status the process ends with: it is swallowed, and nothing is recorded.
+void CallGuarded(DlssNr::ProcessEnd::Callback callback, uint32_t status)
+{
+    __try
+    {
+        callback(status);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+}
+
 LONG NTAPI Hook(HANDLE process, LONG status)
 {
-    // The first call is the one that carries the status: ExitProcess calls again after the DLL detach, and a fault
-    // inside the callback would come back through here as a second end.
+    // The first call is the one that carries the status: ExitProcess calls again after the DLL detach.
     if (IsSelf(process) && !g_fired.exchange(true))
     {
         if (const auto callback = g_callback.load())
-            callback(static_cast<uint32_t>(status));
+            CallGuarded(callback, static_cast<uint32_t>(status));
     }
 
     return g_original(process, status);

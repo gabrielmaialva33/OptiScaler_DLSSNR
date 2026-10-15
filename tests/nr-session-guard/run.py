@@ -134,6 +134,9 @@ for fmt in ('Exception 0x%08X after the model had run for %lld s.', 'Exit code %
     require(f'Localization::Tr("{fmt}")' in menu, f'the menu does not show {fmt!r}')
     require(fmt in pack_keys, f'pt-BR pack has no entry for {fmt!r}')
 require('Localization::Tr(SessionGuardReasonText(guard))' in menu, 'the menu must show the reason for the whole verdict')
+checkbox = menu[menu.index('Localization::Label("Enable Neural Rendering")'):][:600]
+require('SessionGuardEnableAnyway();' in checkbox,
+        'turning NR on with the checkbox must be the same statement as Enable anyway, or its notice outlives it')
 for line in ('"DLSS-NR session guard: {} ({}; ran {} s, {} unclean in a row){}"',
              '"; Neural Rendering is off for this session (the ini is unchanged)"',
              '"DLSS-NR session guard: cannot see this process end (the NtTerminateProcess hook did not attach); "'):
