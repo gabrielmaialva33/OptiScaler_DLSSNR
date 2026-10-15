@@ -23,6 +23,10 @@ and only then the change, as [nr-before-dlssg.md](design/nr-before-dlssg.md) did
     one clean launch since, more wanted), the way back from a quiet DLSS (4-5 ms drains), and synthesized motion on
     Vulkan (`SynthMotion`): the smear on camera turns judged gone in DOOM Eternal.
   - Session guard v2 and the comparison capture hardened (both default off, not yet in a game).
+- **Native D3D11 DLSS's own guides for NR, 2026-10-15** ([dx11-native-dlss-guides.md](design/dx11-native-dlss-guides.md),
+  step 3): Sons Of The Forest under Proton, `Dx11Upscaler=dlss`, `HookMethod=2`: depth (R32G8X24) and motion (R16G16_FLOAT)
+  carried on every DLSS evaluate, the game's guides used on every present, judged running well. The last capability
+  gap from the NeuRotic comparison, closed.
 - **NR ahead of the game's own DLSS-G** ([nr-before-dlssg.md](design/nr-before-dlssg.md)). Measured in Crimson Desert:
   no flicker at 3x, same cost as the upscaled route. Merged in `c9c5e64f`.
 - **MFG unlock hardening** (edx wrapper ceiling, transactional gates). Measured: Crimson Desert at 6x (provider
