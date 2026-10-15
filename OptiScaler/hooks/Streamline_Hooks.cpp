@@ -2125,13 +2125,13 @@ void StreamlineHooks::updateDlssgOptions()
 
 void StreamlineHooks::applyMenuDlssgInterlock(sl::DLSSGOptions& options, bool dlssgPotentiallyActive)
 {
-    auto& state = State::Instance();
-
-    // Keyed on the overlay, not the swapchain: the submit this guards against is MenuOverlayVk's, and
-    // a title whose swapchainApi is not Vulkan can still have that overlay live.
-    if (state.swapchainApi != API::Vulkan && !state.menuOverlayIsVulkan)
-        return;
-
+    // DLSS-G off while our menu is open, whichever overlay draws it.
+    //  - Vulkan (d8275824): the overlay's submit competes with DLSS-G's pacer under vkd3d-proton (fence
+    //    timeouts, device loss).
+    //  - D3D11/D3D12: the overlay draws the menu into the real frame at its present, after the game
+    //    handed that frame over, and DLSS-G reads the same buffer again to make the next generated frames,
+    //    so the menu came back blended into them: at 4x three frames in four showed it translucent
+    //    (Crimson Desert, 2026-10-14). The menu's own code re-sends the options when it opens and closes.
     if (!MenuOverlayBase::IsVisible())
         return;
 

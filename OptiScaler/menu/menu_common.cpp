@@ -1897,6 +1897,18 @@ void MenuCommon::HandleMenuShortcuts(RenderMenuContext& ctx)
         if (inputFpsCycle && config->ShowFps.value_or_default())
             config->FpsOverlayType = (FpsOverlay) ((config->FpsOverlayType.value_or_default() + 1) % FpsOverlay_COUNT);
 
+        // StreamlineHooks::applyMenuDlssgInterlock pauses DLSS-G while the menu is open, and it acts when options
+        // are sent. Send them again on every change of visibility, wherever it came from (the key, Close, a
+        // reset), so a game that sets its options only once still pauses and resumes with the menu.
+        {
+            static bool visibleForDlssg = false;
+            if (_isVisible != visibleForDlssg)
+            {
+                visibleForDlssg = _isVisible;
+                StreamlineHooks::updateDlssgOptions();
+            }
+        }
+
         if (inputMenu)
         {
             inputMenu = false;

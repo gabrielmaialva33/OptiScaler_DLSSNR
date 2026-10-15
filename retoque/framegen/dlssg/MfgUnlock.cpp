@@ -2,6 +2,7 @@
 
 #include "MfgUnlock.h"
 #include "MfgPatchPlan.h"
+#include "MfgProbe.h"
 
 #include <Config.h>
 #include <Util.h>
@@ -173,7 +174,9 @@ GateMatch ForeignGate(uintptr_t constantAt)
 
 // Plans the rewrite of the count and the neutralisation of the architecture clamp, so
 // MultiFrameCountMax is published as five.
-GateMatch PlanAdvertise(HMODULE module, std::vector<MfgPatch::Site>& plan, LiveOps& ops)
+//
+// log=false is the step-0 probe's read-only census (ProbeGates): same search, no lines that read as a rewrite.
+GateMatch PlanAdvertise(HMODULE module, std::vector<MfgPatch::Site>& plan, LiveOps& ops, bool log = true)
 {
     if (const auto at309 = scanner::GetAddress(module, kAdvertisePattern309); at309 != 0)
     {
@@ -181,8 +184,9 @@ GateMatch PlanAdvertise(HMODULE module, std::vector<MfgPatch::Site>& plan, LiveO
         const auto branchAt = at309 + 6;
         const uint8_t nop[] = { 0x0F, 0x1F, 0x44, 0x00, 0x00, 0x90 };
 
-        LOG_INFO("MFG unlock: advertise (310.9) at {:X}, jl {} -> {}", at309,
-                 Hex((const uint8_t*) branchAt, sizeof(nop)), Hex(nop, sizeof(nop)));
+        if (log)
+            LOG_INFO("MFG unlock: advertise (310.9) at {:X}, jl {} -> {}", at309,
+                     Hex((const uint8_t*) branchAt, sizeof(nop)), Hex(nop, sizeof(nop)));
 
         return { MfgPatch::AddSite(plan, ops, branchAt, nop, sizeof(nop)) ? GateMatch::Found : GateMatch::Missing };
     }
@@ -196,8 +200,10 @@ GateMatch PlanAdvertise(HMODULE module, std::vector<MfgPatch::Site>& plan, LiveO
         const uint8_t count[] = { kMaxGeneratedFrames };
         const uint8_t nop[] = { 0x0F, 0x1F, 0x40, 0x00 };
 
-        LOG_INFO("MFG unlock: advertise at {:X}, count {} -> {}, cmovl {} -> {}", address, *(const uint8_t*) countAt,
-                 kMaxGeneratedFrames, Hex((const uint8_t*) cmovAt, sizeof(nop)), Hex(nop, sizeof(nop)));
+        if (log)
+            LOG_INFO("MFG unlock: advertise at {:X}, count {} -> {}, cmovl {} -> {}", address,
+                     *(const uint8_t*) countAt, kMaxGeneratedFrames, Hex((const uint8_t*) cmovAt, sizeof(nop)),
+                     Hex(nop, sizeof(nop)));
 
         const bool planned = MfgPatch::AddSite(plan, ops, countAt, count, sizeof(count)) &&
                              MfgPatch::AddSite(plan, ops, cmovAt, nop, sizeof(nop));
@@ -211,12 +217,13 @@ GateMatch PlanAdvertise(HMODULE module, std::vector<MfgPatch::Site>& plan, LiveO
     if (const auto foreign = scanner::GetAddress(module, kAdvertiseForeignPattern); foreign != 0)
         return ForeignGate(foreign + 13);
 
-    LOG_WARN("MFG unlock: the advertise signature did not match");
+    if (log)
+        LOG_WARN("MFG unlock: the advertise signature did not match");
     return {};
 }
 
 // Plans dropping the Ada branch and raising the accepted count, so a request for five is not rejected.
-GateMatch PlanValidate(HMODULE module, std::vector<MfgPatch::Site>& plan, LiveOps& ops)
+GateMatch PlanValidate(HMODULE module, std::vector<MfgPatch::Site>& plan, LiveOps& ops, bool log = true)
 {
     if (const auto at309 = scanner::GetAddress(module, kValidatePattern309); at309 != 0)
     {
@@ -224,8 +231,9 @@ GateMatch PlanValidate(HMODULE module, std::vector<MfgPatch::Site>& plan, LiveOp
         const auto setAt = at309 + 5;
         const uint8_t always[] = { 0xB0, 0x01, 0x90 };
 
-        LOG_INFO("MFG unlock: validate (310.9) at {:X}, setae {} -> {}", at309,
-                 Hex((const uint8_t*) setAt, sizeof(always)), Hex(always, sizeof(always)));
+        if (log)
+            LOG_INFO("MFG unlock: validate (310.9) at {:X}, setae {} -> {}", at309,
+                     Hex((const uint8_t*) setAt, sizeof(always)), Hex(always, sizeof(always)));
 
         return { MfgPatch::AddSite(plan, ops, setAt, always, sizeof(always)) ? GateMatch::Found : GateMatch::Missing };
     }
@@ -239,9 +247,10 @@ GateMatch PlanValidate(HMODULE module, std::vector<MfgPatch::Site>& plan, LiveOp
         const uint8_t nop[] = { 0x90, 0x90 };
         const uint8_t count[] = { kMaxGeneratedFrames };
 
-        LOG_INFO("MFG unlock: validate at {:X}, jl {} -> {}, count {} -> {}", address,
-                 Hex((const uint8_t*) branchAt, sizeof(nop)), Hex(nop, sizeof(nop)), *(const uint8_t*) countAt,
-                 kMaxGeneratedFrames);
+        if (log)
+            LOG_INFO("MFG unlock: validate at {:X}, jl {} -> {}, count {} -> {}", address,
+                     Hex((const uint8_t*) branchAt, sizeof(nop)), Hex(nop, sizeof(nop)), *(const uint8_t*) countAt,
+                     kMaxGeneratedFrames);
 
         const bool planned = MfgPatch::AddSite(plan, ops, branchAt, nop, sizeof(nop)) &&
                              MfgPatch::AddSite(plan, ops, countAt, count, sizeof(count));
@@ -255,7 +264,8 @@ GateMatch PlanValidate(HMODULE module, std::vector<MfgPatch::Site>& plan, LiveOp
     if (const auto foreign = scanner::GetAddress(module, kValidateForeignPattern); foreign != 0)
         return ForeignGate(foreign + 1);
 
-    LOG_WARN("MFG unlock: the validate signature did not match");
+    if (log)
+        LOG_WARN("MFG unlock: the validate signature did not match");
     return {};
 }
 
@@ -624,8 +634,48 @@ version_t ModuleVersion(HMODULE module)
 
 } // namespace
 
+MfgUnlock::GateReport MfgUnlock::ProbeGates(HMODULE provider)
+{
+    GateReport report;
+
+    if (provider == nullptr)
+        return report;
+
+    const auto toState = [](const GateMatch& match)
+    {
+        switch (match.kind)
+        {
+        case GateMatch::Found:
+            return GateReport::Found;
+        case GateMatch::Foreign:
+            return GateReport::Foreign;
+        default:
+            return GateReport::Missing;
+        }
+    };
+
+    LiveOps ops;
+
+    // PlanAdvertise/PlanValidate only Read through ops; the write happens later in Commit, which is never
+    // called here. The plan is thrown away, so this is a pure search over the module, and log=false keeps
+    // it from printing the unlock's "advertise at X, count 3 -> 5" lines beside a probe that writes nothing.
+    std::vector<MfgPatch::Site> throwaway;
+    report.advertise = toState(PlanAdvertise(provider, throwaway, ops, false));
+
+    throwaway.clear();
+    report.validate = toState(PlanValidate(provider, throwaway, ops, false));
+
+    return report;
+}
+
 void MfgUnlock::TryApply(HMODULE provider)
 {
+    // The step-0 MFG-below-Ada probe (MfgProbe.h) looks first: before the option check, so it runs with the
+    // unlock off, and before any write below, so it describes the provider as NVIDIA shipped it. Both load
+    // sites hand this function the module they just mapped. It writes nothing, and on Ada, Blackwell and
+    // non-NVIDIA it returns at its gate (one atomic load once the GPU is known).
+    MfgProbe::LogModule(provider);
+
     if (!Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default())
         return;
 

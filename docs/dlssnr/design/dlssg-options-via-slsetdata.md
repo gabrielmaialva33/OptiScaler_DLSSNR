@@ -110,7 +110,7 @@ Exactly what the wrapper hook does today, factored out so there is one implement
   `overrideCount == 0` means eOff case (`Streamline_Hooks.cpp:1197-1205`);
 - the one-time `dlssgMfgMax` population, which is what makes the menu control appear at all
   (`1179-1194`);
-- `applyMenuDlssgInterlock`, which turns FG off while a Vulkan overlay is up (`1756`);
+- `applyMenuDlssgInterlock`, which turns FG off while a Vulkan overlay is up (`1756`; since 2026-10-14, while any overlay's menu is up);
 - `state.dlssgLastSetMode` bookkeeping (`1207`).
 
 Factoring is the point of the change as much as the new hook is. Two copies of this policy would

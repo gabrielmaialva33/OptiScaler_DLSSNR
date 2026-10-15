@@ -47,4 +47,23 @@ namespace MfgUnlock
 // looked up by name -- which cannot find the driver's own copy, a <hash>.bin under
 // ProgramData\NVIDIA\NGX\models\dlssg\, so the load hook hands that one over itself.
 void TryApply(HMODULE provider = nullptr);
+
+// Read-only gate census for the step-0 MFG probe (MfgProbe). Runs the same advertise/validate signature
+// search TryApply does, but through the plan-only path that records bytes and never writes, so it reports
+// whether each gate is present, absent, or already rewritten by another unlocker (Foreign) without
+// touching the module. This keeps the probe from carrying a second copy of the signatures.
+struct GateReport
+{
+    enum State
+    {
+        Found,
+        Missing,
+        Foreign
+    };
+
+    State advertise = Missing;
+    State validate = Missing;
+};
+
+GateReport ProbeGates(HMODULE provider);
 } // namespace MfgUnlock

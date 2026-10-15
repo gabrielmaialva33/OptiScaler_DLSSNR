@@ -421,6 +421,16 @@ ModelLoader=auto
 ; 0 to 2 - Default (auto) is 1
 HookMethod=auto
 
+; Experiment: a present host on Vulkan, below the game's own API (native Vulkan, DXVK, vkd3d-proton). With Enabled,
+; installs its own narrow interception of Vulkan creation, queue calls and present, also under [Vulkan] SkipHooks or
+; the marker; adds the model's device extensions at vkCreateDevice and TRANSFER_SRC to swapchains whose surface offers
+; it, and copies every presented image out and back before it is shown, running the model on the way on an SDR
+; swapchain: cold, no game parameters, zero guides (constant depth, no motion), so motion may smear. Stands down while
+; the game's own upscaler runs NR on Vulkan, or the D3D12 route runs it. Logs "DLSS-NR Vulkan present host (cold NR)"
+; lines per window. Read at start-up (docs/dlssnr/design/nr-vulkan-present-host.md).
+; true or false - Default (auto) is false
+VulkanPresentHost=auto
+
 ; The D3D12 present pass only (HookMethod=2, and Auto once it has moved to present): require the game's
 ; own depth and motion, captured from its upscaler. On, a frame with none ready is shown as the game
 ; rendered it; off, the pass runs on constant depth and no motion (or on SynthMotion's estimate), which is
@@ -813,6 +823,11 @@ fights Streamline DLSS-G for the swapchain; never in a native Vulkan game, which
 path. On Wine, an `optiscaler_skip_vulkan_hooks` file beside the DLL still does the same (deprecated;
 the log says so). The narrower environment variable `OPTISCALER_DISABLE_VULKAN_WDX12_HOOKS=1`
 (upstream PR #1131) drops only the three Vulkan_wDx12 entry paths and keeps the overlay and spoofing.
+
+`[DlssNr] VulkanPresentHost=true` with `[DlssNr] Enabled=true` is the one exception to `SkipHooks` and the marker:
+DLSS-NR's Vulkan present host installs its own hooks on vulkan-1.dll's creation, lifetime and present calls anyway,
+and nothing else of the bundle comes back. The log then has both the skip line and the host's install line, which
+names the skip. Stage 3 copies each presented image out and back, and runs the model on the way on an SDR swapchain.
 
 ```ini
 [Vulkan]

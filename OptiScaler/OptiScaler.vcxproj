@@ -1038,6 +1038,13 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="..\retoque\dlssnr\DlssNr_GpuTiming.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_Submission.cpp" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_PairCapture.cpp" />
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentRegistry.h" />
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentTransport.h" />
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentHost.h" />
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentNr.h" />
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentModel.h" />
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_VkModelOwner.h" />
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_VkPresentHost.cpp" />
     <ClInclude Include="..\retoque\lsfg\Lsfg.h" />
     <ClInclude Include="..\retoque\lsfg\LsfgDxil.h" />
     <ClInclude Include="..\retoque\lsfg\LsfgGraph.h" />
@@ -1062,6 +1069,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_Helpers.cpp" />
     <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_UiComposition.cpp" />
     <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_DebugPacing.cpp" />
+    <ClInclude Include="..\retoque\framegen\dlssg\MfgProbe.h" />
+    <ClCompile Include="..\retoque\framegen\dlssg\MfgProbe.cpp" />
   </ItemGroup>
   <ItemDefinitionGroup>
     <ClCompile>

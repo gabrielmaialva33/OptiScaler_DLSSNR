@@ -213,6 +213,21 @@ Native Vulkan games can hit fence timeouts when the Vulkan overlay runs next to 
 <details>
 <summary><b>Windows</b></summary>
 
+From a release zip, the installer does steps 1 and 2:
+
+1. Extract the zip anywhere, close the game, and double-click `install-windows.cmd`. Give it the folder that
+   holds the game's executable (drag it into the window) and pick Install, Uninstall or a dry run.
+   - It installs `OptiScaler.dll` as `dxgi.dll` (or the name you give), the forwarder and the `OptiScaler\`
+     folder, and `OptiScaler.ini` only if the game has none.
+   - It refuses while the game is running, when a file in the way is not OptiScaler's (ReShade, another mod),
+     and when another proxy name there already holds OptiScaler. The message names the command-line flag that
+     overrides each one (`-KeepReShade`, `-ReplaceForeign`, `-AllowSecondProxy`).
+   - Whatever it replaces goes to `.retoque\backup\` in the game folder, and Uninstall puts it back.
+   - It never ships, copies or removes `nvngx_dlssnr.dll`; put your own beside the game's executable.
+2. Turn the module on in `OptiScaler.ini` (see [Using it](#using-it)).
+
+By hand instead:
+
 1. Copy `OptiScaler.dll`, `OptiScaler.ini`, `nvngx.dll_dlssnr.dll` and your `nvngx_dlssnr.dll` beside
    the game's executable.
 2. Rename `OptiScaler.dll` to the proxy name (`dxgi.dll`, `winmm.dll`, ...). `setup_windows.bat` does it.
@@ -288,7 +303,7 @@ retoque/          everything this fork adds: the Neural Rendering module (dlssnr
                   synthesized frame generation (shaders/synth_motion/, inputs/FG/Synth_*), the menu's
                   translations, and smaller pieces, at the same relative paths as in OptiScaler/
 docs/             design notes (indexed by topic), Linux/Proton notes, guides, history
-tools/            build, deploy, release and log-summary scripts
+tools/            build, deploy (Linux), Windows installer, release and log-summary scripts
 tests/            the test suites and their runner
 OptiScaler/       OptiScaler's own tree with our changes, at upstream's paths so merges stay easy
 Config.md         every INI key

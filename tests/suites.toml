@@ -123,6 +123,11 @@ tier = "host"
 timeout = 300
 summary = "The NR Vulkan device-extension merge, compiled against the real Vulkan headers: KHR and EXT buffer_device_address never leave it together."
 
+[nr-vk-present-host]
+tier = "host"
+timeout = 120
+summary = "The Vulkan present host, stages 1 to 3: the registry, transport and cold-NR headers (records with ids of their own, reused handles, devices side by side, the lines; the usage plan, the route, the ring, the counters; the colour plan, the device extensions and bufferDeviceAddress, the model's counters) and the one-owner arbiter under ASan/UBSan, plus source guards: one gated call site ahead of the marker check; only a swapchain's usage, a present's waits and a device's extensions edited; no refusal after a wait is spent; locks in order; a model frame counted on submit, seen complete on a fence, freed only idle; drains before frees."
+
 [nr-shutdown]
 tier = "host"
 timeout = 300
@@ -157,6 +162,11 @@ summary = "Real D3D12 timestamp queries in an isolated Wine prefix. Never loads 
 tier = "wine"
 timeout = 1800
 summary = "Builds a real DLL and drives real Vulkan to exercise overlay lifetime under Wine."
+
+[vulkan-present-host]
+tier = "wine"
+timeout = 1800
+summary = "The production DLL (x64/out) under a Win32 Vulkan application and Wine, synchronization validation on with zero errors: with [DlssNr] VulkanPresentHost on, under the marker, SkipHooks, and beside the bundle with the Vulkan menu off and on, the round trip's lines are held against the application's own facts (same-queue and cross-family routes, 0/1/2 waits, a ring overfilled behind GPU work, usage edits, recreation, resize, device teardown) and every presented image reads back unchanged; a surface hiding TRANSFER_SRC keeps it observe-only; with the key or the master off, no host line and, under the marker, vulkan-1.dll's exports byte-identical. A D3D11 and a D3D12 title through a local Proton's DXVK and vkd3d-proton: every present carried. Stage 3 under Proton with the real model: cold NR on every SDR present (BGRA8 UNORM and sRGB, cross-family, an unaligned extent, working scale 0.5), exact read-backs with ApplyModel off and changed ones with it on; refused for a device without the NVX extensions, an old forwarder, no model (SKIP without the kit or a local Proton)."
 
 [dlssnr-loopback]
 tier = "wine"
@@ -197,6 +207,11 @@ summary = "The real MFG byte signatures and the real scanner matcher against syn
 tier = "host"
 timeout = 300
 summary = "The MFG unlock's write half (MfgPatchPlan.h) over a fake module with injected failures: a patch group commits whole or rolls back whole, a half-written site is restored, a wrong read-back rolls back, a site changed since planning writes nothing, a failed restore is reported and does not stop the others."
+
+[mfg-probe]
+tier = "host"
+timeout = 300
+summary = "The step-0 MFG-below-Ada probe logic (MfgProbe.h): the gate exits before the claim, foreign-loader check, census, facts or emit off [Turing, Ada) -- Ada, Blackwell, NVIDIA with an unread arch 0, Volta, non-NVIDIA -- counted through an injected environment, and the production gate memo (GateCache); the fatbin/cubin census over synthetic containers (SASS sm_86, sm_89/sm_120-only, PTX-only, bare cubins, an ELF inside a container, truncated and 2^64-wrapping lengths); CUDA sm_86 loadability; the exact text of the module and admission lines and each NGX skip reason; foreign-loader detection; and, when Crimson Desert's nvngx_dlssg.dll is present, the census against the offline inventory (70 containers, frame 0/31, 39 sm_86 cubins). Writes nothing and runs no patcher or DLL."
 
 [nr-model-loader]
 tier = "host"
@@ -252,6 +267,11 @@ summary = "No home path, LAN or tailnet address, or token in any tracked file ou
 tier = "host"
 timeout = 120
 summary = "tools/deploy-to-game.sh on fake game directories: refuses while a process maps the directory, on a foreign or case-variant DLL, and on a second OptiScaler proxy; Keep-ReShade with the ini key replaced, never duplicated; receipt, partial receipt, dry run, and uninstall back to the prior state."
+
+[windows-installer]
+tier = "host"
+timeout = 900
+summary = "tools/install-windows.ps1 on fake game folders in a pinned PowerShell 7.4 container (or a local pwsh): the deploy-safety refusals, receipt, partial receipt, dry run and uninstall, receipts crossing to and from deploy-to-game.sh, the model never touched; static ASCII/CRLF/packager checks always. SKIP for the cases without docker or pwsh."
 
 [lsfg-shader-library]
 tier = "host"

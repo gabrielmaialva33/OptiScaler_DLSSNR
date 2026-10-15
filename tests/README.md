@@ -28,8 +28,8 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
-| `wine` | msvc-wine prefix; `vulkan-overlay` also needs a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `dlssnr-loopback` |
+| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `mfg-probe`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `windows-installer`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
+| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
 The wine tier is serial on purpose. These suites compile through the single msvc-wine
@@ -38,8 +38,8 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Forty-seven suites. All but `nr-invariants`, `repo-privacy` and `deploy-safety` build real production code with local fakes under
-AddressSanitizer and UndefinedBehaviorSanitizer.
+**Host tier.** Fifty suites. All but `nr-invariants`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
+code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `lsfg-shader-library` — the LSFG runtime shader library (`retoque/lsfg/LsfgShaderLibrary.{h,cpp}`): DLL discovery (Windows Steam `libraryfolders.vdf`, registry, Wine/Proton `Z:` paths, `$HOME`, `$XDG_DATA_HOME`, override, `Lossless.dll` folder mapping), PE `RT_RCDATA` SPIR-V module extraction (99 modules), SPIR-V magic validation, Quality/Performance and FP32/FP16 resource ID resolution, real user DLL extraction when present, and content-hash-keyed DXIL cache storage/invalidation; plus `tools/lsfg-study/convert.py`'s Float16 detection (synthetic modules, and exactly ids 51..98 on the real DLL).
 - `lsfg-integration` — LSFG 3.1 as FSR-FG's interpolator (study branch, `retoque/lsfg/`): the DXIL PSV0 reader
@@ -111,6 +111,16 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   module whose writes can be told to fail: a patch group commits whole or rolls back whole, a half-written
   site is restored, a wrong read-back rolls back, a site changed since planning writes nothing, and a failed
   restore is reported without stopping the others.
+- `mfg-probe` — the step-0 MFG-below-Ada probe logic (`retoque/framegen/dlssg/MfgProbe.h`, std-only): the
+  gate exits before the claim, foreign-loader check, census, facts or emit off `[Turing, Ada)` (Ada,
+  Blackwell, an NVIDIA adapter whose architecture was never read, Volta, non-NVIDIA), counted through an
+  injected environment that also carries the production glue's stateful steps, plus the production gate
+  memo (`GateCache`); the fatbin/cubin census over synthetic containers (SASS sm_86, sm_89/sm_120-only,
+  PTX-only, bare cubins, an ELF inside a container, truncated and 2^64-wrapping lengths); CUDA sm_86
+  loadability; the exact text of the module and admission lines and each NGX skip reason; and foreign-loader
+  detection. With Crimson Desert's `nvngx_dlssg.dll` present it censuses the real provider against the
+  offline inventory (70 containers, frame 0/31, 39 sm_86 cubins), read in place and never copied; that case
+  skips when the file is absent. Writes nothing and runs no patcher or DLL.
 - `sl-log-repeat` — the Streamline log repeat filter against the real `setDynamicMFGParams` line
   on a fake clock: one line per 10 s with the folded count, new sites at once, a bounded table that
   fails open. Runs no Streamline and no callback.
@@ -122,6 +132,14 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   second OptiScaler proxy name; Keep-ReShade renames and sets `[Plugins] LoadReshade=true` by replacing lines,
   never adding a second; the receipt and its partial form after an injected failure; dry runs write nothing;
   `--uninstall` returns the directory to its snapshot before the deploy. Python and bash, no Wine.
+- `windows-installer` — `tools/install-windows.ps1`, the same contract for Windows users, on fake game folders
+  in a pinned PowerShell 7.4 container (streamed in with tar, since the docker context may be remote) or a local
+  `pwsh`: the same refusals, Keep-ReShade, receipt, partial receipt, dry runs and uninstall; receipts written by
+  `deploy-to-game.sh` uninstalled by it and the reverse, and both scripts writing the same receipt and files for
+  the same folder; `nvngx_dlssnr.dll` never touched. The running-game checks run through Linux stand-ins (a
+  process started from the folder, a `flock`-emulated exclusive handle). Static checks (ASCII, the `.cmd`'s CRLF,
+  the packager's allow-list) run always; without docker or `pwsh` the cases print `SKIP` and the suite passes on
+  those. Nothing here runs Windows, Windows PowerShell 5.1 or the `.cmd`.
 - `fg-synth-policy` — synthesized FG's decisions (fast-motion response on incoherent motion
   and its cap, low-fps floor, duplicate-present advice, which HUD fix runs for which output), the
   motion statistics they are made from, and the NR/FG motion handoff, from the production headers,
@@ -198,6 +216,17 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-vk-extensions` — the Vulkan device-extension merge the NR hook hands `vkCreateDevice`,
   compiled against the real Vulkan headers: `VK_KHR_` and `VK_EXT_buffer_device_address` never
   leave it together, and the one the game asked for is the one kept.
+- `nr-vk-present-host` — the Vulkan present host's stages 1 to 3 (`docs/dlssnr/design/nr-vulkan-present-host.md`):
+  the registry header (`DlssNr_VkPresentRegistry.h`) through its state machine -- records with ids of their own, a
+  reused handle as a new record, two devices with the same swapchain handle value, destroys taking their children,
+  unknown and internal objects, the window, creation and destruction lines field for field -- and the transport's
+  decisions (`DlssNr_VkPresentTransport.h`): the usage plan at swapchain creation and every refusal's reason, the
+  route at present (same queue, cross-family, concurrent, none), the ring, the counters. Source guards: one call site,
+  first in `VulkanHooks::Hook` and ahead of the marker check, gated before anything else; only an eligible swapchain's
+  usage and a transported present's waits ever edited; no refusal after a wait is spent; locks in order; drains
+  before frees. Stage 3: the colour plan, the device's extensions and bufferDeviceAddress, the model's counters and
+  lines, the one-owner arbiter; guards that a model frame is decided before recording, counted on submit, seen
+  complete on a fence, freed only idle and abandoned on a lost device. No Vulkan or Wine.
 - `nr-zero-guides` — zero depth and motion for a host with no engine buffers, and the
   two-heap clear contract.
 
@@ -215,6 +244,22 @@ AddressSanitizer and UndefinedBehaviorSanitizer.
   when `nvofapi64.dll` or its shaders are unavailable. No NGX, no game.
 - `vulkan-overlay` — builds a real DLL and drives real Vulkan to exercise overlay
   lifetime.
+- `vulkan-present-host` — the production DLL from `build-local.sh`, uninstrumented, under a Win32 Vulkan application,
+  with core and synchronization validation on (proved active) and zero errors required: with `[DlssNr]
+  VulkanPresentHost` on (under the marker, under `SkipHooks`, beside the bundle with its menu off and on) every line
+  of the host is held against the application's own record -- which presents the round trip carried, by the same
+  queue or across families from a compute-only presenter, with zero, one and two waits, and which it refused when
+  more were in flight than its ring holds; usages edited at creation; retirements at recreation, resize and device
+  destruction -- and every presented image read back equals the pattern the application made. A surface that hides
+  TRANSFER_SRC (a native test layer) keeps every swapchain observe-only. With the key or the master off there is no
+  host line, and under the marker vulkan-1.dll's exports are byte-identical to before OptiScaler loaded. Plus a D3D11
+  and a D3D12 title through a local Proton's DXVK (validated) and vkd3d-proton: their swapchains get TRANSFER_SRC and
+  every present is carried (SKIP without a local Proton). Stage 3 (`nr*` cases, `nr.cpp`), under Proton with the real
+  model from the local kit and the driver's NGX core: cold NR on every SDR present (BGRA8 UNORM and sRGB,
+  cross-family, an extent not a multiple of eight, working scale 0.5) -- every read-back exact with `ApplyModel` off,
+  changed by about three eight-bit steps with it on -- and refused, with every read-back exact, for a device without
+  `VK_NVX_binary_import` (the test layer hides it), the kit's old forwarder, and no model (SKIP without the kit or a
+  local Proton). No game or FG.
 
 **Not a suite.** `nr-before-upscale/verify-invariants.py` is a one-shot evidence
 script pinned to baseline commit `660303ec`. `run.py` does not call it and

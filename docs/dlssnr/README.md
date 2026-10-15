@@ -8,6 +8,11 @@ shader rebuild). The forwarder DLL is explained in
 [retoque/dlssnr/forwarder/README.md](../../retoque/dlssnr/forwarder/README.md), and the evidence
 log of the attempt to drop it is [../history/FORWARDER_INVESTIGATION.md](../history/FORWARDER_INVESTIGATION.md).
 
+## Roadmap
+
+- [roadmap.md](roadmap.md): what NeuRotic has that this fork does not yet, in order, with each item's design note, where
+  it stands and the game run it needs.
+
 ## Rules and review
 
 - [DEVELOPMENT.md](design/DEVELOPMENT.md): the invariants, state specs and per-change-type review a change must pass before deploy.
@@ -69,6 +74,7 @@ Related, outside that sequence:
 - [nr-menu-mode.md](design/nr-menu-mode.md): keeping NR running while the upscaler is idle in menus.
 - [present-real-guides.md](design/present-real-guides.md): checking that the guides the present pass reuses belong to the frame being presented (design; step 0, log only, built).
 - [nr-before-dlssg.md](design/nr-before-dlssg.md): running the present pass at the game's Streamline `Present`, before its DLSS-G interpolates, so generated frames carry the edit; NeuRotic's pre-FG adapter as prior art (design).
+- [present-depth-without-upscaler.md](design/present-depth-without-upscaler.md): the game's own depth for the present pass in titles that call no upscaler: heuristic discovery from depth-stencil binds, Streamline depth tags, or synthesized motion alone; NeuRotic's built-in capture as prior art (design; step 0, log only, proposed).
 - [dx11-native-dlss-guides.md](design/dx11-native-dlss-guides.md): NR for D3D11 games that call DLSS themselves, through `dlss_12` first (design).
 - [pr-improvements.md](design/pr-improvements.md): review of state, exposure, multipass and localization work taken from open PRs.
 
@@ -77,6 +83,9 @@ Related, outside that sequence:
 - [synthesized-frame-generation.md](design/synthesized-frame-generation.md): frame generation for titles that give no motion, step by step.
 - [synthesized-motion.md](design/synthesized-motion.md): synthesized motion vectors for the no-upscaler NR path.
 - [mfg-count-override.md](design/mfg-count-override.md): MFG above 2x on Ada under Proton, measured.
+- [mfg-rtx20-30.md](design/mfg-rtx20-30.md): DLSS-G and MFG on RTX 20/30: the gates NVIDIA's runtime puts below Ada, an
+  offline inventory of what ten provider builds ship for sm_86 and sm_75, NeuRotic's unqualified experiment and
+  `dlssg_for_sm86` as prior art, and a default-off, Ampere-first plan (design; step 0, log only, proposed).
 - [dlssg-options-via-slsetdata.md](design/dlssg-options-via-slsetdata.md): reaching DLSS-G options through `slSetData` (premise withdrawn, see the note).
 
 ## NGX and driver

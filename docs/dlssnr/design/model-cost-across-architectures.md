@@ -95,6 +95,11 @@ picture at 4X on that card was not checked. Since 2026-09-27, `AdaBlackwellKerne
 default; before that its default covered Turing through Ada. The reason is that what the loader does
 to the same kernel images is unknown.
 
+*Corrected 2026-10-14.* "A hardware gate" above is wrong. The gates are software: Streamline's adapter admission, the
+NGX core comparing the card against the provider's exported minimum architecture, and 31 frame kernels shipped only for
+sm_89 and sm_120. The networks already ship as sm_86 SASS, and no game-shipped provider references the optical-flow
+hardware. Evidence and a plan in [mfg-rtx20-30.md](mfg-rtx20-30.md).
+
 The session log also reports `arch=0x170` for this adapter, which is `NV_GPU_ARCHITECTURE_GA100`:
 NVAPI's id for the Ampere generation, whatever the die.
 
