@@ -12,8 +12,11 @@
 //   does (its own device change is its own business: it abandons the old device's state, as before). Refused while
 //   the present host holds it; the asking itself is what makes the present host stand down.
 // - The present host asks before every frame it would run the model on. Refused while the after-upscale route holds
-//   the model, while that route asked within the last kAfterUpscaleLiveMs (it wants it), and while the present host
-//   holds it on another device.
+//   the model, while that route asked within the last kAfterUpscaleLiveMs (it wants it), while it was refused for the
+//   present host and has not taken the model since (unless it then went quiet for kAfterUpscaleIdleMs: a frame slower
+//   than the live window must not let the host take the model back between the route's refusal and its next ask), and
+//   while the present host holds it on another device. A host still holding the model after a refusal yields with no
+//   time limit: it frees the model as soon as its frames are seen complete.
 // - Once refused for the after-upscale route, the present host stops recording NR, waits for every frame it already
 //   recorded to be seen complete, frees its model and releases the token; the after-upscale route takes it at its
 //   next evaluate. A frame whose completion is never seen keeps the token held: fail closed.
@@ -59,6 +62,8 @@ inline constexpr const char kAfterUpscaleOwns[] =
     "the after-upscale route (the game's own upscaler) owns the model in this process";
 inline constexpr const char kAfterUpscaleWants[] =
     "the after-upscale route (the game's own upscaler) asked for the model within the last half second";
+inline constexpr const char kAfterUpscaleWaiting[] =
+    "the after-upscale route (the game's own upscaler) was refused the model and has not taken it yet";
 inline constexpr const char kOtherDevice[] = "the model is in use on another VkDevice of this process";
 inline constexpr const char kAfterUpscaleRetiring[] =
     "the after-upscale route went quiet; the model is being handed back to the present host";
@@ -90,11 +95,15 @@ class Arbiter
             _retireCancelled = true;
 
         if (_owner == Who::PresentHost)
+        {
+            _waiting = true; // the host stands down for it, and stays down until it takes the model
             return { false, kHeldByPresentHost };
+        }
 
         _owner = Who::AfterUpscale;
         _device = device;
         _recording = true;
+        _waiting = false;
         return { true, nullptr };
     }
 
@@ -115,6 +124,8 @@ class Arbiter
             return { false, _retiring ? kAfterUpscaleRetiring : kAfterUpscaleOwns };
         if (AfterUpscaleLive(nowMs))
             return { false, kAfterUpscaleWants };
+        if (AfterUpscaleWaiting(nowMs))
+            return { false, kAfterUpscaleWaiting };
         if (_owner == Who::PresentHost && _device != device)
             return { false, kOtherDevice };
         return { true, nullptr };
@@ -125,12 +136,21 @@ class Arbiter
     {
         _owner = Who::PresentHost;
         _device = device;
+        _waiting = false; // granted: a route still waiting had gone quiet for kAfterUpscaleIdleMs
     }
 
-    // The present host holds the model and another route wants it: stop recording, drain, release.
+    // The present host holds the model and another route wants it: stop recording, drain, release. After a refusal it
+    // yields with no time limit (the idle window bounds only the host's next claim): a host still holding the model
+    // has frames not yet seen complete, and gives it up as soon as they are.
     bool PresentHostMustYield(uint64_t device, uint64_t nowMs) const
     {
-        return _owner == Who::PresentHost && _device == device && AfterUpscaleLive(nowMs);
+        return _owner == Who::PresentHost && _device == device && (AfterUpscaleLive(nowMs) || _waiting);
+    }
+
+    // Why the present host must yield, for its log: the route asked within the live window, or was refused and waits.
+    const char* YieldReason(uint64_t nowMs) const
+    {
+        return AfterUpscaleLive(nowMs) ? kAfterUpscaleWants : kAfterUpscaleWaiting;
     }
 
     void Release(Who who, uint64_t device)
@@ -225,10 +245,18 @@ class Arbiter
         return _asked && nowMs >= _askedMs && nowMs - _askedMs < kAfterUpscaleLiveMs;
     }
 
+    // Refused for the present host, not granted since, and not quiet for kAfterUpscaleIdleMs (a clock read out of order
+    // counts as not quiet).
+    bool AfterUpscaleWaiting(uint64_t nowMs) const
+    {
+        return _waiting && (nowMs < _askedMs || nowMs - _askedMs < kAfterUpscaleIdleMs);
+    }
+
     Who _owner = Who::None;
     uint64_t _device = 0;
     bool _asked = false;
     uint64_t _askedMs = 0;
+    bool _waiting = false;         // the route was refused for the present host and has not taken the model since
     bool _recording = false;       // the route is inside an evaluate it was granted
     bool _retiring = false;        // a hand-back from the route is under way
     uint64_t _retireDevice = 0;    // ... draining this device

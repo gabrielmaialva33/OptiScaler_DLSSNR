@@ -2703,8 +2703,9 @@ VkPresentAdmission PresentHostMustYield(VkDevice device)
                                 "stands down" };
 
     std::lock_guard<std::mutex> lock(g_ownerMutex);
-    if (g_owner.PresentHostMustYield(reinterpret_cast<uint64_t>(device), OwnerNowMs()))
-        return { NrSkip::AfterUpscale, VkModelOwner::kAfterUpscaleWants };
+    const uint64_t now = OwnerNowMs();
+    if (g_owner.PresentHostMustYield(reinterpret_cast<uint64_t>(device), now))
+        return { NrSkip::AfterUpscale, g_owner.YieldReason(now) };
 
     return {};
 }
