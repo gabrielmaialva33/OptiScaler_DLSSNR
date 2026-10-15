@@ -9,7 +9,9 @@ made. With the key off, nothing of the host may appear and vulkan-1.dll's export
 
 Stage 3's cases (nr*) run nr.cpp with the real model: the forwarder built with this DLL, NVIDIA's nvngx_dlssnr.dll
 from the local kit (symlinked, never copied into the tree) and the driver's NGX core from /usr/lib/nvidia/wine, in a
-prefix set up as Proton sets one up for NGX. Without those files they print SKIP."""
+prefix set up as Proton sets one up for NGX. Without those files they print SKIP. One of them, nr-route-quiet, is a game
+that turns its upscaler on and off: the after-upscale route takes the model from the present host, goes quiet, and the
+present host takes it back, twice."""
 import argparse
 import hashlib
 import json
@@ -163,7 +165,7 @@ def build_harness():
              '/Fo' + str(OUT / 'translated.obj'), '/Fe' + str(OUT / TRANSLATED_EXE), '/link', 'user32.lib'],
             env=env, logfile=OUT / 'build-translated.log', timeout=600)
         run([MSVC / 'cl', '/nologo', '/std:c++20', '/EHsc', '/MD', '/W4', '/O2',
-             '/I' + str(ROOT / 'external/vulkan/include'), HERE / 'nr.cpp',
+             '/I' + str(ROOT / 'external/vulkan/include'), '/I' + str(ROOT / 'external/nvngx_dlss_sdk'), HERE / 'nr.cpp',
              '/Fo' + str(OUT / 'nr.obj'), '/Fe' + str(OUT / NR_EXE),
              '/link', '/LIBPATH:' + str(ROOT / 'OptiScaler/library/vulkan'), 'vulkan-1.lib', 'user32.lib'],
             env=env, logfile=OUT / 'build-nr.log', timeout=600)
@@ -1087,6 +1089,155 @@ def check_nr(name, facts, log):
     return problems, summary
 
 
+# --- The way back: an after-upscale route that goes quiet (DOOM Eternal, 2026-10-14) ----------------------------
+
+# nr.cpp --route: one swapchain throughout; OptiScaler's own FSR 2.2 behind its NGX exports for 30 frames, the
+# after-upscale route running the model on its output; then the feature released and nothing evaluated until 14 s after
+# the last evaluate, longer than the present host waits (kAfterUpscaleIdleMs); twice. The phases' read-backs say who
+# ran the model when: until 9 s after the last evaluate the route (frames unedited), from 12 s the present host.
+ROUTE_CASES = {'nr-route-quiet', 'nr-route-quiet-wdx12'}
+ROUTE_IDLE_S = 10  # retoque/dlssnr/DlssNr_VkModelOwner.h, kAfterUpscaleIdleMs
+
+
+def execute_route(name, dll, redist, files):
+    work = OUT / 'cases' / name
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    shutil.copy2(dll, work / 'dxgi.dll')
+    shutil.copy2(OUT / NR_EXE, work / NR_EXE)
+    for library in redist:
+        shutil.copy2(library, work / library.name)
+    shutil.copyfile(files['built'], work / 'nvngx.dll_dlssnr.dll')
+    (work / 'nvngx_dlssnr.dll').symlink_to(files['model'])
+    # OptiScaler's own FSR 2.2 as the game's upscaler: nothing but the model to supply, and the evaluate's path to the
+    # after-upscale route is the one every OptiScaler upscaler takes. DLSS stays on, so NGX initialises through the
+    # driver's core, as a game's does.
+    wdx12 = name == 'nr-route-quiet-wdx12'
+    ini = ini_for(False, True, True, not wdx12, level=1) + '[Upscalers]\nVulkanUpscaler=fsr22\n'
+    (work / 'OptiScaler.ini').write_text(ini)
+    if not wdx12:
+        (work / MARKER).write_text('')
+    env = nr_env()
+    # Do not inherit a diagnostic override that silently removes the chain this case must exercise.
+    env.pop('OPTISCALER_DISABLE_VULKAN_WDX12_HOOKS', None)
+    args = ['--route'] + (['--wdx12'] if wdx12 else [])
+    with (OUT / f'{name}.log').open('w') as log:
+        process = subprocess.run([str(files['proton']), 'run', str(work / NR_EXE), *args], cwd=work,
+                                 env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                 timeout=900)
+    run_log = (OUT / f'{name}.log').read_text(errors='replace')
+    facts = json.loads((work / 'result.json').read_text())
+    log_path = work / 'OptiScaler.log'
+    log = log_path.read_text(errors='replace') if log_path.exists() else ''
+    if process.returncode != 0 or facts.get('status') != 'PASS':
+        reason = facts.get('reason') or facts.get('first_validation') or next(
+            (l for l in reversed(run_log.splitlines()) if l.startswith('FAIL: ')), 'no reason written')
+        raise RuntimeError(f'{name}: application failed (exit {process.returncode}): {reason}; see '
+                           f'{OUT / (name + ".log")} and {log_path}')
+    if facts.get('validation_active') is not True or facts.get('validation_errors') != 0:
+        raise RuntimeError(f'{name}: validation was not proved active and clean')
+    return facts, log
+
+
+def check_route(name, facts, log):
+    """Twice: the present host stands down for the route, the route runs the model, goes quiet, and kAfterUpscaleIdleMs
+    later the present host takes the model back, the route's objects freed; never earlier, never called off."""
+    problems = []
+
+    def need(condition, message):
+        if not condition:
+            problems.append(message)
+
+    wdx12 = name == 'nr-route-quiet-wdx12'
+    need(facts.get('wdx12_probed') is wdx12, 'wDx12 chain probe did not match the case')
+    # One rejection is the application's deliberate, Vulkan-valid zero-batch probe. No host drain may add one.
+    need(log.count('Invalid parameters to hk_vkQueueSubmit') == int(wdx12),
+         'unexpected wDx12 submit rejections (only the chain probe may be rejected)')
+    if wdx12:
+        need('Skipping vulkan-1.dll hooks' not in log, 'the Vulkan bundle was skipped')
+        need('Skipping Vulkan_wDx12 hooks' not in log, 'wDx12 was disabled')
+    lines = log.splitlines()
+    phases = {p['name']: p for p in facts.get('phases', [])}
+    expected = ['cold', 'on', 'off-waiting', 'off-handing-back', 'off-back', 'on-again', 'off-again-waiting',
+                'off-again-handing-back', 'off-again-back', 'on-at-exit']
+    need(list(phases) == expected, f'phases {list(phases)}')
+    if problems:
+        return problems, ''
+
+    # Who ran the model, from what came back: the present host edits the frames it runs on, the route's run is on its
+    # own output, never presented.
+    for name_ in ('cold', 'off-back', 'off-again-back'):
+        p = phases[name_]
+        need(p['readbacks'] >= 5 and p['exact'] == 0 and p['mae_mean'] > 0,
+             f'{name_}: the present host did not run the model on every frame: {p}')
+    for name_, evaluates in (('on', 30), ('on-again', 30), ('on-at-exit', 10)):
+        p = phases[name_]
+        need(p['evaluates'] == evaluates and p['evaluates'] == p['presents'], f'{name_}: evaluates {p}')
+        need(p['readbacks'] >= 5 and p['exact'] == p['readbacks'], f'{name_}: the present host did not stand down '
+                                                                   f'for the route: {p}')
+    for name_ in ('off-waiting', 'off-again-waiting'):
+        p = phases[name_]
+        # This phase ends at a fixed deadline; the enabled bundle can make it produce fewer than five read-backs.
+        # Require actual coverage, and reject any edited frame. A frame-count floor here would test throughput.
+        need(p['readbacks'] > 0, f'{name_}: no read-back before the hand-back deadline: {p}')
+        need(p['exact'] == p['readbacks'], f'{name_}: the model went back to the present host '
+                                         f'before {ROUTE_IDLE_S} s: {p}')
+
+    def count(text):
+        return sum(1 for l in lines if text in l)
+
+    host = f'DLSS-NR Vulkan present host: device {facts["device"]} #'
+    route_waits = 'DLSS-NR Vulkan: this route waits: the Vulkan present host holds the model'
+    stood_down = 'the model stood down and was freed'
+    route_has = 'DLSS-NR Vulkan: this route has the model again (the present host stood down)'
+    taking = f'the after-upscale route has not asked for the model for {ROUTE_IDLE_S} s: taking it back'
+    freed = "DLSS-NR Vulkan: the after-upscale route's model was freed for the hand-back (its feature at 1280x720"
+    again = "the model is the present host's again"
+    exit_freed = "DLSS-NR Vulkan: the after-upscale route's objects on the device freed before it goes"
+    for text, times in ((route_waits, 3), (stood_down, 3), (route_has, 3), (taking, 2), (freed, 2), (again, 2),
+                        ('the model initialised on device', 3), ('DLSS-NR Vulkan: running natively at 1280x720', 1),
+                        (exit_freed, 1)):
+        need(count(text) == times, f'expected {times} line(s) with {text!r}, found {count(text)}')
+    for text in ('called off', 'the model is off on this device', 'drain is still waiting', 'faulted', 'abandoned'):
+        need(count(text) == 0, f'a line with {text!r}: ' + next((l for l in lines if text in l), ''))
+    for text in (stood_down, taking, again):
+        need(all(host in l for l in lines if text in l), f'{text!r} not said for the harness\'s device')
+
+    # In order, twice: stand down, the route takes it, goes quiet, the drain, the route's objects freed, the host's; then
+    # once more the stand-down, and at exit the route's objects freed before NGX is shut down on the device.
+    ngx_down = 'NGX shut down on the device before it goes (returned 1)'
+    kinds_text = (route_waits, stood_down, route_has, taking, freed, again, exit_freed, ngx_down)
+    order = [i for i, l in enumerate(lines) for text in kinds_text if text in l]
+    kinds = [next(k for k, text in enumerate(kinds_text) if text in lines[i]) for i in order]
+    need(kinds == [0, 1, 2, 3, 4, 5] * 2 + [0, 1, 2, 6, 7], f'lines out of order: {kinds}')
+
+    # The host had stood down for the route before the device went: no model of its own to free then.
+    gone = [l for l in lines if host in l and 'destroyed;' in l]
+    need(len(gone) == 1 and 'the model' not in gone[0], f'device destruction: {gone}')
+
+    builds = sum(1 for l in lines if "the model's feature is up at" in l)
+    route_builds = sum(1 for l in lines if 'DLSS-NR Vulkan: feature up at 1280x720' in l)
+    need(builds == 3 and route_builds == 3, f'feature builds: {builds} of the present host\'s, {route_builds} of the '
+                                            'route\'s')
+    vuids = set(v for v in facts.get('model_vuids', '').split(',') if v)
+    need(vuids <= MODEL_VUIDS, f'validation reports of the model\'s own objects beyond those known: {sorted(vuids)}')
+    need(facts.get('model_messages', 0) <= builds + route_builds,
+         f'{facts.get("model_messages")} reports of the model\'s own objects for {builds + route_builds} feature builds')
+
+    drains = [re.search(r'the drain took (\d+) ms', l) for l in lines if again in l]
+    summary = (f'twice: the present host stood down for the route ({phases["on"]["evaluates"]} and '
+               f'{phases["on-again"]["evaluates"]} evaluates, every read-back exact), took the model back '
+               f'{ROUTE_IDLE_S} s after the route went quiet (drains of '
+               f'{", ".join(m.group(1) for m in drains if m)} ms; {phases["off-waiting"]["readbacks"]} and '
+               f'{phases["off-again-waiting"]["readbacks"]} read-backs exact until 9 s after the last evaluate, every one '
+               f'changed from 12 s), the route\'s feature freed each time and at exit, before NGX went; {builds} feature builds of the present host\'s, '
+               f'{route_builds} of the route\'s; '
+               f'0 validation errors of the host\'s ({facts.get("model_messages", 0)} of the model\'s own '
+               f'{",".join(sorted(vuids)) or "objects"} set aside)')
+    return problems, summary
+
+
 def check_host_off(name, facts, log, *, marker):
     problems = []
     if HOST_TEXT in log:
@@ -1125,8 +1276,10 @@ def main():
         build_harness()
     build_layer()
 
-    cases = args.only.split(',') if args.only else list(CASES) + list(TRANSLATED_CASES) + list(NR_CASES)
-    unknown = [c for c in cases if c not in CASES and c not in TRANSLATED_CASES and c not in NR_CASES]
+    cases = (args.only.split(',') if args.only else
+             list(CASES) + list(TRANSLATED_CASES) + list(NR_CASES) + sorted(ROUTE_CASES))
+    unknown = [c for c in cases if c not in CASES and c not in TRANSLATED_CASES and c not in NR_CASES and
+               c not in ROUTE_CASES]
     if unknown:
         raise RuntimeError(f'unknown case(s): {unknown}')
     results = {'dll': str(dll), 'dll_sha256': sha(dll), 'harness_sha256': sha(OUT / EXE), 'cases': {}}
@@ -1215,7 +1368,7 @@ def main():
             results['cases'][name] = {'status': 'FAIL', 'problems': [str(error)]}
             print(f'FAIL: {name}: {error}', file=sys.stderr)
 
-    nr_cases = [c for c in cases if c in NR_CASES]
+    nr_cases = [c for c in cases if c in NR_CASES or c in ROUTE_CASES]
     files, missing = nr_files(dll) if nr_cases else ({}, [])
     if nr_cases and not missing:
         prepare_nr_prefix(files)
@@ -1225,10 +1378,15 @@ def main():
             print(f'SKIP: {name}: missing {", ".join(missing)}', flush=True)
             continue
         try:
-            facts, log = execute_nr(name, dll, redist, files)
-            problems, summary = check_nr(name, facts, log)
+            if name in ROUTE_CASES:
+                facts, log = execute_route(name, dll, redist, files)
+                problems, summary = check_route(name, facts, log)
+            else:
+                facts, log = execute_nr(name, dll, redist, files)
+                problems, summary = check_nr(name, facts, log)
             results['cases'][name] = {'status': 'FAIL' if problems else 'PASS', 'problems': problems,
-                                      'swapchains': facts['swapchains'], 'offered': facts['offered']}
+                                      'swapchains': facts['swapchains'], 'offered': facts['offered'],
+                                      'phases': facts.get('phases')}
             if problems:
                 failures.append(name)
                 print(f'FAIL: {name}:', file=sys.stderr)

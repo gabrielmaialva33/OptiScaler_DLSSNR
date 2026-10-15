@@ -696,7 +696,8 @@ cases below hold the exports byte-identical).
   one lock per queue held across that present would close the cycle.
 - **Below OptiScaler's own hooks.** The round trip's device functions are resolved through
   `VulkanHooks::GetDeviceProcAddr` (the bundle's trampoline, or the plain export without the bundle), and its submits
-  go through the host's own trampoline of the device's `vkQueueSubmit`, below every hook on it. The independent review
+  go through the host's own trampoline of the device's `vkQueueSubmit`. This was initially described as below every
+  hook; the stage-3 DOOM finding below shows wDx12 can still sit underneath it. The independent review
   found why that matters: resolved through the bundle's `vkGetDeviceProcAddr`, the host's submit became Vulkan_wDx12's
   hook, which takes a queue lock of its own before calling down into the host's -- the reverse of an application
   submit's order, a deadlock in exactly DOOM Eternal's configuration. All of these are resolved before the host's
@@ -874,7 +875,9 @@ GE-Proton11-7, RTX 4090, `[DlssNr] VulkanPresentHost=true`. About three and a ha
 Item 3 of "What settles the marker question", cold NR: the model inside the round trip's own command buffer, on the
 work queue, with no application NGX and no game parameters. Branch `feat/vulkan-present-host`, on top of stage 2:
 `ea506f5d` (the host and the model), `aa122612` (tests), `e3c71460` (a chain with bufferDeviceAddress off), `1894b1ae`
-(what the independent review found, below), `d325cf39` and `e2951c81` (tests). Same keys: with `[DlssNr] Enabled` and `VulkanPresentHost`
+(what the independent review found, below), `d325cf39` and `e2951c81` (tests); after the first DOOM Eternal run,
+`b19d88c7` (the way back from a quiet after-upscale route) and `d9523592` (tests), then what that fix's review found
+(below, "The review" under the way back). Same keys: with `[DlssNr] Enabled` and `VulkanPresentHost`
 both true the model now runs on every eligible frame; with either off, `Install` still returns at its first statement,
 and the after-upscale route is what it was (its one new call, the owner claim below, is never refused when the host
 is off).
@@ -942,7 +945,10 @@ is off).
   `EvaluateAfterUpscaleVk` where it commits to a frame) and wins: refused while the present host holds the model, its
   asking makes the host stand down at its next present -- stop recording, wait for its frames to be seen complete, free
   the model, release -- and the route takes it at its next evaluate. The host stays down while the route asked within
-  half a second (the D3D12 boundary's `BoundaryLive` window) and for good once it owns the model. The host also stands
+  half a second (the D3D12 boundary's `BoundaryLive` window), from a refusal until the route takes the model (unless
+  the route goes quiet for ten seconds first: `the after-upscale route ... was refused the model and has not taken it
+  yet`), and while it owns the model -- until the route goes quiet, when the host takes it back (below, "The way back";
+  the first build held it for good). The host also stands
   down while the D3D12 route has a model (`DlssNr::IsRunning()`: a translated D3D12 title's own NR, a Vulkan title
   through the D3D12 bridge, the D3D11 bridge's host), and refuses on a second device while it holds the first. The
   stand-down check runs at every present of the device, before the refusals that return without reaching the model's
@@ -1072,7 +1078,214 @@ route`, `another device`, `another swapchain`, `model unavailable`, `model busy`
   application retrieved; the zero guides are cleared for one work family per device (NVIDIA has one graphics
   family); `DlssNr::IsRunning()` is read without its lock.
 
-### What a DOOM Eternal run should show (DLSS off, so the after-upscale route stays idle)
+### The first DOOM Eternal run, and the way back (2026-10-14)
+
+The stage-3 build, merged into `feat/neurotic-parity` as `d10abe21`, ran in DOOM Eternal (GE-Proton11-7, 3440x1440,
+the bundle on). What it showed, from `OptiScaler.log`:
+
+- **Cold NR at present works in a real game.** At 19:45:24 the model came up on the game's start window (836x1356),
+  `the model runs at present`, 294 frames evaluated, pass GPU mean 3.06 ms (last 2.85, the first frame 10.1).
+- **The stand-down works.** The game created its DLSS feature at 19:45:25.45 (OptiScaler's NGX, handle 1000000); the
+  route's first evaluate, 19:45:26.497, was refused (`this route waits`), 12 ms later the host's next present stood the
+  model down and freed it, and the route took it: `feature up at 836x1356`, then 3440x1440 when the game rebuilt its
+  feature (handle 1000001) at 19:45:31-32.
+- **The way back did not exist.** At 19:46:30.87 the player turned DLSS off (`NVSDK_NGX_VULKAN_ReleaseFeature` of
+  1000001). For the next 46 s there was not one `EvaluateAfterUpscaleVk`, and the present host never brought the model
+  up again: the 10,000-present window line at 19:46:35 reads `NR: evaluated 294, refused 9706 (NR off 105, after-upscale
+  route 9601)` (the 105 are F7). DLSS came back at 19:47:16 (handles 1000002, then 1000003 at a 2293x960 render) and the
+  route resumed. The cause: the arbiter refused the host with `the after-upscale route ... owns the model` for as long
+  as the route held the token, and nothing ever released it -- a game that stops calling its upscaler simply stops
+  calling; the route has no moment of its own to give the model up.
+- **The transport kept every present**, cross-family from the compute queue as in stage 2: every window and swapchain
+  line in the log reads `skipped 0` and `max CPU wait 0.000 ms` (1 + 1,186 presents of the start swapchains, then a
+  window of 10,000: 1,916 on the same queue, 8,084 across families).
+- **No exit lines are normal for this title.** DOOM Eternal never destroys its device or its last swapchain at exit:
+  no `destroyed` line for either, in all three runs, stage 2's included. So the `NGX shut down on the device before it
+  goes` / `the model freed` lines a harness shows will not appear here, and their absence is not a fault.
+
+**The fix: the way back** (`b19d88c7`; arbiter `DlssNr_VkModelOwner.h`, host `Housekeep` in `DlssNr_VkPresentHost.cpp`,
+the route's side in `DlssNrFeature_Vk.cpp`):
+
+- Once the route has been out of an evaluate for `kAfterUpscaleIdleMs` -- **10 s**, counted from the end of its last
+  one (a guard in `EvaluateAfterUpscaleVk` stamps it on the way out: the route records after it asks, and a cold feature
+  build inside one evaluate can take a while; never while it records) -- the host may take the model back on the
+  route's device. Ten seconds is twenty times the live window: long against what pauses a game's upscaler without the
+  player turning it off (a loading screen, a menu, a feature rebuild: DOOM made two features two seconds apart when DLSS
+  came back), where a hand-back costs two rebuilds of a 3440x1440 feature for nothing; short against a player who
+  turned DLSS off and waits for the picture to change (the run sat 46 s). A pause shorter than the window never loses
+  the model, however often it happens.
+- It is begun only by a present of the route's device on which the host has no model of its own, NR is on, the model's
+  extensions are there and a carried swapchain is one the model may see (SDR, its working colour possible): a hand-back
+  the host could not use would only free the route's objects for the route to build again.
+- **The drain.** Every queue of the device the application retrieved is try-locked (its present lock, then its submit
+  lock, as a borrower takes them; one another thread holds is tried again at the next present: the host never waits
+  here), a fence is made per queue, the hand-back is marked begun in the arbiter (`BeginHandBack`, refused if the route
+  asked in the meantime), and each fence is submitted on an empty batch (`vkQueueSubmit` with count 1, a non-null
+  `VkSubmitInfo` with `sType` set and all other fields zero, and the fence), so it signals once everything submitted to its queue before it has completed -- the command
+  buffers the route last recorded into among them. The fences are polled at later presents, never waited for.
+- **Finish.** When every fence was seen signalled, the route's lock is try-locked (held means the route is evaluating:
+  next present) and the arbiter finishes the hand-back: **Done** releases the token and the route's objects are freed
+  -- its feature, images, pass, meter readback, parameter block and timestamp pool, with no device-wide wait (the drain
+  proved them idle; `ShutdownVk(true)` still waits first) -- or it is **Cancelled**: the route asked at any point after
+  the hand-back began, recording into a buffer that may be submitted after the fences, and it keeps the model and
+  everything of its. NGX stays initialised on the device through the forwarder (it is the device's): the host's model,
+  made again at its next frame, finds it up (`dlssnr_vk_init` answers 1 for the device it initialised), finds the
+  forwarder's float slot again for its own parameter block, and builds its own images and feature. Nothing of the old
+  present model is left: it was freed when it stood down. The hand-back is the drained device's: finishing or calling
+  off another device's does nothing, and a route that moved to another device while a drain was under way has called
+  it off (its asking anywhere does).
+- **Again and again.** DLSS on after a hand-back is the ordinary stand-down; the route, taking the token from nobody,
+  finds the forwarder's float slot again for its block (the two blocks may keep floats in different slots). Its `this
+  route waits` line is said at each change now, with `this route has the model again` when it takes it.
+- **Failure paths.** A drain submit that fails calls the hand-back off (the fences already submitted are only waited
+  for; on a lost device nothing is destroyed) and is not tried again for another ten seconds. A fence that never
+  signals keeps the hand-back open and frees nothing (fail closed), said once after the 2 s drain bound; a device with
+  no queue on record (the host came in late) is never handed back, said once. At `vkDestroyDevice` a hand-back under
+  way ends within the drain's bound, and the route's objects on the device go before the call down and before NGX is
+  shut down on it (`AfterUpscaleDeviceGone`): freed once the host has drained every queue of the device behind fences
+  of its own, waited for within the 2 s bound (`DrainForDestroy`; the application destroying the device uses none of
+  its queues), or -- the device lost, work of the host's on it never seen complete, the drain not finished -- only
+  forgotten, and NGX on the device then only forgotten too; and its token is given back. A route that held the model on a device the game replaced, and never asked again, no longer holds it for
+  good; a later device with the same handle value no longer finds the route's stale handles; NGX is no longer shut down
+  under the route's live feature.
+- **The assumption it rests on**: a game submits what it recorded within ten seconds of recording it. A game that
+  re-submitted a command buffer recorded once, long ago, with the route's pass in it, would see its objects freed under
+  it. No engine known here does that with its upscaler's buffer; a game that does would show a device lost after a
+  hand-back.
+
+**The review.** An independent read-only review of `b19d88c7` found the fence semantics, the queue try-locks, the
+cancel's atomicity (every recording after the hand-back began is preceded by an ask under the owner's lock, and the
+free holds the route's lock from the token's release to its end), the lock order with the route's lock taken inside
+the transport's, the free on the present thread, the forwarder's one-device state and the off/on/off cycle sound. It
+found two bugs, both fixed in the commit after it: the idle clock started at the route's ask, so one evaluate longer
+than ten seconds (a cold NGX bring-up and feature build) could have been handed back under its own recording -- now it
+counts from the evaluate's end, and never while the route records; and a drain under way on one device when the route
+moved to another, the first then destroyed or lost, left the hand-back open for the session (its cancel matched the
+route's new device) -- the arbiter now keys the hand-back on the drained device. And the destroy path, which broke the
+forwarder's "every feature released" precondition before `Shutdown1` (as stage 3 already did): its first fix, a
+`vkDeviceWaitIdle` before the free, was itself reviewed again and replaced -- unbounded under the transport's lock on a
+hung GPU, its result ignored on a lost one -- by the bounded fence drain above, whose failure forgets both the route's
+objects and NGX on the device. Left as risks: the ten seconds, not the fences, is what covers a command buffer recorded before the hand-back began but
+submitted after it (a game holding one across a stall, or re-submitting one recorded long ago); a settings menu kept
+open past ten seconds -- where players toggle DLSS -- costs a needless hand-back and a rebuild when the game's upscaler
+comes back. The game releasing its own feature (`NVSDK_NGX_VULKAN_ReleaseFeature`, which OptiScaler intercepts) would
+be a stronger signal that its buffers are done, but DOOM releases and recreates its feature within a second on a
+resolution change with DLSS still on, so it can only shorten the wait, never replace it; not done. The model's and the
+route's frees log under the transport's lock, as a stand-down's release always has.
+
+**The stand-down under slow frames.** The first full run of `nr-route-quiet` after those fixes ran with the host tier
+in parallel, and the harness's frames slowed to about a second each. The stand-down then flapped: refused at the
+route's evaluate, the host stood down at its next present, but the route's next ask came more than half a second
+later, so the host took the model again, stood down again, and only then did the route get it (`stood down and was
+freed` twice in a row, a fourth feature build of the host's). Any game whose upscaler evaluates less than twice a
+second -- a loading screen still evaluating, a loaded machine -- would flap the same way, two feature rebuilds a time.
+The arbiter now remembers a refusal: from the route's refusal until it takes the model, the host is refused
+(`kAfterUpscaleWaiting`) and, if it still holds the model, must yield, however long the route's frames take; a route
+refused once that never asks again lapses after the same ten seconds as the hand-back, and the host then takes the
+model back. The harness's judged phases also go on until they have a dozen frames, so a slow machine thins them
+instead of emptying them.
+
+The lines, in the order a DLSS off/on cycle makes them (`nr-route-quiet`'s run; device and sizes vary):
+
+```
+DLSS-NR Vulkan: this route waits: the Vulkan present host holds the model; it stands down for this route at its next present
+DLSS-NR Vulkan present host: device 0x14572D0 #4: the model stood down and was freed
+DLSS-NR Vulkan: this route has the model again (the present host stood down)
+DLSS-NR Vulkan present host: device 0x14572D0 #4: the after-upscale route has not asked for the model for 10 s: taking it back, once the device's 2 queue(s) drained
+DLSS-NR Vulkan: the after-upscale route's model was freed for the hand-back (its feature at 1280x720, its images, pass and parameter block); NGX stays initialised on the device
+DLSS-NR Vulkan present host: device 0x14572D0 #4: the model is the present host's again (the drain took 95 ms)
+DLSS-NR Vulkan present host: the model initialised on device 0x14572D0 (cold: ...)
+```
+
+Frames refused while the queues drain are counted as `after-upscale route` like the ten seconds before them; when one is
+a window's first refusal its text reads `the after-upscale route has not asked for the model for ten seconds; it is
+being handed back to the present host`. A hand-back the route called off says `the hand-back is called off: the after-upscale route asked for the model again
+while the device drained; it keeps it`.
+
+Validated: `tests/nr-vk-present-host` (the arbiter through three DLSS on/off cycles, a long evaluate never handed back
+under its own recording, a hand-back called off, a failed drain, twenty pauses just short of the window, the device
+going, the review's device move during a drain; source guards for the order of the drain and the free, the recording
+guard, the bounded drain at destroy), and **`nr-route-quiet`** in `tests/vulkan-present-host`, a 21st case under Proton
+with synchronization validation: a game initialising NGX through OptiScaler's exports with OptiScaler's FSR 2.2 behind
+them, 30 evaluates (the route running the model at 1280x720), the feature released, then presents only, twice; then on
+once more and the device destroyed with the route holding the model. Every read-back exact from the stand-down until
+9 s after the last evaluate (about 80 each time), every one edited again from 12 s; the hand-back's lines in order
+twice, drains of about 100 ms at the harness's rate under validation, six feature builds (three of each), nothing called
+off or abandoned, the route's objects freed at exit before NGX was shut down (returned 1), no validation report of
+anyone's but the model's known one. Not validated: a game (the next DOOM run, below), a render thread recording while the hand-back
+drains (one thread does both in the harness: host tier only), a fence that never signals.
+
+### DOOM Eternal: the downstream wDx12 submit hook rejected the drain
+
+The game run on build `cec50409` reached the ten-second hand-back, but every attempt was called off. The reported
+log lines were (device handle omitted):
+
+```text
+[E] Invalid parameters to hk_vkQueueSubmit
+DLSS-NR Vulkan present host: device ...: a hand-back drain submit returned -3; the hand-back is called off, the after-upscale route keeps the model
+```
+
+The pair repeated every ten seconds; with DLSS off the route kept the model and NR never ran at present. The
+cancel path safely destroyed the fences that were never submitted. The failure was not a lost device or a leak.
+`dev.fn.queueSubmit` can reach `Vulkan_wDx12::hk_vkQueueSubmit` below the host; the earlier claim that the trampoline
+is below every hook was too strong. That hook rejects `pSubmits == nullptr` with
+`VK_ERROR_INITIALIZATION_FAILED` (-3), even though
+[Vulkan permits a zero-count/null-array submit](https://docs.vulkan.org/refpages/latest/refpages/source/vkQueueSubmit.html).
+
+Both fork-owned fence-only submits now pass count 1 and an empty `VkSubmitInfo` with its `sType` set:
+`StartHandBack`, and `DrainForDestroy` (the bounded destroy drain introduced by `559a54a7`). There are no command
+buffers, waits or signals in the batch; the fence still follows prior queue work. The after-upscale implementation
+in `DlssNrFeature_Vk.cpp` records commands but has no queue-submit call; the audit found no other zero-count/null-array
+submit or Submit2/KHR equivalent under `retoque/`. No upstream hook is changed.
+
+The host-tier guard now scans all fork C/C++ sources for that pattern, including Submit2/KHR and dispatch-table
+spellings; it failed on both drain sites before the fix. The existing `nr-route-quiet` passed because it creates
+`optiscaler_skip_vulkan_hooks`: `VulkanHooks::Hook` returns before installing wDx12. The new
+`nr-route-quiet-wdx12` companion leaves the bundle enabled, disables only the overlay, and clears the diagnostic
+wDx12-disable environment override. A deliberate zero-count/null-array probe through the application's device
+proc address must return -3 and produce exactly one rejection line, proving the actual production hook is active;
+no further rejection is permitted during two hand-backs and the bounded device-destroy drain. It uses the same
+read-back, ownership-order and synchronization-validation checks as the original case. A real DOOM retest remains
+separate; this change does not deploy a DLL into the running game.
+
+The companion's negative control on the retained pre-fix build `80374044` reproduced both -3 hand-back failures.
+Its bounded destroy drain also failed, so the route's objects were abandoned and validation reported
+`VUID-vkDestroyDevice-device-05137` (live child objects at destroy). This is distinct from the safe cancellation of
+never-submitted hand-back fences. On the fixed build, the first companion run completed the two hand-backs and
+clean teardown with zero host validation errors, but the checker falsely called four exact read-backs in its first
+nine-second window an early takeover because it required five. The bounded waiting windows now require a nonempty
+sample and reject every changed frame; unlike the post-hand-back phases, their length cannot be extended for a slow
+machine without crossing the hand-back deadline. An empty sample and a sample with one changed frame are rejected.
+
+Final validation on build `da4988a1`: all 49 host suites passed; `nr-route-quiet` and
+`nr-route-quiet-wdx12` both passed under Proton with synchronization validation. The wDx12 case saw exactly the
+one deliberate probe rejection, drained in 94 and 96 ms, read back 79 exact frames in each early waiting window,
+then edited every judged post-hand-back frame, and freed the route's objects before NGX shutdown at exit. Both
+cases had zero host validation errors and six occurrences each of the model's already-allowed
+`VUID-vkCmdDraw-None-09600`. This proves the hook-chain regression in the harness, not a new DOOM game run.
+
+### What the next DOOM Eternal run should show
+
+Deployed with `nvngx.dll_dlssnr.dll` from the same build, `[DlssNr] Enabled=true`, `VulkanPresentHost=true`, as for the
+first run:
+
+- At start, as before: cold NR at present on the start window, then the game's DLSS feature and one `this route waits`,
+  `the model stood down and was freed`, `this route has the model again (the present host stood down)`, the route's
+  `feature up at 3440x1440`.
+- **DLSS turned off in the game**: about ten seconds of frames refused as `after-upscale route` (the picture unedited:
+  the route no longer runs and the host waits), then `has not asked for the model for 10 s: taking it back, once the
+  device's N queue(s) drained`, `the after-upscale route's model was freed for the hand-back (its feature at 3440x1440,
+  ...)`, `the model is the present host's again (the drain took M ms)` -- a few frames' worth at the game's rate --
+  and the host's `the model initialised on device`, `images built for 3440x1440`, `feature is up at 3440x1440`, `the
+  model runs at present`. The next window line's `NR: evaluated` climbs again; `pass GPU` is the cost at 3440x1440.
+- **DLSS on again**: `this route waits`, `stood down and was freed`, `this route has the model again`, the route's
+  `feature up at` (its first frames rebuild the feature: a hitch, as at any DLSS toggle). **Off again**: the hand-back
+  again, ten seconds after. Any number of times; never `called off` unless DLSS comes back within the drain's few
+  frames.
+- No exit lines (above). A `device lost` or a crash after a hand-back would point at the assumption above; the log's
+  last hand-back line would be the place to start.
+
+### What a DOOM Eternal run should show (DLSS off, so the after-upscale route stays idle; written before the first run)
 
 With `[DlssNr] Enabled=true`, `VulkanPresentHost=true`, and both `nvngx.dll_dlssnr.dll` **from this build** (an older
 one has no `dlssnr_vk_shutdown`) and the model beside `winmm.dll`; the bundle on, as before:
