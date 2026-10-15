@@ -92,6 +92,8 @@ Related, outside that sequence:
 
 - [ngx-driver-616.md](design/ngx-driver-616.md): NVIDIA 616.64 and the loader's own route to feature 18.
 - [ngx-shutdown-order.md](design/ngx-shutdown-order.md): the D3D12 NGX core shutdown ABI.
-- [session-guard.md](design/session-guard.md): keeping NR off for the next launch after a session that ended without closing while NR ran.
+- [session-guard.md](design/session-guard.md): keeping NR off for the next launch after a session that ended without closing while NR ran;
+  version 2 sees the process end itself (`NtTerminateProcess`), records crashes, exit codes and device removal, and is off by
+  default until a game run confirms it.
 - [dred.md](design/dred.md): opt-in D3D12 DRED, so a device removal on native Windows names the queue, the command list and the operation the GPU stopped at.
 - [../history/FORWARDER_INVESTIGATION.md](../history/FORWARDER_INVESTIGATION.md) and [retoque/dlssnr/forwarder/README.md](../../retoque/dlssnr/forwarder/README.md) (linked, not design notes).
