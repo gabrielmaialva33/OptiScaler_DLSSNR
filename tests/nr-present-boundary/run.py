@@ -86,3 +86,25 @@ with tempfile.TemporaryDirectory(prefix='optiscaler-nr-present-boundary-') as di
                     '-I', str(root / 'retoque'),
                     str(here / 'cases.cpp'), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
+
+    # Execute the production no-new-capture admission condition, not a reimplementation. A movie can keep
+    # presenting real app frames after the upscaler stops. Lower entries may instead see generated frames.
+    admission = re.search(r'if \((newestRecordedSeq > 0.*?)\)\s*\{', run_present, re.S)
+    assert admission, 'present capture admission condition moved'
+    predicate = admission.group(1).replace('cfg.DlssNrRequireDlss.value_or_default()', 'requireDlss')
+    quiet = Path(directory) / 'quiet.cpp'
+    quiet.write_text('#include <cassert>\n#include <cstdint>\n#include <initializer_list>\n'
+                     'bool skip(uint64_t newestRecordedSeq, uint64_t g_nrLastEnhancedRecordedSeq, '
+                     '[[maybe_unused]] bool boundary, [[maybe_unused]] bool requireDlss) { return '
+                     + predicate + '; }\nint main() {\n'
+                     'for (bool boundary : {false, true}) for (bool require : {false, true}) {\n'
+                     'assert(!skip(0, 0, boundary, require));\n'
+                     'assert(!skip(7, 6, boundary, require));\n'
+                     'for (int frame = 0; frame < 1000; ++frame) '
+                     'assert(skip(7, 7, boundary, require) == (!boundary || require));\n'
+                     'assert(!skip(8, 7, boundary, require));\n'
+                     '} }\n')
+    subprocess.run(['g++', '-std=c++20', '-Wall', '-Wextra', '-Werror',
+                    str(quiet), '-o', str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+    print('PASS: real app presents continue through a quiet upscaler; lower entries and required guides keep the skip')

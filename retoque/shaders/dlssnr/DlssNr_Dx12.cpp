@@ -7437,10 +7437,13 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     size_t trackedSlot = DlssNr::PresentGuides::kRingSize;
 
     const auto newestRecordedSeq = g_presentGuideRing.NewestRecordedSequence();
-    if (newestRecordedSeq > 0 && newestRecordedSeq == g_nrLastEnhancedRecordedSeq)
+    if (newestRecordedSeq > 0 && newestRecordedSeq == g_nrLastEnhancedRecordedSeq &&
+        (!boundary || cfg.DlssNrRequireDlss.value_or_default()))
     {
-        // No new capture has been recorded since the last enhanced present: skip present (Correction 5). This is the
-        // present with no capture of its own -- a generated frame, or the upscaler gone quiet -- which D5 says skips.
+        // Below the app boundary, no new capture can mean a generated frame: keep Correction 5's skip. At the
+        // app's own Present, an upscaler can go quiet during video playback; when guides are optional, continue
+        // through identity rejection and the existing zero/synthesized fallback instead (hellraiser-video-present.md).
+        // Use this entry's boundary flag, not BoundaryLive(): lower entries must never inherit this permission.
         CountPresentPassGuides(guides, pickedSlot, DlssNr::PresentGuideIdentity::Outcome::Skipped);
         ++g_presentSkips;
         nrLock.unlock();
@@ -7499,8 +7502,8 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     CountPresentPassGuides(guides, pickedSlot, guideOutcome);
 
     // The newest capture refused for good: decided on as surely as one used, so a later present with nothing newer
-    // recorded has no capture of its own and skips above (D5) instead of running the fallback -- a generated frame of a
-    // game's own frame generation that OptiScaler does not replace reaches this entry. A refused older pick (a newer
+    // recorded skips above (D5), except at the app boundary with optional guides, where it runs the fallback.
+    // A generated frame may reach a lower entry, never that boundary. A refused older pick (a newer
     // capture still being copied), or a refusal that turns on this present (SettlesNewest), is left to the next one.
     if (guideOutcome == DlssNr::PresentGuideIdentity::Outcome::Refused &&
         DlssNr::PresentGuideIdentity::SettlesNewest(guides.decision.reason) &&

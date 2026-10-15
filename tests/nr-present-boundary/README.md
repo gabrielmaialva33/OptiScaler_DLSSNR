@@ -22,7 +22,7 @@ DLSS-G or shown as the game drew it, never every other one.
 - **`HookMethod=1`:** untouched.
 - **OptiScaler's own frame generation** sets the same two signals but is not the game's: the FG hook's pass runs, the
   wrapped entry is left to its existing stand-down, and Auto does not latch.
-- **The boundary** (step 1, not built): a pass that runs above DLSS-G is never declined, and Auto is Auto again there.
+- **The boundary** (step 1, built): a pass that runs above DLSS-G is never declined, and Auto is Auto again there.
 
 Source guards: `RunPresentPass` decides through `PresentBoundary::Decide` and handles `Declined`; the upscaled route asks
 `UpscaledDefersToPresent` and `UpscaledCapturesForPresent`; the inline Auto conditions they replaced are not back.
@@ -36,5 +36,15 @@ evaluate, `ExecuteCommandLists`) is there exactly once. What it logs is a game r
 
 The inputs come from `State` (`dlssgLastSetMode`, `dlssgDetectedInterpolationCount`, `currentFG`) in
 `BoundaryInputs` (`DlssNr_Dx12.cpp`); whether those reflect the game's DLSS-G in a given title is a game run's
-question, as is the picture. Crimson Desert with its DLSS-G at 2x, `HookMethod=2`, is the check: the status line should
-read the declined reason, with no flicker because there is no edit, and `HookMethod=0` should stay upscaled.
+question, as is the picture. With `HookMethod=2` set before startup, the boundary should run before DLSS-G;
+a live switch without the installed boundary should instead report the declined reason. Numeric Auto (0) stays
+upscaled after seeing the game's DLSS-G unless an installed boundary is live.
+
+## Quiet upscaler at the app boundary
+
+The runner also extracts and executes the production no-new-capture admission predicate. It checks
+an empty history, a newly captured frame, 1,000 presents after the same capture was consumed/settled,
+and a resumed capture, for both entry types and both RequireDlss values. Only the app's own boundary
+with optional guides continues through the fallback during the quiet period. Existing guide-identity
+suite coverage proves consumed captures are refused; this admission test does not run D3D12 or NGX.
+See `docs/dlssnr/design/hellraiser-video-present.md` for the game experiment and unverified limits.
