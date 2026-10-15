@@ -15,6 +15,7 @@
 #include "upscalers/dlss/DLSSFeature_Dx12.h"
 
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <framegen/dlssg/MfgProbe.h>
 #include "FG/FSR3_Dx12_FG.h"
 #include "FG/Upscaler_Inputs_Dx12.h"
 #include "FG/XeFG_Inputs_Dx12.h"
@@ -976,6 +977,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_GetFeatureRequirements(
     const bool isUpscaling = FeatureDiscoveryInfo->FeatureID == NVSDK_NGX_Feature_SuperSampling;
     const bool isFG = FeatureDiscoveryInfo->FeatureID == NVSDK_NGX_Feature_FrameGeneration;
     const bool dlssgAdjacent = Nvngx_FG::isDx12Available() || State::Instance().activeFgInput == FGInput::DLSSG;
+
+    MfgProbe::LogAdmission(Adapter, FeatureDiscoveryInfo); // step-0 MFG-below-Ada probe; inert off that path
 
     if (isUpscaling || (isFG && dlssgAdjacent))
     {
