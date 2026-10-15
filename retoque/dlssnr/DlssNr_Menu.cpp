@@ -629,8 +629,28 @@ void RenderMenu(Config* config, float menuResScale)
             if (guard.action == SessionGuard::Action::Disable)
                 ImGui::TextWrapped(
                     "%s", Localization::Tr("Neural Rendering is off for this session. Your settings are unchanged."));
-            ImGui::TextWrapped("%s", Localization::Tr(SessionGuardReasonText(guard.reason)));
+            ImGui::TextWrapped("%s", Localization::Tr(SessionGuardReasonText(guard)));
             ImGui::PopStyleColor();
+
+            // The numbers behind it, dimmed: how the session ended and how long the model had run. A standing block
+            // carries none.
+            switch (guard.end)
+            {
+            case SessionGuard::End::Crashed:
+                ImGui::TextDisabled(Localization::Tr("Exception 0x%08X after the model had run for %lld s."),
+                                    guard.code, (long long) guard.ranSeconds);
+                break;
+            case SessionGuard::End::ExitCode:
+                ImGui::TextDisabled(Localization::Tr("Exit code %u after the model had run for %lld s."), guard.code,
+                                    (long long) guard.ranSeconds);
+                break;
+            case SessionGuard::End::Vanished:
+            case SessionGuard::End::DeviceRemoved:
+                ImGui::TextDisabled(Localization::Tr("The model had run for %lld s."), (long long) guard.ranSeconds);
+                break;
+            default:
+                break;
+            }
 
             if (guard.action == SessionGuard::Action::Disable &&
                 ImGui::SmallButton(Localization::Label("Enable anyway")))

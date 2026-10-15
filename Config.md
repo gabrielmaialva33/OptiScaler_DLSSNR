@@ -388,11 +388,12 @@ there.
 
 ```ini
 [DlssNr]
-; Keep NR off for one session after a session that ended without closing while NR ran (crash, killed
-; hang). A marker file retoque_nr_session.state beside the log records it; the ini is never rewritten.
-; Off by default: under Proton, DOOM Eternal and Crimson Desert left the marker behind after ordinary quits
-; (their exits never reach DLL_PROCESS_DETACH), so every short session read as a crash. Opt-in until a
-; better exit signal exists (docs/dlssnr/design/session-guard.md, "Measured").
+; Keep NR off for one session after a session that ended badly while NR ran (crash, killed hang, lost
+; graphics device). A marker file retoque_nr_session.state beside the log records it; a normal quit, seen
+; by a hook on NtTerminateProcess however the game ends itself, removes it; the ini is never rewritten.
+; Off by default until a game run confirms the exit signal: the first version, which saw an exit only at
+; DLL_PROCESS_DETACH, read every short DOOM Eternal and Crimson Desert session under Proton as a crash
+; (docs/dlssnr/design/session-guard.md).
 ; true or false - Default (auto) is false
 SessionGuard=auto
 

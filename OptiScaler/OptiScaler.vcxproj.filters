@@ -2050,5 +2050,11 @@
     <ClCompile Include="..\retoque\lsfg\presenter\MfgSwapChain_DebugPacing.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_ProcessEnd.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClCompile Include="..\retoque\dlssnr\DlssNr_ProcessEnd.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

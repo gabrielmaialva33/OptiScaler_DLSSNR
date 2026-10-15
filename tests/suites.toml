@@ -46,7 +46,7 @@ summary = "What the present host builds and when: tiny frames, resizes, the pass
 [nr-session-guard]
 tier = "host"
 timeout = 60
-summary = "Session guard: the policy table (early, middle, long unclean ends), marker ownership, unreadable and read-only cases, config-off, plus call-site guards."
+summary = "Session guard: the policy table by how the last session ended (normal quit, exit code, exception, device lost, no end seen) and for how long, marker ownership and the probe, unreadable, other-format and read-only cases, the end of the process (fixed buffer, lock tries, nothing after it), config-off, the exact texts, plus guards on the call sites, the exit hook and the project."
 
 [nr-dx11-route]
 tier = "host"

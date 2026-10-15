@@ -3553,6 +3553,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         reportSkip("D3D12 device removed or hung");
         LOG_ERROR("DLSS-NR: D3D12 device removed or hung (reason: 0x{:08X})", (unsigned) removedReason);
         DlssNr::Dred::Report(device);
+        DlssNr::SessionGuardDeviceRemoved(); // evidence for the next launch, whatever the game does now
         device->Release();
         return false;
     }

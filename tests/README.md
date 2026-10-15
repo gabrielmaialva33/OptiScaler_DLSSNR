@@ -59,10 +59,13 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 - `nr-detail-measure` — the "Measure detail" CPU tile reduction and statistical aggregation (detail added,
   Laplacian raw, flicker beyond native, OkLab chroma/warmth, and shadow darkening/crush), delta comparisons
   and textual metric generation.
-- `nr-session-guard` — the NR session guard (`DlssNr_SessionGuard.h`): what a marker left by an unclean session
-  means (early end disables and stays blocked until acknowledged, middle ends warn then disable on the second,
-  long ends are not blamed), who owns a marker (live second instance, reused pid), unreadable and read-only
-  cases, and the call-site and session-only-disable source guards. The Windows layer is not exercised.
+- `nr-session-guard` — the NR session guard (`DlssNr_SessionGuard.h`): what a marker left by the last session
+  means, by how it ended (a normal quit leaves none; an exception or a device NR saw lost disables under 10 minutes;
+  an exit code or no end seen disables under 2 minutes and warns up to 10, the second in a row disabling), who owns a
+  marker (live second instance, reused pid, the probe's answers), unreadable, other-format and read-only cases, the
+  end of the process (fixed buffer, bounded lock tries, nothing started after it), the exact menu and log texts, and
+  source guards on the call sites, the exit hook, the at-exit code paths and the project entries. The Windows file
+  I/O and the hook in a real process are not exercised.
 - `nr-residual-limit` — the residual limit (`docs/dlssnr/design/residual-limit.md`): the composition's guard
   and limit sliced out of `dlssnr.hlsl` and compiled against HLSL's intrinsics, held against the guard alone (off
   is the guard to the bit; on bounds both ways in stops, only narrows, stays inside the guard, symmetric); the
