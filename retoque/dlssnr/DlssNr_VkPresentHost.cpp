@@ -1302,6 +1302,58 @@ bool EndHandBack(DeviceTransport& dev, uint64_t budgetNs)
     return drained;
 }
 
+// At the device's destruction, with nothing of the host's on it unproven: every queue of it the application retrieved
+// drained behind a fence of the host's, waited for within `budgetNs`, so what is freed next (the after-upscale route's
+// objects, NGX on the device) is proven idle without an unbounded device-wide wait. The application destroying the
+// device uses none of its queues now. False when a fence could not be made or submitted, or was not seen signalled in
+// time (its fences are then kept, never destroyed), or no queue is on record.
+bool DrainForDestroy(DeviceTransport& dev, uint64_t budgetNs)
+{
+    const auto queues = DeviceQueues(dev.device);
+    if (dev.lost || queues.empty())
+        return false;
+
+    std::vector<VkFence> fences;
+    VkFenceCreateInfo fenceInfo { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    bool submitted = true;
+    for (const auto& [queue, locks] : queues)
+    {
+        VkFence fence = VK_NULL_HANDLE;
+        if (dev.fn.createFence(dev.device, &fenceInfo, nullptr, &fence) != VK_SUCCESS)
+        {
+            submitted = false;
+            break;
+        }
+
+        const VkResult result = dev.fn.queueSubmit(queue, 0, nullptr, fence);
+        if (result != VK_SUCCESS)
+        {
+            dev.fn.destroyFence(dev.device, fence, nullptr); // never submitted
+            if (result == VK_ERROR_DEVICE_LOST)
+                MarkLost(dev);
+            submitted = false;
+            break;
+        }
+        fences.push_back(fence);
+    }
+
+    bool drained = submitted;
+    if (!fences.empty() && !dev.lost)
+    {
+        const VkResult result =
+            dev.fn.waitForFences(dev.device, static_cast<uint32_t>(fences.size()), fences.data(), VK_TRUE, budgetNs);
+        if (result == VK_ERROR_DEVICE_LOST)
+            MarkLost(dev);
+        if (result != VK_SUCCESS)
+            return false; // the fences stay: one may still be pending
+
+        for (const VkFence fence : fences)
+            dev.fn.destroyFence(dev.device, fence, nullptr);
+    }
+
+    return drained && !dev.lost;
+}
+
 // On every present of the device, whatever becomes of it (a frame the transport refuses, a swapchain the model may not
 // see): with NR turned off live, or another route asking for the model, the model stands down. Otherwise a model that
 // once ran here would hold the token for as long as the device's presents never reached the model's decision -- an
@@ -2068,10 +2120,12 @@ std::string TeardownDevice(DeviceTransport& dev)
     const uint64_t spent = Since(start);
     const bool drained = EndHandBack(dev, spent < kDrainNs ? kDrainNs - spent : 0);
     DlssNr::ReleaseModelFromPresentHost(dev.device);
-    // The route's objects freed only where nothing says the GPU may still be busy: not a lost device, nor one with work
-    // of the host's never seen complete (its model's frames, a retired swapchain's slots, the hand-back's fences).
-    DlssNr::AfterUpscaleDeviceGone(dev.device, dev.lost || forgetOnly || abandoned != 0 || !drained, dev.lines);
-    DlssNr::ShutdownPresentNgx(dev.device, forgetOnly, dev.lines);
+    // The route's objects freed, and NGX shut down on the device, only where the GPU is proven done: not a lost device,
+    // none with work of the host's never seen complete (its model's frames, a retired swapchain's slots, the
+    // hand-back's fences), and every queue drained now within its own bound. Otherwise both only forget the device.
+    const bool unproven = dev.lost || forgetOnly || abandoned != 0 || !drained || !DrainForDestroy(dev, kDrainNs);
+    DlssNr::AfterUpscaleDeviceGone(dev.device, unproven, dev.lines);
+    DlssNr::ShutdownPresentNgx(dev.device, unproven, dev.lines);
 
     for (const VkSemaphore semaphore : dev.retained)
         dev.fn.destroySemaphore(dev.device, semaphore, nullptr);

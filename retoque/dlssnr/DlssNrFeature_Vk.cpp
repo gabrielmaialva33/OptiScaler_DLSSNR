@@ -1813,8 +1813,8 @@ void AfterUpscaleDeviceGone(VkDevice device, bool forgetOnly, std::vector<std::s
 
             if (forgetOnly)
             {
-                // Nothing called on a lost device, nor waited for on one whose GPU may never finish: forgotten, its
-                // destruction frees them.
+                // Nothing called on a lost device, nor on one whose GPU was not proven done: forgotten, its destruction
+                // frees them.
                 ShutdownVk(false);
                 lines.push_back("DLSS-NR Vulkan: the after-upscale route's objects on the device are abandoned with it "
                                 "(the device is lost, or work on it was never seen complete)");
@@ -1822,9 +1822,10 @@ void AfterUpscaleDeviceGone(VkDevice device, bool forgetOnly, std::vector<std::s
             else
             {
                 // Freed before the device goes and before NGX is shut down on it (its children must go first, the
-                // feature before NGX), once the device is idle: the application destroying it uses none of its queues
-                // now, so the wait is valid, and its work had to be complete anyway.
-                ShutdownVk(true);
+                // feature before NGX): the host drained every queue of the device behind fences of its own, all seen
+                // signalled, so nothing the GPU runs can still use them -- no device-wide wait, which could block every
+                // present unbounded on a hung GPU.
+                FreeRouteObjects();
                 lines.push_back("DLSS-NR Vulkan: the after-upscale route's objects on the device freed before it "
                                 "goes");
             }
