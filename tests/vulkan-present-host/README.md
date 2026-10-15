@@ -191,7 +191,8 @@ after-upscale route the way every OptiScaler upscaler does) on a device that ena
 (`shaderInt16`, `shaderFloat16`). The phases, each with its read-backs counted apart: `cold` (1.5 s, the present host
 runs the model on every frame), then twice `on` (a feature created, 30 evaluates at 640x360 -> 1280x720, the route
 running the model on the upscaler's output), the feature released, and presents only until 9 s after the last
-evaluate (`off-waiting`), 12 s (`off-handing-back`) and 14 s (`off-back`); then `on-at-exit` (10 evaluates, the feature
+evaluate (`off-waiting`), 12 s (`off-handing-back`) and 14 s (`off-back`; it and `cold` go on until they have a dozen
+frames, so a loaded machine thins them instead of emptying them); then `on-at-exit` (10 evaluates, the feature
 released) and the device destroyed with the route holding the model. It must hold: every `cold` and `off-back`
 read-back changed (the present host's model), every `on` and `off-waiting` one exact (the host stood down, and did not
 take the model back before 10 s); in the log, in this order and twice, `this route waits`, `the model stood down and

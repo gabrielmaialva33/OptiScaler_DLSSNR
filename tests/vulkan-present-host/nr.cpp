@@ -895,10 +895,13 @@ struct App
         using Clock = std::chrono::steady_clock;
         // Frames are begun until `end`; under the validation layer one takes up to a few hundred milliseconds, which
         // the phases' bounds leave room for.
-        const auto presentUntil = [&](const char* name, Clock::time_point end)
+        // With `atLeast`, frames go on past `end` until that many were presented: a phase whose read-backs are judged
+        // must have some, however slowly a loaded machine presents (a phase counts only the read-backs of its own
+        // frames it makes itself, so a few fewer than its presents: the swapchain's images).
+        const auto presentUntil = [&](const char* name, Clock::time_point end, uint32_t atLeast = 0)
         {
             Begin(name);
-            while (Clock::now() < end)
+            while (Clock::now() < end || phase->presents < atLeast)
             {
                 Frame(target);
                 ++phase->presents;
@@ -907,7 +910,7 @@ struct App
         using Ms = std::chrono::milliseconds;
 
         // The game's start window: nothing upscaled, the present host runs the model at present.
-        presentUntil("cold", Clock::now() + Ms(1500));
+        presentUntil("cold", Clock::now() + Ms(1500), 12);
 
         const auto init = Ngx<PFN_NgxInit>("NVSDK_NGX_VULKAN_Init");
         const auto capabilities = Ngx<PFN_NgxParams>("NVSDK_NGX_VULKAN_GetCapabilityParameters");
@@ -1033,7 +1036,7 @@ struct App
             // present host's again.
             presentUntil(cycle == 0 ? "off-waiting" : "off-again-waiting", lastAsk + Ms(9000));
             presentUntil(cycle == 0 ? "off-handing-back" : "off-again-handing-back", lastAsk + Ms(12000));
-            presentUntil(cycle == 0 ? "off-back" : "off-again-back", lastAsk + Ms(14000));
+            presentUntil(cycle == 0 ? "off-back" : "off-again-back", lastAsk + Ms(14000), 12);
         }
 
         // On once more, and the game exits with the route holding the model: its objects go with the device.

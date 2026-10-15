@@ -61,7 +61,10 @@ The registry's state machine and the transport's decisions, with plain integers 
   changing nothing; twenty pauses a millisecond short of the window that never lose the model; a clock read out of
   order; the token following the route's own device change; `DeviceGone` for both owners and during a hand-back; and
   the review's case, a drain on d1 when the route moves to d2 and d1 then goes (destroyed, lost or drained): the
-  hand-back ends and d2 can be handed back later.
+  hand-back ends and d2 can be handed back later. And frames slower than the live window: a route refused at T keeps
+  the host down (`kAfterUpscaleWaiting`, and yielding if it still holds the model) until it takes the model 1.6 s
+  later; a route refused once that never asks again lapses after the idle window, a clock read out of order not
+  counting as quiet, and the host's `Take` ends the reservation.
 - Two devices alive at once whose swapchains have the same handle value: no aliasing. A device destroyed takes its
   queues and swapchains; a new device with the old handle value, and a queue and swapchain with the old values too,
   are new records with new ids; a create that returns a handle still on record replaces it and is counted.

@@ -1013,7 +1013,7 @@ static void OwnerArbitration()
 //
 // One evaluate of the route: granted (or not) at `at`, its recording over `takes` later.
 static DlssNr::VkModelOwner::Verdict Evaluate(DlssNr::VkModelOwner::Arbiter& a, uint64_t device, uint64_t at,
-                                               uint64_t takes = 2)
+                                              uint64_t takes = 2)
 {
     const auto verdict = a.AfterUpscale(device, at);
     if (verdict.granted)
@@ -1162,6 +1162,39 @@ static void OwnerHandBack()
     c.Take(d2);
     c.DeviceGone(d2);
     CHECK(c.Owner() == Who::None);
+
+    // Frames slower than the live window (a loaded machine, a game at a few frames a second): the route refused at T,
+    // the host standing down at a present 800 ms later, must not take the model back before the route's next ask --
+    // that flapped in a harness run under load (stood down, took it again, stood down) -- and the route then takes it.
+    Arbiter s;
+    CHECK(s.PresentHost(d1, 0).granted);
+    s.Take(d1);
+    CHECK(!Evaluate(s, d1, 1000).granted && s.PresentHostMustYield(d1, 1000));
+    CHECK(s.YieldReason(1000) == kAfterUpscaleWants);
+    CHECK(s.PresentHostMustYield(d1, 1000 + kAfterUpscaleLiveMs + 300)); // still: it wants the model
+    CHECK(s.YieldReason(1000 + kAfterUpscaleLiveMs + 300) == kAfterUpscaleWaiting);
+    s.Release(Who::PresentHost, d1);
+    Verdict w = s.PresentHost(d1, 1000 + kAfterUpscaleLiveMs + 300);
+    CHECK(!w.granted && w.reason == kAfterUpscaleWaiting);
+    CHECK(Evaluate(s, d1, 2600).granted && s.Owner() == Who::AfterUpscale);
+    w = s.PresentHost(d1, 2600 + kAfterUpscaleLiveMs + 1);
+    CHECK(!w.granted && w.reason == kAfterUpscaleOwns);
+    // Granted, the route no longer waits: its device gone, the host on another device takes the model once the live
+    // window is past, not ten seconds later.
+    s.DeviceGone(d1);
+    CHECK(s.PresentHost(d2, 2602 + kAfterUpscaleLiveMs).granted);
+    // A route refused once that never asks again keeps the host down for the idle window, not for good; the host then
+    // takes the model and the reservation is gone.
+    Arbiter r;
+    CHECK(r.PresentHost(d1, 0).granted);
+    r.Take(d1);
+    CHECK(!Evaluate(r, d1, 100).granted);
+    r.Release(Who::PresentHost, d1);
+    CHECK(r.PresentHost(d1, 100 + kAfterUpscaleIdleMs - 1).reason == kAfterUpscaleWaiting);
+    CHECK(r.PresentHost(d1, 99).reason == kAfterUpscaleWaiting); // a clock read out of order: still waiting
+    CHECK(r.PresentHost(d1, 100 + kAfterUpscaleIdleMs).granted);
+    r.Take(d1);
+    CHECK(!r.PresentHostMustYield(d1, 100 + kAfterUpscaleIdleMs + 1));
 
     // A drain under way on d1 when the route moves to d2 (the review, 2026-10-14): the move calls it off, and d1 then
     // destroyed or lost before its drain is seen through ends the hand-back -- it must not stay open for the session,
