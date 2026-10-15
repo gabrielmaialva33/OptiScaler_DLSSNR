@@ -230,6 +230,12 @@ The design adds no resources and no queues. The reasons it needs saying anyway:
 
 ### D5. Frame generation
 
+**2026-10-15 correction:** at the actual Streamline app boundary, with `RequireDlss=false`, no new
+capture no longer skips the frame: an upscaler may stop during movie playback while the app keeps
+presenting. Consumed guides remain rejected and the frame uses the existing fallback. Lower entries
+and `RequireDlss=true` keep the skip. This supersedes the unconditional-skip description below; see
+[Hellraiser: video coverage](hellraiser-video-present.md) for the evidence, limits and test protocol.
+
 The pass runs once per base frame, before FG, in both FG presenters (`:6312-6326` stands the wrapped
 entry down once the FG hook ran). With identity in place that has a precise meaning:
 
