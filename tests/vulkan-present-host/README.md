@@ -87,7 +87,8 @@ sees the hidden usage too and would report a swapchain created with it.
 It also carries the timing knobs of "Off the present path" (environment variables, off unless set):
 `RETOQUE_SLOW_OFF_DEVICE_THREAD_MS` sleeps every `vkAllocateMemory`, `vkCreateComputePipelines`, `vkCreateCuModuleNVX`
 and `vkCreateCuFunctionNVX` made on a thread other than the device's creating one (the model's builder, and NGX inside
-it), up to `RETOQUE_SLOW_OFF_DEVICE_THREAD_TOTAL_MS`; `RETOQUE_STALL_PRESENT_AT=N:MS` holds the N-th
+it), up to `RETOQUE_SLOW_OFF_DEVICE_THREAD_TOTAL_MS` per burst (a burst ends after a second without one, so each build is
+slowed about as much); `RETOQUE_STALL_PRESENT_AT=N:MS` holds the N-th
 `vkQueuePresentKHR` MS below the host's hook; `RETOQUE_COUNT_OFF_THREAD_QUEUE=1` counts queue submits and idle waits
 made off the device's creating thread and writes them to `layer-offthread.txt` at the device's destruction.
 
@@ -199,7 +200,7 @@ frames of a device refused as building before `model unavailable` (the stage 1 a
 `nr-no-model`). No case but `nr-stall-watch` may log a watchdog line.
 
 `nr-build-slow` runs `nr.cpp --slow-build` with the layer slowing every allocation, pipeline and NVX module made off
-the device's creating thread by 400 ms (12 s in all) and counting queue calls made off it. One swapchain presented
+the device's creating thread by 400 ms (4 s per build) and counting queue calls made off it. One swapchain presented
 once and destroyed (DOOM Eternal's #9), its replacement at the same size, a resize to 517x389 and back, then a last
 size presented once and the device destroyed at once. It must hold: every present under 300 ms (each is timed) while
 the build takes seconds (the slowest at least 2 s); every frame of the churn carried while the model is built, and the

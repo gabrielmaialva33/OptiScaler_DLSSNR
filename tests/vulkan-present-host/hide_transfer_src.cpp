@@ -12,8 +12,9 @@
 // Two timing knobs for "Off the present path" in the design note:
 // - RETOQUE_SLOW_OFF_DEVICE_THREAD_MS: every vkAllocateMemory, vkCreateComputePipelines, vkCreateCuModuleNVX and
 //   vkCreateCuFunctionNVX made on a thread other than the one that created the device sleeps this long first, up to
-//   RETOQUE_SLOW_OFF_DEVICE_THREAD_TOTAL_MS in all (default 3000): the present host's model builder (and NGX's own
-//   threads) slowed, the application's own thread -- which presents -- untouched.
+//   RETOQUE_SLOW_OFF_DEVICE_THREAD_TOTAL_MS (default 3000) per burst -- a burst ends after a second with no such call,
+//   so each of the model's builds is slowed about as much: the present host's model builder (and NGX's own threads)
+//   slowed, the application's own thread -- which presents -- untouched.
 // - RETOQUE_STALL_PRESENT_AT=N:MS: the N-th vkQueuePresentKHR sleeps MS before calling down, inside the host's present
 //   hook, for the stall watchdog to name.
 // - RETOQUE_COUNT_OFF_THREAD_QUEUE=1: vkQueueSubmit, vkQueueSubmit2 and vkQueueWaitIdle made on a thread other than the
@@ -97,16 +98,35 @@ uint64_t EnvMs(const char* name, uint64_t fallback)
     return value != nullptr ? std::strtoull(value, nullptr, 10) : fallback;
 }
 
-std::atomic<uint64_t> g_slowedMs { 0 };
+std::mutex g_slowMutex;
+uint64_t g_slowedMs = 0;     // in the current burst
+uint64_t g_lastSlowedAt = 0; // monotonic ms the last such call ended (or will, when slowed)
 
-// Off the device's creating thread: sleep the knob's time, within the total.
+uint64_t NowMs()
+{
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+}
+
+// Off the device's creating thread: sleep the knob's time, within the burst's total.
 void SlowOffDeviceThread(const DeviceData& data)
 {
     const uint64_t ms = EnvMs("RETOQUE_SLOW_OFF_DEVICE_THREAD_MS", 0);
     if (ms == 0 || std::this_thread::get_id() == data.creator)
         return;
-    if (g_slowedMs.fetch_add(ms) + ms > EnvMs("RETOQUE_SLOW_OFF_DEVICE_THREAD_TOTAL_MS", 3000))
-        return;
+    {
+        std::lock_guard lock(g_slowMutex);
+        // A burst is a run of these calls with no second's gap between them: one build's, slowed or not.
+        const uint64_t now = NowMs();
+        if (now > g_lastSlowedAt + 1000)
+            g_slowedMs = 0; // a new burst: another build
+        g_lastSlowedAt = now;
+        if (g_slowedMs + ms > EnvMs("RETOQUE_SLOW_OFF_DEVICE_THREAD_TOTAL_MS", 3000))
+            return;
+        g_slowedMs += ms;
+        g_lastSlowedAt = now + ms;
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 

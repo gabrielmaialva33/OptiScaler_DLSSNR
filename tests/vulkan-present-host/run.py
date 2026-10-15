@@ -933,7 +933,7 @@ NR_CASES = {
 # The test layer's timing knobs and the harness's arguments, for the cases that use them.
 NR_TIMING = {
     'nr-stall-watch': ({'RETOQUE_STALL_PRESENT_AT': '30:2600'}, []),
-    'nr-build-slow': ({'RETOQUE_SLOW_OFF_DEVICE_THREAD_MS': '400', 'RETOQUE_SLOW_OFF_DEVICE_THREAD_TOTAL_MS': '12000',
+    'nr-build-slow': ({'RETOQUE_SLOW_OFF_DEVICE_THREAD_MS': '400', 'RETOQUE_SLOW_OFF_DEVICE_THREAD_TOTAL_MS': '4000',
                        'RETOQUE_COUNT_OFF_THREAD_QUEUE': '1'}, ['--slow-build']),
 }
 # The longest a present may take in nr-build-slow, while the model's build takes seconds: the round trip, the validation
@@ -1091,12 +1091,7 @@ def check_build_slow(name, facts, log):
     need(building.get('last') == 1, f'the last swapchain was not carried while its build ran: {building}')
     waited = [re.search(r'waited (\d+) ms for the model.s build under way before the device goes', l) for l in lines]
     waited = [int(m.group(1)) for m in waited if m]
-    need(len(waited) == 1 and waited[0] > 0, f'the device did not wait for the build under way: {waited}')
-    # Behind the host's back on the queues: the builder's one submit per build, no idle wait (NGX's own included).
-    offthread = (Path(OUT / 'cases' / name / 'layer-offthread.txt').read_text().split()
-                 if (OUT / 'cases' / name / 'layer-offthread.txt').exists() else [])
-    need(len(offthread) == 4 and int(offthread[3]) == 0 and int(offthread[1]) == len(ready),
-         f'queue calls off the presenting thread: {offthread} for {len(ready)} builds')
+    need(len(waited) == 1 and waited[0] >= 1000, f'the device did not wait for the slowed build under way: {waited}')
 
     # The builds: asked for on the present path, made off it, slowly (the layer), adopted when over.
     asked = [l for l in lines if 'the model is being built for ' in l and 'off the present path; frames are carried' in l]
@@ -1106,6 +1101,11 @@ def check_build_slow(name, facts, log):
                                                                            f'{len(ready)}')
     slowest = max((ms for _, ms in ready), default=0)
     need(slowest >= 2000, f'no build was slowed enough to prove anything (slowest {slowest} ms)')
+    # Behind the host's back on the queues: the builder's one submit per build, no idle wait (NGX's own included).
+    offthread = (Path(OUT / 'cases' / name / 'layer-offthread.txt').read_text().split()
+                 if (OUT / 'cases' / name / 'layer-offthread.txt').exists() else [])
+    need(len(offthread) == 4 and int(offthread[3]) == 0 and int(offthread[1]) == len(ready),
+         f'queue calls off the presenting thread: {offthread} for {len(ready)} builds')
     longest = max(s['max_present_ms'] for s in facts['swapchains'])
     need(longest < SLOW_BUILD_PRESENT_MS, f'a present took {longest:.1f} ms while builds took up to {slowest} ms')
     for text in ('the model is off on this device', 'called off', 'faulted'):
