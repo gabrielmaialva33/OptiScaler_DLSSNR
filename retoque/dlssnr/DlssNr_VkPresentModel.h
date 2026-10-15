@@ -61,7 +61,8 @@ struct VkPresentModelDevice
 };
 
 // One frame, as the host hands it over: the working colour (kWorkingFormat), in GENERAL on entry and left there
-// rewritten, sampled and stored by the pass.
+// rewritten, sampled and stored by the pass. HDR instead hands over the raw transport image in TRANSFER_DST;
+// Record performs the conversion around NR and returns it in TRANSFER_DST.
 struct VkPresentNrFrame
 {
     VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -69,8 +70,9 @@ struct VkPresentNrFrame
     VkImageView view = VK_NULL_HANDLE;
     uint32_t width = 0;
     uint32_t height = 0;
-    uint64_t ticket = 0; // the host's, unique on the device, non-zero
-    bool cut = false;    // the host knows the history is invalid: a new swapchain served, the model back after a gap
+    uint64_t ticket = 0;     // the host's, unique on the device, non-zero
+    uint32_t hdrProfile = 0; // HDR: image is the raw transport copy, TRANSFER_DST on entry/exit; view unused
+    bool cut = false; // the host knows the history is invalid: a new swapchain served, the model back after a gap
 };
 
 struct VkPresentAdmission
@@ -91,7 +93,8 @@ class VkPresentModel
     // a product built for another size or family is retired (freed once the frames that used it are seen complete) and
     // a build is requested; while it is queued or running the answer is NrSkip::Building; once it is over it is
     // adopted here, or its failure latched (Unavailable from then on).
-    VkPresentAdmission Admit(uint32_t width, uint32_t height, uint32_t family);
+    VkPresentAdmission Admit(uint32_t width, uint32_t height, uint32_t family, uint32_t hdrProfile = 0,
+                             uint32_t rawFormat = 0);
 
     // The pass into frame.cmd, after an Admit of the same size: encode, the downsample below native, the model, the
     // resolve into the working colour. False: something failed after recording began; the caller discards the recording

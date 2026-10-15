@@ -34,6 +34,8 @@ struct BuildKey
     uint32_t workHeight = 0;
     uint32_t family = UINT32_MAX;
     bool synth = false;
+    uint32_t hdrProfile = 0;
+    uint32_t rawFormat = 0;
 
     bool operator==(const BuildKey&) const = default;
 };

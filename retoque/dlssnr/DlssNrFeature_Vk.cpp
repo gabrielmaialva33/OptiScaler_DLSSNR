@@ -23,6 +23,8 @@
 #include <shaders/dlssnr/DlssNr_GuideMatch.h>
 #include <shaders/output_scaling/OS_Vk.h>
 #include <shaders/synth_motion/SynthMotion_Vk.h>
+#include <shaders/dlssnr/DlssNr_PresentHdr_Vk.h>
+#include "DlssNr_PresentHdr.h"
 
 #include <algorithm>
 #include <array>
@@ -345,9 +347,15 @@ static VkImageInfo ImageInfoOf(const OwnedImage& img)
 }
 
 bool CreateImageOn(VkDevice device, VkPhysicalDevice physicalDevice, OwnedImage& img, uint32_t width, uint32_t height,
-                   VkFormat format, bool readWrite)
+                   VkFormat format, bool readWrite, bool* lost = nullptr, bool storage = true)
 {
     DestroyImageOn(device, img);
+    const auto failed = [lost](VkResult result)
+    {
+        if (lost && result == VK_ERROR_DEVICE_LOST)
+            *lost = true;
+        return result != VK_SUCCESS;
+    };
 
     VkImageCreateInfo info {};
     info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -358,12 +366,12 @@ bool CreateImageOn(VkDevice device, VkPhysicalDevice physicalDevice, OwnedImage&
     info.arrayLayers = 1;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                 VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    info.usage = (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0) | VK_IMAGE_USAGE_SAMPLED_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vkCreateImage(device, &info, nullptr, &img.image) != VK_SUCCESS)
+    if (failed(vkCreateImage(device, &info, nullptr, &img.image)))
     {
         LOG_ERROR("DLSS-NR Vulkan: could not create a {}x{} image", width, height);
         return false;
@@ -378,11 +386,12 @@ bool CreateImageOn(VkDevice device, VkPhysicalDevice physicalDevice, OwnedImage&
     alloc.memoryTypeIndex =
         FindMemoryTypeIndexOn(physicalDevice, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    if (alloc.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(device, &alloc, nullptr, &img.memory) != VK_SUCCESS ||
-        vkBindImageMemory(device, img.image, img.memory, 0) != VK_SUCCESS)
+    if (alloc.memoryTypeIndex == UINT32_MAX || failed(vkAllocateMemory(device, &alloc, nullptr, &img.memory)) ||
+        failed(vkBindImageMemory(device, img.image, img.memory, 0)))
     {
         LOG_ERROR("DLSS-NR Vulkan: could not back a {}x{} image", width, height);
-        DestroyImageOn(device, img);
+        if (!lost || !*lost)
+            DestroyImageOn(device, img);
         return false;
     }
 
@@ -393,10 +402,11 @@ bool CreateImageOn(VkDevice device, VkPhysicalDevice physicalDevice, OwnedImage&
     view.format = format;
     view.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
 
-    if (vkCreateImageView(device, &view, nullptr, &img.view) != VK_SUCCESS)
+    if (failed(vkCreateImageView(device, &view, nullptr, &img.view)))
     {
         LOG_ERROR("DLSS-NR Vulkan: could not view a {}x{} image", width, height);
-        DestroyImageOn(device, img);
+        if (!lost || !*lost)
+            DestroyImageOn(device, img);
         return false;
     }
 
@@ -1872,6 +1882,7 @@ struct RetiredSet
     void* feature = nullptr;
     std::vector<OwnedImage> images;
     SynthMotion::VkImages synth; // the synthesized-motion estimator's images for that size, if it had them
+    PresentHdr::VkConversion hdr;
     std::vector<uint64_t> waitFor;
 };
 
@@ -1968,19 +1979,25 @@ struct PresentBuildJob
     uint64_t tickMask = ~0ull;
     void* feature = nullptr;
     OwnedImage output, proxy, keep, proxySmall, depth, motion;
+    OwnedImage hdrOriginal, hdrLinear, hdrEncoded;
+    PresentHdr::VkConversion hdr;
     // Synthesized motion (stage 5), with key.synth: the estimator's pipelines (needSynthPipelines) and its images for
     // this size. synthOff: why it could not be made; the product is then built without it (zero motion), never refused.
     SynthMotion::VkPipelines synthPipelines;
     SynthMotion::VkImages synthImages;
     std::string synthOff;
-    std::string failure; // empty: Done
-    bool retry = false;  // a failure that frees everything and asks again later (the queue's locks stayed busy)
-    bool lost = false;   // the device was lost during it: the host marks the device lost
+    std::string failure;     // empty: Done
+    bool hdrFailure = false; // only the optional conversion failed, so another profile/size may still run
+    bool retry = false;      // a failure that frees everything and asks again later (the queue's locks stayed busy)
+    bool lost = false;       // the device was lost during it: the host marks the device lost
     std::vector<std::string> lines;
     uint64_t startedMs = 0;
     uint64_t finishedMs = 0;
 
-    std::array<OwnedImage*, 6> Images() { return { &output, &proxy, &keep, &proxySmall, &depth, &motion }; }
+    std::array<OwnedImage*, 9> Images()
+    {
+        return { &output, &proxy, &keep, &proxySmall, &depth, &motion, &hdrOriginal, &hdrLinear, &hdrEncoded };
+    }
 
     void Say(std::string line) { lines.push_back("DLSS-NR Vulkan present host: " + std::move(line)); }
 
@@ -2002,6 +2019,7 @@ void FreeBuild(PresentBuildJob& job)
         g_fwd.release(job.feature);
     job.feature = nullptr;
 
+    job.hdr.Destroy(d);
     for (OwnedImage* image : job.Images())
         DestroyImageOn(d, *image);
 
@@ -2027,6 +2045,7 @@ void FreeBuild(PresentBuildJob& job)
 // Forget whatever a job made, calling nothing: its GPU work may not be over, or its device may be gone.
 void ForgetBuild(PresentBuildJob& job)
 {
+    job.hdr = {};
     (void) job.pass.release();
     job.feature = nullptr;
     job.newParams = nullptr;
@@ -2054,7 +2073,7 @@ void RunBuild(PresentBuildJob& job)
     const auto stop = [&job](std::string why, bool free = true)
     {
         job.failure = std::move(why);
-        if (job.orphaned.load(std::memory_order_acquire) || !free)
+        if (job.orphaned.load(std::memory_order_acquire) || job.lost || !free)
             ForgetBuild(job);
         else
             FreeBuild(job);
@@ -2211,6 +2230,28 @@ void RunBuild(PresentBuildJob& job)
     if (!images)
         return stop("the model's images could not be allocated at " + std::to_string(k.width) + "x" +
                     std::to_string(k.height));
+
+    if (k.hdrProfile != 0)
+    {
+        job.hdrFailure = true;
+        activity.Stage("building HDR conversion resources");
+        const auto raw = static_cast<VkFormat>(k.rawFormat);
+        if (!PresentHdr::VkConversion::Supports(pd, raw, k.width, k.height))
+            return stop("HDR conversion format capabilities unavailable; the frame stays original");
+        if (!CreateImageOn(d, pd, job.hdrOriginal, k.width, k.height, raw, false, &job.lost, false) ||
+            !CreateImageOn(d, pd, job.hdrLinear, k.width, k.height, working, true, &job.lost) ||
+            !CreateImageOn(d, pd, job.hdrEncoded, k.width, k.height, PresentHdr::VkConversion::EncodedFormat(raw), true,
+                           &job.lost) ||
+            !job.hdr.Create(d, pd, k.width, k.height, k.hdrProfile, job.hdrOriginal.view, job.hdrLinear.view,
+                            job.hdrEncoded.view))
+        {
+            job.lost = job.lost || job.hdr.lost;
+            return stop("HDR conversion resources could not be built; the frame stays original");
+        }
+        job.hdrFailure = false;
+        job.Say("HDR conversion resources built off the present path for " + std::to_string(k.width) + "x" +
+                std::to_string(k.height) + ", " + VkPresentHost::FormatName(k.rawFormat));
+    }
 
     job.Say("the model's images built for " + std::to_string(k.width) + "x" + std::to_string(k.height) + " (working " +
             std::to_string(k.workWidth) + "x" + std::to_string(k.workHeight) +
@@ -2479,6 +2520,10 @@ struct VkPresentModel::Impl
     OwnedImage proxySmall; // the proxy at the working size, below native only
     OwnedImage depth;      // zero guides at the working size: constant depth ...
     OwnedImage motion;     // ... and no motion
+    OwnedImage hdrOriginal, hdrLinear, hdrEncoded;
+    PresentHdr::VkConversion hdr;
+    bool saidHdr = false;
+    std::optional<BuildKey> hdrFailure;
 
     // Synthesized motion (stage 5, [DlssNr] SynthMotion): the estimator's pipelines (the device's, from the first build
     // that asked for them) and its images (the product's, with key.synth), its history, and the field as NGX is handed
@@ -2557,6 +2602,13 @@ struct VkPresentModel::Impl
     // The device was lost during a build: the host marks the device lost, and nothing of the model's is freed.
     bool deviceLost = false;
 
+    bool Lost() const
+    {
+        // JobState's acquire publishes the worker's non-atomic result. Never read it while the worker can write it.
+        const BuildState state = JobState();
+        return deviceLost || (job && (state == BuildState::Done || state == BuildState::Failed) && job->lost);
+    }
+
     // A job still queued is called off (the builder skips it, touching nothing): a model giving the model up does not
     // wait behind other work the builder has.
     void CancelQueued()
@@ -2565,7 +2617,10 @@ struct VkPresentModel::Impl
             job->orphaned.store(true, std::memory_order_release);
     }
 
-    std::array<OwnedImage*, 6> Images() { return { &output, &proxy, &keep, &proxySmall, &depth, &motion }; }
+    std::array<OwnedImage*, 9> Images()
+    {
+        return { &output, &proxy, &keep, &proxySmall, &depth, &motion, &hdrOriginal, &hdrLinear, &hdrEncoded };
+    }
 
     void Free(RetiredSet& set)
     {
@@ -2578,6 +2633,7 @@ struct VkPresentModel::Impl
             DestroyImageOn(dev.device, image);
 
         set.images.clear();
+        set.hdr.Destroy(dev.device);
         SynthMotion::DestroyVkImages(dev.device, set.synth);
     }
 
@@ -2585,7 +2641,7 @@ struct VkPresentModel::Impl
     // NGX call and the builder's are not to be overlapped.
     void FreeRetired()
     {
-        if (Building())
+        if (Building() || Lost())
             return;
 
         for (auto it = retired.begin(); it != retired.end();)
@@ -2607,6 +2663,8 @@ struct VkPresentModel::Impl
     {
         RetiredSet old;
         old.feature = feature;
+        old.hdr = hdr;
+        hdr = {};
         for (OwnedImage* image : Images())
         {
             if (image->image != VK_NULL_HANDLE || image->memory != VK_NULL_HANDLE)
@@ -2671,6 +2729,8 @@ struct VkPresentModel::Impl
                 Say("the model's build did not reach the GPU (" + over->failure + "); asked for again");
                 return true;
             }
+            if (over->hdrFailure && !over->lost)
+                hdrFailure = over->key;
             Latch(NrSkip::Unavailable, over->failure);
             return false;
         }
@@ -2705,9 +2765,12 @@ struct VkPresentModel::Impl
 
         feature = over->feature;
         over->feature = nullptr;
-        OwnedImage* mine[6] = { &output, &proxy, &keep, &proxySmall, &depth, &motion };
+        hdr = over->hdr;
+        over->hdr = {};
+        saidHdr = false;
+        const auto mine = Images();
         const auto theirs = over->Images();
-        for (size_t i = 0; i < 6; ++i)
+        for (size_t i = 0; i < mine.size(); ++i)
         {
             *mine[i] = *theirs[i];
             *theirs[i] = OwnedImage {};
@@ -2768,7 +2831,7 @@ size_t VkPresentModel::InFlight() const
 
 bool VkPresentModel::Building() const { return _impl->Building(); }
 
-bool VkPresentModel::DeviceLost() const { return _impl->deviceLost; }
+bool VkPresentModel::DeviceLost() const { return _impl->Lost(); }
 
 void VkPresentModel::Orphan()
 {
@@ -2801,10 +2864,19 @@ std::vector<std::string> VkPresentModel::TakeLines()
     return lines;
 }
 
-VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height, uint32_t family)
+VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height, uint32_t family, uint32_t hdrProfile,
+                                         uint32_t rawFormat)
 {
     Impl& m = *_impl;
 
+    if (m.failed && m.hdrFailure && !m.deviceLost &&
+        (m.hdrFailure->hdrProfile != hdrProfile || m.hdrFailure->rawFormat != rawFormat ||
+         m.hdrFailure->width != width || m.hdrFailure->height != height))
+    {
+        m.failed = false;
+        m.failure.clear();
+        m.hdrFailure.reset();
+    }
     if (m.failed)
         return { NrSkip::Unavailable, m.failure };
 
@@ -2841,6 +2913,8 @@ VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height, uint32
         width,      height, workWidth,
         workHeight, family, VkPresentHost::SynthWanted(synthConfigured, !m.synthOff.empty(), workWidth, workHeight)
     };
+    want.hdrProfile = hdrProfile;
+    want.rawFormat = hdrProfile != 0 ? rawFormat : 0;
     for (;;)
     {
         const auto step = VkPresentHost::DecideBuild(m.failed, m.JobState(), m.built, m.key, want);
@@ -2884,14 +2958,41 @@ VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height, uint32
     return {};
 }
 
-bool VkPresentModel::Record(const VkPresentNrFrame& frame)
+namespace
 {
+void HdrBarrier(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImageLayout to)
+{
+    VkImageMemoryBarrier barrier { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    barrier.image = image;
+    barrier.oldLayout = from;
+    barrier.newLayout = to;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &barrier);
+}
+void HdrCopy(VkCommandBuffer cmd, VkImage from, VkImage to, uint32_t width, uint32_t height)
+{
+    VkImageCopy region {};
+    region.srcSubresource = region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.extent = { width, height, 1 };
+    vkCmdCopyImage(cmd, from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, to, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                   &region);
+}
+} // namespace
+
+bool VkPresentModel::Record(const VkPresentNrFrame& input)
+{
+    VkPresentNrFrame frame = input;
     Impl& m = *_impl;
     auto& cfg = *Config::Instance();
     VkCommandBuffer cmd = frame.cmd;
 
     if (m.failed || !m.built || m.Building() || m.feature == nullptr || m.pass == nullptr || cmd == VK_NULL_HANDLE ||
-        frame.view == VK_NULL_HANDLE || frame.width != m.width || frame.height != m.height)
+        (frame.hdrProfile == 0 && frame.view == VK_NULL_HANDLE) || frame.width != m.width || frame.height != m.height ||
+        frame.hdrProfile != m.key.hdrProfile)
         return false;
 
     const bool reduced = m.workWidth != m.width || m.workHeight != m.height;
@@ -2927,14 +3028,33 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
         return false;
     };
 
-    // Encode. The presented frame is display-referred SDR: the encode is the identity (gPassthrough), and so is every
-    // place the shader reproduces it. No game exposure exists on this route; the white point is the slider's.
+    if (frame.hdrProfile != 0)
+    {
+        HdrBarrier(cmd, input.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        HdrBarrier(cmd, m.hdrOriginal.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        HdrCopy(cmd, input.image, m.hdrOriginal.image, m.width, m.height);
+        HdrBarrier(cmd, m.hdrOriginal.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+        HdrBarrier(cmd, m.hdrLinear.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        m.hdr.Record(cmd, m.width, m.height, PresentHdr::kModeDecode);
+        HdrBarrier(cmd, m.hdrLinear.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        frame.image = m.hdrLinear.image;
+        frame.view = m.hdrLinear.view;
+    }
+
+    // SDR is display-referred: the encode is the identity (gPassthrough), including every place it is reproduced.
+    // Decoded HDR is linear light and uses the reversible transfer at 203-nit white times the slider. No game
+    // exposure exists on this route.
     DlssNrConstants encode {};
     encode.Mode = DlssNrMode_Encode;
     encode.Width = m.width;
     encode.Height = m.height;
     encode.WhitePoint = cfg.DlssNrWhitePointScale.value_or_default();
-    encode.Passthrough = 1u;
+    encode.Passthrough = frame.hdrProfile != 0 ? 0u : 1u;
+    if (frame.hdrProfile != 0)
+    {
+        const float scale = std::isfinite(encode.WhitePoint) && encode.WhitePoint > 0.0f ? encode.WhitePoint : 1.0f;
+        encode.WhitePoint = PresentHdr::kSdrWhiteScRgb * scale;
+    }
     encode.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
     encode.ApplyModel = cfg.DlssNrApplyModel.value_or_default() ? 1u : 0u;
     encode.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
@@ -2944,7 +3064,7 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
     encode.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
     encode.GuideWidth = m.workWidth;
     encode.GuideHeight = m.workHeight;
-    encode.HighlightRecovery = 0u; // linear HDR only, and this frame is SDR
+    encode.HighlightRecovery = frame.hdrProfile != 0 ? cfg.DlssNrHighlightRecovery.value_or_default() : 0u;
     encode.ResidualLimit = DlssNr::ResidualLimitStops(cfg.DlssNrResidualLimit.value_or_default());
 
     Transition(cmd, m.proxy, VK_IMAGE_LAYOUT_GENERAL);
@@ -2977,7 +3097,7 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
     }
 
     // Synthesized motion (stage 5): the estimator reads the model's own input -- the encode's proxy, the frame itself
-    // on this SDR route (passthrough), downsampled below native -- so its field is at the working size in working
+    // on SDR (passthrough), the reversible-transfer proxy on HDR, downsampled below native -- at the working size in
     // pixels, the model's own grid, as the D3D12 route's guide resample makes it. Its own dispatches and push
     // descriptors, not the pass's ring. Once it has a real field, that replaces the zero motion guide; a recording that
     // does not happen (nothing invalid ever reaches it) leaves the model on zero motion.
@@ -3045,6 +3165,26 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
                           frame.view, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
         return fail("the resolve dispatch failed");
 
+    if (frame.hdrProfile != 0)
+    {
+        HdrBarrier(cmd, m.hdrLinear.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        HdrBarrier(cmd, m.hdrEncoded.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        m.hdr.Record(cmd, m.width, m.height, PresentHdr::kModeEncode);
+        HdrBarrier(cmd, m.hdrEncoded.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        HdrBarrier(cmd, input.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        if (m.hdrEncoded.format != m.hdrOriginal.format)
+        {
+            VkImageBlit region {};
+            region.srcSubresource = region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            region.srcOffsets[1] =
+                region.dstOffsets[1] = { static_cast<int32_t>(m.width), static_cast<int32_t>(m.height), 1 };
+            vkCmdBlitImage(cmd, m.hdrEncoded.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, input.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_NEAREST);
+        }
+        else
+            HdrCopy(cmd, m.hdrEncoded.image, input.image, m.width, m.height);
+    }
+
     if (pair != UINT32_MAX)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m.queryPool, pair * 2 + 1);
 
@@ -3054,6 +3194,19 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
 void VkPresentModel::Submitted(uint64_t ticket)
 {
     Impl& m = *_impl;
+
+    if (m.key.hdrProfile != 0)
+        NotePresentHdr(m.key.hdrProfile == 1 ? PresentColour::Hdr10 : PresentColour::ScRgb, nullptr, true,
+                       PresentHdr::kSdrWhiteNits, false);
+    if (m.key.hdrProfile != 0 && !m.saidHdr)
+    {
+        m.saidHdr = true;
+        m.Say(std::string("HDR conversion on, ") +
+              (m.key.hdrProfile == 1 ? "HDR10 (PQ, Rec.2020)" : "scRGB (FP16, linear)") + " at " +
+              std::to_string(m.width) + "x" + std::to_string(m.height) +
+              ": linear Rec.709 FP16, SDR white 203.0 nits (203-nit fallback) x Paper white; original codes bound for "
+              "reconstruction");
+    }
 
     m.pending.push_back(ticket);
     m.firstDispatch.emplace_back(ticket, m.recordFirst);
@@ -3146,7 +3299,7 @@ void VkPresentModel::Release()
     // complete. A job still queued is called off (the builder skips it, touching nothing); one over and not yet adopted
     // is adopted first, so its product is freed with the rest.
     m.CancelQueued();
-    if (!m.pending.empty() || m.JobState() == BuildState::Running || m.deviceLost)
+    if (!m.pending.empty() || m.JobState() == BuildState::Running || m.Lost())
     {
         Abandon();
         return;
@@ -3156,6 +3309,12 @@ void VkPresentModel::Release()
         m.job.reset(); // called off above: the builder holds its own reference, and skips it
     else if (m.job)
         (void) m.Adopt();
+
+    if (m.Lost())
+    {
+        Abandon();
+        return;
+    }
 
     for (RetiredSet& set : m.retired)
         set.waitFor.clear();
@@ -3172,6 +3331,7 @@ void VkPresentModel::Release()
         m.params = nullptr;
     }
 
+    m.hdr.Destroy(m.dev.device);
     for (OwnedImage* image : m.Images())
         DestroyImageOn(m.dev.device, *image);
 
@@ -3210,6 +3370,7 @@ void VkPresentModel::Release()
 void VkPresentModel::Abandon()
 {
     Impl& m = *_impl;
+    m.deviceLost = m.Lost(); // retain a terminal worker result before dropping the job
 
     // A job under way is orphaned: the builder drops what it makes without calling anything once it returns.
     if (m.job)
@@ -3220,6 +3381,7 @@ void VkPresentModel::Abandon()
 
     // The pass's destructor would call vkDestroy* on a device that may be gone: leaked instead, as ShutdownVk(false)
     // leaks the after-upscale route's.
+    m.hdr = {};
     (void) m.pass.release();
 
     m.feature = nullptr;
