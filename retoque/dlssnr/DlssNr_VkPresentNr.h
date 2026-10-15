@@ -501,18 +501,19 @@ inline constexpr uint64_t kSynthStaleMs = 250;
 inline constexpr uint32_t kSynthMinWidth = 256;
 inline constexpr uint32_t kSynthMinHeight = 128;
 
-// Whether a product for a frame of this size asks for the estimator: the key is on, the device has not refused it.
-inline bool SynthWanted(bool configured, bool deviceRefused, uint32_t width, uint32_t height)
+// Whether a product asks for the estimator: the key is on, the device has not refused it, and the model's working
+// size -- what the estimator runs at, reading the model's own input -- is large enough.
+inline bool SynthWanted(bool configured, bool deviceRefused, uint32_t workWidth, uint32_t workHeight)
 {
-    return configured && !deviceRefused && width >= kSynthMinWidth && height >= kSynthMinHeight;
+    return configured && !deviceRefused && workWidth >= kSynthMinWidth && workHeight >= kSynthMinHeight;
 }
 
-// Whether the estimator's history starts over this frame: the model's own (a new product, a discarded frame), the
-// host's cut (a new swapchain served, the model back after a gap), or a gap between its own recordings.
-inline bool SynthReset(bool modelReset, bool cut, uint64_t lastMs, uint64_t nowMs)
-{
-    return modelReset || cut || lastMs == 0 || nowMs - lastMs > kSynthStaleMs;
-}
+// Whether the estimator's history starts over this frame: its first recording, or a gap between its recordings (the
+// D3D12 rule). New images (a new product) start it over themselves (Estimator_Vk::Restart). Not the model's resets nor
+// the host's cut: the model forgets its own history then, so a field spanning a frame it was not shown only reaches a
+// model that ignores it, and restarting the estimator would put six more frames on zero motion. A real change of
+// picture is FFX's scene-change detection's.
+inline bool SynthReset(uint64_t lastMs, uint64_t nowMs) { return lastMs == 0 || nowMs - lastMs > kSynthStaleMs; }
 
 // What the model is told about motion this frame.
 struct MotionGuide
@@ -524,22 +525,14 @@ struct MotionGuide
     float scaleY = 1.0f;
 };
 
-// The field, when the estimator has a real one this frame (Ready): the whole frame, current to previous in frame
-// pixels, handed as it is. The model reads its scale in pixels of the motion texture it is handed (the D3D12 route's
-// GuideMatch::ModelMotionScale, [DlssNr] RenderMotionScale on, the default), which is the frame's: 1. With the key off,
-// the conversion it replaced, working over frame (GuideMatch::LegacyMotionScale). Otherwise the zero guide, at the
-// working size, at unit scale: nothing moved, so the scale has nothing to scale.
-inline MotionGuide ChooseMotionGuide(bool fieldReady, uint32_t width, uint32_t height, uint32_t workWidth,
-                                     uint32_t workHeight, bool renderMotionScale)
+// The field, when the estimator has a real one this frame (Ready), otherwise the zero guide; either at the model's
+// working size from the origin, at unit scale. The estimator reads the model's own input, so its field is at the
+// working size in working pixels: what the D3D12 route makes of a frame-size field with its guide resample, whose scale
+// (frame pixels in a working-size texture) both [DlssNr] RenderMotionScale rules give as working over frame. The model
+// never gets a guide larger than its colour, which it would read at the wrong pixels (reduced-scale-guides.md).
+inline MotionGuide ChooseMotionGuide(bool fieldReady, uint32_t workWidth, uint32_t workHeight)
 {
-    if (!fieldReady || width == 0 || height == 0)
-        return { false, workWidth, workHeight, 1.0f, 1.0f };
-
-    if (renderMotionScale)
-        return { true, width, height, 1.0f, 1.0f };
-
-    return { true, width, height, static_cast<float>(workWidth) / static_cast<float>(width),
-             static_cast<float>(workHeight) / static_cast<float>(height) };
+    return { fieldReady, workWidth, workHeight, 1.0f, 1.0f };
 }
 
 // NrReset with the motion guide in it: a scene cut the estimator read back is a cut, and ZeroGuideReset applies only

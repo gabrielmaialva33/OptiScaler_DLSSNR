@@ -2293,14 +2293,14 @@ void RunBuild(PresentBuildJob& job)
         job.motion.layout = VK_IMAGE_LAYOUT_GENERAL;
     }
 
-    // The estimator's images for this size, moved into GENERAL and cleared in this same buffer. A failure leaves the
-    // product without them.
+    // The estimator's images for the model's working size (it reads the model's input), moved into GENERAL and cleared
+    // in this same buffer. A failure leaves the product without them.
     if (job.key.synth && job.synthOff.empty())
     {
         activity.Stage("allocating the synthesized-motion estimator's images");
-        if (SynthMotion::CreateVkImages(d, pd, k.width, k.height, cmd, job.synthImages, job.synthOff))
-            job.Say("synthesized motion: the estimator's images made for " + std::to_string(k.width) + "x" +
-                    std::to_string(k.height) + " (FidelityFX optical flow on Vulkan)");
+        if (SynthMotion::CreateVkImages(d, pd, k.workWidth, k.workHeight, cmd, job.synthImages, job.synthOff))
+            job.Say("synthesized motion: the estimator's images made for " + std::to_string(k.workWidth) + "x" +
+                    std::to_string(k.workHeight) + ", the model's working size (FidelityFX optical flow on Vulkan)");
     }
 
     // The feature, built cold: no game parameters, the tuning from the config, UI correction on as the after-upscale
@@ -2836,9 +2836,11 @@ VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height, uint32
                                        " pixels; the model is not built that small" };
     }
 
-    const bool synth = VkPresentHost::SynthWanted(Config::Instance()->DlssNrSynthMotion.value_or_default(),
-                                                  !m.synthOff.empty(), width, height);
-    const BuildKey want { width, height, workWidth, workHeight, family, synth };
+    const bool synthConfigured = Config::Instance()->DlssNrSynthMotion.value_or_default();
+    BuildKey want {
+        width,      height, workWidth,
+        workHeight, family, VkPresentHost::SynthWanted(synthConfigured, !m.synthOff.empty(), workWidth, workHeight)
+    };
     for (;;)
     {
         const auto step = VkPresentHost::DecideBuild(m.failed, m.JobState(), m.built, m.key, want);
@@ -2850,6 +2852,9 @@ VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height, uint32
         if (step == VkPresentHost::BuildStep::Adopt)
         {
             const bool retry = m.Adopt();
+            // An adoption can latch the estimator off for the device: the product just adopted, built without it, is
+            // then the one this frame wants, never a second build that asks for it again.
+            want.synth = VkPresentHost::SynthWanted(synthConfigured, !m.synthOff.empty(), workWidth, workHeight);
             m.FreeRetired();
             if (retry)
                 return { NrSkip::Building, "the model's build is asked for again at the next frame" };
@@ -2942,26 +2947,6 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
     encode.HighlightRecovery = 0u; // linear HDR only, and this frame is SDR
     encode.ResidualLimit = DlssNr::ResidualLimitStops(cfg.DlssNrResidualLimit.value_or_default());
 
-    // Synthesized motion (stage 5): the estimator reads the working colour before the pass rewrites it, and its field
-    // replaces the zero motion guide once it has a real one. Its own dispatches and push descriptors, not the pass's
-    // ring. A recording that does not happen (nothing invalid ever reaches it) leaves the model on zero motion.
-    bool fieldReady = false;
-    bool sceneCut = false;
-    m.synthRecorded = false;
-    if (m.key.synth && m.synthImages.Valid() && m.synthPipelines.Valid())
-    {
-        const uint64_t now = OwnerNowMs();
-        const bool synthReset = VkPresentHost::SynthReset(m.reset, frame.cut, m.lastSynthMs, now);
-        m.lastSynthMs = now;
-        if (m.estimator.Record(cmd, m.synthPipelines, m.synthImages, frame.view, VK_IMAGE_LAYOUT_GENERAL, synthReset,
-                               frame.ticket))
-        {
-            m.synthRecorded = true;
-            fieldReady = m.estimator.Ready();
-            sceneCut = m.estimator.SceneCut();
-        }
-    }
-
     Transition(cmd, m.proxy, VK_IMAGE_LAYOUT_GENERAL);
     Transition(cmd, m.keep, VK_IMAGE_LAYOUT_GENERAL);
 
@@ -2991,13 +2976,34 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
         modelInput = &m.proxySmall;
     }
 
+    // Synthesized motion (stage 5): the estimator reads the model's own input -- the encode's proxy, the frame itself
+    // on this SDR route (passthrough), downsampled below native -- so its field is at the working size in working
+    // pixels, the model's own grid, as the D3D12 route's guide resample makes it. Its own dispatches and push
+    // descriptors, not the pass's ring. Once it has a real field, that replaces the zero motion guide; a recording that
+    // does not happen (nothing invalid ever reaches it) leaves the model on zero motion.
+    bool fieldReady = false;
+    bool sceneCut = false;
+    m.synthRecorded = false;
+    if (m.key.synth && m.synthImages.Valid() && m.synthPipelines.Valid())
+    {
+        const uint64_t now = OwnerNowMs();
+        const bool synthReset = VkPresentHost::SynthReset(m.lastSynthMs, now);
+        m.lastSynthMs = now;
+        if (m.estimator.Record(cmd, m.synthPipelines, m.synthImages, modelInput->view, VK_IMAGE_LAYOUT_GENERAL,
+                               synthReset, frame.ticket))
+        {
+            m.synthRecorded = true;
+            fieldReady = m.estimator.Ready();
+            sceneCut = m.estimator.SceneCut();
+        }
+    }
+
     Transition(cmd, m.output, VK_IMAGE_LAYOUT_GENERAL);
 
     // Zero depth (constant, read inverted, so zero is the far plane) at the working size from the origin. Motion: the
-    // synthesized field when the estimator has one this frame (the whole frame, in frame pixels), otherwise the zero
-    // guide at the working size, at unit scale: nothing moved, so the scale has nothing to scale.
-    const auto guide = VkPresentHost::ChooseMotionGuide(fieldReady, m.width, m.height, m.workWidth, m.workHeight,
-                                                        cfg.DlssNrRenderMotionScale.value_or_default());
+    // synthesized field when the estimator has one this frame, otherwise the zero guide; both at the working size, at
+    // unit scale (the field is in working pixels; the zero guide has nothing to scale).
+    const auto guide = VkPresentHost::ChooseMotionGuide(fieldReady, m.workWidth, m.workHeight);
     const bool reset = VkPresentHost::NrResetWithMotion(m.reset, frame.cut, sceneCut,
                                                         cfg.DlssNrZeroGuideReset.value_or_default(), guide.field);
     NVSDK_NGX_Resource_VK* motionGuide = guide.field ? &m.fieldNgx : &m.motion.ngx;
@@ -3021,9 +3027,9 @@ bool VkPresentModel::Record(const VkPresentNrFrame& frame)
         m.saidField = true;
         char scale[64];
         std::snprintf(scale, sizeof(scale), "%.3f x %.3f", guide.scaleX, guide.scaleY);
-        m.Say("synthesized motion: the first field handed to the model at " + std::to_string(m.width) + "x" +
-              std::to_string(m.height) + " (motion vector scale " + scale + ", working " + std::to_string(m.workWidth) +
-              "x" + std::to_string(m.workHeight) + ")");
+        m.Say("synthesized motion: the first field handed to the model at " + std::to_string(guide.width) + "x" +
+              std::to_string(guide.height) + ", its working size (motion vector scale " + scale + ", frame " +
+              std::to_string(m.width) + "x" + std::to_string(m.height) + ")");
     }
 
     // Resolve: the proxy, the model's answer and the untouched frame back into the working colour.

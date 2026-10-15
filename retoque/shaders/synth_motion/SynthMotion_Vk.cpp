@@ -284,9 +284,22 @@ std::string VkUnsupported(VkPhysicalDevice physical, uint32_t apiVersion)
     VkPhysicalDeviceProperties properties {};
     vkGetPhysicalDeviceProperties(physical, &properties);
 
-    if (!AtLeast11(apiVersion) || !AtLeast11(properties.apiVersion))
-        return "it needs Vulkan 1.1 (the application asked for " + std::to_string(VK_API_VERSION_MAJOR(apiVersion)) +
-               "." + std::to_string(VK_API_VERSION_MINOR(apiVersion)) + ")";
+    // An application that names no version asked for 1.0.
+    const auto version = [](uint32_t v)
+    {
+        return v == 0 ? std::string("1.0 (none given)")
+                      : std::to_string(VK_API_VERSION_MAJOR(v)) + "." + std::to_string(VK_API_VERSION_MINOR(v));
+    };
+    if (!AtLeast11(apiVersion))
+        return "it needs Vulkan 1.1, and the application's instance asked for " + version(apiVersion);
+    if (!AtLeast11(properties.apiVersion))
+        return "it needs Vulkan 1.1, and the device offers " + version(properties.apiVersion);
+
+    // The pyramid's and the scene-change divergence's groups are 256 threads in x; Vulkan guarantees 128.
+    const auto& limits = properties.limits;
+    if (limits.maxComputeWorkGroupInvocations < 256 || limits.maxComputeWorkGroupSize[0] < 256 ||
+        limits.maxComputeWorkGroupSize[1] < 16 || limits.maxComputeWorkGroupSize[2] < 4)
+        return "the device's compute groups are smaller than the estimator's (256 threads, 256 x 16 x 4)";
 
     VkPhysicalDeviceSubgroupProperties subgroup { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES };
     VkPhysicalDevicePushDescriptorPropertiesKHR push {
@@ -318,14 +331,17 @@ std::string VkUnsupported(VkPhysicalDevice physical, uint32_t apiVersion)
         VkFormatFeatureFlags features;
         const char* name;
     };
+    // Every image is stored to and cleared at creation (TRANSFER_DST); the scene-change output and the field are also
+    // copied from, and the field is sampled by whoever reads it.
+    constexpr VkFormatFeatureFlags store = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     const Need needs[] = {
-        { VK_FORMAT_R8_UINT, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT, "R8_UINT storage" },
-        { VK_FORMAT_R16G16_SINT, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT, "R16G16_SINT storage" },
-        { kVkMotionFormat, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT,
-          "R16G16_SFLOAT storage and sampling" },
-        { VK_FORMAT_R32_UINT, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT,
-          "R32_UINT storage atomics" },
-        { VK_FORMAT_R32_SFLOAT, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT, "R32_SFLOAT storage" },
+        { VK_FORMAT_R8_UINT, store, "R8_UINT storage" },
+        { VK_FORMAT_R16G16_SINT, store, "R16G16_SINT storage" },
+        { kVkMotionFormat, store | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT,
+          "R16G16_SFLOAT storage, sampling and copies" },
+        { VK_FORMAT_R32_UINT, store | VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT,
+          "R32_UINT storage atomics and copies" },
+        { VK_FORMAT_R32_SFLOAT, store, "R32_SFLOAT storage" },
     };
 
     for (const Need& need : needs)
@@ -633,6 +649,7 @@ bool Estimator_Vk::Record(VkCommandBuffer cmd, const VkPipelines& p, const VkIma
     const bool doReset = reset || _needReset;
     const uint32_t frameIndex = doReset ? 0 : static_cast<uint32_t>(_confirmedFrameIndex + 1);
 
+    _recordedOwedCut = false;
     if (doReset)
     {
         ++_epoch;
@@ -642,6 +659,7 @@ bool Estimator_Vk::Record(VkCommandBuffer cmd, const VkPipelines& p, const VkIma
     {
         _sceneCut = true;
         _cutOwed = false;
+        _recordedOwedCut = true; // owed again if this recording is dropped
     }
 
     const uint32_t parity = _nextParity;
@@ -780,12 +798,19 @@ bool Estimator_Vk::Record(VkCommandBuffer cmd, const VkPipelines& p, const VkIma
                              nullptr, 0, nullptr);
     }
 
-    // This frame's scene-change bits, copied out for Completed(ticket) -- into a slot no frame still in flight owns. A
-    // frame that finds none copies nothing and only cannot report a cut.
+    // This frame's scene-change bits, copied out for Completed(ticket) -- into a slot no frame still in flight owns
+    // (one whose frame never completes keeps its slot, and the others go round it). A frame that finds none copies
+    // nothing and only cannot report a cut.
     _recordedSlot = UINT32_MAX;
     {
-        const uint32_t slot = static_cast<uint32_t>(_recordCount % kVkReadbackSlots);
-        if (_slots[slot].ticket == 0)
+        uint32_t slot = UINT32_MAX;
+        for (uint32_t i = 0; i < kVkReadbackSlots && slot == UINT32_MAX; ++i)
+        {
+            const uint32_t candidate = static_cast<uint32_t>((_recordCount + i) % kVkReadbackSlots);
+            if (_slots[candidate].ticket == 0)
+                slot = candidate;
+        }
+        if (slot != UINT32_MAX)
         {
             VkBufferImageCopy region {};
             region.bufferOffset = slot * kReadbackStride;
@@ -839,10 +864,14 @@ void Estimator_Vk::AbandonRecording()
     if (!_pending)
         return;
 
-    // Nothing recorded ran: a reset that was asked for is still owed, and the read-back slot is free again.
+    // Nothing recorded ran: a reset that was asked for is still owed, so is a scene cut it raised, and the read-back
+    // slot is free again.
     _pending = false;
     if (_recordedReset)
         _needReset = true;
+    if (_recordedOwedCut)
+        _cutOwed = true;
+    _recordedOwedCut = false;
     if (_recordedSlot != UINT32_MAX)
         _slots[_recordedSlot] = Slot {};
     _recordedSlot = UINT32_MAX;

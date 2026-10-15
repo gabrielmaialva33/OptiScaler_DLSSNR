@@ -123,8 +123,8 @@ class Estimator_Vk
     bool Ready() const { return _ready; }
 
     // A scene change, read back from a frame the caller saw complete (Completed): raised on the first Record after
-    // that, so a frame or more late. The field on the cut frame itself is already zero on the GPU (FFX's search writes
-    // zero vectors then). Callers OR it into the model's reset.
+    // that, so at least a frame late (more with frames in flight). The field on the cut frame itself is already zero on
+    // the GPU (FFX's search writes zero vectors then). Callers OR it into the model's reset.
     bool SceneCut() const { return _sceneCut; }
 
     void ConfirmExecuted();  // the command buffer that carried the last Record was submitted
@@ -155,6 +155,7 @@ class Estimator_Vk
     uint32_t _recordedFrameIndex = 0;
     uint32_t _recordedSlot = UINT32_MAX;
     bool _recordedReset = false;
+    bool _recordedOwedCut = false; // the recording raised an owed cut: owed again if it is abandoned
     bool _pending = false;
     bool _needReset = true;
 
