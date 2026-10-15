@@ -84,6 +84,14 @@ winevulkan answers both the application's and OptiScaler's surface queries from 
 surface without TRANSFER_SRC. It is listed after the validation layer (nearer the driver), so the validation layer
 sees the hidden usage too and would report a swapchain created with it.
 
+It also carries the timing knobs of "Off the present path" (environment variables, off unless set):
+`RETOQUE_SLOW_OFF_DEVICE_THREAD_MS` sleeps every `vkAllocateMemory`, `vkCreateComputePipelines`, `vkCreateCuModuleNVX`
+and `vkCreateCuFunctionNVX` made on a thread other than the device's creating one (the model's builder, and NGX inside
+it), up to `RETOQUE_SLOW_OFF_DEVICE_THREAD_TOTAL_MS` per burst (a burst ends after a second without one, so each build is
+slowed about as much); `RETOQUE_STALL_PRESENT_AT=N:MS` holds the N-th
+`vkQueuePresentKHR` MS below the host's hook; `RETOQUE_COUNT_OFF_THREAD_QUEUE=1` counts queue submits and idle waits
+made off the device's creating thread and writes them to `layer-offthread.txt` at the device's destruction.
+
 ## Cases
 
 | Case | Marker | `[Vulkan] SkipHooks` | `Enabled` | `VulkanPresentHost` | `OverlayMenu` | Must hold |
@@ -182,14 +190,33 @@ driver's core or a Proton the cases print SKIP.
 | `nr-no-extensions` | true | auto | no | built | yes | the test layer hides `VK_NVX_binary_import`: the device line says it is not possible, every present refused for `device extensions`, every read-back exact |
 | `nr-old-forwarder` | true | auto | no | the kit's (2026-09-03, no `dlssnr_abi_version`) | yes | refused, `nvngx.dll_dlssnr.dll is from a different build`; every read-back exact |
 | `nr-no-model` | true | auto | no | built | no | refused, `nvngx_dlssnr.dll was not found beside OptiScaler or the game`; every read-back exact |
+| `nr-stall-watch` | true | auto | no | built | yes | as `nr`, and the test layer holds the 30th present 2.6 s below the host's hook: exactly one watchdog line, `thread N in vkQueuePresentKHR (0x...) for 2.x s: calling down vkQueuePresentKHR; holds the present lock` |
+
+The model is built off the present path ("Off the present path" in the design note): the first swapchain at a size
+carries its first frames unchanged (`model building`, the first refusal `the model is being built for WxH off the
+present path`) until the model is adopted, every later swapchain at a size already built none; only those frames may
+come back exactly with the model applied. A model that cannot come up says so once its build is over: up to three
+frames of a device refused as building before `model unavailable` (the stage 1 and 2 cases, `nr-old-forwarder`,
+`nr-no-model`). No case but `nr-stall-watch` may log a watchdog line.
+
+`nr-build-slow` runs `nr.cpp --slow-build` with the layer slowing every allocation, pipeline and NVX module made off
+the device's creating thread by 400 ms (4 s per build) and counting queue calls made off it. One swapchain presented
+once and destroyed (DOOM Eternal's #9), its replacement at the same size, a resize to 517x389 and back, then a last
+size presented once and the device destroyed at once. It must hold: every present under 300 ms (each is timed) while
+the build takes seconds (the slowest at least 2 s); every frame of the churn carried while the model is built, and the
+model running once it is adopted; vkDestroyDevice waiting for the build under way (`waited N ms for the model's build
+under way before the device goes`) and the device going with `the model freed` and validation clean of live
+children; off the presenting thread one queue submit per build (the builder's) and no idle wait; watchdog lines only
+for the build and for the destroy waiting on it.
 
 `nr-route-quiet` runs `nr.cpp --route`: a game that turns its upscaler on and off, DOOM Eternal's shape (2026-10-14:
 the game's DLSS turned off left the after-upscale route holding the model for the session). One B8G8R8A8 swapchain
 presented throughout; NGX initialised through OptiScaler's own `NVSDK_NGX_VULKAN_*` exports, as a game calls them, with
 `[Upscalers] VulkanUpscaler=fsr22` (OptiScaler's FSR 2.2 behind them, so no DLSS is needed: the evaluate reaches the
 after-upscale route the way every OptiScaler upscaler does) on a device that enables what FSR 2.2's shaders declare
-(`shaderInt16`, `shaderFloat16`). The phases, each with its read-backs counted apart: `cold` (1.5 s, the present host
-runs the model on every frame), then twice `on` (a feature created, 30 evaluates at 640x360 -> 1280x720, the route
+(`shaderInt16`, `shaderFloat16`). The phases, each with its read-backs counted apart: `cold-build` (2 s, the model built off
+the present path, its frames carried unchanged: at least one exact), `cold` (1.5 s, the present host runs the model on
+every frame), then twice `on` (a feature created, 30 evaluates at 640x360 -> 1280x720, the route
 running the model on the upscaler's output), the feature released, and presents only until 9 s after the last
 evaluate (`off-waiting`), 12 s (`off-handing-back`) and 14 s (`off-back`; it and `cold` go on until they have a dozen
 frames, so a loaded machine thins them instead of emptying them); then `on-at-exit` (10 evaluates, the feature

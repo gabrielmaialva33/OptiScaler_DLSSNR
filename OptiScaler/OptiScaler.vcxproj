@@ -1044,6 +1044,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentNr.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentModel.h" />
     <ClInclude Include="..\retoque\dlssnr\DlssNr_VkModelOwner.h" />
+    <ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentBuild.h" />
     <ClCompile Include="..\retoque\dlssnr\DlssNr_VkPresentHost.cpp" />
     <ClInclude Include="..\retoque\lsfg\Lsfg.h" />
     <ClInclude Include="..\retoque\lsfg\LsfgDxil.h" />

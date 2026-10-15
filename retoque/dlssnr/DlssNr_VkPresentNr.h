@@ -9,6 +9,8 @@
 // Standard library only; Vulkan's values are plain integers, and tests/nr-vk-present-host checks each one repeated
 // here against vulkan_core.h.
 
+#include "DlssNr_VkPresentBuild.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -72,23 +74,25 @@ class HandBackDiagnostics
     void Reset() { _reasons.clear(); }
 };
 
+// A queue's locks record their holder, so the stall watchdog's line names it (DlssNr_VkPresentBuild.h).
+using QueueMutex = TrackedMutex<std::recursive_timed_mutex>;
+
 struct QueueLocks
 {
-    std::recursive_timed_mutex submit;
-    std::recursive_timed_mutex present;
+    QueueMutex submit;
+    QueueMutex present;
     uint32_t family = UINT32_MAX;
     uint32_t index = UINT32_MAX;
 };
 
 // Called under the current present lock and transport mutex. Never wait for another queue whose presenter may be
 // waiting for that mutex. The caller releases all previously acquired locks on failure by leaving its RAII scope.
-inline const char* TryHandBackQueueLocks(QueueLocks& locks,
-                                         std::vector<std::unique_lock<std::recursive_timed_mutex>>& held)
+inline const char* TryHandBackQueueLocks(QueueLocks& locks, std::vector<std::unique_lock<QueueMutex>>& held)
 {
-    std::unique_lock<std::recursive_timed_mutex> present(locks.present, std::try_to_lock);
+    std::unique_lock<QueueMutex> present(locks.present, std::try_to_lock);
     if (!present.owns_lock())
         return "present";
-    std::unique_lock<std::recursive_timed_mutex> submit(locks.submit, std::try_to_lock);
+    std::unique_lock<QueueMutex> submit(locks.submit, std::try_to_lock);
     if (!submit.owns_lock())
         return "submit";
     held.push_back(std::move(present));
@@ -437,6 +441,7 @@ enum class NrSkip : uint8_t
     Unavailable,    // the model could not be brought up, or faulted: off for this device (the reason is logged)
     Busy,           // as many of the model's frames in flight as its descriptor ring allows
     RecordFailed,   // recording the pass failed; the frame carried unchanged and the model is off
+    Building,       // the model is being built off the present path; the frame carried unchanged
     Count,
 };
 
@@ -468,6 +473,8 @@ inline const char* NrSkipName(NrSkip skip)
         return "model busy";
     case NrSkip::RecordFailed:
         return "record failed";
+    case NrSkip::Building:
+        return "model building";
     default:
         return "none";
     }

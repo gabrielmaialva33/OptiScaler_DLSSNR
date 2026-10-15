@@ -17,6 +17,7 @@ dlssnr = root / 'retoque/dlssnr'
 registry = (dlssnr / 'DlssNr_VkPresentRegistry.h').read_text()
 transport = (dlssnr / 'DlssNr_VkPresentTransport.h').read_text()
 nr = (dlssnr / 'DlssNr_VkPresentNr.h').read_text()
+build = (dlssnr / 'DlssNr_VkPresentBuild.h').read_text()
 owner = (dlssnr / 'DlssNr_VkModelOwner.h').read_text()
 model_h = (dlssnr / 'DlssNr_VkPresentModel.h').read_text()
 feature_vk = (dlssnr / 'DlssNrFeature_Vk.cpp').read_text()
@@ -112,10 +113,13 @@ print('PASS: every fork QueueSubmit/QueueSubmit2/KHR call avoids literal zero co
 # --- Source guards ----------------------------------------------------------------------------------------------
 
 # The headers are standard library only (the registry includes the transport header, the transport header the cold-NR
-# one), so this suite compiles them as production does.
-for text in (nr, owner):
+# one, the cold-NR one the build's), so this suite compiles them as production does.
+for text in (build, owner):
     includes = sorted(l.strip() for l in text.splitlines() if l.startswith('#include'))
     assert all(re.fullmatch(r'#include <\w+>', l) for l in includes), includes
+includes = sorted(l.strip() for l in nr.splitlines() if l.startswith('#include'))
+assert includes[0] == '#include "DlssNr_VkPresentBuild.h"', includes
+assert all(re.fullmatch(r'#include <\w+>', l) for l in includes[1:]), includes
 includes = sorted(l.strip() for l in transport.splitlines() if l.startswith('#include'))
 assert includes[0] == '#include "DlssNr_VkPresentNr.h"', includes
 assert all(re.fullmatch(r'#include <\w+>', l) for l in includes[1:]), includes
@@ -228,7 +232,7 @@ assert 'if (prep.wait == VK_NULL_HANDLE) return next(queue, info);' in flat(pres
 prepare = code(function(host, 'Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView* view)'))
 # Lock order: the presenting queue's present lock (the hook, first), the transport's, then a borrowed queue's present and
 # submit locks, try-locked only after the ring and the recording, so no wait above holds them.
-assert prepare.index('std::lock_guard lock(g_transportMutex)') < prepare.index('try_lock_for')
+assert prepare.index('TransportLock lock;') < prepare.index('try_lock_for')
 assert prepare.index('RecordWork(') < prepare.index('try_lock_for')
 assert prepare.index('WaitSlot(') < prepare.index('try_lock_for')
 assert prepare.index('borrowedPresent.try_lock_for') < prepare.index('borrowedSubmit.try_lock_for')
@@ -358,17 +362,20 @@ assert 'encode.Passthrough = 1u;' in record_model and 'encode.HighlightRecovery 
 # every place the shader reproduces the encode.
 assert re.findall(r'DlssNrConstants (\w+)', record_model) == ['encode', 'down', 'resolve'], record_model
 assert 'DlssNrConstants down = encode;' in record_model and 'DlssNrConstants resolve = encode;' in record_model
-admit = code(function(feature_vk, 'VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height)'))
+admit = code(function(feature_vk, 'VkPresentAdmission VkPresentModel::Admit(uint32_t width, uint32_t height, '))
 assert 'std::clamp(DlssNr::WorkingScale(), 0.25f, 1.0f)' in admit  # never above native on zero guides
-assert admit.index('pending.size() >= VkPresentHost::kNrInFlightMax') < admit.index('LoadForwarderShared()')
-assert 'old.waitFor = m.pending;' in admit and 'DeviceWaitIdle' not in code(model)
+retire = code(function(feature_vk, '    void RetireProduct()'))
+assert 'old.waitFor = pending;' in retire and 'DeviceWaitIdle' not in code(model)
 completed = code(function(feature_vk, 'std::optional<double> VkPresentModel::Completed(uint64_t ticket)'))
 assert 'm.FreeRetired();' in completed and 'VK_QUERY_RESULT_WAIT_BIT' not in completed
 release = code(function(feature_vk, 'void VkPresentModel::Release()'))
 assert 'Shutdown' not in release, 'NGX goes with the device (ShutdownPresentNgx), not with the model'
 # The pass's slot ring: a frame is admitted only while the oldest one in flight is less than a ring behind it.
 assert 'm.dispatches + 3 - oldest > kPresentPassSlots' in admit
-assert release.index('if (!m.pending.empty())') < release.index('g_fwd.release(')
+# A queued job is called off first; a running one, frames in flight or a build-lost device abandon instead of freeing.
+assert release.index('m.CancelQueued();') < \
+    release.index('if (!m.pending.empty() || m.JobState() == BuildState::Running || m.deviceLost)') < \
+    release.index('g_fwd.release(')
 abandon = code(function(feature_vk, 'void VkPresentModel::Abandon()'))
 assert not re.search(r'\bvk[A-Z]\w*\(|g_fwd\.|Destroy', abandon), abandon
 # The model's calls go through the forwarder (its __try isolation), and its fault ends it.
@@ -482,6 +489,102 @@ print('PASS: the way back (begun only with no model here and the route quiet sin
       'signalled and the token was released, without a device-wide wait; the route records nothing before it asks; '
       'the device going ends it, the route freed only where the GPU is proven done)', flush=True)
 
+# --- Off the present path (DOOM Eternal's startup hang, 2026-10-14) -------------------------------------------------
+# Nothing opaque or unbounded runs under the host's locks: the present path neither initialises NGX, brings the core up,
+# creates the pass, allocates the model's images nor creates a feature; the builder thread does, and takes no lock of the
+# host's or the route's. While a job is queued or running, the present path makes no NGX call for the model.
+for name, text in (('Admit', admit), ('Record', record_model)):
+    for forbidden in ('g_fwd.init', 'g_fwd.create', 'g_fwd.probe', 'NVNGXProxy::', 'CreateImageOn(', 'DlssNr_Vk>(',
+                      'vkCreate', 'vkAllocate', 'LoadForwarderShared', 'vkCmdClearColorImage'):
+        assert forbidden not in text, (name, forbidden)
+assert admit.index('DecideBuild(') < admit.index('m.Adopt();') and 'm.Request(want);' in admit
+assert admit.index('DecideBuild(') < admit.index('pending.size() >= VkPresentHost::kNrInFlightMax')
+assert re.search(r'return \{ NrSkip::Building,', admit)
+assert 'm.Building()' in record_model.split('return false;')[0]  # no evaluate while a job runs
+free_retired = code(function(feature_vk, '    void FreeRetired()'))
+assert re.match(r'\{\s*if \(Building\(\)\)\s*return;', free_retired), free_retired
+builder_part = code(feature_vk[feature_vk.index("// --- The model's builds, off the present path"):
+                               feature_vk.index('struct VkPresentModel::Impl')])
+run_build = code(function(feature_vk, 'void RunBuild(PresentBuildJob& job)'))
+for needed in ('g_fwd.init(', 'NVNGXProxy::InitVulkan(', 'g_fwd.create(', 'CreateImageOn(', 'job.dev.submit(',
+               'make_unique<DlssNr_Vk>(', 'job.pass->Prepare(cmd)', 'vkCmdClearColorImage('):
+    assert needed in run_build, needed
+# Its only CPU wait for the GPU is the host's submit (bounded); it never touches the route's state or locks.
+for forbidden in ('g_vk.', 'g_vkMutex', 'g_ownerMutex', 'DeviceWaitIdle', 'QueueWaitIdle', 'WaitForFences', 'Sleep('):
+    assert forbidden not in builder_part, forbidden
+assert builder_part.count('std::thread(') == 1 and 'std::thread(' in code(function(feature_vk, '    void Post('))
+# Orphaned (the device lost or destroyed): what the job made is forgotten, never freed.
+assert re.search(r"if \(job\.orphaned\.load\(std::memory_order_acquire\) \|\| !free\)\s*ForgetBuild\(job\);",
+                 run_build)
+# The GPU's own work is waited for before the product is handed over; a timeout or a lost device frees nothing.
+assert re.search(r'if \(submitted == VK_TIMEOUT\)\s*return stop\([^;]*,\s*false\);', run_build, re.S)
+assert re.search(r'if \(submitted == VK_ERROR_DEVICE_LOST\)\s*\{\s*job\.lost = true;\s*return stop\([^;]*, false\);',
+                 run_build, re.S)
+assert re.search(r'if \(submitted == VK_INCOMPLETE\)\s*return stop\([^;]*, false\);', run_build, re.S)
+# The model's state is the present path's; the builder's product is handed over only once the job's state says so.
+adopt = code(function(feature_vk, '    bool Adopt()'))
+assert "over->state.load(std::memory_order_acquire) == BuildState::Failed" in adopt
+assert 'job->state.store(job->failure.empty() ? BuildState::Done : BuildState::Failed,' in flat(builder_part)
+# Releasing and abandoning respect a job under way: never freed under the builder; abandoned orphans it.
+abandon_model_fn = code(function(feature_vk, 'void VkPresentModel::Abandon()'))
+assert 'm.job->orphaned.store(true, std::memory_order_release);' in abandon_model_fn
+assert 'return _impl->pending.size() + (_impl->JobState() == BuildState::Running ? 1 : 0);' in flat(feature_vk)
+# A job is forgotten, never destroyed, when its last reference goes; an orphaned one's product is forgotten by the
+# builder and never handed over.
+assert 'PresentBuildJob::~PresentBuildJob() { ForgetBuild(*this); }' in feature_vk
+run_builder = code(function(feature_vk, '    void Run()'))
+assert run_builder.index('RunBuild(*job);') < run_builder.index('ForgetBuild(*job);')
+# The NGX device records' lock is never held across an NGX call.
+for block in re.findall(r'std::lock_guard<std::mutex> lock\(g_presentNgxMutex\);(.*?)\n\s*\}', run_build, re.S):
+    assert 'NVNGXProxy::' not in block and 'ShutdownPresentCore' not in block and 'g_fwd.' not in block, block
+
+# The host: the builder's submit takes the work queue's locks as a borrower, bounded, never the transport lock, and
+# waits for its fence only after giving them back; at vkDestroyDevice a build under way is waited for, bounded, before
+# anything of the model's is freed; the model is asked with the round trip's work family.
+build_submit = code(function(host, 'VkResult BuildSubmit(const DeviceFns& fn, VkDevice device, VkCommandBuffer cmd,'))
+# Short tries: the present lock bounded per slice, the submit lock never waited for while the present lock is held,
+# nothing taken blocking, never the transport lock; the fence waited for in slices after both locks are given back,
+# and the orphan flag checked between slices.
+assert 'present.try_lock_for(std::chrono::milliseconds(kBuildSliceMs))' in build_submit
+assert 'submit.try_lock()' in build_submit and 'submit.try_lock_for' not in build_submit
+assert '.lock()' not in build_submit and 'TransportLock' not in build_submit and 'g_transportMutex' not in build_submit
+assert build_submit.index('submit.try_lock()') < build_submit.index('fn.queueSubmit(queue, 1, &info, fence)') < \
+    build_submit.index('present.unlock();') < build_submit.index('waitForFences(')
+assert re.search(r'if \(cancelled\.load\(std::memory_order_acquire\)\)\s*return VK_INCOMPLETE;', build_submit)
+assert 'fn.waitForFences(device, 1, &fence, VK_TRUE, slice)' in build_submit
+assert re.search(r'if \(result != VK_ERROR_DEVICE_LOST\)\s*fn\.destroyFence', build_submit)
+assert re.search(r'if \(result == VK_SUCCESS\)\s*fn\.destroyFence\(device, fence, nullptr\);\s*return result;',
+                 build_submit)
+assert 'dev.model->Admit(sc.extent.width, sc.extent.height, workFamily)' in decide
+# vkDestroyDevice: a build under way is ended -- waited for, then orphaned and waited for again -- before anything,
+# the lost branch included; a build that lost the device marks it lost there and in DecideNr.
+end_build = code(function(host, 'void EndModelBuild(DeviceTransport& dev)'))
+assert end_build.index('WaitBuild(kBuildDestroyWaitMs)') < end_build.index('Orphan();') < \
+    end_build.index('WaitBuild(kBuildOrphanWaitMs)')
+assert teardown.index('EndModelBuild(dev);') < teardown.index('if (dev.lost)') < teardown.index('InFlight()')
+assert re.search(r'if \(dev\.model->DeviceLost\(\)\)\s*MarkLost\(dev\);', decide)
+
+# The stall watchdog: started only once Install is past its gate and installed; it reads the activity table and logs,
+# and takes no lock.
+install_body = code(function(host, 'void DlssNr::VkPresentHost::Install(HMODULE vulkan1)'))
+assert install_body.index('DlssNrVulkanPresentHost.value_or_default()') < install_body.index('g_installed = true;') < \
+    install_body.index('std::thread(')
+watchdog = install_body[install_body.index('std::thread('):]
+for forbidden in ('lock', 'Lock', 'Mutex', 'mutex'):
+    assert forbidden not in watchdog, forbidden
+assert 'Activities().Check(ActivityNowMs())' in watchdog and 'Sleep(500)' in watchdog
+# Every entry point that can hold or wait for a host lock records an activity.
+for name in ('VkResult OnPresent(', 'void OnDestroyDevice(', 'void OnDestroySwapchain(', 'VkResult OnCreateSwapchain(',
+             'VkResult LockedQueueCall('):
+    assert 'HostActivity activity(' in code(function(host, name)), name
+assert 'g_transportMutex.lock()' in code(function(host, '    TransportLock()'))
+assert 'std::lock_guard lock(g_transportMutex)' not in code(host)
+
+print('PASS: off the present path (Admit and Record build nothing; the builder does it all, takes no lock of the '
+      "host's or the route's, hands over only once its GPU work is seen complete; no NGX call while a job runs; the "
+      "build's submit borrows the work queue's locks bounded; vkDestroyDevice waits for a build; the watchdog takes "
+      'no lock and starts only installed)', flush=True)
+
 print('PASS: stage-3 guards (decided before recording, counted on submit, seen complete on a fence, freed only idle, '
       'abandoned on loss; after-upscale route asks first; passthrough encode; semaphores freed after the destroy)',
       flush=True)
@@ -513,7 +616,8 @@ for item in (r'<ClCompile Include="..\retoque\dlssnr\DlssNr_VkPresentHost.cpp" /
              r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentTransport.h" />',
              r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentNr.h" />',
              r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentModel.h" />',
-             r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkModelOwner.h" />'):
+             r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkModelOwner.h" />',
+             r'<ClInclude Include="..\retoque\dlssnr\DlssNr_VkPresentBuild.h" />'):
     assert item in project, item
 
 print('PASS: source guards (one gated call site ahead of the skip; only the usage and the waits edited, each where the '

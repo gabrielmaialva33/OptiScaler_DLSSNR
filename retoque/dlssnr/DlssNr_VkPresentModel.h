@@ -4,7 +4,9 @@
 
 #include "DlssNr_VkPresentNr.h"
 
+#include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -28,7 +30,14 @@
 // at most kNrInFlightMax frames are in flight, which is what the pass's slot ring allows. A ticket never seen complete
 // keeps what it used forever; on a lost device everything is abandoned (DEVELOPMENT.md rule 8).
 //
-// Everything is called with the host's transport lock held; the model takes none of its own beyond the forwarder's.
+// Built off the present path ("Off the present path" in the design note): everything that brings the model up or
+// resizes it -- NGX's initialisation on the device, the driver core, the pass, the images, the feature's creation and
+// its GPU initialisation -- runs on one process-wide builder thread, which takes no lock of the host's and submits its
+// work through VkPresentModelDevice::submit. Admit only asks for a build and adopts it once over; while one is queued
+// or running the present path makes no NGX call for the model, and frames are carried unchanged (NrSkip::Building).
+//
+// Everything is called with the host's transport lock held; the model takes none of its own beyond the forwarder's
+// and, for the builder's hand-over, its job's.
 namespace DlssNr
 {
 struct VkPresentModelDevice
@@ -37,6 +46,15 @@ struct VkPresentModelDevice
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     uint32_t timestampValidBits = 0; // of the work queue's family; 0: the pass is not timed
+
+    // The builder's way to a queue, the host's: `cmd` submitted on a queue of `family` with that queue's present and
+    // submit locks taken as a borrower takes them, in short tries (VK_NOT_READY when they stay busy: nothing
+    // submitted), the locks released, then the fence waited for with `timeoutNs` in slices (VK_TIMEOUT: still pending;
+    // VK_INCOMPLETE: `cancelled` was set while waiting -- the device is going -- in either case the fence and the
+    // buffer's pool are left alone). Called on the builder thread, which holds no lock of the host's.
+    std::function<VkResult(VkCommandBuffer cmd, uint32_t family, uint64_t timeoutNs,
+                           const std::atomic<bool>& cancelled)>
+        submit;
 };
 
 // One frame, as the host hands it over: the working colour (kWorkingFormat), in GENERAL on entry and left there
@@ -66,15 +84,15 @@ class VkPresentModel
     VkPresentModel(const VkPresentModel&) = delete;
     VkPresentModel& operator=(const VkPresentModel&) = delete;
 
-    // Everything a frame of this size needs that needs no command buffer: the forwarder, NGX on the device, the
-    // parameter block, the pass, the images (rebuilt for a new size; the old ones are freed once the frames that used
-    // them are seen complete). A failure that will not mend itself is latched: Unavailable from then on.
-    VkPresentAdmission Admit(uint32_t width, uint32_t height);
+    // Whether a frame of this size, its round trip on `family`, may be shown to the model now. Never builds anything:
+    // a product built for another size or family is retired (freed once the frames that used it are seen complete) and
+    // a build is requested; while it is queued or running the answer is NrSkip::Building; once it is over it is
+    // adopted here, or its failure latched (Unavailable from then on).
+    VkPresentAdmission Admit(uint32_t width, uint32_t height, uint32_t family);
 
-    // The pass into frame.cmd, after an Admit of the same size: the zero guides' clear when owed, the feature's
-    // creation when there is none (its initialisation is recorded here too), encode, the downsample below native, the
-    // model, the resolve into the working colour. False: something failed after recording began; the caller discards
-    // the recording (Discarded) and records the plain round trip, and the model is Unavailable from then on.
+    // The pass into frame.cmd, after an Admit of the same size: encode, the downsample below native, the model, the
+    // resolve into the working colour. False: something failed after recording began; the caller discards the recording
+    // (Discarded) and records the plain round trip, and the model is Unavailable from then on.
     bool Record(const VkPresentNrFrame& frame);
 
     // What became of the recording Record made for `ticket`: submitted with its round trip, or never submitted.
@@ -84,8 +102,23 @@ class VkPresentModel
     // The fence of `ticket`'s round trip was seen signalled. The pass's GPU time when that frame was timed.
     std::optional<double> Completed(uint64_t ticket);
 
-    // Frames submitted and not yet seen complete.
+    // Frames submitted and not yet seen complete, plus one while a build is running: either keeps the model (and the
+    // token) from being released. A build only queued does not: Release calls it off.
     size_t InFlight() const;
+
+    // A build queued or running: the present path makes no NGX call for the model.
+    bool Building() const;
+
+    // Waits up to `timeoutMs` for a build under way to be over (never on the present path: vkDestroyDevice only). True
+    // when none is under way any more.
+    bool WaitBuild(uint64_t timeoutMs);
+
+    // The build under way is orphaned (its device is going, or lost): the builder stops at its next step or wait slice
+    // and leaves whatever it made to the device, calling nothing more on it.
+    void Orphan();
+
+    // The device was lost during a build: the host marks the device lost, and Release frees nothing.
+    bool DeviceLost() const;
 
     // Why the model is off on this device, empty while it is not.
     const std::string& Failure() const;

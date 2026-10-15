@@ -54,6 +54,11 @@ class DlssNr_Vk : public Shader_Vk
     DlssNr_Vk(std::string InName, VkDevice InDevice, VkPhysicalDevice InPhysicalDevice);
     ~DlssNr_Vk();
 
+    // The placeholder's one-time setup (its move into GENERAL), recorded into a command buffer of the caller's ahead of
+    // any dispatch, so the first dispatch records none. The Vulkan present host's model builder records it into its
+    // own buffer and waits for it; the after-upscale route leaves it to its first dispatch, as before.
+    bool Prepare(VkCommandBuffer InCmdList) { return CreateDummy(InCmdList); }
+
     // One dispatch of the composition shader.
     //
     // Any of the four read views may be VK_NULL_HANDLE, in which case the dummy is bound; the two
