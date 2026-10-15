@@ -1720,9 +1720,11 @@ makes a generated frame on it, so the policy's only risk -- the host's submit on
 presenter, which consumes the same frames -- cannot be measured. It is stage 4's next step once a Streamline DLSS-G
 Vulkan title has run the experiment's transport arm clean. Shape (a) needs no NR of the host's at all.
 
-**Cost.** Per present: the three process-wide signals (two loads and a pointer read) and, with an FSR-FG output, a scan
-of its three extra queues and one handle compare. Untouched presents cost nothing more. With frame generation off,
-nothing changes.
+**Cost.** Per present with the host on: the three process-wide signals (two loads, and two out-of-line calls on
+OptiScaler's FG feature when one exists) and, with an FSR-FG output, a scan of its reserved queues and one handle
+compare. Beside frame generation, the device's rings are polled (a fence status per pending slot) and the model is
+stood down; nothing else is done for an untouched present. With frame generation off and the trace off, the host does
+what it did before stage 4.
 
 ### Instrumentation: the pacer trace
 
@@ -1731,7 +1733,7 @@ nothing changes.
 per swapchain every 10 s while it presents (and a last one when it is destroyed):
 
 ```text
-DLSS-NR Vulkan present host (trace): swapchain 0x... #N on device #D, 10.0 s: 1203 presents (120.3/s); threads tid 1234 "vkd3d_queue" 1203 (caller d3d12core.dll); queues 0x... 1203; waits 1-1 (1203), host signals 1203, untouched 0; present ids 5..1207 (gaps 0, out of order 0); frame time p50 8.31 p95 8.42 p99 9.10 max 25.03 ms, over twice the median 2; present call p50 0.21 p99 0.48 max 3.02 ms; results VK_SUCCESS 1203; GPU completions 1203, ring 2, max CPU wait 0.000 ms; frame generation none; Streamline fence timeouts 0, pacer 0, warnings 0, errors 0
+DLSS-NR Vulkan present host (trace): swapchain 0x... #N on device #D, 10.0 s: 1203 presents (120.3/s); threads tid 1234 "vkd3d_queue" (caller d3d12core.dll) 1203; queues 0x... 1203; waits 1-1 (1203), host signals 1203, untouched 0; present ids 5..1207 (gaps 0, out of order 0); frame time p50 8.31 p95 8.42 p99 9.10 max 25.03 ms, over twice the median 2; present call p50 0.210 p99 0.480 max 3.020 ms; results VK_SUCCESS 1203; GPU completions 1203, ring 2, max CPU wait 0.000 ms; frame generation none 1203; Streamline fence timeouts 0, pacer 0, warnings 0, errors 0
 ```
 
 - **Threads and identities**: the presenting thread's id and name (`GetThreadDescription`, read once per thread: vkd3d-
@@ -1748,8 +1750,19 @@ DLSS-NR Vulkan present host (trace): swapchain 0x... #N on device #D, 10.0 s: 12
   host off, reads Streamline's own lines from `OptiScaler.log` instead (the callback writes them at every log level).
 - **Frame generation**: the shape each present was classified as.
 
-The trace's own cost when on: a lock and a few vector appends per present, and a sort of the window's intervals every
-10 s. Its lock is a leaf: nothing is called under it.
+The trace's own cost when on, per present: a clock read at entry and at exit, two short leaf locks (Streamline's counts
+are copied, their last message included, then the window's lock is taken), the thread's key built as a string, a
+registry lookup for a swapchain not on record, and a few vector appends; a sort of the window's intervals every 10 s.
+Off, one relaxed load per present. Both locks are leaves: nothing is called under either, and the line is logged after
+they are released.
+
+Windows are kept by device and swapchain handle (handle values repeat across devices). A window ends at its 10 s, at
+its swapchain's destruction, at `vkDestroyDevice` (with every window of that device, those not on record included),
+and at a swapchain's creation on its device: one left under the same handle (its destroy was never seen), and every
+window of the device's swapchains not on record. That last rule is for FSR-FG's proxy, whose creation and destruction
+never reach the host but which is made, and replaced, together with FFX's own swapchain, so a resize's gap does not land
+in a stale window's tail. Present ids of 0 are none; a gap is counted from the highest id seen, so one late id is one
+out of order and not also a gap after it.
 
 ### The pacer experiment (test plan)
 
@@ -1793,8 +1806,9 @@ generation.
 (`DecideFg`), the unsupported line, Streamline's classifier and the trace (`PacerTrace`). The host reads the facts in
 `FgFactsFor`: the three process-wide signals exactly as `PresentBoundary::Inputs` reads them, and
 `State::currentVkFG->OwnsQueue/OwnsSwapchain`. `Prepare` classifies before anything else of the transport; with frame
-generation it skips the hand-back and stand-down housekeeping (`Housekeep`), polls the device's rings, stands the model
-down (`StandDown`), logs the line once per device and shape, and then either returns `Skip::FrameGeneration` before
+generation it skips the housekeeping (`Housekeep`: no hand-back begins, though one already draining is still polled),
+polls the device's rings (each swapchain's completions credited to its own record), cuts every swapchain's model
+history, stands the model down (`StandDown`), logs the line once per device and shape, and then either returns `Skip::FrameGeneration` before
 any other refusal (untouched: no wait spent, no info edited) or, in the experiment arm, carries the present with NR
 refused as `frame generation` before `DecideNr` is asked. A new transport skip `frame generation` and NR skip `frame
 generation` count both in the window and destruction lines. Two keys, both read at `Install` (a change needs a
@@ -1819,7 +1833,7 @@ RTX 4090):
   creation hook (nested in the game's call), so it has an id, images and the round trip. The proxy the game presents
   into is answered by the bundle's creation hook above the host, so the host first meets it at a present
   (`which the host never saw created`), and its destruction never reaches the host either: the trace closes that
-  stream at `vkDestroyDevice`. **This is what stage 4's NR-on-real-frames step must solve first**: the real frame of
+  stream at the next swapchain made on its device (FFX makes its own with each proxy) or at `vkDestroyDevice`. **This is what stage 4's NR-on-real-frames step must solve first**: the real frame of
   shape (b) is an image of FFX's that the host does not know. Its placement (the game's present into FFX's swapchain)
   stands; the way in is either the bundle telling the host of the proxy's images, or the host reading the frame at
   FFX's present before it is interpolated, through FFX's own callback.
@@ -1866,11 +1880,11 @@ model, as in stages 3 and 5):
      swapchain is made, and the run is run 1 again (no `frame generation active` line, NR at present as before).
    - Or `FSRFG_Vk::CreateSwapchain Swapchain context creation result: The operation was successful`, then
      `frame generation active (OptiScaler's Vulkan FSR-FG output, its own present): NR at present is off on this device
-     until stage 4 is proven; its presents go down untouched` (and possibly the same for `the game's present into it`),
-     `a present of swapchain 0x..., which the host never saw created`, no `the model runs at present` (if the model had
+     until stage 4 is proven; its presents go down untouched` (the game's own presents into FFX's swapchain get no such
+     line: the host never saw that swapchain made), `a present of swapchain 0x..., which the host never saw created`, no `the model runs at present` (if the model had
      come up before the swapchain it stands down: `the model stood down and was freed`), window lines with `skipped N (frame generation N)`,
-     and trace lines with `frame generation FSR-FG output` and one `(not on record)` with `frame generation FSR-FG
-     input`. The picture is the game's without NR, and no frame is generated (DOOM has no DLSS-G input); what this run
+     and trace lines with `frame generation FSR-FG output` and others, `(not on record)`, with `frame generation
+     FSR-FG input` (the game's presents into FFX's swapchain; one stream per FFX swapchain). The picture is the game's without NR, and no frame is generated (DOOM has no DLSS-G input); what this run
      shows is that the routing survives a real title. Note the menu, alt-tab and a resize.
 3. Optional, FG on with `VulkanPresentFgTransport=true`: the same, with `its presents keep the round trip without NR`,
    FFX's swapchains `transported N` and trace `host signals N, untouched 0`. Any `VK_ERROR_DEVICE_LOST` or a present
