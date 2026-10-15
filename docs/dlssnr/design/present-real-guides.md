@@ -1,10 +1,11 @@
 # Real guides for the present pass: proving the capture belongs to the frame being presented
 
-Status: design for review, 2026-10-13. **Step 0 (log only) is built** and was measured in Crimson Desert on
-2026-10-14 ([Step 0 measured](#step-0-measured-2026-10-14-crimson-desert)), on branch `feat/present-guide-identity`:
-the stamp, the decision header and both consumers' calls, acting on nothing; see
-[Step 0 as built](#step-0-as-built). Steps after it are not built. Nothing here has been run in a game. Written
-against `93730d39`; line numbers are into that tree.
+Status: 2026-10-15. **Step 1 is built** ([Step 1 as built](#step-1-as-built)), on branch
+`feat/present-real-guides-step1`: both consumers read a capture only when the rules accept it, and fall back
+otherwise. Step 1 has not been run in a game. Step 0 (log only, [Step 0 as built](#step-0-as-built)) was measured in
+Crimson Desert on 2026-10-14 and 2026-10-15 ([Step 0 measured](#step-0-measured-2026-10-14-crimson-desert)); the
+rules stand on that data, with rule 6 enforced at the game's own Present only. The design sections were written
+against `93730d39`, and their line numbers are into that tree.
 
 Read first: [nr-present-hook.md](nr-present-hook.md) (the present host, and the ring this note builds
 on), [synthesized-motion.md](synthesized-motion.md) (what runs when there are no game guides),
@@ -164,7 +165,9 @@ A slot is accepted for this present only if all hold; the first that fails is th
 evaluate for frame N while the present thread is still presenting N-1, so the epoch of a correct
 capture is not always equal to the present's. It is assumed to be 1; it must be measured first (see
 the test plan, step 0) and the design stands or falls on that measurement. If no small constant
-describes a title, rule 6 is dropped for it and rules 2 to 5 carry the identity.
+describes a title, rule 6 is dropped for it and rules 2 to 5 carry the identity. (Measured: 1 at the game's own
+Present, where step 1 enforces it; not settled at the other entries, where step 1 counts rule 6 and does not
+enforce it. See [Step 1 as built](#step-1-as-built).)
 
 Rule 4 deserves its own sentence, because it is where this design differs most from today. Today the
 newest capture wins. Under rule 4 a frame with two same-extent evaluates is refused rather than
@@ -287,8 +290,9 @@ quantity would break "one quantity, one control" (`DEVELOPMENT.md` §1.3). What 
   subject.
 - Menu: one read-only line under the present controls, "Guides: game's, N refused (reason)" /
   "synthesized" / "zero", shown only when the present route is active (invariant 2, no dead control).
+  Built in step 1; its states are DEVELOPMENT.md section 2.4.
 - Log: one line per window, in the style of the existing two-second status line, with counts per
-  refusal reason, so a title can be diagnosed from its log alone.
+  refusal reason, so a title can be diagnosed from its log alone. Built in step 1.
 - **Reserved, not built:** a strictness key (`PresentGuideIdentity=strict|relaxed`) only if step 0's
   data shows a title that rules 4 or 6 refuse while its guides are demonstrably right. It would be a
   four-point config round trip and is not added speculatively.
@@ -298,7 +302,7 @@ quantity would break "one quantity, one control" (`DEVELOPMENT.md` §1.3). What 
 | Item | Anticipated answer |
 |---|---|
 | 1 Default-identical | At `HookMethod=1`: no stamp, no registry, no decision, no log. Route change confined to 0 and 2. |
-| 2 No dead control | The menu line only appears with the present route active. |
+| 2 No dead control | The menu line only appears with the present route active. Step 1: DEVELOPMENT.md section 2.4 is its state table. |
 | 3 One quantity, one control | No new key. |
 | 4 Config round-trip | Not triggered (no key). Triggered if the reserved key is ever added. |
 | 5 Struct equals cbuffer | No shader or constant change. |
@@ -326,7 +330,8 @@ evaluates; a resize between capture and present; a generated frame (rule 5) at 2
 source-change debounce (a single miss does not reset, `kSourceStable` misses reset once); a long
 simulated run with random capture drops, asserting that **no slot is ever read after the rule that
 refused it** and that the ring's never-overwrite-an-in-flight-slot property still holds. Plus an
-`nr-invariants` addition: no reader of `g_temporalValid` outside the status line.
+`nr-invariants` addition: no reader of `g_temporalValid` in the status line. (Written first as "outside the status
+line", which inverts D3: routing keeps reading the latch, the status stops. Step 1 built the check as D3 has it.)
 
 **What the host tier will not show**, and the README of the suite should say so: that a real driver
 accepts the copy formats, that the pairing is visually right, that DLSS-G does not stall.
@@ -347,6 +352,8 @@ standing request in `nr-present-hook.md`; this change adds no new copy, so it ne
 retires that request.
 
 ## Step 0 as built
+
+Kept as the record of what step 0 was; [Step 1 as built](#step-1-as-built) replaced its calls and its line.
 
 The maintainer chose the log-only first slice (open question 3). What exists, all of it inert at the default
 `HookMethod=1`, with the pass off, and in a title whose ring never records:
@@ -453,10 +460,194 @@ Two sessions of the same day, both `HookMethod=2`, GE-Proton11-7, RTX 4090:
 - **Rule 4 costs nothing in this title** (one capture per frame), and no `device`, `extent`, `output-base` or
   `swapchain` refusal was seen in either session. Not seen either: a resize or an Alt-Tab inside these windows.
 
+Two more sessions on 2026-10-15, build `a2d02037`, the same setup at the game's own Present, with the game's DLSS-G
+switched on (4x, `[DLSSG] OverrideInterpolationCount=3`) and off several times in each, the boundary live throughout
+but for one lapse (a window at 00:27:30 in session 2 where the interim refusal declined the wrapped entry). Read from
+`OptiScaler.previous.log` and `OptiScaler.log` in the game's `bin64`, before step 1 was written:
+
+| | session 1 (00:14, 7 windows) | session 2 (00:23, 9 windows) |
+|---|---|---|
+| presents / read a capture / skipped / none | 4,382 / 4,382 / 0 / 0 | 5,536 / 5,536 / 0 / 0 |
+| would pass / refused | 4,381 / 1 (`ambiguous`) | 5,535 / 1 (`ambiguous`) |
+| epoch lag of new captures | `1`: 4,382 | `1`: 5,536 |
+| captures per frame at their extent | `1`: 4,381, `3+`: 1 | `1`: 5,535, `3+`: 1 |
+
+Read as "How to read it for step 1" asks, over the three sessions at the boundary (18,993 presents):
+
+- **`kLag`**: every capture one boundary behind, through DLSS-G on and off. `kLag = 1` stands there. The wrapped entry
+  is still only its ten seconds at lag 2, so step 1 enforces rule 6 at the boundary and nowhere else.
+- **Rule 4**: four refusals, all `ambiguous`. In each `a2d02037` session it was one present at start-up, counted `3+`
+  (the warm-up flips mark no boundary, so the captures made during them share one count; step 0 departure 1).
+  `9f97f708` had two, counted `2` and `3+`, which the first measurement put at start-up; its log is gone, so the `2`
+  one is not checked. One or two frames per session.
+- **Rule 2, device and swapchain**: no `extent`, `output-base`, `device` or `swapchain` refusal, with the proxy and the
+  wrapped swapchain both in play.
+- **The design's own test**: 4 of 18,993 would have been refused (0.02%), at start-up as far as the logs say. The rules
+  are not shown wrong, and this note is not rewritten; step 1 is built on them as they stand.
+- Still not seen: a resize, an Alt-Tab, a `consumed` refusal (generated frames never reach the boundary, and DLSS-G
+  on or off made no difference to any count).
+
+## Step 1 as built
+
+Built on `feat/present-real-guides-step1`, on top of step 0 and nr-before-dlssg.md's boundary. Not run in a game.
+Reviewed adversarially per DEVELOPMENT.md section 3 before it was committed; what that review found is folded in
+below (the bridge's rule-5 record while unlogged, "waiting" on a host that never waits, `ZeroGuideReset` on a single
+miss, the route the status names, the zero-to-game change, generated frames of a game's own FSR3 or XeSS FG).
+
+### What it does
+
+- **Both consumers read the slot the rules return, and nothing else.** In `RunPresentPass` the pick is followed by
+  `AskPresentPassGuides`, and the read, its `Track` and the frame description all take `guides.decision.slot`
+  (`usableSlot`); the pick itself only goes to the identity and the record. In `CapturedPresentGuides` the pick goes
+  through `AskBridgeGuides`, and `ReadCapturedGuides` is handed the decision's slot. A refused slot is never tracked,
+  so there is nothing to undo on it (D3), and the ring may overwrite it once the next pick has moved its last-read mark
+  (`PickForPresent` set it on the refused slot, as it always did, so the next capture goes elsewhere).
+- **A refusal falls back through the branches that already existed.** The D3D12 pass runs on zero guides, or on
+  `SynthMotion`'s estimate when it is on; under `RequireDlss=true` the frame is shown as the game drew it, as with no
+  capture (open question 5: a frame whose capture is not its own has no guides the user asked to require). The bridge
+  returns false and its host takes its zeros or `SynthMotion` as before.
+- **Rule 6 is enforced at the game's own Present only** (`Present::enforceLag`, the `boundary` argument), where 18,993
+  presents put every capture one boundary behind. At the wrapped swapchain entry, OptiScaler's FG hook and the D3D11
+  bridge, nothing measured the lag well enough (the wrapped entry's ten seconds at lag 2 are its first ten seconds, the
+  other two have no data), so a capture past `kLag` is used there as before, and counted
+  ("used past the lag limit where it is not enforced"). That is D2's own fallback ("rule 6 is dropped for it") applied
+  per entry rather than per title, and a session at the wrapped entry is what would change it (below).
+- **Rule 5 falls back; it does not skip.** D2's table says a consumed pick skips the present's pass, for the
+  generated-frame case. That case never reaches the decision: `RunPresentPass`'s own skip (nothing recorded since the
+  last capture the pass used) stays in front of it, is counted as `skipped`, and is the D5 behaviour. A consumed pick
+  that gets past it is a present whose own capture has been recorded but has not completed (step 0's reading of
+  `consumed`): a real frame, which a skip would show unedited and a fallback edits. Most generated frames no longer
+  reach the pass (the boundary sees none, the FG hook sees base frames, the wrapped entry declines under the game's
+  DLSS-G), but a game's own FSR3 or XeSS frame generation that OptiScaler does not replace still presents every frame
+  through the wrapped entry. The skip covers those after a capture that was used, and, since step 1, after one that
+  was refused: when the refused pick is the newest capture recorded, it counts as decided on, so the presents after it
+  with nothing newer skip as they would after a use. A refused older pick (a newer capture still being copied) does
+  not, so that capture is not passed over.
+- **The presenter is the swapchain's window** (`PresentGuidePresenter`, `GetHwnd`, the swapchain pointer when there is
+  no window), for the D3D12 pass. The game's Streamline proxy at the boundary and the swapchain beneath it are then one
+  presenter, not two that refuse each other on rule 3 (nr-before-dlssg.md's test plan asks for this). A recreated
+  swapchain on the same window is the same presenter by design. The bridge still names its host.
+- **A lasting change of source resets the model once** (D3). `SourceHistory` counts, per consumer, whether each
+  present's pass runs on the game's guides; a change that holds for `kSourceStable` (4, still assumed: step 0 saw no
+  source change to tune it on) presents in a row asks for a reset through `g_resetOnReturn`, the request a route
+  switch makes. A single miss, or an alternation, never resets, and `ZeroGuideReset` waits for the same thing: while
+  the game's guides hold the history, a frame that misses them takes no policy reset either (both hosts), since it is a
+  miss and not a scene without motion. The first source to hold after the route starts resets nothing: the route's own
+  reset covers it. Every frame whose pass runs is noted, a ring that never recorded included, so a title screen with no
+  upscaler settles on zeros and the start of captures is a change like any other (one reset); a title that never
+  captures never changes. Zero and synthesized are one side: the estimator settles its own changes, and a switch
+  between them never reset before.
+- **The status stops reading the latch** (D3). `HookStatus` no longer reads `g_temporalValid`; on a present route it
+  names the guides from the last second's outcomes, which `StatusWindow` packs into one word and publishes through an
+  atomic, so the menu reads it without the lock: "present: active, the game's depth and motion", "... synthesized
+  motion", "... zero guides (no motion)", "present: waiting for the game's depth and motion", and "present: no new
+  frame from the upscaler (shown as the game drew it)" when every present skipped. "Waiting" is what the D3D12 pass
+  reported doing under `RequireDlss`, not the setting: the D3D11 bridge never waits. At the boundary the status keeps
+  its own text. Which route is in use is the present entry's own word (`PresentRouteLive`, set once the placement
+  chose it), so Auto on its first present second, or on frames the pass declines before its pick, is still named as
+  present. Routing still reads the latch (Auto stays on present after the upscaler stops). `nr-invariants` section 6
+  holds that `HookStatus` does not read it.
+- **The menu line** (`PresentGuidesLine`, DEVELOPMENT.md section 2.4) sits under the status line, read-only, shown
+  only while a present host has decided in the last two seconds: "Guides: the game's depth and motion, on every
+  frame", or "on U of P frames; R refused (reason), N with none", or "synthesized motion" / "zero (no motion)" with
+  what the rules refused.
+- **No key.** The config surface is the note's: `HookMethod`, `RequireDlss` and `SynthMotion` span the states. The
+  `RequireDlss` text (ini, `Config.md`, the menu's help and its pt-BR entry) now says a capture must be the frame's own.
+
+### What it leaves as it was
+
+- **D4.** No resource, no queue, no wait, no new lock: the decision runs under `g_nrMutex` where the pick always ran,
+  and the status leaves through atomics. The **resize generation** D4 suggests is not built: rule 2 already refuses a
+  capture from before a size change, a same-size resize changes nothing the guides describe, a recreated swapchain on
+  the same window is meant to be the same presenter, and some titles call `ResizeBuffers` often enough that a
+  generation would refuse guides that are right.
+- **Today's skip.** Its test is unchanged (newest recorded against the newest at the last use, or at the last refusal
+  of the newest), so step 0's "skipped but would pass" can still happen (zero in every session so far), and is still
+  counted.
+- **When a use is counted.** A use is recorded when the read is tracked, before the list is known to execute. A list
+  that is then dropped (the pass failing, a submission that fails) leaves the capture counted as used: rule 5 refuses
+  it if it is offered again, and the window and the status say "used". The bridge's abandoned recording is the same.
+- **`MVJittered`** (open question 2): parity with the after-upscale route, which ignores it.
+- **Inert at the default.** At `HookMethod=1` `RunPresentPass` returns before the pick, so nothing here runs. With a
+  ring that never recorded (PCSX2, Divinity) nothing is asked, the bridge's list is not even asked for its device, no
+  boundary is marked, nothing is logged and no reset is asked for; the source history settles on zeros and never
+  changes, and the status is fed, which now says "zero guides" or "synthesized motion" where it said "dummy temporal
+  inputs".
+
+### The log lines
+
+One line per consumer per window, on step 0's cadence (at least 2 s; a window like the last one written held to
+30 s). Counts made up:
+
+```
+DLSS-NR present guides, identity applied, D3D12 present: 1237 presents in 30.0 s, lag limit enforced on 1237 | 1236 used the game's depth and motion, 1 refused (ambiguous 1), 0 skipped with no new capture, 0 had none | skipped but would pass 0 | used past the lag limit where it is not enforced 0 | epoch lag of new captures 0:0 1:1237 2:0 3:0 4+:0 | captures per frame at their extent 1:1236 2:0 3+:1
+```
+
+- `lag limit enforced on N`: the presents at the game's own Present. Fewer than `presents` means the wrapped entry, the
+  FG hook or the bridge decided some.
+- `used`: the pass read the capture. `refused`: by first failing rule, the frame fell back. `skipped`: the pass's own
+  skip. `had none`: nothing was picked (or the read could not be tracked).
+- `used past the lag limit where it is not enforced`: what rule 6 would have refused at those entries.
+- The histograms and the `last extent refusal` field are step 0's.
+
+And when a change of source holds (first three, then every hundredth):
+
+```
+DLSS-NR present guides, D3D12 present: the model's history restarts on zero or synthesized guides, held for 4 frames (1 so far)
+```
+
+`grep -a -c 'identity applied' OptiScaler.dll` is 1 when step 1 is linked in; step 0's `identity check (log only` is
+gone.
+
+### What a Crimson Desert run should show
+
+`HookMethod=2` set before the game starts, the game's DLSS-G on (the boundary, nr-before-dlssg.md step 1):
+
+- The boundary's own lines as before: `DLSS-NR present: the pass runs at the game's own Present...` once, and
+  `DLSS-NR status: present: at the game's own Present, ahead of its frame generation | N presents : N renders =
+  1.00x on screen`.
+- The first identity window: at most `1 refused (ambiguous 1)`, the start-up frame; every later one `lag limit
+  enforced on N | N used the game's depth and motion, 0 refused, 0 skipped with no new capture, 0 had none` with the
+  lag histogram all at `1:` and captures per frame all at `1:`. Toggling DLSS-G on and off changes none of it.
+- One `history restarts on the game's depth and motion` line where captures start, if the pass ran on the title screen
+  before the first upscaler evaluate (it does at the boundary). None after it in steady play. One around a menu or a
+  cutscene would mean the guides were refused, or absent, for four frames in a row there: the window line says which.
+- The menu, under the status line: "Guides: the game's depth and motion, on every frame".
+- On screen, what step 1 of nr-before-dlssg.md measured: no flicker, NR on every frame. Step 1 changes which captures
+  may be read, and in the step 0 data that is the one start-up frame.
+- Anything else is a finding: `lag` at the boundary means `kLag` is wrong for that state; `swapchain` means the
+  presenter is misread; `device`, `extent` or `output-base` outside a resize mean the stamp and the present disagree.
+
+Worth one more session, because it is what would let rule 6 be enforced below the boundary: `HookMethod=2` set from
+the menu after start-up (so the boundary is not installed) with DLSS-G off throughout, through gameplay. The line's
+`lag limit enforced on 0` and its lag histogram are then the wrapped entry's own measurement.
+
+### Tests
+
+- `tests/nr-present-guide-identity` (host): every rule alone and in order, rule 6 enforced and not (and the mark),
+  narrowing over random cases with a table oracle, the late copy and the wrapped entry's lag at both settings, a
+  20,000-frame run on the production ring that reads the decision's slot and checks that it never names a capture
+  refused earlier for a reason that cannot improve and that a slot being read is never overwritten, step 1's window and
+  line, an untracked read and `MarkUsed`, `SourceHistory`, the status word and its texts; the renderer's glue sliced
+  out and run against fakes (the window as presenter, the proxy and the wrapped swapchain as one presenter, inert on an
+  empty ring, use, consumed, skip, lag at and below the boundary, the change from zeros to the game's guides and back
+  with its log lines and the hold `ZeroGuideReset` waits on, the status and the menu line, waiting reported by the
+  host, the bridge in each state, and an unlogged bridge still moving rule 5's record); and source guards that both
+  consumers read the decision's slot and never the pick (that a refused pick is not read is theirs to hold: the cases
+  read what the decision gives them).
+- `tests/nr-present-guide-identity-msvc` (wine): the same decision cases and glue slice compiled by MSVC, in a private
+  copy of the prefix, and run under Wine, so the header's formatting, clock conversion and packing are checked through
+  the compiler and standard library the DLL ships with. No D3D12.
+- `nr-invariants` section 6: `HookStatus` reads no latch. `nr-present-host`: its fakes take the bridge host's new
+  fallback note.
+- Not covered by any of them: a real driver, the picture, DLSS-G's pacing, and the D3D11 bridge with a real upscaler
+  (open question 4).
+
 ## Risks
 
 - **`kLag` has no small constant in a title.** Then rule 6 is dropped for it and identity rests on
-  rules 2 to 5. The risk is a title where that is not enough; step 0 finds it first.
+  rules 2 to 5. The risk is a title where that is not enough; step 0 finds it first. Step 1 enforces rule 6 only at
+  the game's own Present, so below it identity already rests on rules 2 to 5.
 - **Rule 4 refuses titles that evaluate twice at one extent.** They lose real guides at present and
   fall back to zero or synthesized motion. That is a visible regression against today for those titles
   (today they get the newest capture, right or wrong). Whether that trade is acceptable is the
@@ -475,12 +666,14 @@ Two sessions of the same day, both `HookMethod=2`, GE-Proton11-7, RTX 4090:
 ## Open questions for the maintainer
 
 1. Is refusing ambiguous frames (rule 4) acceptable, given that it removes real guides from any title
-   that evaluates twice at one extent?
+   that evaluates twice at one extent? (Step 1 refuses them. In Crimson Desert it costs the first frame after
+   start-up and nothing else.)
 2. Should present refuse `MVJittered` as NeuRotic's D3D11 route does, or keep parity with the
-   after-upscale route, which ignores the flag?
+   after-upscale route, which ignores the flag? (Step 1 keeps parity.)
 3. Is a log-only step 0 the right first slice, or should the stamp and the decision go in behind a
-   key at once?
+   key at once? (Answered: step 0 was log only, and step 1 needed no key.)
 4. Which D3D11 title with a real upscaler is available for testing the bridge consumer of this
    ring? Without one, the bridge half of this change is host-tested only.
 5. Should a refused frame under `RequireDlss=true` skip the pass (show the game's frame, as today), or
-   is that wrong for the frames refused for identity reasons rather than absence?
+   is that wrong for the frames refused for identity reasons rather than absence? (Step 1 skips: a capture that is
+   not the frame's own is no guide for it, and the key asks for guides.)

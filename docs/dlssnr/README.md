@@ -72,7 +72,7 @@ Related, outside that sequence:
 
 - [nr-before-upscale.md](design/nr-before-upscale.md): optional NR before the upscaler (Stage=1).
 - [nr-menu-mode.md](design/nr-menu-mode.md): keeping NR running while the upscaler is idle in menus.
-- [present-real-guides.md](design/present-real-guides.md): checking that the guides the present pass reuses belong to the frame being presented (design; step 0, log only, built).
+- [present-real-guides.md](design/present-real-guides.md): checking that the guides the present pass reuses belong to the frame being presented (step 0 measured in Crimson Desert; step 1, the rules applied, built and not yet run in a game).
 - [nr-before-dlssg.md](design/nr-before-dlssg.md): running the present pass at the game's Streamline `Present`, before its DLSS-G interpolates, so generated frames carry the edit; NeuRotic's pre-FG adapter as prior art (design).
 - [present-depth-without-upscaler.md](design/present-depth-without-upscaler.md): the game's own depth for the present pass in titles that call no upscaler: heuristic discovery from depth-stencil binds, Streamline depth tags, or synthesized motion alone; NeuRotic's built-in capture as prior art (design; step 0, log only, proposed).
 - [dx11-native-dlss-guides.md](design/dx11-native-dlss-guides.md): NR for D3D11 games that call DLSS themselves, through `dlss_12` first (design).
