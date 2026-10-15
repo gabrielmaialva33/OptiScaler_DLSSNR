@@ -28,7 +28,7 @@ entry, or the next run tells you.
 
 | Tier | Needs | Suites |
 |---|---|---|
-| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `windows-installer`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
+| `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `mfg-probe`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `windows-installer`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
 | `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session and a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback` |
 | `wip` | registered, no runner yet | — |
 
@@ -38,7 +38,7 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 ## What the suites cover
 
-**Host tier.** Forty-nine suites. All but `nr-invariants`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
+**Host tier.** Fifty suites. All but `nr-invariants`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
 code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `lsfg-shader-library` — the LSFG runtime shader library (`retoque/lsfg/LsfgShaderLibrary.{h,cpp}`): DLL discovery (Windows Steam `libraryfolders.vdf`, registry, Wine/Proton `Z:` paths, `$HOME`, `$XDG_DATA_HOME`, override, `Lossless.dll` folder mapping), PE `RT_RCDATA` SPIR-V module extraction (99 modules), SPIR-V magic validation, Quality/Performance and FP32/FP16 resource ID resolution, real user DLL extraction when present, and content-hash-keyed DXIL cache storage/invalidation; plus `tools/lsfg-study/convert.py`'s Float16 detection (synthetic modules, and exactly ids 51..98 on the real DLL).
@@ -111,6 +111,16 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   module whose writes can be told to fail: a patch group commits whole or rolls back whole, a half-written
   site is restored, a wrong read-back rolls back, a site changed since planning writes nothing, and a failed
   restore is reported without stopping the others.
+- `mfg-probe` — the step-0 MFG-below-Ada probe logic (`retoque/framegen/dlssg/MfgProbe.h`, std-only): the
+  gate exits before the claim, foreign-loader check, census, facts or emit off `[Turing, Ada)` (Ada,
+  Blackwell, an NVIDIA adapter whose architecture was never read, Volta, non-NVIDIA), counted through an
+  injected environment that also carries the production glue's stateful steps, plus the production gate
+  memo (`GateCache`); the fatbin/cubin census over synthetic containers (SASS sm_86, sm_89/sm_120-only,
+  PTX-only, bare cubins, an ELF inside a container, truncated and 2^64-wrapping lengths); CUDA sm_86
+  loadability; the exact text of the module and admission lines and each NGX skip reason; and foreign-loader
+  detection. With Crimson Desert's `nvngx_dlssg.dll` present it censuses the real provider against the
+  offline inventory (70 containers, frame 0/31, 39 sm_86 cubins), read in place and never copied; that case
+  skips when the file is absent. Writes nothing and runs no patcher or DLL.
 - `sl-log-repeat` — the Streamline log repeat filter against the real `setDynamicMFGParams` line
   on a fake clock: one line per 10 s with the folded count, new sites at once, a bounded table that
   fails open. Runs no Streamline and no callback.

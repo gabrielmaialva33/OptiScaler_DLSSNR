@@ -208,6 +208,11 @@ tier = "host"
 timeout = 300
 summary = "The MFG unlock's write half (MfgPatchPlan.h) over a fake module with injected failures: a patch group commits whole or rolls back whole, a half-written site is restored, a wrong read-back rolls back, a site changed since planning writes nothing, a failed restore is reported and does not stop the others."
 
+[mfg-probe]
+tier = "host"
+timeout = 300
+summary = "The step-0 MFG-below-Ada probe logic (MfgProbe.h): the gate exits before the claim, foreign-loader check, census, facts or emit off [Turing, Ada) -- Ada, Blackwell, NVIDIA with an unread arch 0, Volta, non-NVIDIA -- counted through an injected environment, and the production gate memo (GateCache); the fatbin/cubin census over synthetic containers (SASS sm_86, sm_89/sm_120-only, PTX-only, bare cubins, an ELF inside a container, truncated and 2^64-wrapping lengths); CUDA sm_86 loadability; the exact text of the module and admission lines and each NGX skip reason; foreign-loader detection; and, when Crimson Desert's nvngx_dlssg.dll is present, the census against the offline inventory (70 containers, frame 0/31, 39 sm_86 cubins). Writes nothing and runs no patcher or DLL."
+
 [nr-model-loader]
 tier = "host"
 timeout = 300
