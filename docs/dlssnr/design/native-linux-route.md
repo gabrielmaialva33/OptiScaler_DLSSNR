@@ -4,6 +4,11 @@ Design assessment, 2026-10-15; Retoque baseline `24a10942`. No implementation or
 part of this change. “Native” here means an ELF Linux application using Vulkan, not a Windows
 application using Vulkan through Proton. The latter already has a Retoque present host.
 
+**Follow-up:** [Step 0 measured](#step-0-measured) below records the subsequently authorized
+inventory/native-NGX probe at baseline `aa81b96b`. Native SR creation works; native NR cannot
+initialize with the available artifacts because `libnvidia-ngx-dlssnr.so` is missing. No native
+route or cross-process transport was implemented.
+
 ## Recommendation
 
 Do **step 0, measurements only**, before committing to a native product. Give native NGX the first
@@ -376,10 +381,183 @@ latency gates, defer the route and keep the existing Proton path. The useful del
 an honest measurement record and a small list of missing capabilities, not a native feature that
 silently presents stale frames or risks indefinite waits.
 
-## Validation of this note
+## Validation of the original design note
 
 Read the Retoque present-host Stage 3, off-present build, Stage 5 and HDR contracts and the development
 invariants; checked current source dependencies and primary sources linked above. Performed only
 read-only hardware/package/binary inspection. No native feature-18 query, model load, FD import,
 surface enumeration, inference or game measurement was performed. Documentation link targets and
 whitespace are checked before commit; no build or host/GPU test is required for this docs-only change.
+
+## Step 0 measured
+
+2026-10-15, **items 1 and 2 only**, following a separate authorization. Disposable source and runner:
+[`tools/probes/native-ngx/`](../../../tools/probes/native-ngx/README.md). This location keeps a GPU
+experiment out of the host/CI suite registry; no new test directory or suite count change is needed.
+The executable is native x86-64 ELF, compiled by host g++, using NVIDIA's public Linux SDK wrapper
+`libnvsdk_ngx.a` and its public Vulkan/parameter interfaces. No private core function casts, PE
+execution, invented vtables, model patches or signature bypasses were used.
+
+### Go/no-go result
+
+**Option (b) is NO-GO with the currently available official artifacts on this machine.** The SR
+positive control establishes that the native SDK/core/device/model-loading path works. For NR,
+the core searches for an actual Linux feature library and reports it missing. This is a concrete
+model-availability blocker, not evidence that Linux NGX could never run feature 18. Reopen (b)
+when a legitimate native NR model becomes available, then require completed deterministic
+evaluate/identity/pixel-diff controls before declaring success. No NR evaluation ran here because
+creation failed. Items 3–5, helper transport, copies and latency measurements remain unperformed.
+
+All capability getters below returned `0x00000001` (success); the **value** is separate from the
+getter status. A returned minimum version of 0.0 for unavailable NR is not a usable driver requirement.
+
+| Query / operation | SR, feature 1 | NR, feature 18 |
+|---|---|---|
+| Instance-extension query | `0x00000001` | `0x00000001` |
+| Device-extension query | `0x00000001` | `0x00000001` |
+| `GetFeatureRequirements` | `0x00000001`; support flags 0, minimum architecture `0x160`, OS `any` | `0xbad00012` = `FAIL_NotImplemented`; no valid requirements output |
+| `Available` | 1 | 0 |
+| `NeedsUpdatedDriver` | 0 | 0 |
+| `FeatureInitResult` | `0x00000001` | `0xbad00004` = `FAIL_FeatureNotFound` |
+| `MinDriverVersionMajor` / `Minor` | 470 / 0 | 0 / 0 |
+| `CreateFeature1` | `0x00000001`, non-null handle | `0xbad0000b` = `FAIL_UnableToInitializeFeature`, null handle |
+| Initialization GPU submit/fence | `VK_SUCCESS` / `VK_SUCCESS`, completed before release | No feature, no submit |
+| Evaluate / pixels | Not needed for the requested SR **creation** positive control; not measured | Not run: conditional on a legitimate native NR path succeeding |
+
+Core `Init_with_ProjectID`, `GetCapabilityParameters`, SR release, parameter destruction and
+device-specific shutdown all returned `0x00000001`; final Vulkan drain returned `VK_SUCCESS`.
+Own project ID, SDK API 0x15, Vulkan API request 1.2, one graphics+compute queue from family 0.
+The instance enables `VK_KHR_get_physical_device_properties2`; device enables `VK_NVX_binary_import`,
+`VK_NVX_image_view_handle`, `VK_KHR_push_descriptor`, `VK_KHR_buffer_device_address`, with buffer
+device address enabled. SR uses 640×360 input / 1280×720 output, MaxQuality, low-resolution motion
+flag, and the SDK's creation helper. The NR create diagnostic uses the same public API/capability
+object and Retoque's enable/640×360 dimension keys. With no NR library, no NR model validated those
+parameters: this does not establish a complete native NR parameter contract.
+
+### Inventory result table
+
+Authoritative guarded run: `~/.cache/retoque-native-ngx/run-20261015T151235Z/`.
+An earlier guarded run at `run-20261015T150847Z/` independently returned the same NGX statuses.
+No game mappings were present before the GPU invocations. All numbers are point-in-time queries,
+not performance measurements; clocks/power/display settings were not changed.
+
+| Item | Measured value |
+|---|---|
+| GPU / driver | RTX 4090, 24,564 MiB; 615.78.08 (`nvidia-utils 615.78.08-1`) |
+| Device UUID | `4f1ceff00dc0928684531bb6657cb77a` |
+| Driver UUID | `ad6325108a6658c8aa0c9ffd3f6f97fe` |
+| Native Vulkan | Device API 1.4.351; loader/tools 1.4.363.0-1 |
+| Session / compiler / trace tool | Hyprland 0.56.2-4; gcc 16.2.1+r23+gd564253eb6c8-1; strace 7.2-1 |
+| Runner | Native ELF and system Vulkan loader; **no Wine/Proton runner** |
+| Vulkan headers | Existing repository submodule pin `d64e9e156ac818c19b722ca142230b68e3daafe3` |
+| Before-run GPU state | P8; graphics 450 MHz, memory 810 MHz; 450 W limit, 16.27 W draw; 1,805 MiB used (nvidia-smi) |
+| Device-local heap 0 | size 25,757,220,864 bytes; budget 23,441,506,304; process usage 0 before device creation |
+| Host heap 1 | size/budget 24,979,617,792 bytes; process usage 0 before device creation |
+| Native XWayland WSI | XCB and Xlib report 2 pairs: BGRA8 UNORM/SRGB, both SRGB_NONLINEAR; FIFO, IMMEDIATE, FIFO_LATEST_READY |
+| Native Wayland WSI | 38 format/colour-space pairs; includes A2R10 and A2B10 + HDR10_ST2084, FP16 + EXTENDED_SRGB_LINEAR; MAILBOX, FIFO, FIFO_LATEST_READY, IMMEDIATE |
+
+Surface queries came from native `vulkaninfo` against separate Wayland and X11 surfaces. No HDR
+swapchain, NR presentation, visual-quality or scanout test was performed. All 38 pairs and surface
+capabilities are in `vulkaninfo.txt`; surface availability is not external-allocation compatibility.
+
+| Queue family | Available queues | Flags | Timestamp bits |
+|---|---:|---|---:|
+| 0 | 16 | graphics, compute, transfer, sparse (`0xf`) | 64 |
+| 1 | 2 | transfer, sparse (`0xc`) | 64 |
+| 2 | 8 | compute, transfer, sparse (`0xe`) | 64 |
+| 3 | 1 | video decode, transfer, sparse (`0x2c`) | 32 |
+| 4 | 2 | video encode, transfer, sparse (`0x4c`) | 32 |
+| 5 | 1 | optical flow, transfer, sparse (`0x10c`) | 64 |
+
+External-image queries were 2D, optimal tiling, flags 0, separately for opaque FD (`0x1`) and
+DMA-BUF (`0x200`). `T` means TRANSFER_SRC|TRANSFER_DST (`0x3`), `TSS` adds SAMPLED|STORAGE (`0xf`).
+Every successful row has external-memory features `0x6` (EXPORTABLE|IMPORTABLE, **not**
+DEDICATED_ONLY), matching handle type as both compatible and export-from-imported mask, and
+max extent 32768×32768. No shared memory was allocated/imported; modifiers and a Wine endpoint
+were not tested. This is an inventory for later option (a), not its transport proof.
+
+| Format | Opaque FD T / TSS | DMA-BUF T / TSS |
+|---|---|---|
+| RGBA8 UNORM (37) | success / success | success / success |
+| BGRA8 UNORM (44) | success / success | success / success |
+| A2R10G10B10 UNORM (58) | success / `VK_ERROR_FORMAT_NOT_SUPPORTED` (-11) | success / -11 |
+| A2B10G10R10 UNORM (64) | success / success | success / success |
+| RGBA16F (97) | success / success | success / success |
+
+| External semaphore tuple | Features / compatibility / export-from-imported |
+|---|---|
+| Opaque FD + binary | `0x3` IMPORTABLE|EXPORTABLE; `0x1` / `0x1` |
+| Opaque FD + timeline | `0x3`; `0x1` / `0x1` |
+| Sync FD + binary | `0x3`; `0x10` / `0x10` |
+| Sync FD + timeline | 0 / 0 / 0, unsupported |
+
+### Files, hashes and the missing native model
+
+SDK headers, static API wrapper and SR model were fetched from pinned
+[NVIDIA/DLSS `37495948`](https://github.com/NVIDIA/DLSS/tree/374959484e79a640feaba44c93ac8cfb0a03f5b5).
+They reside only under `~/.cache/retoque-native-ngx/<full-SDK-commit>/`; no NVIDIA headers, libraries
+or compiled probes are committed. Source uses the public SDK setters/getters, not parameter-object
+layout assumptions. The SDK's
+[result enum](https://github.com/NVIDIA/DLSS/blob/374959484e79a640feaba44c93ac8cfb0a03f5b5/include/nvsdk_ngx_defs.h)
+defines the hexadecimal statuses above.
+
+| Artifact | SHA-256 |
+|---|---|
+| Native driver `libnvidia-ngx.so.615.78.08` | `85da2399cceeb954b8dc2753cc9bb50ddabd1baf847d8664b85374cc99b03990` |
+| SDK Linux `libnvsdk_ngx.a` | `3321c4ca9adf71f345550d10bf2148ed38003151b03ec5f81c99d00949ab8202` |
+| Linux SR `libnvidia-ngx-dlss.so.310.9.1` | `7561f16cab74e2b7ccf791bf44bb9cc43abb44bcf78f33c5663520ad4e857e02` |
+| Guarded probe ELF | `1e69c5adeeb0ff22fffaa8bd766a97d9e2ced06a521d95ed910d80a8ee57a39a` |
+| NGX/Vulkan probe log | `bb5ce6ace81aa1420054cd6f47f6d6798248a8e8ca7637155edc200dbd443352` |
+| File/process/network trace | `a6049d956bf54e608ea36ca06045e522ac2ba51a3b7696b0392002ac88edea78` |
+
+`manifest.json` records all SDK-file hashes, opened ELF module hashes, source, inventory and logs.
+`opened-paths.json` lists successful absolute `openat` paths visible in complete trace lines;
+`trace.log` retains failures, relative paths and split/resumed calls too. `model-discovery.txt`
+retains the core's candidate names/directories. In the guarded run:
+
+- The SDK opens `/usr/lib/libnvidia-ngx.so.1`, resolving to the driver file above.
+- The core opens the SDK's `lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.310.9.1`. Its callback reports
+  build 310.9.1, CL 38868064. `/proc/self/maps` also shows its memfd-loaded mappings; do not mistake
+  `(deleted)` there for a missing SR model.
+- For NR, the core scans that release directory and the probe executable/result directory for
+  `libnvidia-ngx-dlssnr.so` (including versioned snippets). The release directory contains only SR;
+  no NR candidate is opened. The candidate is identified by the callback rather than a fabricated
+  failed `openat` of an exact unversioned pathname.
+- The isolated model-cache deny-list path is attempted and absent. Core logs its usual allow
+  decision; the probe does not patch that policy. Signature checking remains enabled.
+
+Verbatim core line, excluding the callback wrapper:
+
+```text
+[NGXSecureLoadFeature:1286] warning: ModuleName - libnvidia-ngx-dlssnr.so doesn't exist in any of the search paths!
+```
+
+### Updater incident and enforced rerun boundary
+
+**The first probe inadvertently violated the no-updater-execution constraint.** Although a
+cache-local config set `allow_ngx_updater=false`, the core still launched four updater processes.
+Each read that configuration and exited 1. Their file/process trace shows no file-mutating
+operations for those processes; that first trace did not include network syscalls, so it cannot
+prove an absence of network attempts. The initial evidence remains under
+`~/.cache/retoque-native-ngx/results/`; do not use its unguarded executable for reproduction.
+No system configuration or model was deliberately changed, and no updater was called directly.
+
+The delivered probe installs a process-local, inherited **seccomp no-exec guard before any SDK
+call**. `execve`/`execveat` and alternate x32 ABI execution are denied; failure to install the
+guard aborts the probe. A negative control returns `-1/EPERM`. This does not alter the driver core,
+signature policy or system configuration. The runner retains the per-process updater-disabled
+config as a second precaution, but does not rely on it to prevent execution.
+
+Both guarded runs show all four updater exec attempts denied with `EPERM`, zero successful
+updater executions and no AF_INET/AF_INET6 connection attempts in their network-inclusive traces.
+The native SR and NR results are unchanged. Do not describe the entire investigation as “the
+updater never ran”: that is true only of the guarded runs used for the final table.
+
+### Validation and remaining scope
+
+Host g++ build with warnings as errors and clang-format 22 dry-run/Werror pass. `nr-invariants`
+passes in the capped systemd scope; no host GPU test is registered, and no full host suite is
+needed for the disposable probe. No Wine prefix, Retoque DLL build, game, deployment, push or
+merge. No actual external-memory/semaphore interop, NR inference, identity pixels, timing A/B,
+helper transport or option-(a) implementation was performed. A future native NR model must
+still establish the parameter contract and pass the conditional evaluate/pixel tests.
