@@ -1264,6 +1264,55 @@ then edited every judged post-hand-back frame, and freed the route's objects bef
 cases had zero host validation errors and six occurrences each of the model's already-allowed
 `VUID-vkCmdDraw-None-09600`. This proves the hook-chain regression in the harness, not a new DOOM game run.
 
+### Second DOOM cycle: hand-back diagnostics and a window heartbeat
+
+The 2026-10-14 run on `c8d9df7f` (the parity branch's integration of `da4988a1`) proves the first hand-back:
+at 22:23:10.473 the host drained four queues in 5 ms and resumed NR at 3440x1440. At 22:24:43 it stood down again.
+The last exposure-change message is at 22:24:59.768; `ReleaseFeature(1000000)` is logged at 22:25:12.212, then
+nothing through the reported continued rendering and quit. There is no second new-queue line after 22:24:43.
+
+This does not identify a second-cycle runtime defect. Exposure is logged only after a change above its threshold,
+not at every evaluate. F7 turning NR off returns before the route asks for the model and also prevents the host
+from taking it back; continued evaluates at stable exposure can instead keep the route non-idle. The release line
+precedes an unbounded `vkDeviceWaitIdle` and two 500 ms sleeps in upstream; it is not proof that release returned.
+Release does not relinquish the NR owner token. The existing real-hook harness already releases its NGX feature
+after the last evaluate on each of two cycles and successfully hands the model back.
+
+The diagnostic change preserves ownership and the ten-second quiet window. Once a hand-back is due, it names each
+blocking reason once per due episode: NR off, a model still present, retry backoff, unavailable device/model/instance,
+a yielding route, or no eligible swapchain (with individual reasons). It also names no recorded queues, fence-create
+failure and a refused begin. A busy queue names its handle, family, index and present/submit lock, after one second
+of failed attempts; changing reasons cannot produce one line per frame. Success or no longer being due resets the
+episode. Re-enabling NR incurs no new quiet window. Messages queued by Housekeep are flushed before early present
+refusals, too; previously such a message could stay queued until a transport path reached the later flush.
+
+Queue locking stays try-only. Present already holds its own present lock and the transport mutex; another present
+may hold another queue's present lock while waiting for that transport mutex. Waiting for that queue here would
+close a cycle. Acquiring each queue's present then submit lock with try-lock, retaining them only for a successful
+attempt, gives them all back on any refusal and retries at the next present. It adds no timed wait to a present and
+makes progress once the locks are free, but cannot promise fairness against continuous contention. No observed
+lock failure in this DOOM log justifies changing that policy or submitting without the required synchronization.
+
+Each window additionally emits its usual cumulative transport/NR counters on the first present at least 60 seconds
+after its previous line, with reason `60 s heartbeat`. Event/decade lines reset that deadline. No presents means no
+heartbeat; a long gap emits one current line, not catch-up lines. The clock is monotonic and tests inject its value.
+
+Validation on build `bfe1b517` (`20261014_224714`): all 49 host suites passed in the memory-capped scope.
+The host suite covers F7-off readiness while already quiet, immediate admission on re-enable, real present/submit
+mutex contention with one delayed diagnostic and progress after release, and fake-clock heartbeat boundaries.
+`nr-route-quiet` and `nr-route-quiet-wdx12` passed both NGX-release cycles. The new `nr-route-toggle-wdx12`
+passed both release/F7-off/F7-on cycles through the real wDx12 hook: exactly one NR-off blocker per cycle,
+hand-back starting 96.698/100.320 ms after re-enable and draining in 96/98 ms, exact disabled/route read-backs,
+and changed post-hand-back frames. All three have zero host validation errors; the six already classified
+`nv.ngx.*` model reports per case remain separately counted.
+
+The toggle case enables the legacy overlay to exercise its actual F7 handler, using window-local messages.
+Its first run exposed the overlay's missing device-exit cleanup (54 live objects), unrelated to hand-back.
+The harness now creates/destroys a temporary Win32 surface after all measured phases to invoke the overlay's
+existing cleanup path; validation suppresses no leak report. Startup splash and F7-toast frames are kept outside
+the byte-exact route/disabled checks. This tests real input and ownership transitions, not ordinary overlay exit,
+concurrent game queues or DOOM's exact call sequence. No second-cycle stall was reproduced and no game was deployed.
+
 ### What the next DOOM Eternal run should show
 
 Deployed with `nvngx.dll_dlssnr.dll` from the same build, `[DlssNr] Enabled=true`, `VulkanPresentHost=true`, as for the
