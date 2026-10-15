@@ -111,6 +111,26 @@ mask almost everywhere.
 colour 1, guard 2. This is Crimson Desert's: "colour transform on (linear HDR), transfer matched
 residual, guard 2.0x", `WhitePointSource=1`.
 
+### Live white-point fallback (2026-10-15)
+
+The live D3D12 exposure is optional. `WhitePoint()` accepts a sample only inside `(1e-6, 1e6)`
+and its computed `gExposurePreMul / exposure` only inside the inclusive `[0.01, 4096]` range.
+Non-finite, non-positive or out-of-range results fall through to `max(gWhitePoint, 1e-4)`;
+they must not be clamped into an apparently valid live white point. Valid live values retain
+exactly the existing division and operation order. Vulkan has no live exposure binding and
+continues to use the CPU value. Both shader targets are rebuilt for this change.
+
+The CPU policy stays unchanged: `Exposure::WhitePoint` sanitizes pre-exposure and trim, uses a
+valid delayed sample, then clamps the result to `[0.01, 4096]`. This is the existing bounded
+fallback, not a promise that an invalid live sample can never produce an endpoint. Changing it
+to paper white on a single excursion would change the CPU-only Vulkan path and the deliberate
+one-sided-excursion behavior of the exposure latch. The latch observes the **untrimmed,
+unclamped** implied white point in `DlssNr_Dx12.cpp`; after two readings below 0.02 and two above
+512 it disables live exposure and selects paper white for the session. That policy remains
+separate from per-frame live validation. Tests retain Crimson Desert's 0.10..307 adaptation
+and Control's two-sided latch, and execute the actual shader function against invalid samples,
+invalid ratios, both inclusive endpoints, CPU fallback, live-off and `VK_MODE`.
+
 ### 3.1 The encode: where the energy leaves what the model sees, on purpose
 
 | Lines | What |
