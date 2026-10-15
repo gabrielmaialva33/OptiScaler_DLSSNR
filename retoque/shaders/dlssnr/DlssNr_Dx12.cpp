@@ -7100,7 +7100,9 @@ const char* HookStatus()
                    "it interpolates)";
         if (presenting)
             return DlssNr::PresentGuideIdentity::RouteText(false, RecentGuideSource(guides));
-        return "present: active on the swapchain's backbuffer";
+        if (PresentRouteLive())
+            return "present: active on the swapchain's backbuffer";
+        return "present: no present has reached the pass yet";
     }
 
     if (method == 0)
@@ -7480,11 +7482,12 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     const auto guideOutcome = DlssNr::PresentGuideIdentity::OutcomeOf(guides.decision, temporalValid);
     CountPresentPassGuides(guides, pickedSlot, guideOutcome);
 
-    // The newest capture refused: decided on as surely as one used, so a later present with nothing newer recorded has
-    // no capture of its own and skips above (D5) instead of running the fallback -- a generated frame of a game's own
-    // frame generation that OptiScaler does not replace reaches this entry. A refused older pick (a newer capture still
-    // being copied) is left to the next present.
+    // The newest capture refused for good: decided on as surely as one used, so a later present with nothing newer
+    // recorded has no capture of its own and skips above (D5) instead of running the fallback -- a generated frame of a
+    // game's own frame generation that OptiScaler does not replace reaches this entry. A refused older pick (a newer
+    // capture still being copied), or a refusal that turns on this present (SettlesNewest), is left to the next one.
     if (guideOutcome == DlssNr::PresentGuideIdentity::Outcome::Refused &&
+        DlssNr::PresentGuideIdentity::SettlesNewest(guides.decision.reason) &&
         g_presentGuideRing.GetSlot(pickedSlot).sequence == newestRecordedSeq)
     {
         g_nrLastEnhancedRecordedSeq = newestRecordedSeq;

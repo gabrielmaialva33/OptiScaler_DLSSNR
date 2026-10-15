@@ -445,6 +445,33 @@ enum class Outcome : uint8_t
     None,    // nothing was picked, or the read could not be tracked: zero or synthesized guides
 };
 
+// Whether refusing the newest capture recorded settles it for good, so that a later present with nothing newer can
+// skip as it would after a use (D5) instead of running the fallback. Only reasons that live in the capture: its
+// device, its output base, its ordinal (no newer capture of its frame can exist when it is the newest), its render
+// extent, and its lag and age, which only grow. Not extent or swapchain, which turn on the present and can be a
+// passing state of it (a resize under way, another window's present); not consumed, which the skip already covers.
+inline bool SettlesNewest(Reason reason)
+{
+    switch (reason)
+    {
+    case Reason::Device:
+    case Reason::OutputBase:
+    case Reason::Ambiguous:
+    case Reason::Lag:
+    case Reason::Stale:
+    case Reason::Subrect:
+        return true;
+    case Reason::Accepted:
+    case Reason::NoCapture:
+    case Reason::Extent:
+    case Reason::Swapchain:
+    case Reason::Consumed:
+        break;
+    }
+
+    return false;
+}
+
 // The outcome of a present that did not skip. `read`: the pass took the slot the decision gave it (the read was
 // tracked). An accepted capture whose read could not be tracked is not read, and counts as none.
 inline Outcome OutcomeOf(const Decision& decision, bool read)
