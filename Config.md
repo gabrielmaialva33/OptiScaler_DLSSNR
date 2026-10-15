@@ -432,11 +432,13 @@ HookMethod=auto
 VulkanPresentHost=auto
 
 ; The D3D12 present pass only (HookMethod=2, and Auto once it has moved to present): require the game's
-; own depth and motion, captured from its upscaler. On, a frame with none ready is shown as the game
-; rendered it; off, the pass runs on constant depth and no motion (or on SynthMotion's estimate), which is
-; right for a title whose upscaler is not DLSS. The D3D11 bridge's present host does not read this: it
-; uses the game's depth and motion when the game's upscaler runs through OptiScaler's D3D11-on-D3D12
-; bridge (dlss_12 and the other _12 upscalers), and constant depth and no motion (or SynthMotion's
+; own depth and motion, captured from its upscaler. A capture is used only on a frame it can be shown to
+; belong to (docs/dlssnr/design/present-real-guides.md). On, a frame with none of its own -- none ready,
+; or a capture that is not this frame's -- is shown as the game rendered it; off, the pass runs on
+; constant depth and no motion (or on SynthMotion's estimate), which is right for a title whose upscaler
+; is not DLSS. The D3D11 bridge's present host does not read this: it uses the game's depth and motion
+; when the game's upscaler runs through OptiScaler's D3D11-on-D3D12 bridge (dlss_12 and the other _12
+; upscalers) and the capture is the frame's own, and constant depth and no motion (or SynthMotion's
 ; estimate) otherwise.
 ; true or false - Default (auto) is false
 RequireDlss=auto
@@ -445,7 +447,8 @@ RequireDlss=auto
 ; history over every frame. With zero motion the model believes nothing moved and blends the new frame
 ; with where things used to be -- ghosts and doubled edges whenever the camera moves, worst in fast
 ; first-person titles. On, there is no history to ghost from, at the cost of the model's temporal
-; smoothing. No effect when real guides are captured.
+; smoothing. No effect when real guides are captured, nor on the odd frame whose capture is refused while
+; the game's guides are otherwise in use (docs/dlssnr/design/present-real-guides.md, step 1).
 ; true or false - Default (auto) is false
 ZeroGuideReset=auto
 

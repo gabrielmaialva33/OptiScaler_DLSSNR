@@ -9,9 +9,11 @@
 // returns is the ring's pick or none, never another one, so an identity failure can never make an unsafe slot
 // readable.
 //
-// Built in step 0 of that note, which is log only: both consumers ask, nothing acts on the answer, and Consumer
-// counts what the answer would have changed. Standard library only, so tests/nr-present-guide-identity drives every
-// rule on the host.
+// Step 1 of that note: both consumers read the slot Decide returns, so a capture reaches the model only when every
+// rule holds, and a refused one is never read (the frame falls back to zero or synthesized guides). Consumer counts
+// what each present did and writes one line per window; SourceHistory says when a change of guide source owes the
+// model a reset; Status is what the status line and the menu say about the guides. Standard library only, so
+// tests/nr-present-guide-identity drives every rule on the host.
 
 #include "DlssNr_PresentGuideRing.h"
 
@@ -25,11 +27,18 @@ namespace DlssNr::PresentGuideIdentity
 {
 using PresentGuides::kRingSize;
 
-// How many frame boundaries a correct capture may trail the present that reads it. Assumed, not measured. An engine
-// that evaluates and presents on one thread captures in the interval just before the present's own boundary, which
-// is 1; one whose render thread runs a frame ahead of its present thread lands on 2. Step 0's log carries the
-// distribution that should set it.
+// How many frame boundaries a correct capture may trail the present that reads it, where rule 6 is enforced.
+// Measured in Crimson Desert at the game's own Present (nr-before-dlssg.md's boundary): every capture of three
+// sessions was one boundary behind (9,075 presents at 9f97f708, 4,382 and 5,536 at a2d02037). At the wrapped
+// swapchain entry the one session measured had every capture two behind, but only its first ten seconds, which does
+// not settle that entry. So rule 6 is enforced at the boundary only; elsewhere a capture further behind is counted
+// and still used (Present::enforceLag).
 constexpr uint64_t kLag = 1;
+
+// A change of guide source -- the game's depth and motion against zero or synthesized ones -- that holds for this
+// many presents in a row drops the model's history once (D3). A shorter change falls back without a reset, so a
+// title that misses the odd frame does not reset continuously. Assumed: step 0 saw no source change to tune it on.
+constexpr uint32_t kSourceStable = 4;
 
 // A swapchain counts as presenting on its device for this long after its last present. The registry counts
 // swapchains that present, not swapchains that exist: a launcher's chain that stops presenting stops counting.
@@ -53,7 +62,7 @@ struct Stamp
     uint32_t renderHeight = 0;       //
     uint64_t presentEpoch = 0;       // the frame boundary count when the capture was made
     uint32_t evalsSincePresent = 0;  // this capture's ordinal since that boundary, on its device at its output extent
-    const void* swapchain = nullptr; // the device's one presenting swapchain; null for none or several
+    const void* swapchain = nullptr; // the device's one presenter (see Present::swapchain); null for none or several
 };
 
 using Stamps = std::array<Stamp, kRingSize>;
@@ -64,11 +73,14 @@ struct Present
     const void* device = nullptr; // the device the present's list reads the copies on
     uint32_t width = 0;           // the image the pass edits: the backbuffer
     uint32_t height = 0;          //
+    // Who presents: one identity per presenting window. The D3D12 pass names the swapchain's window, so the game's
+    // Streamline proxy and the swapchain beneath it are one presenter; the D3D11 bridge names its host.
     const void* swapchain = nullptr;
     uint32_t swapchainsOnDevice = 0; // presenting swapchains on that device, this one included
     uint64_t epoch = 0;              // the frame boundary count, this present's own included
-    uint64_t lastConsumed = 0;       // ring sequence of the capture this consumer last read; 0 for none
+    uint64_t lastConsumed = 0;       // ring sequence of the capture this consumer last used; 0 for none
     int64_t nowMs = 0;
+    bool enforceLag = true; // rule 6 refuses; false: a capture past kLag is accepted and marked (Decision::lagBeyond)
 };
 
 // In the order the rules are checked; the first that fails is the answer.
@@ -122,6 +134,7 @@ struct Decision
 {
     size_t slot = kRingSize;
     Reason reason = Reason::NoCapture;
+    bool lagBeyond = false; // more than kLag boundaries behind, at a present that does not enforce rule 6
 };
 
 struct Extent
@@ -214,10 +227,10 @@ inline Decision Decide(size_t picked, const PresentGuides::Ring& ring, const Sta
     if (slot.sequence <= present.lastConsumed)
         return refuse(Reason::Consumed);
 
-    // 6. No more than kLag frame boundaries behind this present.
+    // 6. No more than kLag frame boundaries behind this present, where that limit was measured; elsewhere noted.
     const uint64_t lag = present.epoch > stamp.presentEpoch ? present.epoch - stamp.presentEpoch : 0;
 
-    if (lag > kLag)
+    if (lag > kLag && present.enforceLag)
         return refuse(Reason::Lag);
 
     // 7. The ring's own age limit, asked again with the present's clock.
@@ -234,7 +247,7 @@ inline Decision Decide(size_t picked, const PresentGuides::Ring& ring, const Sta
         return refuse(Reason::Subrect);
     }
 
-    return { picked, Reason::Accepted };
+    return { picked, Reason::Accepted, lag > kLag };
 }
 
 // The swapchains that have presented on each device lately.
@@ -420,16 +433,27 @@ class Tracker
 };
 
 // ---------------------------------------------------------------------------------------------------------------
-// Step 0: what the decision would have changed, counted per consumer and written as one line per window.
+// Step 1: what each present did with the decision, counted per consumer and written as one line per window.
 // ---------------------------------------------------------------------------------------------------------------
 
-// What the present does today with the slot PickForPresent offered.
-enum class Today : uint8_t
+// What a present did with its pick.
+enum class Outcome : uint8_t
 {
-    Read,    // reads the picked capture
-    Skipped, // runs no pass: nothing was captured since its last one (the D3D12 present pass's own skip)
-    None,    // nothing was picked; zero or synthesized guides
+    Used,    // every rule held, and the pass reads the capture
+    Refused, // a rule failed: the capture is not read, and the frame falls back (or waits, under RequireDlss)
+    Skipped, // the D3D12 present pass's own skip: nothing was recorded since the capture it last used
+    None,    // nothing was picked, or the read could not be tracked: zero or synthesized guides
 };
+
+// The outcome of a present that did not skip. `read`: the pass took the slot the decision gave it (the read was
+// tracked). An accepted capture whose read could not be tracked is not read, and counts as none.
+inline Outcome OutcomeOf(const Decision& decision, bool read)
+{
+    if (decision.reason == Reason::Accepted)
+        return read ? Outcome::Used : Outcome::None;
+
+    return decision.reason == Reason::NoCapture ? Outcome::None : Outcome::Refused;
+}
 
 using Clock = std::chrono::steady_clock;
 
@@ -444,13 +468,15 @@ constexpr size_t kFrameBuckets = 3; // 1, 2, 3 or more
 struct Counts
 {
     uint32_t presents = 0;
-    uint32_t read = 0;
+    uint32_t enforced = 0; // presents at which rule 6 was enforced
+    uint32_t used = 0;
     uint32_t skipped = 0;
     uint32_t none = 0;
-    std::array<uint32_t, kReasons> readReasons {}; // the decision, over presents that read a capture today
-    uint32_t skippedWouldPass = 0;                 // presents that skip today on a capture the rules accept
-    std::array<uint32_t, kLagBuckets> lag {};      // epoch lag, over picks no present had read yet
-    std::array<uint32_t, kFrameBuckets> frame {};  // FrameCaptures, over the same picks
+    std::array<uint32_t, kReasons> refused {};    // by first failing rule
+    uint32_t skippedWouldPass = 0;                // presents that skipped on a capture the rules accept
+    uint32_t lagBeyond = 0;                       // used, more than kLag behind, where rule 6 is not enforced
+    std::array<uint32_t, kLagBuckets> lag {};     // epoch lag, over picks no present had used yet
+    std::array<uint32_t, kFrameBuckets> frame {}; // FrameCaptures, over the same picks
 
     // The last extent or output-base refusal of the window, for the line.
     bool haveMismatch = false;
@@ -459,6 +485,14 @@ struct Counts
     uint32_t mismatchHeight = 0;
 };
 
+inline uint32_t Refusals(const Counts& counts)
+{
+    uint32_t total = 0;
+    for (const uint32_t n : counts.refused)
+        total += n;
+    return total;
+}
+
 // Which buckets are in use: what makes a window look like the last one written.
 inline uint32_t Shape(const Counts& counts)
 {
@@ -466,12 +500,14 @@ inline uint32_t Shape(const Counts& counts)
     uint32_t bit = 0;
     const auto add = [&shape, &bit](uint32_t value) { shape |= (value != 0 ? 1u : 0u) << bit++; };
 
-    add(counts.read);
+    add(counts.used);
     add(counts.skipped);
     add(counts.none);
-    for (const uint32_t n : counts.readReasons)
+    add(counts.presents - counts.enforced);
+    for (const uint32_t n : counts.refused)
         add(n);
     add(counts.skippedWouldPass);
+    add(counts.lagBeyond);
     for (const uint32_t n : counts.lag)
         add(n);
     for (const uint32_t n : counts.frame)
@@ -484,35 +520,33 @@ inline std::string FormatLine(const char* consumer, const Counts& counts, Clock:
 {
     const auto n = [](uint32_t value) { return std::to_string(value); };
     const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    const uint32_t refused = Refusals(counts);
 
-    const uint32_t passes = counts.readReasons[static_cast<size_t>(Reason::Accepted)];
-    const uint32_t refused = counts.read - passes;
-
-    std::string line = "DLSS-NR present guides, identity check (log only, nothing refused), ";
+    std::string line = "DLSS-NR present guides, identity applied, ";
     line += consumer;
     line += ": " + n(counts.presents) + " presents in " + std::to_string(ms / 1000) + "." +
-            std::to_string(ms % 1000 / 100) + " s";
-    line += " | today " + n(counts.read) + " read a capture, " + n(counts.skipped) + " skipped with no new capture, " +
-            n(counts.none) + " had none";
-    line += " | of those read, " + n(passes) + " would pass, " + n(refused) + " would be refused";
+            std::to_string(ms % 1000 / 100) + " s, lag limit enforced on " + n(counts.enforced);
+    line += " | " + n(counts.used) + " used the game's depth and motion, " + n(refused) + " refused";
 
     if (refused != 0)
     {
         std::string reasons;
 
-        for (size_t r = static_cast<size_t>(Reason::NoCapture); r < kReasons; ++r)
+        for (size_t r = static_cast<size_t>(Reason::Device); r < kReasons; ++r)
         {
-            if (counts.readReasons[r] == 0)
+            if (counts.refused[r] == 0)
                 continue;
 
             reasons += reasons.empty() ? " (" : ", ";
-            reasons += std::string(ReasonName(static_cast<Reason>(r))) + " " + n(counts.readReasons[r]);
+            reasons += std::string(ReasonName(static_cast<Reason>(r))) + " " + n(counts.refused[r]);
         }
 
         line += reasons + ")";
     }
 
+    line += ", " + n(counts.skipped) + " skipped with no new capture, " + n(counts.none) + " had none";
     line += " | skipped but would pass " + n(counts.skippedWouldPass);
+    line += " | used past the lag limit where it is not enforced " + n(counts.lagBeyond);
     line += " | epoch lag of new captures 0:" + n(counts.lag[0]) + " 1:" + n(counts.lag[1]) + " 2:" + n(counts.lag[2]) +
             " 3:" + n(counts.lag[3]) + " 4+:" + n(counts.lag[4]);
     line += " | captures per frame at their extent 1:" + n(counts.frame[0]) + " 2:" + n(counts.frame[1]) +
@@ -529,8 +563,8 @@ inline std::string FormatLine(const char* consumer, const Counts& counts, Clock:
     return line;
 }
 
-// One present stream's step-0 record: the counts of the open window, and the last capture it read, which rule 5
-// compares against. Used under the ring's lock, by that consumer only.
+// One present stream's record: the counts of the open window, and the last capture it used, which rule 5 compares
+// against. Used under the ring's lock, by that consumer only.
 class Consumer
 {
     const char* _name;
@@ -545,12 +579,21 @@ class Consumer
   public:
     explicit Consumer(const char* name) : _name(name) {}
 
+    const char* Name() const { return _name; }
     uint64_t LastConsumed() const { return _lastConsumed; }
     const Counts& Open() const { return _counts; }
 
+    // Rule 5's record of a use, without counting it: for a present that is not logged. Never backwards: an older
+    // capture used after a newer one does not make the newer one unused.
+    void MarkUsed(uint64_t sequence)
+    {
+        if (sequence > _lastConsumed)
+            _lastConsumed = sequence;
+    }
+
     // Counts one present; `present` is what Tracker::AtPresent filled. True when a line is due, written to *line.
     bool Note(const Decision& decision, size_t picked, const PresentGuides::Ring& ring, const Stamps& stamps,
-              const Present& present, Today today, Clock::time_point now, std::string* line)
+              const Present& present, Outcome outcome, Clock::time_point now, std::string* line)
     {
         if (!_started)
         {
@@ -559,12 +602,13 @@ class Consumer
         }
 
         ++_counts.presents;
+        _counts.enforced += present.enforceLag ? 1 : 0;
 
         const bool havePick = picked < kRingSize && ring.GetSlot(picked).recorded;
         const uint64_t sequence = havePick ? ring.GetSlot(picked).sequence : 0;
 
-        // The lag and frame histograms count a capture once, at the first present it is offered to. Offered again
-        // after it was read, it is counted as consumed, and its lag only grows.
+        // The lag and frame histograms count a capture once, at the first present it is offered to. Offered again,
+        // it is counted as consumed or lag, and its lag only grows.
         if (havePick && sequence > _lastCounted)
         {
             _lastCounted = sequence;
@@ -577,11 +621,18 @@ class Consumer
             ++_counts.frame[frame >= kFrameBuckets ? kFrameBuckets - 1 : (frame == 0 ? 0 : frame - 1)];
         }
 
-        switch (today)
+        switch (outcome)
         {
-        case Today::Read:
-            ++_counts.read;
-            ++_counts.readReasons[static_cast<size_t>(decision.reason)];
+        case Outcome::Used:
+            ++_counts.used;
+            _counts.lagBeyond += decision.lagBeyond ? 1 : 0;
+
+            if (havePick)
+                MarkUsed(sequence);
+            break;
+
+        case Outcome::Refused:
+            ++_counts.refused[static_cast<size_t>(decision.reason)];
 
             if (decision.reason == Reason::Extent || decision.reason == Reason::OutputBase)
             {
@@ -590,18 +641,14 @@ class Consumer
                 _counts.mismatchWidth = present.width;
                 _counts.mismatchHeight = present.height;
             }
-
-            // Never backwards: an older capture read after a newer one does not make the newer one unread.
-            if (havePick && sequence > _lastConsumed)
-                _lastConsumed = sequence;
             break;
 
-        case Today::Skipped:
+        case Outcome::Skipped:
             ++_counts.skipped;
             _counts.skippedWouldPass += decision.reason == Reason::Accepted ? 1 : 0;
             break;
 
-        case Today::None:
+        case Outcome::None:
             ++_counts.none;
             break;
         }
@@ -628,4 +675,261 @@ class Consumer
 
     void Reset() { *this = Consumer(_name); }
 };
+
+// The guide source the model's history is being built on, and when a change of it owes a reset (D3). Real motion and
+// zero or synthesized motion are different contracts for one history buffer. Zero and synthesized are one side here:
+// the estimator settles its own changes (SynthMotionGuide), and a switch between them never reset before.
+class SourceHistory
+{
+    enum Source : uint8_t
+    {
+        kUnknown,
+        kGame,
+        kOther,
+    };
+
+    Source _established = kUnknown;
+    Source _candidate = kUnknown;
+    uint32_t _run = 0;
+
+  public:
+    // One present whose pass runs; `game`: on the game's own depth and motion. True once, on the present at which a
+    // change of source has held for kSourceStable presents in a row. The first source to hold is where the route
+    // starts, and the route's own reset already covers it.
+    bool Note(bool game)
+    {
+        const Source source = game ? kGame : kOther;
+
+        if (source == _established)
+        {
+            _candidate = kUnknown;
+            _run = 0;
+            return false;
+        }
+
+        if (source != _candidate)
+        {
+            _candidate = source;
+            _run = 0;
+        }
+
+        if (++_run < kSourceStable)
+            return false;
+
+        const bool reset = _established != kUnknown;
+        _established = source;
+        _candidate = kUnknown;
+        _run = 0;
+        return reset;
+    }
+
+    // Which source holds: 1 the game's, 0 zero or synthesized, -1 none yet.
+    int Established() const { return _established == kUnknown ? -1 : (_established == kGame ? 1 : 0); }
+
+    void Reset() { *this = SourceHistory {}; }
+};
+
+// ---------------------------------------------------------------------------------------------------------------
+// What the status line and the menu say about the guides: the last second's outcomes, not g_temporalValid, which
+// latches on the first capture and never clears (D3).
+// ---------------------------------------------------------------------------------------------------------------
+
+// One second of outcomes. presents: those that ran the pass or would have (used, refused, none); skipped apart.
+struct Status
+{
+    uint32_t presents = 0;
+    uint32_t used = 0;
+    uint32_t refused = 0;
+    uint32_t skipped = 0;
+    Reason top = Reason::Accepted; // the most frequent refusal; Accepted when there was none
+};
+
+// Packed into one word, so it is published with a store and read with a load, without the ring's lock. Each count
+// saturates at 15 bits, far above any present rate.
+constexpr uint32_t kStatusCountMax = 0x7FFF;
+
+inline uint64_t Pack(const Status& status)
+{
+    const auto field = [](uint32_t v) -> uint64_t { return v > kStatusCountMax ? kStatusCountMax : v; };
+    return field(status.presents) | field(status.used) << 15 | field(status.refused) << 30 |
+           field(status.skipped) << 45 | static_cast<uint64_t>(static_cast<uint8_t>(status.top) & 0xFu) << 60;
+}
+
+inline Status Unpack(uint64_t word)
+{
+    Status status;
+    status.presents = static_cast<uint32_t>(word & kStatusCountMax);
+    status.used = static_cast<uint32_t>(word >> 15 & kStatusCountMax);
+    status.refused = static_cast<uint32_t>(word >> 30 & kStatusCountMax);
+    status.skipped = static_cast<uint32_t>(word >> 45 & kStatusCountMax);
+    const auto top = static_cast<uint8_t>(word >> 60 & 0xFu);
+    status.top = top < kReasons ? static_cast<Reason>(top) : Reason::Accepted;
+    return status;
+}
+
+constexpr Clock::duration kStatusWindow = std::chrono::seconds(1);
+
+class StatusWindow
+{
+    Status _open {};
+    std::array<uint32_t, kReasons> _reasons {};
+    Clock::time_point _start {};
+    bool _started = false;
+
+  public:
+    // One present. True when a second has passed, with that second written to *out.
+    bool Add(Outcome outcome, Reason reason, Clock::time_point now, Status* out)
+    {
+        if (!_started)
+        {
+            _start = now;
+            _started = true;
+        }
+
+        if (outcome == Outcome::Skipped)
+        {
+            ++_open.skipped;
+        }
+        else
+        {
+            ++_open.presents;
+            _open.used += outcome == Outcome::Used ? 1 : 0;
+
+            if (outcome == Outcome::Refused)
+            {
+                ++_open.refused;
+                ++_reasons[static_cast<size_t>(reason)];
+            }
+        }
+
+        if (now - _start < kStatusWindow)
+            return false;
+
+        uint32_t best = 0;
+        for (size_t r = static_cast<size_t>(Reason::Device); r < kReasons; ++r)
+        {
+            if (_reasons[r] > best)
+            {
+                best = _reasons[r];
+                _open.top = static_cast<Reason>(r);
+            }
+        }
+
+        if (out != nullptr)
+            *out = _open;
+
+        _open = {};
+        _reasons = {};
+        _start = now;
+        return true;
+    }
+
+    void Reset() { *this = StatusWindow {}; }
+};
+
+// What a present host did with its last frame that had no guides of the game's: the D3D12 pass under RequireDlss
+// waits (the frame is shown as the game drew it); otherwise the pass runs on SynthMotion's estimate or on zeros. The
+// D3D11 bridge never waits: it does not read RequireDlss.
+enum class Fallback : uint8_t
+{
+    Zero,
+    Synthesized,
+    Waiting,
+};
+
+// What the guides were, as a status line names them.
+enum class Source : uint8_t
+{
+    Game,        // the game's depth and motion, on at least one frame of the second
+    Synthesized, // SynthMotion's estimate, depth constant
+    Zero,        // constant depth, no motion
+    Waiting,     // the D3D12 pass under RequireDlss: none the rules accept, so the frame is shown as the game drew it
+    Skipping,    // every present skipped: no new capture since the last one used (the upscaler has stopped)
+};
+
+inline Source SourceOf(const Status& status, Fallback fallback)
+{
+    if (status.used > 0)
+        return Source::Game;
+    if (status.presents == 0 && status.skipped > 0)
+        return Source::Skipping;
+
+    switch (fallback)
+    {
+    case Fallback::Waiting:
+        return Source::Waiting;
+    case Fallback::Synthesized:
+        return Source::Synthesized;
+    case Fallback::Zero:
+        break;
+    }
+
+    return Source::Zero;
+}
+
+// HookStatus's text for a present route, by source. Literals, so the caller can hand them out as they are.
+inline const char* RouteText(bool autoRoute, Source source)
+{
+    switch (source)
+    {
+    case Source::Game:
+        return autoRoute ? "auto: present, the game's depth and motion"
+                         : "present: active, the game's depth and motion";
+    case Source::Synthesized:
+        return autoRoute ? "auto: present, synthesized motion" : "present: active, synthesized motion";
+    case Source::Zero:
+        return autoRoute ? "auto: present, zero guides (no motion)" : "present: active, zero guides (no motion)";
+    case Source::Skipping:
+        return autoRoute ? "auto: present, no new frame from the upscaler (shown as the game drew it)"
+                         : "present: no new frame from the upscaler (shown as the game drew it)";
+    case Source::Waiting:
+        break;
+    }
+
+    return autoRoute ? "auto: present, waiting for the game's depth and motion"
+                     : "present: waiting for the game's depth and motion";
+}
+
+// The menu's line under the present controls: what the guides were, and what the rules refused, over the last second.
+inline std::string GuidesLine(const Status& status, Fallback fallback)
+{
+    const auto n = [](uint32_t value) { return std::to_string(value); };
+    const std::string reason = status.refused != 0 ? std::string(" (") + ReasonName(status.top) + ")" : "";
+    const Source source = SourceOf(status, fallback);
+    std::string line;
+
+    switch (source)
+    {
+    case Source::Game:
+        if (status.used == status.presents)
+            line = status.skipped != 0 ? "Guides: the game's depth and motion, on every frame the pass ran on"
+                                       : "Guides: the game's depth and motion, on every frame";
+        else
+            line = "Guides: the game's depth and motion on " + n(status.used) + " of " + n(status.presents) +
+                   " frames; " + n(status.refused) + " refused" + reason + ", " +
+                   n(status.presents - status.used - status.refused) + " with none" +
+                   (fallback == Fallback::Waiting ? ", shown as the game drew them" : "");
+        break;
+    case Source::Synthesized:
+        line = "Guides: synthesized motion";
+        break;
+    case Source::Zero:
+        line = "Guides: zero (no motion)";
+        break;
+    case Source::Waiting:
+        line = "Guides: none the rules accept yet; frames are shown as the game drew them";
+        break;
+    case Source::Skipping:
+        return "Guides: no new frame from the upscaler; frames are shown as the game drew them";
+    }
+
+    if (source != Source::Game && status.refused != 0)
+        line += "; the game's refused on " + n(status.refused) + " of " + n(status.presents) + " frames" + reason;
+
+    if (status.skipped != 0)
+        line += "; " + n(status.skipped) + " with no new frame from the upscaler";
+
+    return line;
+}
+
 } // namespace DlssNr::PresentGuideIdentity

@@ -531,8 +531,9 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     ID3D12Resource* capturedMotion = nullptr;
     DlssNrFrameInfo captured {};
 
+    bool gameGuidesHold = false;
     if (CapturedPresentGuides(cmdList, &capturedDepth, &capturedMotion, &captured, queue, this, sourceWidth,
-                              sourceHeight))
+                              sourceHeight, &gameGuidesHold))
     {
         // The capture describes its own guides -- their subrects, their motion encoding, whether depth
         // is inverted -- and none of that is knowable from here. What stays is this host's account of
@@ -574,11 +575,17 @@ bool PresentHost::Record(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         }
     }
 
+    // What a frame without the game's guides runs on, for the status line and the menu's guides line.
+    if (capturedMotion == nullptr)
+        NotePresentGuideFallback(motion != _guides.Motion());
+
     // Zero guides tell the model nothing moved, and it blends each frame with its history accordingly:
     // ghosts and doubled edges under a moving camera (Generation Zero, 2026-09-24). Opt-in, because a
     // slow isometric camera (Divinity) was measured fine with history, and history is what smooths.
-    // Keyed on the motion, not the depth: synthesized motion keeps the zero depth and needs no reset.
-    if (motion == _guides.Motion() && Config::Instance()->DlssNrZeroGuideReset.value_or_default())
+    // Keyed on the motion, not the depth: synthesized motion keeps the zero depth and needs no reset. Not on a single
+    // frame whose game guides were refused while they still hold the history (present-real-guides.md, D3): that
+    // frame is a miss, not a scene without motion, and a reset there would undo what the game's guides built.
+    if (motion == _guides.Motion() && Config::Instance()->DlssNrZeroGuideReset.value_or_default() && !gameGuidesHold)
     {
         // Policy only if nothing real was already owed: a host rebuilt at the same size carries a genuine
         // reset in from PresentFrameDefaults, and that one must still read as a cut.

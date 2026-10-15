@@ -96,12 +96,24 @@ DlssNrFrameInfo PresentFrameDefaults(bool reset, PresentColour colour = PresentC
 // them inside the recording it is building and does not store them.
 //
 // presenter (one identity per presenting swapchain) and the extent of the frame being presented feed the identity
-// check of present-real-guides.md, which is log only for now and changes nothing returned here. A caller that names
-// no presenter is not counted.
+// rules of present-real-guides.md (step 1): the capture is handed out only when it can be shown to belong to the
+// frame being presented, and false is returned otherwise, as for no capture. A caller that names no presenter is
+// not logged, and fails rule 3 whenever a stamp names one. gameGuidesHold, when given, says whether the game's
+// guides still hold the model's history after this frame: true through a single refused frame, so the caller's
+// ZeroGuideReset policy waits until zero guides are what the frames run on (D3).
 bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** depth, ID3D12Resource** motion,
                            DlssNrFrameInfo* frame, ID3D12CommandQueue* queue = nullptr, const void* presenter = nullptr,
-                           unsigned int presentWidth = 0, unsigned int presentHeight = 0);
+                           unsigned int presentWidth = 0, unsigned int presentHeight = 0,
+                           bool* gameGuidesHold = nullptr);
 void AbandonCapturedGuides();
+
+// What a present host ran a frame on when the game's guides were not used: SynthMotion's estimate, or zeros. For the
+// status line and the menu's guides line, which name what is running (present-real-guides.md, D3).
+void NotePresentGuideFallback(bool synthesized);
+
+// The menu's line about the present route's guides over the last second, with what the identity rules refused.
+// Empty while no present host has decided lately, or with the pass off.
+std::string PresentGuidesLine();
 
 // The pass, over a frame no upscaler was asked for.
 //
@@ -499,8 +511,8 @@ PairCaptureStatus GetPairCaptureStatus();
 // before the forward is ordered ahead of DLSS-G's read. While that entry is live the two below it stand down.
 void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool fgHook, bool boundary = false);
 
-// The source the pass is running from, for the overlay: the upscaler's output or the swapchain, and
-// whether the temporal inputs are in hand. Empty while nothing has run yet.
+// The source the pass is running from, for the overlay: the upscaler's output or the swapchain, and on a present
+// route the guides its presents ran on over the last second. Empty while nothing has run yet.
 const char* HookStatus();
 
 void Shutdown();
