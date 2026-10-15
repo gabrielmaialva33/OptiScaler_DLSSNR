@@ -699,9 +699,16 @@ assert 'const FgCarry fgCarry = DecideFg(prep.fg, g_fgTransport.load(std::memory
 fg_branch = prepare[prepare.index('if (fgCarry == FgCarry::Normal)'):prepare.index('if (fgCarry == FgCarry::Untouched)')]
 assert re.search(r'if \(fgCarry == FgCarry::Normal\)\s*\{\s*Housekeep\(\*dev\);\s*\}', fg_branch), fg_branch
 for needed in ('StandDown(*dev);', 'Poll(*dev, sc, times)', 'FgUnsupportedText(prep.fg, fgCarry == FgCarry::TransportOnly)',
-               'PollHandBack(*dev);'):
+               'PollHandBack(*dev);', 'sc.nrCut = true;', 'prep.polledElsewhere.push_back(polled);'):
     assert needed in fg_branch, needed
-assert 'StartHandBack' not in fg_branch
+# Beside frame generation: no housekeeping (no hand-back begins, nothing of the route's), only the stand-down.
+fg_else = fg_branch[fg_branch.index('else'):]
+for banned in ('Housekeep', 'StartHandBack', 'HandBackBlocked'):
+    assert banned not in fg_else, banned
+# The other swapchains' completions go to their own records, not to this present's.
+assert re.search(r'for \(const Prepared::Polled& polled : prep\.polledElsewhere\)\s*'
+                 r'g_registry\.OnCompletions\(H\(prep\.device\), H\(polled\.swapchain\), polled\.completions,',
+                 code(function(host, 'VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, ')))
 assert ('fgCarry == FgCarry::TransportOnly ? NrDecision { NrSkip::FrameGeneration, FgUnsupportedText(prep.fg, true) } '
         ': DecideNr(*dev, sc, route.workFamily)') in prepare_flat
 facts_fn = code(function(host, 'FgFacts FgFactsFor(VkQueue queue, VkSwapchainKHR swapchain)'))
@@ -711,9 +718,13 @@ for needed in ('state.dlssgLastSetMode != sl::DLSSGMode::eOff', 'state.dlssgDete
 # Inert when off: the trace in the present, destroy-swapchain and destroy-device hooks only under the key, Streamline's
 # note returning first thing; the two keys read at Install, after the gate.
 present_body = code(function(host, 'VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, '))
-assert "if (g_traceOn.load(std::memory_order_relaxed) && info->swapchainCount >= 1" in present_body
+assert 'const bool traced = g_traceOn.load(std::memory_order_relaxed);' in present_body
+assert 'const auto entered = traced ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};' \
+    in present_body
+assert 'if (traced && info->swapchainCount >= 1' in present_body
 assert present_body.index('result = next(queue, info);') < present_body.index('g_trace.Add(sample, streamline)')
-for name in ('void OnDestroySwapchain(', 'void OnDestroyDevice('):
+assert 'sample.fg = prep.fgKnown ? prep.fg : ClassifyFg(FgFactsFor(queue, info->pSwapchains[0]));' in present_body
+for name in ('void OnDestroySwapchain(', 'void OnDestroyDevice(', 'VkResult OnCreateSwapchain('):
     body = code(function(host, name))
     assert 'if (g_traceOn.load(std::memory_order_relaxed)' in body, name
 note = code(function(host, 'void DlssNr::VkPresentHost::NoteStreamline(int level, const char* message)'))
@@ -721,14 +732,16 @@ assert re.match(r'\{\s*if \(!g_traceOn\.load\(std::memory_order_relaxed\) \|\| m
 install_flat = flat(code(function(host, 'void DlssNr::VkPresentHost::Install(HMODULE vulkan1)')))
 assert install_flat.index('DlssNrVulkanPresentHost.value_or_default()') < \
     install_flat.index('g_traceOn.store(Config::Instance()->DlssNrVulkanPresentTrace.value_or_default()') < \
-    install_flat.index('g_fgTransport.store(Config::Instance()->DlssNrVulkanPresentFgTransport.value_or_default()')
+    install_flat.index('g_fgTransport.store(Config::Instance()->DlssNrVulkanPresentFgTransport.value_or_default()') < \
+    install_flat.index('DetourTransactionBegin();')
 # The trace's and Streamline's locks are leaves: their blocks call only the trace's and the counts' own functions.
 for lock in ('g_traceMutex', 'g_streamlineMutex'):
     blocks = re.findall(r'std::lock_guard lock\(' + lock + r'\);(.*?)\n\s*\}', code(host), re.S)
     assert blocks, lock
     for block in blocks:
         calls = set(re.findall(r'\b([A-Za-z_][\w:.]*)\s*\(', block))
-        assert calls <= {'g_trace.Add', 'g_trace.Flush', 'g_trace.FlushDevice', 'g_streamline.Add', 'H', 'static_cast'}, \
+        assert calls <= {'g_trace.Add', 'g_trace.Flush', 'g_trace.FlushDevice', 'g_trace.FlushOnCreate', 'g_streamline.Add',
+                         'H', 'static_cast'}, \
             (lock, calls)
 # Streamline's two log callbacks hand every message over, before the repeat filter, and nothing else of them changed.
 streamline_hooks = (root / 'OptiScaler/hooks/Streamline_Hooks.cpp').read_text()

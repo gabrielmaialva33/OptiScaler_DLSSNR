@@ -13,6 +13,7 @@ prefix set up as Proton sets one up for NGX. Without those files they print SKIP
 that turns its upscaler on and off: the after-upscale route takes the model from the present host, goes quiet, and the
 present host takes it back, twice."""
 import argparse
+import collections
 import hashlib
 import json
 import os
@@ -1165,6 +1166,23 @@ def check_hdr(name, facts, log):
 # layout, and the objects left at vkDestroyDevice. The transport arm may add nothing to it.
 FG_VUIDS = {'VUID-VkGraphicsPipelineCreateInfo-pDynamicStates-00749', 'VUID-VkImageCreateInfo-imageCreateMaxMipLevels-02251',
             'VUID-VkImageViewCreateInfo-usage-02275', 'VUID-vkCmdDraw-None-09600', 'VUID-vkDestroyDevice-device-05137'}
+# What the untouched arm reported in this run (every report counted by id, and the objects left at vkDestroyDevice), for
+# the transport arm to be held to: the same, so a leak of the host's cannot hide under FFX's own 05137.
+FG_REPORTS = {}
+
+
+def fg_reports(name, facts):
+    """Every error report the application wrote for `name`, counted by id (MODEL ones apart), and the leaked-object count
+    at vkDestroyDevice; problems when a report has no id the runner can read or the count is not the application's."""
+    validation = OUT / 'cases' / name / 'validation.txt'
+    text = validation.read_text(errors='replace') if validation.exists() else ''
+    ids = collections.Counter(m.group(1) for m in re.finditer(r'^(?!MODEL )(\S+) \| ', text, re.M))
+    leaks = [int(n) for n in re.findall(r'has (\d+) leaked objects', text)]
+    problems = []
+    if sum(ids.values()) != facts.get('validation_errors'):
+        problems.append(f'{sum(ids.values())} reports read from validation.txt, the application counted '
+                        f'{facts.get("validation_errors")}')
+    return ids, leaks, problems
 
 
 def check_fg(name, facts, log):
@@ -1182,11 +1200,19 @@ def check_fg(name, facts, log):
     lines = log.splitlines()
     need(any('FSRFG_Vk::CreateSwapchain Swapchain context creation result: The operation was successful' in l
              for l in lines), 'FSR-FG made no frame-generation swapchain: the shape was not exercised')
-    said = [l for l in lines if 'frame generation active (' in l and 'NR at present is off on this device' in l]
+    # The device's own line (the transport arm's NR refusals quote the same words inside window and destruction lines).
+    said = [l for l in lines if re.search(r'present host: device 0x[0-9A-F]+ #\d+: frame generation active \(', l) and
+            'NR at present is off on this device' in l]
     need(len(said) >= 1, 'no frame-generation line')
     need(all(('keep the round trip without NR' in l) == transport for l in said), f'frame-generation lines: {said}')
     need(any("OptiScaler's Vulkan FSR-FG output, its own present" in l for l in said),
          'FSR-FG\'s own presents were not identified')
+    # Once per device and shape.
+    said_keys = collections.Counter(
+        (m.group(1), m.group(2)) for m in (re.search(r'device (0x[0-9A-F]+ #\d+): frame generation active \(([^)]*)\)', l)
+                                           for l in said) if m is not None)
+    need(sum(said_keys.values()) == len(said) and all(n == 1 for n in said_keys.values()),
+         f'frame-generation lines not once per device and shape: {dict(said_keys)}')
     for words in ('the model is being built', 'the model runs at present', "the model's feature is up"):
         need(not any(words in l for l in lines), f'the model came up beside frame generation: {words!r}')
     need(any('which the host never saw created' in l for l in lines),
@@ -1197,14 +1223,17 @@ def check_fg(name, facts, log):
     carried = untouched = 0
     for line in gone:
         m = re.search(r'destroyed after (\d+) presents; transported (\d+), skipped (\d+)(?: \(([^)]*)\))?, waits taken '
-                      r'over \d+, submits (\d+)', line)
+                      r'over \d+, submits (\d+), completions (\d+)', line)
         if m is None:
             problems.append(f'destruction line unparsed: {line[:200]}')
             continue
-        presents, transported, skipped, skips, submits = (int(m.group(1)), int(m.group(2)), int(m.group(3)),
-                                                          counts(m.group(4)), int(m.group(5)))
+        presents, transported, skipped, skips, submits, completions = (
+            int(m.group(1)), int(m.group(2)), int(m.group(3)), counts(m.group(4)), int(m.group(5)), int(m.group(6)))
         if transport:
             need(transported == presents and submits >= presents, f'transport arm, not every present carried: {line[:240]}')
+            # Every round trip seen complete, and the slots freed after their drain, as on any other swapchain.
+            need(completions == transported and 'freed after a drain of ' in line,
+                 f'transport arm, round trips not all complete or not freed: {line[:300]}')
             nr = line[line.index('; NR: ') + 2:] if '; NR: ' in line else ''
             problems.extend(nr_problems('FFX swapchain', nr, 0, presents, {'frame generation': presents}))
             carried += transported
@@ -1230,15 +1259,27 @@ def check_fg(name, facts, log):
         elif not transport:
             need('host signals 0' in line, f'untouched arm trace with a host signal: {line[:240]}')
 
-    validation = (OUT / 'cases' / name / 'validation.txt')
-    reported = set(re.findall(r'\b(?:VUID|SYNC-HAZARD)-[\w-]+', validation.read_text(errors='replace'))) \
-        if validation.exists() else set()
+    # Every report by its id ('?' and UNASSIGNED-* included): only FSR-FG's own. The transport arm, beside the untouched
+    # one of the same run, adds none and leaks nothing more.
+    ids, leaks, read_problems = fg_reports(name, facts)
+    problems.extend(read_problems)
+    reported = set(ids)
     need(reported <= FG_VUIDS, f'validation reports beyond FSR-FG\'s own: {sorted(reported - FG_VUIDS)}')
+    compared = ''
+    if not transport:
+        FG_REPORTS[name] = (ids, leaks)
+    elif 'nr-fg-vk' in FG_REPORTS:
+        base_ids, base_leaks = FG_REPORTS['nr-fg-vk']
+        need(ids == base_ids, f'reports differ from the untouched arm\'s: {dict(ids)} against {dict(base_ids)}')
+        need(leaks == base_leaks, f'objects left at vkDestroyDevice {leaks}, the untouched arm {base_leaks}')
+        compared = f', the same reports and {leaks} objects left at vkDestroyDevice as the untouched arm'
+    else:
+        compared = ' (not compared with the untouched arm: run nr-fg-vk with it)'
     summary = (f'{len(gone)} FFX swapchains; ' +
                (f'{carried} presents carried through the round trip without NR (the experiment arm)' if transport else
                 f'{untouched} presents untouched') +
                f'; the game\'s presents into FFX\'s swapchain counted, not carried; no model; {len(traces)} trace lines; '
-               f'validation: FSR-FG\'s own {",".join(sorted(reported)) or "none"} set aside, none of the host\'s')
+               f'validation: FSR-FG\'s own {",".join(sorted(reported)) or "none"} set aside, none of the host\'s{compared}')
     return problems, summary
 
 
@@ -1361,7 +1402,7 @@ def check_nr(name, facts, log):
     else:
         counted = 0
         for line in traces:
-            m = re.search(r': (\d+) presents .*; waits \d+-\d+ \(\d+\), host signals (\d+), untouched (\d+);', line)
+            m = re.search(r': (\d+) presents[ ;].*; waits \d+-\d+ \(\d+\), host signals (\d+), untouched (\d+);', line)
             need(m is not None, f'trace line unparsed: {line[:240]}')
             if m is None:
                 continue
