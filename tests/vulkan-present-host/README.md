@@ -220,6 +220,22 @@ Verified on `da4988a1`: both route cases pass, including wDx12's two hand-backs 
 hand-back drains, zero host validation errors). As a negative control, the retained `80374044` DLL fails the new
 case with two -3 hand-back rejections and a rejected destroy drain, followed by a live-child-object validation error.
 
+`nr-route-toggle-wdx12` extends the real-hook case with the overlay's input handling enabled and `ToggleKey=0x76`.
+After releasing the NGX feature at the end of each evaluate phase, the harness posts F7 down/up messages to its own
+window (no global input injection). The cold phase outlasts the seven-second startup splash; toggle phases outlast
+its two-second toast and fade before byte-exact read-backs are judged. It holds NR off past the ten-second quiet
+deadline, then toggles it on. Both
+cycles must log the production off/on transitions, exactly one `hand-back due but not started: NR off` blocker,
+exact read-backs while disabled, and a hand-back start within two seconds of the on transition. Both post-hand-back
+phases must show the model's edit. A message backend that ignores the input fails this case explicitly.
+The legacy overlay has no cleanup on swapchain/device destruction: the first toggle run reached both hand-backs
+but failed validation at teardown with 54 live objects. After the measured phases, this case creates and destroys
+one temporary Win32 surface (no swapchain or presents), invoking the overlay's existing new-surface cleanup path
+before destroying the device. No leak VUID is suppressed. This case therefore does not test ordinary overlay exit.
+On build `bfe1b517` (`20261014_224714`), both quiet-route cases and this toggle case passed: exactly two NR-off
+blockers in the toggle case, starts 96.698/100.320 ms after re-enable, drains 96/98 ms, byte-exact disabled/route
+frames after notifications faded, changed frames after hand-back, and zero host validation errors.
+
 What NVIDIA's model records into the host's command buffer is validated too. One report comes from it, once per
 feature build: `VUID-vkCmdDraw-None-09600`, an image of its own named `nv.ngx.dlssnr.resource` used in GENERAL at its
 first evaluate without ever leaving UNDEFINED. The application counts reports naming an `nv.ngx.*` object apart
@@ -237,9 +253,10 @@ any other frame.
   menu opened, no upscaler and no Streamline; NR runs only in the cold-NR cases, on a synthetic picture, so nothing
   here judges image quality or motion (the guides are zeros: a moving camera smears).
 - Cold NR: no RGBA8 or non-SDR swapchain (the surface offers none here; the colour plan is held on the host tier), no
-  CONCURRENT image, no device lost mid-frame, no failed submit with a model frame in it, no live toggle of NR or the
-  working scale, no D3D12 route beside the host, no translated title with the model. The after-upscale route runs
-  beside it only in `nr-route-quiet`, behind OptiScaler's FSR 2.2 rather than DLSS, with one thread presenting and
+  CONCURRENT image, no device lost mid-frame, no failed submit with a model frame in it, no live working-scale
+  toggle, no D3D12 route beside the host, no translated title with the model. NR off/on is covered in the route-toggle
+  case. The after-upscale route runs beside it in the `nr-route-*` cases, behind OptiScaler's FSR 2.2 rather than DLSS,
+  with one thread presenting and
   evaluating (a game's render thread recording while the hand-back drains is held on the host tier only).
 - No concurrent presents from two threads, no application thread submitting to a borrowed graphics queue while the
   cross-family route runs (the queue lock exists for it; nothing here contends), no device loss, no failed submit in

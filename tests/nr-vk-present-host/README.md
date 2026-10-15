@@ -10,6 +10,13 @@ as built".
 
 ## What this covers
 
+Hand-back diagnostics use the same readiness policy and try-lock helper as production. F7 off leaves an already-due
+owner untouched; on permits immediate begin without resetting the idle clock. Real worker threads hold each queue
+lock in turn: contention is silent before one second, reported once thereafter, and succeeds when released.
+Distinct alternating reasons are each reported once per due episode. The fake-clock registry tests also cover the
+60-second heartbeat, no catch-up burst after a gap, and an event line resetting its deadline. Source guards ensure
+Housekeep's messages are flushed before early present refusals and no waiting lock was introduced.
+
 The source guard scans every C/C++ file under `retoque/` for literal zero-count or null-array `QueueSubmit`,
 `QueueSubmit2` and `QueueSubmit2KHR` calls (including dispatch-table names). Fence-only drains must use one empty,
 non-null submit struct: DOOM Eternal's downstream wDx12 hook rejects a null array even when Vulkan permits it.

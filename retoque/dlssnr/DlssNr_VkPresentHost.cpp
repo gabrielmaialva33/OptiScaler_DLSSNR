@@ -17,6 +17,7 @@
 
 #include <intrin.h>
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -204,12 +205,6 @@ void Log(const std::vector<std::string>& lines)
 // not, and the application may be submitting to it from its render thread right then. So every queue the application
 // retrieves gets a lock here, its submits, sparse binds and idle waits take it, and so does the round trip.
 
-struct QueueLocks
-{
-    std::recursive_timed_mutex submit;  // the application's submits, sparse binds and idle waits; a borrower
-    std::recursive_timed_mutex present; // the application's presents through the host; a borrower
-};
-
 struct QueueLockEntry
 {
     VkDevice device = VK_NULL_HANDLE;
@@ -226,7 +221,7 @@ QueueLocks* QueueLocksFor(VkQueue queue)
     return found != g_queueLocks.end() ? found->second.locks.get() : nullptr;
 }
 
-void AddQueueLock(VkDevice device, VkQueue queue)
+void AddQueueLock(VkDevice device, VkQueue queue, uint32_t family, uint32_t index)
 {
     std::unique_lock lock(g_queueLocksMutex);
     auto& entry = g_queueLocks[queue];
@@ -234,6 +229,8 @@ void AddQueueLock(VkDevice device, VkQueue queue)
     {
         entry.device = device;
         entry.locks = std::make_unique<QueueLocks>();
+        entry.locks->family = family;
+        entry.locks->index = index;
     }
 }
 
@@ -395,7 +392,7 @@ struct DeviceTransport
     std::vector<std::string> lines; // the model's lines, logged once the transport's lock is released
     HandBackDrain handBack;         // the model taken back from the after-upscale route, while its queues drain
     std::chrono::steady_clock::time_point handBackNotBefore; // after a drain submit failed: not tried again until then
-    bool saidNoQueues = false;                               // a hand-back found no queue to drain, said once
+    HandBackDiagnostics handBackDiagnostics;                 // once per distinct blocker in a due episode
 };
 
 std::mutex g_transportMutex;
@@ -1066,29 +1063,74 @@ std::vector<std::pair<VkQueue, QueueLocks*>> DeviceQueues(VkDevice device)
     return queues;
 }
 
-// Whether a frame of this device could be shown to the model, as far as is known before a present: NR on, the model's
+// Why no frame of this device can be shown to the model (empty means eligible). The caller checks NR on; the model's
 // extensions there, no other route wanting it (with no model here, PresentHostMustYield refuses only for the D3D12
 // route), a carried swapchain whose colour the model may see and whose formats the device can convert. A hand-back the
 // host could not use would only free the after-upscale route's objects for it to build again.
-bool CouldRunModel(DeviceTransport& dev)
+std::string ModelUnavailable(DeviceTransport& dev)
 {
-    if (!Config::Instance()->DlssNrEnabled.value_or_default() || !dev.nrReady || dev.lost || !dev.off.empty() ||
-        dev.instance == VK_NULL_HANDLE || DlssNr::PresentHostMustYield(dev.device).skip != NrSkip::None)
-        return false;
+    if (dev.lost)
+        return "device lost";
+    if (!dev.nrReady)
+        return "model device extensions unavailable: " + dev.nrMissing;
+    if (!dev.off.empty())
+        return "device transport off: " + dev.off;
+    if (dev.instance == VK_NULL_HANDLE)
+        return "the device's instance is not on record";
+    const auto yield = DlssNr::PresentHostMustYield(dev.device);
+    if (yield.skip != NrSkip::None)
+        return "must yield: " + yield.text;
 
+    std::vector<std::string> refusals;
     for (const auto& [handle, sc] : dev.swapchains)
     {
-        if (sc.on && !sc.retired && sc.colour.sdr && sc.nrOff.empty() &&
-            MissingFormatFeatures(dev, sc.colour.raw).empty())
-            return true;
+        std::string reason;
+        if (sc.retired)
+            reason = "retired";
+        else if (!sc.on)
+            reason = "transport off: " + sc.off;
+        else if (!sc.colour.sdr)
+            reason = "colour: " + sc.colour.refusal;
+        else if (!sc.nrOff.empty())
+            reason = "model unavailable: " + sc.nrOff;
+        else
+            reason = MissingFormatFeatures(dev, sc.colour.raw);
+        if (reason.empty())
+            return {};
+        refusals.push_back("swapchain " + Hex(H(handle)) + ": " + reason);
     }
-
-    return false;
+    // Stable across unordered-map iteration and queue changes: the same set of blockers is one diagnostic reason.
+    std::sort(refusals.begin(), refusals.end());
+    std::string reason = "no eligible swapchain";
+    if (refusals.empty())
+        reason += " (none on record)";
+    for (const auto& refusal : refusals)
+        reason += "; " + refusal;
+    return reason;
 }
 
 std::string DeviceName(const DeviceTransport& dev)
 {
     return "DLSS-NR Vulkan present host: device " + Hex(H(dev.device)) + " #" + std::to_string(dev.id);
+}
+
+uint64_t PresentNowMs()
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
+void HandBackBlocked(DeviceTransport& dev, const std::string& reason, uint64_t delayMs = 0)
+{
+    if (dev.handBackDiagnostics.Blocked(reason, PresentNowMs(), delayMs))
+        dev.lines.push_back(DeviceName(dev) + ": hand-back due but not started: " + reason);
+}
+
+std::string QueueName(VkQueue queue, const QueueLocks& locks)
+{
+    return "queue " + Hex(H(queue)) + " family " + std::to_string(locks.family) + " index " +
+           std::to_string(locks.index);
 }
 
 // The after-upscale route went quiet on this device: begin the hand-back and drain every queue of the device behind a
@@ -1102,10 +1144,7 @@ void StartHandBack(DeviceTransport& dev)
         // record means the host came in late, and nothing proves the route's work done.
         dev.handBackNotBefore =
             std::chrono::steady_clock::now() + std::chrono::milliseconds(DlssNr::VkModelOwner::kAfterUpscaleIdleMs);
-        if (!dev.saidNoQueues)
-            dev.lines.push_back(DeviceName(dev) + ": the after-upscale route went quiet, but no queue of the device is "
-                                                  "on record to drain; the model stays with it");
-        dev.saidNoQueues = true;
+        HandBackBlocked(dev, "no queue of the device is on record to drain");
         return;
     }
 
@@ -1116,14 +1155,12 @@ void StartHandBack(DeviceTransport& dev)
     held.reserve(queues.size() * 2);
     for (const auto& [queue, locks] : queues)
     {
-        std::unique_lock<std::recursive_timed_mutex> present(locks->present, std::try_to_lock);
-        if (!present.owns_lock())
+        if (const char* busy = TryHandBackQueueLocks(*locks, held))
+        {
+            HandBackBlocked(dev, QueueName(queue, *locks) + " " + busy + " lock busy (retrying for at least 1 s)",
+                            1000);
             return;
-        std::unique_lock<std::recursive_timed_mutex> submit(locks->submit, std::try_to_lock);
-        if (!submit.owns_lock())
-            return;
-        held.push_back(std::move(present));
-        held.push_back(std::move(submit));
+        }
     }
 
     std::vector<VkFence> fences;
@@ -1138,8 +1175,11 @@ void StartHandBack(DeviceTransport& dev)
     for (size_t i = 0; i < queues.size(); ++i)
     {
         VkFence fence = VK_NULL_HANDLE;
-        if (dev.fn.createFence(dev.device, &fenceInfo, nullptr, &fence) != VK_SUCCESS)
+        const VkResult result = dev.fn.createFence(dev.device, &fenceInfo, nullptr, &fence);
+        if (result != VK_SUCCESS)
         {
+            HandBackBlocked(dev, "fence creation returned " + std::to_string(result) + " for " +
+                                     QueueName(queues[i].first, *queues[i].second));
             destroyFrom(0);
             return;
         }
@@ -1150,6 +1190,7 @@ void StartHandBack(DeviceTransport& dev)
     // everything it recorded before (it last asked kAfterUpscaleIdleMs ago) is ahead of these fences on its queue.
     if (!DlssNr::BeginAfterUpscaleHandBack(dev.device))
     {
+        HandBackBlocked(dev, "BeginAfterUpscaleHandBack refused (owner or quiet state changed)");
         destroyFrom(0);
         return;
     }
@@ -1200,6 +1241,7 @@ void StartHandBack(DeviceTransport& dev)
                             " queue(s) drained");
     }
 
+    dev.handBackDiagnostics.Reset();
     hb.active = true;
     hb.fences = std::move(fences);
 }
@@ -1369,9 +1411,19 @@ void Housekeep(DeviceTransport& dev)
 {
     if (dev.handBack.active)
         PollHandBack(dev);
-    else if (dev.model == nullptr && std::chrono::steady_clock::now() >= dev.handBackNotBefore &&
-             DlssNr::AfterUpscaleIdleOn(dev.device) && CouldRunModel(dev))
-        StartHandBack(dev);
+    else if (DlssNr::AfterUpscaleIdleOn(dev.device))
+    {
+        const bool enabled = Config::Instance()->DlssNrEnabled.value_or_default();
+        const std::string reason = HandBackBlockReason(
+            { enabled, dev.model != nullptr, std::chrono::steady_clock::now() < dev.handBackNotBefore,
+              enabled && dev.model == nullptr ? ModelUnavailable(dev) : std::string() });
+        if (reason.empty())
+            StartHandBack(dev);
+        else
+            HandBackBlocked(dev, reason);
+    }
+    else
+        dev.handBackDiagnostics.Reset();
 
     if (dev.model == nullptr)
         return;
@@ -1580,7 +1632,14 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     {
         std::lock_guard lock(g_transportMutex);
         if (DeviceTransport* dev = FindDevice(prep.device))
+        {
             Housekeep(*dev);
+            // Early refusals below never assign devFound. Flush now, under the transport lock, so a due hand-back's
+            // diagnostics are visible even when no swapchain can be carried. Log only after leaving Prepare.
+            for (std::string& line : dev->lines)
+                prep.warnings.push_back(std::move(line));
+            dev->lines.clear();
+        }
     }
 
     if (info.swapchainCount != 1)
@@ -2247,7 +2306,7 @@ void OnGetQueue(PFN_vkGetDeviceQueue next, VkDevice device, uint32_t family, uin
             g_registry.OnQueue(H(device), family, index, 0, H(*queue));
         }
 
-        AddQueueLock(device, *queue);
+        AddQueueLock(device, *queue, family, index);
     }
 }
 
@@ -2262,7 +2321,7 @@ void OnGetQueue2(PFN_vkGetDeviceQueue2 next, VkDevice device, const VkDeviceQueu
             g_registry.OnQueue(H(device), info->queueFamilyIndex, info->queueIndex, info->flags, H(*queue));
         }
 
-        AddQueueLock(device, *queue);
+        AddQueueLock(device, *queue, info->queueFamilyIndex, info->queueIndex);
     }
 }
 
@@ -2572,6 +2631,7 @@ VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInf
     const CallerInfo& who = WhoCalled(returnAddress);
 
     PresentCall call;
+    call.nowMs = PresentNowMs();
     call.queue = H(queue);
     call.waitSemaphores = info->waitSemaphoreCount;
     call.swapchainCount = info->swapchainCount;

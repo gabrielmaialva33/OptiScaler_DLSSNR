@@ -8,6 +8,8 @@
 #include "DlssNr_VkModelOwner.h"
 #include "DlssNr_VkPresentRegistry.h"
 
+#include <future>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -359,6 +361,8 @@ struct World
         return id;
     }
 
+    uint64_t nowMs = 0;
+
     std::vector<std::string> Present(Handle queue, Handle swapchain, uint32_t index, uint32_t waits, bool acquire,
                                      Handle device, Caller caller = Caller::Native, Handle module = 0x140000000,
                                      const Outcome& outcome = Outcome {})
@@ -366,6 +370,7 @@ struct World
         if (acquire)
             r.OnAcquire(device, swapchain, index);
         PresentCall call;
+        call.nowMs = nowMs;
         call.queue = queue;
         call.waitSemaphores = waits;
         call.swapchainCount = 1;
@@ -378,6 +383,92 @@ struct World
         return r.OnPresent(call);
     }
 };
+
+static void Heartbeat()
+{
+    World w;
+    w.Device(0xD1);
+    w.r.OnQueue(0xD1, 0, 0, 0, 0x51);
+    w.r.OnSurfaceCreated(World::instance, 0x5F1, 0xAAA);
+    w.Swapchain(0xD1, 0x5C1, 0x5F1, 0x12);
+    w.nowMs = 1234;
+    CHECK(w.Present(0x51, 0x5C1, 0, 1, true, 0xD1).size() == 1);
+    w.nowMs += 59999;
+    CHECK(w.Present(0x51, 0x5C1, 1, 1, true, 0xD1).empty());
+    ++w.nowMs;
+    auto lines = w.Present(0x51, 0x5C1, 2, 1, true, 0xD1);
+    CHECK(lines.size() == 1);
+    if (!lines.empty())
+        HAS(lines[0], "60 s heartbeat");
+    CHECK(w.Present(0x51, 0x5C1, 0, 1, true, 0xD1).empty());
+    // The first present after a long gap emits one current line, not a catch-up burst.
+    w.nowMs += 180000;
+    lines = w.Present(0x51, 0x5C1, 1, 1, true, 0xD1);
+    CHECK(lines.size() == 1);
+    if (!lines.empty())
+        HAS(lines[0], "presents 5");
+    CHECK(w.Present(0x51, 0x5C1, 2, 1, true, 0xD1).empty());
+    // Any event line resets the heartbeat deadline.
+    w.r.OnQueue(0xD1, 2, 0, 0, 0x52);
+    w.nowMs += 50000;
+    CHECK(w.Present(0x52, 0x5C1, 0, 1, true, 0xD1).size() == 1);
+    w.nowMs += 10000;
+    CHECK(w.Present(0x52, 0x5C1, 1, 1, true, 0xD1).empty());
+}
+
+static void HandBackDiagnosticsAndLocks()
+{
+    using namespace DlssNr::VkModelOwner;
+    Arbiter owner;
+    CHECK(owner.AfterUpscale(1, 0).granted);
+    owner.AfterUpscaleDone(0);
+    const uint64_t due = kAfterUpscaleIdleMs;
+    CHECK(owner.IdleAfterUpscaleDevice(due) == 1);
+    HandBackReadiness ready;
+    HandBackDiagnostics diagnostics;
+    ready.enabled = false; // F7 off: the route's idle clock is not restarted.
+    auto reason = HandBackBlockReason(ready);
+    CHECK(reason == "NR off ([DlssNr] Enabled=false)");
+    CHECK(diagnostics.Blocked(reason, due));
+    for (uint64_t i = 1; i < 100; ++i)
+        CHECK(!diagnostics.Blocked(reason, due + i));
+    ready.enabled = true;
+    CHECK(HandBackBlockReason(ready).empty());
+    CHECK(owner.BeginHandBack(1, due + 100)); // at once, not another ten seconds
+    CHECK(owner.FinishHandBack(1) == HandBack::Done);
+    diagnostics.Reset();
+    CHECK(diagnostics.Blocked(reason, due + 101)); // a new due episode can report it again
+    CHECK(diagnostics.Blocked("device lost", due + 102));
+    CHECK(!diagnostics.Blocked(reason, due + 103)); // distinct reasons do not spam when alternating
+
+    for (bool submitBusy : { false, true })
+    {
+        QueueLocks queue;
+        std::promise<void> locked, release;
+        auto released = release.get_future();
+        std::thread worker(
+            [&]
+            {
+                std::lock_guard lock(submitBusy ? queue.submit : queue.present);
+                locked.set_value();
+                released.wait();
+            });
+        locked.get_future().wait();
+        diagnostics.Reset();
+        std::vector<std::unique_lock<std::recursive_timed_mutex>> held;
+        const std::string expected = submitBusy ? "submit" : "present";
+        for (uint64_t ms : { 0, 999, 1000, 1001, 5000 })
+        {
+            const char* busy = TryHandBackQueueLocks(queue, held);
+            CHECK(busy != nullptr && expected == busy && held.empty());
+            CHECK(diagnostics.Blocked(expected, ms, 1000) == (ms == 1000));
+        }
+        release.set_value();
+        worker.join();
+        CHECK(TryHandBackQueueLocks(queue, held) == nullptr && held.size() == 2);
+        held.clear();
+    }
+}
 
 static void FirstPresentDecadesAndWaits()
 {
@@ -1289,6 +1380,8 @@ int main()
     NrCounters();
     OwnerArbitration();
     OwnerHandBack();
+    Heartbeat();
+    HandBackDiagnosticsAndLocks();
     NrLines();
 
     if (failures != 0)

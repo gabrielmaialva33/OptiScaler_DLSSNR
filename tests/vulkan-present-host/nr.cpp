@@ -320,6 +320,7 @@ struct App
     bool cross = false;
     bool route = false;
     bool wdx12 = false;
+    bool nrToggle = false;
     bool wdx12Probed = false;
     HMODULE optiscaler = nullptr;
     std::vector<PhaseFacts> phases;
@@ -923,7 +924,9 @@ struct App
         using Ms = std::chrono::milliseconds;
 
         // The game's start window: nothing upscaled, the present host runs the model at present.
-        presentUntil("cold", Clock::now() + Ms(1500), 12);
+        // The input-enabled overlay has a seven-second startup splash. Let it finish before judging the route's
+        // unedited frames; the cold phase itself already expects the present host to change the picture.
+        presentUntil("cold", Clock::now() + Ms(nrToggle ? 10000 : 1500), 12);
 
         const auto init = Ngx<PFN_NgxInit>("NVSDK_NGX_VULKAN_Init");
         const auto capabilities = Ngx<PFN_NgxParams>("NVSDK_NGX_VULKAN_GetCapabilityParameters");
@@ -1044,12 +1047,53 @@ struct App
         {
             const Clock::time_point lastAsk = upscalerOn(cycle == 0 ? "on" : "on-again", 30);
 
+            // Only this harness window receives these messages. Exercise the production F7 handler, without
+            // global SendInput or a test-only DLL export. The runner requires the actual toggle log and NR-off
+            // blocker, so a backend that ignores the messages fails rather than pretending the toggle happened.
+            const auto toggle = [&]
+            {
+                const LPARAM scan = static_cast<LPARAM>(MapVirtualKeyW(VK_F7, MAPVK_VK_TO_VSC)) << 16;
+                Require(PostMessageW(window, WM_KEYDOWN, VK_F7, 1 | scan) != 0, "post F7 down");
+                for (int i = 0; i < 3; ++i)
+                {
+                    Frame(target);
+                    ++phase->presents;
+                }
+                Require(PostMessageW(window, WM_KEYUP, VK_F7, 1 | scan | (3ll << 30)) != 0, "post F7 up");
+                // F7 draws a two-second toast, plus its fade. Keep those frames in the toggle phase, outside the
+                // byte-exact disabled/route checks; ownership timing is still checked against the toggle log.
+                const auto toastGone = Clock::now() + Ms(3000);
+                while (Clock::now() < toastGone)
+                {
+                    Frame(target);
+                    ++phase->presents;
+                }
+            };
+            if (nrToggle)
+            {
+                Begin(cycle == 0 ? "toggle-off" : "toggle-off-again");
+                toggle();
+            }
+
             // ... and off: nothing evaluated for longer than the present host waits (10 s) before taking the model
             // back: the frames until 9 s after the last ask must be the route's (unedited), those from 12 s on the
             // present host's again.
             presentUntil(cycle == 0 ? "off-waiting" : "off-again-waiting", lastAsk + Ms(9000));
-            presentUntil(cycle == 0 ? "off-handing-back" : "off-again-handing-back", lastAsk + Ms(12000));
-            presentUntil(cycle == 0 ? "off-back" : "off-again-back", lastAsk + Ms(14000), 12);
+            if (nrToggle)
+            {
+                // Hold NR off beyond the quiet deadline: exactly one named blocker per cycle, no hand-back.
+                presentUntil(cycle == 0 ? "nr-disabled" : "nr-disabled-again", lastAsk + Ms(13000), 12);
+                Begin(cycle == 0 ? "toggle-on" : "toggle-on-again");
+                toggle();
+                // The model must return without waiting for another ten-second idle window.
+                presentUntil(cycle == 0 ? "off-handing-back" : "off-again-handing-back", Clock::now() + Ms(3000));
+                presentUntil(cycle == 0 ? "off-back" : "off-again-back", Clock::now() + Ms(1500), 12);
+            }
+            else
+            {
+                presentUntil(cycle == 0 ? "off-handing-back" : "off-again-handing-back", lastAsk + Ms(12000));
+                presentUntil(cycle == 0 ? "off-back" : "off-again-back", lastAsk + Ms(14000), 12);
+            }
         }
 
         // On once more, and the game exits with the route holding the model: its objects go with the device.
@@ -1062,6 +1106,18 @@ struct App
         for (Image* img : { &colour, &depth, &motion, &output })
             FreeImage(*img);
 
+        if (nrToggle)
+        {
+            // The legacy overlay frees its device objects on a new Win32 surface, not on DestroySwapchain or
+            // DestroyDevice. Exercise that public cleanup path before teardown; do not suppress its leak VUID.
+            // No swapchain or present is made on this temporary surface, and both hand-back cycles are over.
+            VkWin32SurfaceCreateInfoKHR info { VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR };
+            info.hinstance = module;
+            info.hwnd = window;
+            VkSurfaceKHR cleanupSurface = VK_NULL_HANDLE;
+            Check(vkCreateWin32SurfaceKHR(instance, &info, nullptr, &cleanupSurface), "overlay cleanup surface");
+            vkDestroySurfaceKHR(instance, cleanupSurface, nullptr);
+        }
         DestroySwapchain(target);
         vkDestroyDevice(device, nullptr);
         vkDestroySurfaceKHR(instance, surface, nullptr);
@@ -1203,6 +1259,8 @@ int main(int argc, char** argv)
                 app.route = true;
             else if (!strcmp(argv[i], "--wdx12"))
                 app.wdx12 = true;
+            else if (!strcmp(argv[i], "--nr-toggle"))
+                app.nrToggle = true;
             else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
                 app.frames = static_cast<uint32_t>(std::atoi(argv[++i]));
             else
