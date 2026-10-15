@@ -31,7 +31,7 @@ bool AskDevice(ID3D12Device* device, DXGI_FORMAT format, bool needLoad)
     const bool load = (support.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_LOAD) != 0;
     const bool uav = (support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) != 0 &&
                      (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0;
-    return uav && (load || !needLoad);
+    return (support.Support1 & D3D12_FORMAT_SUPPORT1_TEXTURE2D) != 0 && uav && (load || !needLoad);
 }
 } // namespace
 
@@ -156,10 +156,56 @@ bool DlssNr_PresentHdr_Dx12::Supports(DXGI_FORMAT format)
     return supported;
 }
 
+bool DlssNr_PresentHdr_Dx12::TextureShape(const D3D12_RESOURCE_DESC& d)
+{
+    return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.Width > 0 &&
+           d.Width <= D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION && d.Height > 0 &&
+           d.Height <= D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION && d.DepthOrArraySize == 1 && d.MipLevels == 1 &&
+           d.SampleDesc.Count == 1 && d.SampleDesc.Quality == 0;
+}
+
+bool DlssNr_PresentHdr_Dx12::ValidResources(ID3D12Resource* original, ID3D12Resource* processed, ID3D12Resource* out,
+                                            uint32_t profile, uint32_t mode)
+{
+    if (!_init || original == nullptr || processed == nullptr || out == nullptr || original == out || processed == out)
+        return false;
+    if ((profile != DlssNr::PresentHdr::kProfileHdr10 && profile != DlssNr::PresentHdr::kProfileScRgb) ||
+        (mode != DlssNr::PresentHdr::kModeDecode && mode != DlssNr::PresentHdr::kModeEncode))
+        return false;
+    const DXGI_FORMAT format =
+        profile == DlssNr::PresentHdr::kProfileHdr10 ? DXGI_FORMAT_R10G10B10A2_UNORM : kWorkFormat;
+    if (!Supports(format))
+        return false;
+    const auto src = original->GetDesc();
+    const auto work = processed->GetDesc();
+    const auto dst = out->GetDesc();
+    if (!TextureShape(src) || !TextureShape(work) || !TextureShape(dst) || src.Width != work.Width ||
+        src.Height != work.Height || src.Width != dst.Width || src.Height != dst.Height || src.Format != format ||
+        (src.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0 ||
+        (work.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0 ||
+        (dst.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0)
+        return false;
+    if (mode == DlssNr::PresentHdr::kModeDecode
+            ? (processed != original || dst.Format != kWorkFormat)
+            : (processed == original || work.Format != kWorkFormat || dst.Format != format))
+        return false;
+    for (auto resource : { original, processed, out })
+    {
+        ID3D12Device* owner = nullptr;
+        const HRESULT result = resource->GetDevice(IID_PPV_ARGS(&owner));
+        const bool same = SUCCEEDED(result) && owner == _device;
+        if (owner != nullptr)
+            owner->Release();
+        if (!same)
+            return false;
+    }
+    return true;
+}
+
 bool DlssNr_PresentHdr_Dx12::Record(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* original,
                                     ID3D12Resource* processed, ID3D12Resource* out, uint32_t profile, uint32_t mode)
 {
-    if (!_init || cmdList == nullptr || original == nullptr || processed == nullptr || out == nullptr)
+    if (cmdList == nullptr || !ValidResources(original, processed, out, profile, mode))
         return false;
 
     if (profile != DlssNr::PresentHdr::kProfileHdr10 && profile != DlssNr::PresentHdr::kProfileScRgb)

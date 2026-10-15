@@ -80,6 +80,13 @@ class Book
             record.valid = false;
     }
 
+    // Drop observations when creation/resize/colour changes occur while NR is off. No new record is allocated.
+    void Clear()
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _records.clear();
+    }
+
     PresentColourRecord Lookup(const void* window) const
     {
         if (window == nullptr)

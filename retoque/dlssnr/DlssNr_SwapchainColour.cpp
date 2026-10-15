@@ -9,11 +9,16 @@ namespace DlssNr::SwapchainColour
 namespace
 {
 // Never destroyed: a static destructor would run at process exit while a present thread may still read it.
-Book& TheBook()
+Book* ExistingBook(bool create)
 {
-    static Book* book = new Book();
-    return *book;
+    static std::mutex mutex;
+    static Book* book = nullptr;
+    std::lock_guard lock(mutex);
+    if (book == nullptr && create)
+        book = new Book();
+    return book;
 }
+Book& TheBook() { return *ExistingBook(true); }
 
 // The window and the format of the buffers the swapchain has now, from one GetDesc. The wrapped swapchain and, with
 // frame generation, the FG swapchain the game holds around it present to one window, so either finds the same record.
@@ -32,10 +37,16 @@ bool Describe(IDXGISwapChain* swapchain, const void*& window, DXGI_FORMAT& forma
     return window != nullptr;
 }
 
-// The notes run on upstream's swapchain paths, so with NR off they do nothing at all: no query, no record. NR switched
-// on mid-session meets a window with no record, which the HDR decision declines until the swapchain is recreated or
-// its colour space set again (a decline, never a guess).
-bool Watching() { return Config::Instance()->DlssNrEnabled.value_or_default(); }
+// No query/allocation while NR is off. Drop existing observations when an off-period mutation is seen, otherwise
+// re-enabling NR could decode an SDR frame using a stale PQ observation from the same window.
+bool Watching()
+{
+    if (Config::Instance()->DlssNrEnabled.value_or_default())
+        return true;
+    if (auto book = ExistingBook(false))
+        book->Clear();
+    return false;
+}
 } // namespace
 
 void NoteCreated(IDXGISwapChain* swapchain)

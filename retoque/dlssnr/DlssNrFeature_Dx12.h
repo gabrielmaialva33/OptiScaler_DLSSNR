@@ -383,6 +383,8 @@ bool BufferIsLinearHdr();
 // switch exists only while a present host is looking at an HDR swapchain, in a build that carries the conversion.
 struct PresentHdrStatus
 {
+    float whiteNits = 203.0f;
+    bool whiteFromDisplay = false;
     bool available = false; // this build carries the conversion's shader
     bool seen = false;      // in the last two seconds a present host saw a ten-bit or FP16 swapchain the switch acts on
     bool converted = false; // ... and in the last second it was converting that swapchain's frames
@@ -394,7 +396,8 @@ PresentHdrStatus GetPresentHdrStatus();
 // What a present host decided about an HDR swapchain's frame, for the status above. profile: what the conversion
 // makes of it with the switch on (Hdr10, ScRgb, or Declined). reason: why this frame was not converted, or null.
 // converted: the conversion was armed for it.
-void NotePresentHdr(PresentColour profile, const char* reason, bool converted);
+void NotePresentHdr(PresentColour profile, const char* reason, bool converted, float whiteNits = 203.0f,
+                    bool whiteFromDisplay = false);
 // What peripheral compression did on the last D3D12 dispatch (docs/dlssnr/design/peripheral-compression.md), for the
 // menu's status line. reason is a string literal: "active", or why not.
 struct PeripheryState

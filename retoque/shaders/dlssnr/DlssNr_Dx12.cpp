@@ -18,6 +18,7 @@
 #include <dlssnr/DlssNr_DirectRuntime.h>
 #include <dlssnr/DlssNr_NgxInfo.h>
 #include <dlssnr/DlssNr_PresentColour.h>
+#include <dlssnr/DlssNr_DisplayWhite.h>
 #include <dlssnr/DlssNr_SwapchainColour.h>
 #include <dlssnr/DlssNr_Enlarge.h>
 #include <dlssnr/DlssNr_PrivateSr.h>
@@ -7068,7 +7069,18 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     {
         DXGI_SWAP_CHAIN_DESC1 scDesc {};
 
-        if (SUCCEEDED(swapchain->GetDesc1(&scDesc)))
+        const HRESULT described = swapchain->GetDesc1(&scDesc);
+        if (FAILED(described) && cfg.DlssNrHdrPresent.value_or_default())
+        {
+            g_resetOnReturn = true;
+            if (fgHook)
+                g_lastFgFlip = g_presentFlip;
+            NotePresentHdr(PresentColour::Declined, PresentColourText::kNoDescription, false);
+            ReportSkipOnce(PresentColourText::kNoDescription);
+            ReportRuntimeStatus(false, PresentColourText::kNoDescription);
+            return;
+        }
+        if (SUCCEEDED(described))
         {
             const PresentColourDecision decision = DecidePresentColour(swapchain, scDesc.Format, cfg);
             presentProfile = decision.profile;
@@ -7109,6 +7121,20 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         return;
     }
 
+    const D3D12_RESOURCE_DESC bbDesc = backbuffer->GetDesc();
+    if (IsHdrProfile(presentProfile) && !DlssNr_PresentHdr_Dx12::TextureShape(bbDesc))
+    {
+        backbuffer->Release();
+        device->Release();
+        g_resetOnReturn = true;
+        if (fgHook)
+            g_lastFgFlip = g_presentFlip;
+        NotePresentHdr(presentProfile, PresentColourText::kResourceContract, false);
+        ReportSkipOnce(PresentColourText::kResourceContract);
+        ReportRuntimeStatus(false, PresentColourText::kResourceContract);
+        return;
+    }
+
     EnsureCompose(device);
 
     if (g_compose == nullptr)
@@ -7130,7 +7156,6 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         return;
     }
 
-    const D3D12_RESOURCE_DESC bbDesc = backbuffer->GetDesc();
     const unsigned int width = (unsigned int) bbDesc.Width;
     const unsigned int height = bbDesc.Height;
 
@@ -7162,6 +7187,14 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
                                                     : EnsurePresentHdr(device, width, height, bbDesc.Format);
     else
         ParkPresentHdrTextures();
+    if (presentHdr && hdrRefusal == nullptr)
+    {
+        const uint32_t profile =
+            presentProfile == PresentColour::Hdr10 ? PresentHdr::kProfileHdr10 : PresentHdr::kProfileScRgb;
+        if (!g_presentHdr->ValidResources(g_bbCopy, g_bbCopy, g_hdrWork, profile, PresentHdr::kModeDecode) ||
+            !g_presentHdr->ValidResources(g_bbCopy, g_hdrWork, g_hdrOut, profile, PresentHdr::kModeEncode))
+            hdrRefusal = PresentColourText::kResourceContract;
+    }
 
     if (hdrRefusal != nullptr)
     {
@@ -7178,24 +7211,8 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         return;
     }
 
-    if (presentHdr)
-        NotePresentHdr(presentProfile, nullptr, true);
-
-    // Said once per change, so a log answers whether the frames were converted.
-    {
-        static PresentColour s_loggedProfile = PresentColour::Sdr;
-        if (presentProfile != s_loggedProfile)
-        {
-            s_loggedProfile = presentProfile;
-            if (presentHdr)
-                LOG_INFO("DLSS-NR present: HDR conversion on, {} at {}x{}: the pass runs on linear Rec.709 light with "
-                         "an SDR white of {:.0f} nits x Paper white",
-                         presentProfile == PresentColour::Hdr10 ? "HDR10 (PQ, Rec.2020)" : "scRGB (FP16, linear)",
-                         width, height, DlssNr::PresentHdr::kSdrWhiteNits);
-            else
-                LOG_INFO("DLSS-NR present: HDR conversion off, the swapchain is SDR");
-        }
-    }
+    const auto presentWhite =
+        presentHdr ? DlssNr::PresentHdr::DisplayWhiteForSwapchain(swapchain) : DlssNr::PresentHdr::WhiteLevel {};
 
     ID3D12Resource* depth = nullptr;
     ID3D12Resource* motion = nullptr;
@@ -7404,7 +7421,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         frame.PreExposure = defaults.PreExposure;
         frame.ExtentIsStable = defaults.ExtentIsStable;
         frame.OutputState = defaults.OutputState;
-        frame.PresentWhite = defaults.PresentWhite;
+        frame.PresentWhite = presentHdr ? presentWhite.nits / 80.0f : defaults.PresentWhite;
         frame.PresentQuantRel = defaults.PresentQuantRel;
     }
 
@@ -7505,6 +7522,28 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     Barrier(list, writeBack, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     const bool executed = SubmitPresentList(queue, slot);
+    const bool convertedHdr = presentHdr && executed && writeBack == g_hdrOut;
+    if (presentHdr)
+        NotePresentHdr(presentProfile, convertedHdr ? nullptr : "HDR conversion did not produce a submitted frame",
+                       convertedHdr, presentWhite.nits, presentWhite.fromDisplay);
+    // Only claim conversion after decode/model/encode and submission succeeded. Refresh the line on white changes.
+    static PresentColour loggedProfile = PresentColour::Sdr;
+    static DlssNr::PresentHdr::WhiteLevel loggedWhite;
+    if (convertedHdr && (presentProfile != loggedProfile || presentWhite.nits != loggedWhite.nits ||
+                         presentWhite.fromDisplay != loggedWhite.fromDisplay))
+    {
+        loggedProfile = presentProfile;
+        loggedWhite = presentWhite;
+        LOG_INFO("DLSS-NR present: HDR conversion on, {} at {}x{}: linear Rec.709 FP16, SDR white {:.1f} nits "
+                 "({}) x Paper white; original codes bound for reconstruction",
+                 presentProfile == PresentColour::Hdr10 ? "HDR10 (PQ, Rec.2020)" : "scRGB (FP16, linear)", width,
+                 height, presentWhite.nits, DlssNr::PresentHdr::WhiteSource(presentWhite));
+    }
+    else if (!presentHdr && loggedProfile != PresentColour::Sdr)
+    {
+        loggedProfile = PresentColour::Sdr;
+        LOG_INFO("DLSS-NR present: HDR conversion off, the swapchain is SDR");
+    }
     SettlePresentMotion(executed);
     if (!executed && trackedSlot < DlssNr::PresentGuides::kRingSize)
     {
@@ -9069,14 +9108,18 @@ static std::chrono::steady_clock::time_point g_presentHdrAt {};
 static PresentColour g_presentHdrProfile = PresentColour::Declined;
 static const char* g_presentHdrReason = nullptr;
 static bool g_presentHdrConverted = false;
+static float g_presentHdrWhiteNits = 203.0f;
+static bool g_presentHdrWhiteFromDisplay = false;
 
-void NotePresentHdr(PresentColour profile, const char* reason, bool converted)
+void NotePresentHdr(PresentColour profile, const char* reason, bool converted, float whiteNits, bool whiteFromDisplay)
 {
     std::lock_guard<std::mutex> lock(g_presentHdrStatusMutex);
     g_presentHdrAt = std::chrono::steady_clock::now();
     g_presentHdrProfile = profile;
     g_presentHdrReason = reason;
     g_presentHdrConverted = converted;
+    g_presentHdrWhiteNits = whiteNits;
+    g_presentHdrWhiteFromDisplay = whiteFromDisplay;
 }
 
 PresentHdrStatus GetPresentHdrStatus()
@@ -9091,6 +9134,8 @@ PresentHdrStatus GetPresentHdrStatus()
     const auto age = std::chrono::steady_clock::now() - g_presentHdrAt;
     status.seen = age < std::chrono::seconds(2);
     status.converted = status.seen && g_presentHdrConverted && age < std::chrono::seconds(1);
+    status.whiteNits = g_presentHdrWhiteNits;
+    status.whiteFromDisplay = g_presentHdrWhiteFromDisplay;
     status.profile = g_presentHdrProfile;
     status.reason = g_presentHdrReason;
     return status;

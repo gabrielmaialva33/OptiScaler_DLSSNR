@@ -19,8 +19,9 @@
 
 #include <dlssnr/DlssNr_PresentHdr.h>
 
-// Two dispatches a frame, reused round-robin with no fence: sixteen frames of coverage, twice what the composition
-// keeps for frame generation running the GPU behind the CPU, and four times the present route's list ring.
+// Two dispatches per recording. The native caller holds at most four present-list slots and fence-waits before
+// reuse; the bridge waits its own list. Abandoned lists never execute. Thus <=8 live slots here, below32.
+// A new caller MUST provide the same bounded in-flight/abandonment contract; elapsed frames alone are not proof.
 #define DLSSNR_PRESENT_HDR_NUM_OF_HEAPS 32
 
 class DlssNr_PresentHdr_Dx12 : public Shader_Dx12
@@ -35,6 +36,14 @@ class DlssNr_PresentHdr_Dx12 : public Shader_Dx12
         uint32_t Profile = 0; // DlssNr::PresentHdr::kProfileHdr10 or kProfileScRgb
         uint32_t Mode = 0;    // DlssNr::PresentHdr::kModeDecode or kModeEncode
     };
+
+    static_assert(sizeof(Constants) == D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+
+    static bool TextureShape(const D3D12_RESOURCE_DESC& desc);
+
+    // Preflight without recording GPU commands or writing descriptors. Call before transitioning caller resources.
+    bool ValidResources(ID3D12Resource* original, ID3D12Resource* processed, ID3D12Resource* out, uint32_t profile,
+                        uint32_t mode);
 
     // Whether this build carries the shader.
     static bool Available();
