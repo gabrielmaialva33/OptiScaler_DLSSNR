@@ -442,11 +442,22 @@ const char* WritePair(Job& job, void* const (&mapped)[2], std::string& stemOut)
         };
     };
     std::string failedAt;
-    const bool ok = WriteViaTemporary(paths[0], OpenForWriting, image(rows[0]), &failedAt) &&
-                    WriteViaTemporary(paths[1], OpenForWriting, image(rows[1]), &failedAt) &&
-                    WriteViaTemporary(
-                        paths[2], OpenForWriting, [&json](std::FILE* f)
-                        { return std::fwrite(json.data(), 1, json.size(), f) == json.size(); }, &failedAt);
+    bool ok = false;
+    try
+    {
+        ok = WriteViaTemporary(paths[0], OpenForWriting, image(rows[0]), &failedAt) &&
+             WriteViaTemporary(paths[1], OpenForWriting, image(rows[1]), &failedAt) &&
+             WriteViaTemporary(
+                 paths[2], OpenForWriting, [&json](std::FILE* f)
+                 { return std::fwrite(json.data(), 1, json.size(), f) == json.size(); }, &failedAt);
+    }
+    catch (...)
+    {
+        // A throw outside the writers' own (a path or a name that could not be built): the pair is not kept, and
+        // whatever of it was renamed into place goes below, as for any failed write.
+        ok = false;
+        failedAt = "an exception while the files were written";
+    }
 
     if (!ok)
     {
@@ -495,9 +506,29 @@ void Writer::Run()
         const char* failure = kReasonWrite;
         std::string stem;
         if (isMapped[0] && isMapped[1])
-            failure = WritePair(job, mapped, stem);
+        {
+            // Nothing may leave this thread: an exception out of a detached thread ends the game (std::terminate).
+            try
+            {
+                failure = WritePair(job, mapped, stem);
+            }
+            catch (const std::exception& e)
+            {
+                LOG_ERROR("DLSS-NR capture: writing the pair failed with an exception ({}); nothing kept", e.what());
+                failure = kReasonWrite;
+                stem.clear();
+            }
+            catch (...)
+            {
+                LOG_ERROR("DLSS-NR capture: writing the pair failed with an exception; nothing kept");
+                failure = kReasonWrite;
+                stem.clear();
+            }
+        }
         else
+        {
             LOG_ERROR("DLSS-NR capture: a readback could not be mapped; nothing written");
+        }
 
         for (int i = 0; i < 2; ++i)
         {
@@ -530,17 +561,14 @@ void Poll()
 
 bool Wanted() { return g_used.load(std::memory_order_relaxed) && TheSession().Current() == Phase::Requested; }
 
-void AbandonAfterError()
+void AbandonAfterError(const char* what)
 {
     if (!g_used.load(std::memory_order_relaxed))
         return;
-    static bool said = false; // render thread, under the pass's lock
-    if (!said)
-    {
-        said = true;
-        LOG_ERROR("DLSS-NR capture: describing or recording the frame failed with an exception; that capture is "
-                  "withdrawn and the frame is unchanged");
-    }
+    // Every time: a capture is one press, and the line under the button points here.
+    LOG_ERROR("DLSS-NR capture: describing or recording the frame failed with an exception ({}); that capture is "
+              "withdrawn and the frame is unchanged",
+              what != nullptr ? what : "not a standard exception");
     TheSession().Abandon(kReasonInternal);
 }
 

@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -70,7 +71,7 @@ inline constexpr const char* kReasonWrite = "The files could not be written (see
 inline constexpr const char* kReasonShape = "The two surfaces differ in shape; nothing was captured.";
 inline constexpr const char* kReasonSurface = "This frame is not a single-sample 2D texture; nothing was captured.";
 inline constexpr const char* kReasonInternal =
-    "The capture failed while the frame was being recorded; nothing was captured (see the log).";
+    "The capture failed while the frame was being described or recorded; nothing was captured (see the log).";
 inline constexpr const char* kReasonBusy = "A capture is already under way.";
 
 // --- State machine ---------------------------------------------------------------------------------------------
@@ -745,7 +746,16 @@ bool WriteViaTemporary(const std::filesystem::path& final, Open&& open, Write&& 
     if (file == nullptr)
         return fail("open", ErrnoText(errno));
     errno = 0;
-    const bool wrote = write(file);
+    bool wrote = false;
+    bool threw = false;
+    try
+    {
+        wrote = write(file);
+    }
+    catch (...)
+    {
+        threw = true; // a writer that throws (an allocation) is a failed write: the file is still closed and removed
+    }
     const int writeError = errno;
     errno = 0;
     const bool closed = std::fclose(file) == 0;
@@ -754,6 +764,8 @@ bool WriteViaTemporary(const std::filesystem::path& final, Open&& open, Write&& 
     if (!wrote || !closed)
     {
         std::filesystem::remove(temporary, ec);
+        if (threw)
+            return fail("write", "the writer threw");
         return !wrote ? fail("write", ErrnoText(writeError)) : fail("close", ErrnoText(closeError));
     }
     std::filesystem::rename(temporary, final, ec);
@@ -876,12 +888,14 @@ class Record
 // The keyword the PNG's tEXt chunk carries the record under.
 inline constexpr const char* kTextKeyword = "Retoque.Provenance";
 
-// A number in the record: six significant digits, as printf's %g.
+// A number in the record: six significant digits, as printf's %g in the "C" locale -- what std::format("{:.6g}") gave
+// before. std::to_chars and never snprintf: the CRT is shared with the game, and a game that sets a locale with a
+// decimal comma (pt-BR, de-DE) would otherwise turn 1.25 into "1,25" in every record.
 inline std::string FormatNumber(double value)
 {
-    char text[32];
-    std::snprintf(text, sizeof(text), "%.6g", value);
-    return text;
+    char text[64];
+    const auto result = std::to_chars(text, text + sizeof(text), value, std::chars_format::general, 6);
+    return result.ec == std::errc() ? std::string(text, result.ptr) : std::string("unknown");
 }
 
 // What the record site knows about the frame, already reduced to what may be published: no field is, or may become,
@@ -905,8 +919,8 @@ struct FrameRecordInputs
     double whitePoint = 0.0;
     uint64_t frame = 0;
     uint64_t present = 0;
-    std::string
-        settings; // TimingContract: every setting that shapes the picture, the preset and working scale among them
+    // TimingContract: every setting that shapes the picture, the preset and the working scale among them.
+    std::string settings;
 };
 
 // The first half of the record, set at the record site on the render thread (comparison-capture.md, section 4.4).

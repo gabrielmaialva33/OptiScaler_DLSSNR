@@ -50,8 +50,9 @@ void AtRecordSite(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D
                   const FrameFacts& facts);
 
 // The record site threw (describing the frame allocates): withdraws the request this frame took, or the one still
-// waiting, with a reason, so the button does not stay "waiting". Nothing is freed.
-void AbandonAfterError();
+// waiting, with a reason, so the button does not stay "waiting", and logs what (the exception's text, or null).
+// Nothing is freed.
+void AbandonAfterError(const char* what);
 
 // From DlssNr::Shutdown: lets go of the readbacks proven done; the rest are kept, never freed under the GPU.
 void Shutdown();

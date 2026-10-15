@@ -404,8 +404,8 @@ for _, field, value in assigned:
         fail(f'the record input {field} is set from {value.strip()!r}, which may be a path')
 for builder in ('inline void FillFrameRecord(', 'inline void FillWriteRecord('):
     for value in re.findall(r'r\.Set\("\w+",\s*([^;]*)\);', body_of(code_h, builder)):
-        if not re.fullmatch(r'\s*(?:"[^"]*"|in\.[\w\[\]\.]+|[\w:]+\((?:in\.[\w\[\]\.]+(?:\.\w+\(\))?)?\)|'
-                            r'in\.\w+ \? "1" : "0"|in\.plan\.quantisedFrom)\s*', value):
+        if not re.fullmatch(r'\s*(?:"[^"]*"|in\.[\w\[\]\.]+|[\w:]+\(in\.[\w\[\]\.]+(?:\.\w+\(\))?\)|'
+                            r'in\.\w+ \? "1" : "0")\s*', value):
             fail(f'{builder} sets a value from {value.strip()!r}: only its inputs and literals may reach the record')
 for struct in ('struct FrameRecordInputs', 'struct WriteRecordInputs'):
     if re.search(r'path|wstring', strip_comments(body_of(code_h, struct))):
@@ -452,7 +452,8 @@ if 'scale={}' not in contract or 'preset={}' not in contract or 'render={}x{}' n
 if site >= 0:
     guarded = re.sub(r'\s+', ' ', dispatch[site:dispatch.index('facts);', site) + 400])
     if not re.search(r'Wanted\(\)\) \{ try \{', guarded) or \
-            'catch (...) { DlssNr::PairCapture::AbandonAfterError(); }' not in guarded:
+            'catch (const std::exception& e) { DlssNr::PairCapture::AbandonAfterError(e.what()); } catch (...) { ' \
+            'DlssNr::PairCapture::AbandonAfterError(nullptr); }' not in guarded:
         fail('the record site must be inside try, and a throw must withdraw the capture (AbandonAfterError)')
 shutdown = body_of(renderer, 'void Shutdown()\n{')
 if 'PairCapture::Shutdown();' not in shutdown:
@@ -491,19 +492,40 @@ write_pair = body_of(code_cpp, 'const char* WritePair(')
 ensure = write_pair.find('EnsureDirectory(p.directory')
 if ensure < 0 or not ensure < write_pair.find('MeanOf(') or not ensure < write_pair.find('AdapterFor('):
     fail('WritePair must check the folder (EnsureDirectory) before the means, the adapter and the model')
-if write_pair.find('RotateFolder(p.directory, kMaxPairs, stem)') < write_pair.rfind('WriteViaTemporary(') or \
-        'RotationVictims(' in write_pair or 'if (!ok)' not in write_pair[:write_pair.find('RotateFolder(')]:
-    fail('the cap must run after the pair was written (RotateFolder, protecting the new stem), never before')
+if write_pair.count('RotateFolder(') != 1 or 'RotationVictims(' in write_pair or \
+        write_pair.find('RotateFolder(p.directory, kMaxPairs, stem)') < write_pair.rfind('WriteViaTemporary(') or \
+        'if (!ok)' not in write_pair[:write_pair.find('RotateFolder(')]:
+    fail('the cap must run once, after the pair was written (RotateFolder, protecting the new stem), never before')
+writes = write_pair[write_pair.find('bool ok = false;'):write_pair.find('if (!ok)')]
+if 'try' not in writes or 'catch (...)' not in writes:
+    fail('a throw while the files are written must count as a failed write, so the pair is removed')
+writer_run = body_of(code_cpp, 'void Writer::Run()')
+if not re.search(r'try\s*\{\s*failure = WritePair\(', writer_run) or 'catch (...)' not in writer_run:
+    fail('nothing may leave the writer thread: WritePair must run inside try with a catch (...)')
+if 'snprintf' in body_of(code_h, 'inline std::string FormatNumber(') or \
+        'std::to_chars' not in body_of(code_h, 'inline std::string FormatNumber('):
+    fail("FormatNumber must not depend on the locale the game's CRT is in (std::to_chars, never snprintf)")
 
-# Idle: until the first request nothing of the capture exists; the pass's two calls are one relaxed load each.
-for signature in ('void Poll()', 'bool Wanted()'):
+# Idle: until the first request nothing of the capture exists; the pass's two calls are one relaxed load each, and
+# nothing else reaches the session before a request has set g_used.
+for signature in ('void Poll()', 'bool Wanted()', 'void AbandonAfterError(', 'void Shutdown()',
+                  'PairCaptureStatus GetPairCaptureStatus()'):
     body = body_of(code_cpp, signature) if signature != 'bool Wanted()' else \
         code_cpp[code_cpp.index('bool Wanted()'):code_cpp.index(';', code_cpp.index('bool Wanted()'))]
-    first = body.find('g_used.load(std::memory_order_relaxed)')
+    first = body.find('g_used.load(')
     if first < 0 or (body.find('TheSession()') >= 0 and body.find('TheSession()') < first):
         fail(f'{signature} must read g_used before it touches the session')
-if 'g_used.store(true' not in body_of(code_cpp, 'bool RequestPairCapture('):
-    fail('only a request may bring the capture into existence (g_used)')
+if code_cpp.count('g_used.store(') != 1 or 'g_used.store(true' not in body_of(code_cpp, 'bool RequestPairCapture('):
+    fail('only a request may bring the capture into existence (g_used), and only there')
+request = body_of(code_cpp, 'bool RequestPairCapture(')
+if 'DlssNrUseProxy' not in request or 'kReasonProxy' not in request:
+    fail('a request under the driver proxy must be refused at once: no frame of the pass can take it')
+menu_capture = strip_comments(body_of((nr / 'dlssnr/DlssNr_Menu.cpp').read_text(),
+                                      'static void RenderPairCapture('))
+if 'ReasonStillApplies(status.reason, in)' not in menu_capture:
+    fail("the menu must not show a setting's refusal once the setting is off (ReasonStillApplies)")
+if not 0 <= menu_capture.find('DlssNrEnabled') < menu_capture.find('GetPairCaptureStatus()'):
+    fail('the menu must ask the capture nothing while NR is off')
 if 'TimingModelIdentity' in dispatch[site:site + 3000]:
     fail('the record site must not read the model file (TimingModelIdentity) on the render thread')
 

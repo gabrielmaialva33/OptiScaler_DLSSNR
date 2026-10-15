@@ -10,12 +10,15 @@
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
+#include <clocale>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -733,6 +736,20 @@ static void Folders(const fs::path& out)
     CHECK(why.rfind("rename: ", 0) == 0 && !fs::exists(base / "20261015-123456-Game-003.json.tmp") &&
           fs::is_directory(base / "20261015-123456-Game-003.json" / "inside"));
 
+    // A writer that throws (an allocation inside the image writer) is a failed write like any other: the file is
+    // closed, the temporary removed, and nothing escapes to the writer thread.
+    why.clear();
+    CHECK(!WriteViaTemporary(
+        base / "20261015-123456-Game-004.json", OpenPortable,
+        [](std::FILE* f) -> bool
+        {
+            std::fwrite("{", 1, 1, f);
+            throw std::runtime_error("writer");
+        },
+        &why));
+    CHECK(why == "write: the writer threw" && !fs::exists(base / "20261015-123456-Game-004.json") &&
+          !fs::exists(base / "20261015-123456-Game-004.json.tmp"));
+
     // Rotation after a write, in a real folder: the oldest pairs go, the one just written stays even under an older
     // name, the count is of files actually removed, and nothing foreign is touched -- a name that is not ASCII
     // included, however much it looks like ours.
@@ -961,6 +978,65 @@ static void RecordExact(const fs::path& out)
                                                     "processed_file",
                                                     "sidecar" };
     CHECK(keys == expectedKeys);
+
+    // Numbers are written as std::format("{:.6g}") wrote them before the builders existed, digit for digit, NaN and
+    // infinities included.
+    {
+        std::mt19937_64 rng(2026);
+        std::uniform_real_distribution<double> unit(0.0, 1.0);
+        std::uniform_int_distribution<int> exponent(-40, 40);
+        std::vector<double> values = { 0.0,
+                                       -0.0,
+                                       1.0,
+                                       1.25,
+                                       0.45,
+                                       1e-5,
+                                       123456.0,
+                                       1234567.0,
+                                       1e300,
+                                       5e-324,
+                                       std::numeric_limits<double>::infinity(),
+                                       -std::numeric_limits<double>::infinity(),
+                                       std::numeric_limits<double>::quiet_NaN(),
+                                       static_cast<double>(1.25f),
+                                       static_cast<double>(0.1f) };
+        for (int i = 0; i < 200000; ++i)
+            values.push_back(std::ldexp(unit(rng), exponent(rng)) * (i % 2 == 0 ? 1.0 : -1.0));
+        for (const double v : values)
+        {
+            if (FormatNumber(v) != std::format("{:.6g}", v))
+                std::fprintf(stderr, "FormatNumber(%a) = %s\n", v, FormatNumber(v).c_str());
+            CHECK(FormatNumber(v) == std::format("{:.6g}", v));
+        }
+    }
+
+    // The CRT is the game's: a locale with a decimal comma, which a game may set, must not reach the record.
+    {
+        const char* comma = nullptr;
+        for (const char* name : { "pt_BR.UTF-8", "pt_BR.utf8", "de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8" })
+        {
+            if (std::setlocale(LC_ALL, name) != nullptr)
+            {
+                comma = name;
+                break;
+            }
+        }
+        if (comma == nullptr)
+        {
+            std::printf("nr-capture: SKIP decimal-comma locale: none is installed\n");
+        }
+        else
+        {
+            char probe[16];
+            std::snprintf(probe, sizeof(probe), "%.2f", 1.25);
+            CHECK(std::string(probe) == "1,25"); // the locale is in force, or the check below proves nothing
+            Record again;
+            FillFrameRecord(again, frame);
+            FillWriteRecord(again, write);
+            CHECK(again.Line() == expected && FormatNumber(0.45) == "0.45");
+            std::setlocale(LC_ALL, "C");
+        }
+    }
     ++g_cases;
 }
 

@@ -5725,9 +5725,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, target,
                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS, facts);
             }
+            catch (const std::exception& e)
+            {
+                DlssNr::PairCapture::AbandonAfterError(e.what());
+            }
             catch (...)
             {
-                DlssNr::PairCapture::AbandonAfterError();
+                DlssNr::PairCapture::AbandonAfterError(nullptr);
             }
         }
     }
