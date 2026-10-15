@@ -1095,7 +1095,7 @@ def check_nr(name, facts, log):
 # after-upscale route running the model on its output; then the feature released and nothing evaluated until 14 s after
 # the last evaluate, longer than the present host waits (kAfterUpscaleIdleMs); twice. The phases' read-backs say who
 # ran the model when: until 9 s after the last evaluate the route (frames unedited), from 12 s the present host.
-ROUTE_CASES = {'nr-route-quiet', 'nr-route-quiet-wdx12'}
+ROUTE_CASES = {'nr-route-quiet', 'nr-route-quiet-wdx12', 'nr-route-toggle-wdx12'}
 ROUTE_IDLE_S = 10  # retoque/dlssnr/DlssNr_VkModelOwner.h, kAfterUpscaleIdleMs
 
 
@@ -1113,15 +1113,19 @@ def execute_route(name, dll, redist, files):
     # OptiScaler's own FSR 2.2 as the game's upscaler: nothing but the model to supply, and the evaluate's path to the
     # after-upscale route is the one every OptiScaler upscaler takes. DLSS stays on, so NGX initialises through the
     # driver's core, as a game's does.
-    wdx12 = name == 'nr-route-quiet-wdx12'
-    ini = ini_for(False, True, True, not wdx12, level=1) + '[Upscalers]\nVulkanUpscaler=fsr22\n'
+    wdx12 = name.endswith('-wdx12')
+    toggle = name == 'nr-route-toggle-wdx12'
+    ini = ini_for(False, True, True, toggle or not wdx12, level=1) + '[Upscalers]\nVulkanUpscaler=fsr22\n'
     (work / 'OptiScaler.ini').write_text(ini)
     if not wdx12:
         (work / MARKER).write_text('')
     env = nr_env()
     # Do not inherit a diagnostic override that silently removes the chain this case must exercise.
     env.pop('OPTISCALER_DISABLE_VULKAN_WDX12_HOOKS', None)
-    args = ['--route'] + (['--wdx12'] if wdx12 else [])
+    if toggle:
+        ini = ini.replace('VulkanPresentHost=true\n', 'VulkanPresentHost=true\nToggleKey=0x76\n')
+        (work / 'OptiScaler.ini').write_text(ini)
+    args = ['--route'] + (['--wdx12'] if wdx12 else []) + (['--nr-toggle'] if toggle else [])
     with (OUT / f'{name}.log').open('w') as log:
         process = subprocess.run([str(files['proton']), 'run', str(work / NR_EXE), *args], cwd=work,
                                  env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
@@ -1149,7 +1153,8 @@ def check_route(name, facts, log):
         if not condition:
             problems.append(message)
 
-    wdx12 = name == 'nr-route-quiet-wdx12'
+    wdx12 = name.endswith('-wdx12')
+    toggle = name == 'nr-route-toggle-wdx12'
     need(facts.get('wdx12_probed') is wdx12, 'wDx12 chain probe did not match the case')
     # One rejection is the application's deliberate, Vulkan-valid zero-batch probe. No host drain may add one.
     need(log.count('Invalid parameters to hk_vkQueueSubmit') == int(wdx12),
@@ -1161,6 +1166,31 @@ def check_route(name, facts, log):
     phases = {p['name']: p for p in facts.get('phases', [])}
     expected = ['cold', 'on', 'off-waiting', 'off-handing-back', 'off-back', 'on-again', 'off-again-waiting',
                 'off-again-handing-back', 'off-again-back', 'on-at-exit']
+    if toggle:
+        expected = ['cold', 'on', 'toggle-off', 'off-waiting', 'nr-disabled', 'toggle-on', 'off-handing-back',
+                    'off-back', 'on-again', 'toggle-off-again', 'off-again-waiting', 'nr-disabled-again',
+                    'toggle-on-again', 'off-again-handing-back', 'off-again-back', 'on-at-exit']
+        blocker = 'hand-back due but not started: NR off ([DlssNr] Enabled=false)'
+        need(log.count(blocker) == 2, 'NR off must block each due hand-back exactly once')
+        need(log.count('Neural Rendering toggle key pressed, setting DlssNrEnabled to ') == 4, 'four production F7 toggles were not observed')
+        events = [(i, line) for i, line in enumerate(lines)
+                  if 'Neural Rendering toggle key pressed, setting DlssNrEnabled to ' in line]
+        starts = [i for i, line in enumerate(lines) if 's: taking it back, once the device' in line]
+        blockers = [i for i, line in enumerate(lines) if blocker in line]
+        def time_ms(line):
+            m = re.match(r'\[(\d+):(\d+):(\d+)\.(\d+)\]', line)
+            return ((int(m[1]) * 60 + int(m[2])) * 60 + int(m[3])) * 1000 + float('0.' + m[4]) * 1000
+        if len(events) == 4 and len(starts) == 2 and len(blockers) == 2:
+            for cycle in range(2):
+                off, on = events[2 * cycle], events[2 * cycle + 1]
+                need(off[1].endswith('false') and on[1].endswith('true'), 'F7 order must be off then on')
+                need(off[0] < blockers[cycle] < on[0] < starts[cycle], 'hand-back started while NR was off')
+                elapsed = (time_ms(lines[starts[cycle]]) - time_ms(on[1])) % (24 * 3600000)
+                need(elapsed < 2000, f'hand-back did not start promptly after NR on: {elapsed:.1f} ms')
+        for phase_name in ('nr-disabled', 'nr-disabled-again'):
+            p = phases.get(phase_name, {})
+            need(p.get('readbacks', 0) > 0 and p.get('exact') == p.get('readbacks'),
+                 f'{phase_name}: NR ran while disabled, or no read-backs: {p}')
     need(list(phases) == expected, f'phases {list(phases)}')
     if problems:
         return problems, ''
@@ -1226,12 +1256,15 @@ def check_route(name, facts, log):
          f'{facts.get("model_messages")} reports of the model\'s own objects for {builds + route_builds} feature builds')
 
     drains = [re.search(r'the drain took (\d+) ms', l) for l in lines if again in l]
+    handback_when = ('after F7 re-enabled NR (one due NR-off blocker per cycle, start within 2 s)' if toggle else
+                     f'{ROUTE_IDLE_S} s after the route went quiet')
+    changed_when = 'after re-enabling NR and draining' if toggle else 'from 12 s'
     summary = (f'twice: the present host stood down for the route ({phases["on"]["evaluates"]} and '
                f'{phases["on-again"]["evaluates"]} evaluates, every read-back exact), took the model back '
-               f'{ROUTE_IDLE_S} s after the route went quiet (drains of '
+               f'{handback_when} (drains of '
                f'{", ".join(m.group(1) for m in drains if m)} ms; {phases["off-waiting"]["readbacks"]} and '
                f'{phases["off-again-waiting"]["readbacks"]} read-backs exact until 9 s after the last evaluate, every one '
-               f'changed from 12 s), the route\'s feature freed each time and at exit, before NGX went; {builds} feature builds of the present host\'s, '
+               f'changed {changed_when}), the route\'s feature freed each time and at exit, before NGX went; {builds} feature builds of the present host\'s, '
                f'{route_builds} of the route\'s; '
                f'0 validation errors of the host\'s ({facts.get("model_messages", 0)} of the model\'s own '
                f'{",".join(sorted(vuids)) or "objects"} set aside)')

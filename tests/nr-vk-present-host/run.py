@@ -384,21 +384,27 @@ assert 'VULKAN_Shutdown1()(' not in code(model) and 'shutdown(device, &remaining
 # The way back from the after-upscale route (DOOM Eternal, 2026-10-14; DlssNr_VkModelOwner.h). Begun only with no
 # model of the host's on the device and the route quiet there; followed at every present, before any refusal.
 housekeep_flat = flat(housekeep)
-assert re.search(r'if \(dev\.handBack\.active\) PollHandBack\(dev\); else if \(dev\.model == nullptr && .*'
-                 r'DlssNr::AfterUpscaleIdleOn\(dev\.device\) && CouldRunModel\(dev\)\) StartHandBack\(dev\);',
-                 housekeep_flat), housekeep_flat
-assert housekeep.index('StartHandBack(dev)') < housekeep.index('if (dev.model == nullptr)')
-could_run = code(function(host, 'bool CouldRunModel(DeviceTransport& dev)'))
-for needed in ('DlssNrEnabled', 'dev.nrReady', 'dev.lost', 'sc.colour.sdr', 'sc.nrOff.empty()', '!sc.retired',
-               'PresentHostMustYield(dev.device)', 'MissingFormatFeatures(dev, sc.colour.raw).empty()'):
+assert housekeep.index('AfterUpscaleIdleOn(dev.device)') < housekeep.index('HandBackBlockReason(') < \
+    housekeep.index('StartHandBack(dev);')
+assert 'HandBackBlocked(dev, reason);' in housekeep and 'dev.handBackDiagnostics.Reset();' in housekeep
+assert 'handBackNotBefore =' not in housekeep  # F7 off does not postpone the already-due hand-back
+could_run = code(function(host, 'std::string ModelUnavailable(DeviceTransport& dev)'))
+for needed in ('dev.nrReady', 'dev.lost', 'sc.colour.sdr', 'sc.nrOff.empty()', 'sc.retired',
+               'PresentHostMustYield(dev.device)', 'MissingFormatFeatures(dev, sc.colour.raw)'):
     assert needed in could_run, needed
-# Never waits: every queue's present and submit locks try-locked (a refusal tries again at the next present); the
-# fences made before the hand-back begins, and submitted only after it began, each on an empty batch.
+assert 'DlssNrEnabled.value_or_default()' in housekeep
+# The real try-only lock helper is shared with host tests; StartHandBack's RAII vector releases earlier locks.
 start_hb = code(function(host, 'void StartHandBack(DeviceTransport& dev)'))
-assert start_hb.count('std::try_to_lock') == 2 and 'try_lock_for' not in start_hb and '.lock()' not in start_hb
-assert start_hb.index('locks->present, std::try_to_lock') < start_hb.index('locks->submit, std::try_to_lock')
-assert start_hb.index('try_to_lock') < start_hb.index('createFence(') < \
+try_locks = code(function(nr, 'inline const char* TryHandBackQueueLocks('))
+assert try_locks.count('std::try_to_lock') == 2 and 'try_lock_for' not in try_locks and '.lock()' not in try_locks
+assert try_locks.index('locks.present, std::try_to_lock') < try_locks.index('locks.submit, std::try_to_lock')
+assert start_hb.index('TryHandBackQueueLocks(') < start_hb.index('createFence(') < \
     start_hb.index('BeginAfterUpscaleHandBack(') < start_hb.index('queueSubmit(')
+assert 'HandBackBlocked(dev,' in start_hb and '1000);' in start_hb
+assert 'fence creation returned' in function(host, 'void StartHandBack(DeviceTransport& dev)')
+assert prepare.index('Housekeep(*dev);') < prepare.index('prep.warnings.push_back(std::move(line));', prepare.index('Housekeep(*dev);')) < \
+    prepare.index('return skip(Skip::MultiSwapchain);')
+assert 'call.nowMs = PresentNowMs();' in present_hook
 assert 'dev.fn.queueSubmit(queues[submitted].first, 1, &submitInfo, fences[submitted])' in start_hb
 assert start_hb.index('queueSubmit(') < start_hb.index('held.clear();')
 # A failed drain submit calls the hand-back off; a lost device destroys nothing, fences included.
@@ -521,7 +527,7 @@ assert (vulkan / 'vulkan/vulkan.h').exists(), 'external/vulkan is not checked ou
 
 with tempfile.TemporaryDirectory(prefix='optiscaler-nr-vk-present-host-') as directory:
     binary = Path(directory) / 'cases'
-    subprocess.run(['g++', '-std=c++20', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+    subprocess.run(['g++', '-std=c++20', '-pthread', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
                     '-fno-sanitize-recover=all', '-fno-omit-frame-pointer', '-I', str(vulkan), '-I', str(dlssnr),
                     str(here / 'cases.cpp'), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
