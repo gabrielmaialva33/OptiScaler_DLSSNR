@@ -233,9 +233,9 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   `--source nvofa` runs the NVIDIA Optical Flow source through the same sequences, and skips
   when `nvofapi64.dll` or its shaders are unavailable. No NGX, no game.
 - `synth-motion-vk` — the same estimator on Vulkan (`SynthMotion_Vk`, its SPIR-V from the same sources) on a real
-  device under Wine, with core and synchronization validation on (proved active) and zero errors required: the D3D12
-  suite's frames, sequences and scores (`synth-motion-d3d12/sequences.h`), judged by its `judge()`, and GPU time. SKIP
-  when the device cannot run it. No NGX, no game.
+  device under Wine, with core and synchronization validation on (each proved active) and zero errors required: the
+  D3D12 suite's frames, sequences and scores (`synth-motion-d3d12/sequences.h`), judged by its `judge()`, a pan and the
+  cut also three frames in flight, and GPU time. SKIP when the device cannot run it. No NGX, no game.
 - `vulkan-overlay` — builds a real DLL and drives real Vulkan to exercise overlay
   lifetime.
 - `vulkan-present-host` — the production DLL from `build-local.sh`, uninstrumented, under a Win32 Vulkan application,
@@ -255,7 +255,8 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   `VK_NVX_binary_import` (the test layer hides it), the kit's old forwarder, and no model (SKIP without the kit or a
   local Proton). Stage 5 (`nr-synth-motion`, `[DlssNr] SynthMotion`): the picture panning, the estimator made with every
   product off the present path and its field the model's motion guide after each swapchain's warm-up, validation
-  clean; `nr-pan-zero` is the same pan on zero motion, and both report how much of the unmoved previous frame the
+  clean, at native and at half the working size (the field at the model's working size); `nr-pan-zero` is the same pan
+  on zero motion, and both report how much of the unmoved previous frame the
   model's edit carries. No game or FG.
 
 **Not a suite.** `nr-before-upscale/verify-invariants.py` is a one-shot evidence

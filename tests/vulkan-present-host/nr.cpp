@@ -279,8 +279,8 @@ struct SwapchainFacts
     uint32_t black = 0; // read-backs whose every colour channel came back zero
     bool destroyed = false;
     double maxPresentMs = 0.0; // the longest vkQueuePresentKHR call, the host's hook and everything below included
-    // With --pan, from the swapchain's 16th frame (past the model's build and the estimator's warm-up): how much of the
-    // previous frame, unmoved, the model's edit carries -- the projection of (read back - presented) on (previous -
+    // With --pan, from the swapchain's 16th frame (past the model's build and the estimator's warm-up), on frames the
+    // model edited: how much of the previous frame, unmoved, the model's edit carries -- the projection of (read back - presented) on (previous -
     // presented) at the same pixel, per frame. A model blending a stale history it was told did not move ghosts toward
     // 1; one whose history follows the camera stays near 0.
     double trailSum = 0.0;
@@ -677,7 +677,7 @@ struct App
         }
         const double mae = eightBit ? double(sum) / (double(w) * h * 3) : (exact ? 0.0 : 255.0);
         const int64_t frame = target.expected[index];
-        if (g_pan != 0 && eightBit && frame >= int64_t(target.firstFrame) + 16)
+        if (g_pan != 0 && eightBit && !exact && frame >= int64_t(target.firstFrame) + 16)
         {
             std::vector<uint8_t> previous(expected.size());
             Fill(previous.data(), target.format, w, h, static_cast<uint32_t>(frame - 1));

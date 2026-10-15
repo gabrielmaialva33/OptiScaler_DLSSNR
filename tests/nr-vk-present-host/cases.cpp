@@ -1055,10 +1055,11 @@ static void NrCounters()
 // its history starts over, what the model is told about motion, when the model's history resets, and the counter.
 static void SynthMotionDecisions()
 {
-    // The key on, the device not refusing it, the frame no smaller than the estimator runs at.
-    CHECK(SynthWanted(true, false, 3440, 1440) && SynthWanted(true, false, 256, 128));
+    // The key on, the device not refusing it, the model's working size (what the estimator runs at) no smaller than
+    // it can: 517x389 at WorkingScale 0.5 is 259x195, enough; 480x270 at 0.5 is not.
+    CHECK(SynthWanted(true, false, 3440, 1440) && SynthWanted(true, false, 256, 128) && SynthWanted(true, false, 259, 195));
     CHECK(!SynthWanted(false, false, 3440, 1440) && !SynthWanted(true, true, 3440, 1440));
-    CHECK(!SynthWanted(true, false, 255, 720) && !SynthWanted(true, false, 1280, 127));
+    CHECK(!SynthWanted(true, false, 255, 720) && !SynthWanted(true, false, 1280, 127) && !SynthWanted(true, false, 240, 135));
 
     // A product with the estimator is another key: turning the key on or off is a rebuild, frames carried meanwhile.
     const BuildKey plain { 3440, 1440, 3440, 1440, 0 }, synth { 3440, 1440, 3440, 1440, 0, true };
@@ -1066,24 +1067,19 @@ static void SynthMotionDecisions()
     CHECK(DecideBuild(false, BuildState::None, true, synth, plain) == BuildStep::Request);
     CHECK(DecideBuild(false, BuildState::None, true, synth, synth) == BuildStep::Use);
 
-    // The estimator's history: over on the model's reset, the host's cut, its first recording, and a gap over 250 ms.
-    CHECK(SynthReset(false, false, 0, 1000));
-    CHECK(SynthReset(true, false, 990, 1000) && SynthReset(false, true, 990, 1000));
-    CHECK(!SynthReset(false, false, 1000 - kSynthStaleMs, 1000));
-    CHECK(SynthReset(false, false, 1000 - kSynthStaleMs - 1, 1000));
+    // The estimator's history: over on its first recording and after a gap over 250 ms (the D3D12 rule), not on the
+    // model's resets or the host's cut (the model forgets its own history then).
+    CHECK(SynthReset(0, 1000));
+    CHECK(!SynthReset(990, 1000));
+    CHECK(!SynthReset(1000 - kSynthStaleMs, 1000));
+    CHECK(SynthReset(1000 - kSynthStaleMs - 1, 1000));
 
-    // The guide: the zero one, at the working size and unit scale, until the field is Ready; then the field whole, at
-    // the frame's size, scale 1 (pixels of the texture handed: RenderMotionScale's rule), or working over frame (the
-    // legacy conversion) with that key off. At native the two agree.
-    const MotionGuide zero = ChooseMotionGuide(false, 3440, 1440, 1720, 720, true);
+    // The guide: the zero one until the field is Ready, then the field; either at the model's working size (the field
+    // is estimated on the model's own input, in working pixels), at unit scale. Never larger than the model's colour.
+    const MotionGuide zero = ChooseMotionGuide(false, 1720, 720);
     CHECK(!zero.field && zero.width == 1720 && zero.height == 720 && zero.scaleX == 1.0f && zero.scaleY == 1.0f);
-    const MotionGuide field = ChooseMotionGuide(true, 3440, 1440, 1720, 720, true);
-    CHECK(field.field && field.width == 3440 && field.height == 1440 && field.scaleX == 1.0f && field.scaleY == 1.0f);
-    const MotionGuide legacy = ChooseMotionGuide(true, 3440, 1440, 1720, 720, false);
-    CHECK(legacy.field && legacy.width == 3440 && legacy.height == 1440 && legacy.scaleX == 0.5f &&
-          legacy.scaleY == 0.5f);
-    const MotionGuide native = ChooseMotionGuide(true, 1920, 1080, 1920, 1080, false);
-    CHECK(native.field && native.scaleX == 1.0f && native.scaleY == 1.0f);
+    const MotionGuide field = ChooseMotionGuide(true, 1720, 720);
+    CHECK(field.field && field.width == 1720 && field.height == 720 && field.scaleX == 1.0f && field.scaleY == 1.0f);
 
     // The model's reset: a scene cut is a cut; ZeroGuideReset applies only to a frame on the zero guide.
     CHECK(NrResetWithMotion(false, false, true, false, true));

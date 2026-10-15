@@ -601,13 +601,16 @@ for forbidden in ('LOG_', 'QueueSubmit', 'WaitIdle', 'WaitForFences', 'vkGetFenc
 for name, text in (('Admit', admit), ('Record', record_model)):
     for forbidden in ('CreateVkImages(', 'CreateVkPipelines(', 'VkUnsupported('):
         assert forbidden not in text, (name, forbidden)
-assert 'SynthWanted(Config::Instance()->DlssNrSynthMotion.value_or_default(), !m.synthOff.empty(), width, height)' \
-    in flat(admit)
-assert 'const BuildKey want { width, height, workWidth, workHeight, family, synth };' in admit
+# The estimator at the model's working size; and an adoption that latched it off is the product this frame wants (the
+# want is asked again after it), never a second build asking for it again.
+assert 'SynthWanted(synthConfigured, !m.synthOff.empty(), workWidth, workHeight)' in flat(admit)
+assert admit.index('const bool retry = m.Adopt();') < \
+    admit.index('want.synth = VkPresentHost::SynthWanted(synthConfigured, !m.synthOff.empty(), workWidth, workHeight);') \
+    < admit.index('continue;', admit.index('const bool retry = m.Adopt();'))
 assert 'job.synthOff = SynthMotion::VkUnsupported(pd, job.dev.apiVersion);' in run_build
 assert run_build.index('CreateVkPipelines(d, job.synthPipelines') < run_build.index('vkBeginCommandBuffer(cmd')
 assert run_build.index('vkBeginCommandBuffer(cmd') < \
-    run_build.index('SynthMotion::CreateVkImages(d, pd, k.width, k.height, cmd, job.synthImages, job.synthOff)') < \
+    run_build.index('SynthMotion::CreateVkImages(d, pd, k.workWidth, k.workHeight, cmd, job.synthImages, job.synthOff)') < \
     run_build.index('g_fwd.create(') < run_build.index('job.dev.submit(')
 free_build = code(function(feature_vk, 'void FreeBuild(PresentBuildJob& job)'))
 assert 'DestroyVkImages(d, job.synthImages);' in free_build and 'DestroyVkPipelines(job.synthPipelines);' in free_build
@@ -616,11 +619,12 @@ assert 'job.synthImages = SynthMotion::VkImages {};' in forget_build and 'Destro
 assert 'old.synth = synthImages;' in retire and 'estimator.Restart();' in retire
 free_set = code(function(feature_vk, '    void Free(RetiredSet& set)'))
 assert 'SynthMotion::DestroyVkImages(dev.device, set.synth);' in free_set
-# The estimator reads the working colour before the encode, the model then gets the field or the zero guide.
-assert record_model.index('m.estimator.Record(cmd, m.synthPipelines, m.synthImages, frame.view, VK_IMAGE_LAYOUT_GENERAL,') \
-    < record_model.index('m.pass->Dispatch(cmd, encode,') < record_model.index('ChooseMotionGuide(') < \
-    record_model.index('g_fwd.evaluate(')
-assert 'SynthReset(m.reset, frame.cut, m.lastSynthMs, now)' in record_model
+# The estimator reads the model's own input (the encode's proxy, downsampled below native), so its field is on the
+# model's grid; the model then gets the field or the zero guide, both at the working size.
+assert record_model.index('m.pass->Dispatch(cmd, encode,') < record_model.index('modelInput = &m.proxySmall;') < \
+    record_model.index('m.estimator.Record(cmd, m.synthPipelines, m.synthImages, modelInput->view,') < \
+    record_model.index('ChooseMotionGuide(fieldReady, m.workWidth, m.workHeight)') < record_model.index('g_fwd.evaluate(')
+assert 'SynthReset(m.lastSynthMs, now)' in record_model
 assert 'NrResetWithMotion(m.reset, frame.cut, sceneCut,' in flat(record_model)
 assert 'motionGuide, &m.output.ngx' in flat(record_model) and 'guide.width, guide.height, 0, 0, 0, 0' in flat(record_model)
 assert 'guide.scaleX, guide.scaleY);' in flat(record_model)
@@ -641,10 +645,10 @@ for item in (r'<ClCompile Include="..\retoque\shaders\synth_motion\SynthMotion_V
     assert item in project, item
 assert 'kVkReadbackSlots = 8;' in synth_vk_h and 'kNrInFlightMax = 4;' in nr  # a slot per frame in flight, and more
 
-print('PASS: stage-5 guards (the estimator made by the builder, its images initialised in the build\'s buffer; recorded '
-      'before the encode, its field the motion guide once Ready; confirmed on submit, dropped on discard, its cut read '
-      'at completion; freed with the product, forgotten on abandon; it logs, submits and waits for nothing)',
-      flush=True)
+print('PASS: stage-5 guards (the estimator made by the builder at the working size, its images initialised in the '
+      'build\'s buffer; recorded on the model\'s own input, its field the motion guide once Ready; an adoption that '
+      'latched it off is not rebuilt; confirmed on submit, dropped on discard, its cut read at completion; freed with '
+      'the product, forgotten on abandon; it logs, submits and waits for nothing)', flush=True)
 
 # The present hook goes in at a device's swapchain creation, after the bundle's own (installed in its vkCreateDevice),
 # so it runs first: application -> NR -> overlay -> present.

@@ -18,8 +18,15 @@ NGX, no OptiScaler.dll, no game.
 It is called the way the Vulkan present host calls it (`DlssNrFeature_Vk.cpp`): the images made and initialised in a
 command buffer of their own, submitted and waited for, before the first recording; one ticket per frame;
 `ConfirmExecuted` once the frame is submitted, `AbandonRecording` for a frame recorded and never submitted, `Completed`
-once its fence is seen. The colour is an RGBA8 UNORM image in `SHADER_READ_ONLY_OPTIMAL`, rewritten from a host buffer
-every frame; the field is copied out after the estimator's own closing barrier.
+once its fence is seen. The colour is in the host's working format, `R16G16B16A16_SFLOAT` (the frame's bytes over 255,
+as half floats), read in `GENERAL`, rewritten from a host buffer every frame; the field is copied out after the
+estimator's own closing barrier, and its extent is the images', checked against the colour's.
+
+Most sequences wait for each frame before the next, so `Completed` comes before the next recording. `pan_+4x_inflight`,
+`cut_inflight` and the timing sequences run three frames in flight instead, each frame with its own colour, buffers,
+command buffer and fence, seen only when they come round again: the estimator's barriers are then what orders one
+frame after another under the synchronization checks, and `Completed` arrives three frames late, as it can in the
+host.
 
 The frames, the sequences and the scores are `tests/synth-motion-d3d12`'s (`../synth-motion-d3d12/sequences.h`), and
 `run.py` judges the report with that suite's `judge()` and thresholds, so the two estimators are held to the same
@@ -30,17 +37,20 @@ GPU time at 1920x1080 and 3440x1440. The `hud_*` sequences are the D3D12 suite's
 
 On top of that judgement:
 
-- the validation layer (core and synchronization) ran: a deliberately invalid fence flag must reach the application's
-  messenger with its VUID and be refused;
+- the validation layer ran: a deliberately invalid fence flag must reach the application's messenger with its VUID and
+  be refused; and its synchronization checks ran: two clears of one image with no barrier between them (recorded, never
+  submitted) must be reported as a `SYNC-HAZARD-*`;
 - it reported no error over the whole run;
 - every field is at the colour's extent.
 
-`SceneCut()` is raised one frame after the cut here (it is read when the cut frame's fence is seen), three on D3D12
-(read from a slot old enough to have landed). Both are inside the judged window.
+`SceneCut()` is raised one frame after the cut here (it is read when the cut frame's fence is seen), three frames after
+it in flight and on D3D12 (read from a slot old enough to have landed). All are inside the judged window. `cut_inflight`
+is judged as `cut`, on its own.
 
-GPU time is the estimator's recording bracketed by timestamps, reported and never judged, with clocks unlocked.
-Measured on the RTX 4090 (driver 615.78.08), 2026-10-15: 0.80 ms at 1920x1080 and 1.79 ms at 3440x1440; the D3D12
-estimator's suite, run the same hour with clocks unlocked, measured 0.86 ms and 2.63 ms.
+GPU time is the estimator's recording bracketed by timestamps, the first written once everything before it is done
+(the colour's upload is tens of megabytes at 3440x1440), reported and never judged, with clocks unlocked. Measured on
+the RTX 4090 (driver 615.78.08), 2026-10-15, it varied run to run: 0.80 to 1.08 ms at 1920x1080 and 1.79 to 3.13 ms at
+3440x1440; the D3D12 estimator's suite, the same hour, unlocked: 0.86 and 2.63 ms.
 
 ## SKIP
 

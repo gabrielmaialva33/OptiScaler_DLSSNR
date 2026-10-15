@@ -8,7 +8,8 @@ estimators share the frames, the sequences and the scores (sequences.h), so they
 loads NGX, OptiScaler.dll or a game.
 
 On top of the D3D12 suite's judgement: the validation layer must have been active (a deliberately invalid fence flag
-reached the messenger with its VUID) and must have reported no error. SKIP (exit 0) when the device cannot run the
+reached the messenger with its VUID), its synchronization checks too (two unordered clears were reported as a hazard),
+and it must have reported no error; a pan and the cut also run three frames in flight. SKIP (exit 0) when the device cannot run the
 estimator (SynthMotion::VkUnsupported says why)."""
 import argparse
 import hashlib
@@ -147,9 +148,25 @@ def main():
         print(f'SKIP: {report["skipped"]}')
         return 0
 
-    failures, rows, timing, extents, notes, overlays = runner.judge(report)
+    # The in-flight cut is the D3D12 suite's cut sequence run three frames deep: judged as `cut` on its own, so its
+    # SceneCut() is not taken for a stray one by the rest.
+    main = dict(report, sequences=[s for s in report['sequences'] if s['name'] != 'cut_inflight'])
+    failures, rows, timing, extents, notes, overlays = runner.judge(main)
+    inflight = [dict(s, name='cut') for s in report['sequences'] if s['name'] == 'cut_inflight']
+    if not inflight:
+        failures.append('no cut_inflight sequence in the report')
+    else:
+        cut_failures, cut_rows, _, cut_extents, cut_notes, _ = runner.judge(dict(report, sequences=inflight))
+        failures += [f'cut_inflight: {f}' for f in cut_failures]
+        rows += [('cut_inflight',) + tuple(row[1:]) for row in cut_rows]
+        extents = sorted(set(extents) | set(cut_extents))
+        notes += [f'cut_inflight: {n}' for n in cut_notes]
+    if not any(s['name'] == 'pan_+4x_inflight' for s in report['sequences']):
+        failures.append('no pan_+4x_inflight sequence in the report')
     if not report.get('validation_active'):
         failures.append('the validation layer was not active (the negative control never reached the messenger)')
+    if not report.get('sync_validation_active'):
+        failures.append('the synchronization checks were not active (two unordered clears were not reported)')
     if report.get('validation_errors', 1) != 0:
         failures.append(f'{report.get("validation_errors")} validation error(s); see artifacts/run.log')
     for width, height, colour_width, colour_height in extents:

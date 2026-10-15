@@ -29,6 +29,8 @@ std::atomic<unsigned> g_validationErrors { 0 };
 std::atomic<unsigned> g_wineInjected { 0 };
 std::atomic<bool> g_validationActive { false };
 std::atomic<bool> g_validationProbe { false };
+std::atomic<bool> g_syncProbe { false };
+std::atomic<bool> g_syncActive { false };
 std::string g_firstValidation;
 
 void Log(const char* format, ...)
@@ -83,6 +85,12 @@ VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessage(VkDebugUtilsMessageSeverityFlagBitsE
         g_validationActive = true;
         Log("VALIDATION PROBE (expected): %s", text);
         return VK_TRUE;
+    }
+    if (g_syncProbe && !std::strncmp(id, "SYNC-HAZARD-", 12))
+    {
+        g_syncActive = true;
+        Log("SYNCHRONIZATION PROBE (expected): %s | %s", id, text);
+        return VK_FALSE;
     }
     // Wine's own VK_EXT_external_memory_dma_buf on the host-side device (tests/vulkan-present-host, harness.cpp).
     if (!std::strcmp(id, "VUID-vkCreateDevice-ppEnabledExtensionNames-01387") &&
@@ -219,6 +227,55 @@ struct Gpu
         Check(vkCreateQueryPool(device, &queryInfo, nullptr, &timestamps), "vkCreateQueryPool");
 
         ProbeValidation();
+        ProbeSynchronization();
+    }
+
+    // The synchronization checks' negative control: two clears of one image with no barrier between them must be
+    // reported as a hazard. Recorded, never submitted.
+    void ProbeSynchronization()
+    {
+        VkImageCreateInfo info { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        info.imageType = VK_IMAGE_TYPE_2D;
+        info.format = VK_FORMAT_R32_UINT;
+        info.extent = { 16, 16, 1 };
+        info.mipLevels = 1;
+        info.arrayLayers = 1;
+        info.samples = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        Check(vkCreateImage(device, &info, nullptr, &image), "vkCreateImage (probe)");
+        VkMemoryRequirements req {};
+        vkGetImageMemoryRequirements(device, image, &req);
+        VkMemoryAllocateInfo allocate { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        allocate.allocationSize = req.size;
+        allocate.memoryTypeIndex = MemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        Check(vkAllocateMemory(device, &allocate, nullptr, &memory), "vkAllocateMemory (probe)");
+        Check(vkBindImageMemory(device, image, memory, 0), "vkBindImageMemory (probe)");
+
+        Begin();
+        VkImageMemoryBarrier barrier { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                             nullptr, 1, &barrier);
+        const VkClearColorValue zero {};
+        g_syncProbe = true;
+        vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &barrier.subresourceRange);
+        vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &barrier.subresourceRange);
+        g_syncProbe = false;
+        EndWithoutSubmitting();
+        Check(vkResetCommandBuffer(cmd, 0), "vkResetCommandBuffer (probe)");
+        vkDestroyImage(device, image, nullptr);
+        vkFreeMemory(device, memory, nullptr);
+        if (!g_syncActive)
+            Fail("synchronization validation negative control failed: two unordered clears were not reported");
     }
 
     // The negative control: an invalid fence flag must reach the messenger with its exact VUID.
@@ -382,44 +439,92 @@ void WriteSequence(const Sequence& s, const std::vector<FrameResult>& frames, bo
 // ---------------------------------------------------------------------------------------------
 // One sequence end to end.
 // ---------------------------------------------------------------------------------------------
-std::vector<FrameResult> RunSequence(Gpu& gpu, const SynthMotion::VkPipelines& pipelines, const Sequence& s,
-                                     uint64_t& ticket)
-{
-    const VkDevice device = gpu.device;
 
-    // The colour: RGBA8 UNORM, sampled, rewritten from a host buffer every frame.
+// IEEE half from a float in [0, 1] (the colour's values are bytes over 255): normal numbers rounded to nearest, and
+// below the smallest normal, zero.
+uint16_t ToHalf(float value)
+{
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const int32_t exponent = static_cast<int32_t>((bits >> 23) & 0xFF) - 127 + 15;
+    if (value <= 0.0f || exponent <= 0)
+        return 0;
+    uint32_t mantissa = bits & 0x7FFFFF;
+    uint32_t half = (static_cast<uint32_t>(exponent) << 10) | (mantissa >> 13);
+    if ((mantissa & 0x1FFF) > 0x1000 || ((mantissa & 0x1FFF) == 0x1000 && (half & 1)))
+        ++half;
+    return static_cast<uint16_t>(half);
+}
+
+// One frame's own objects, so frames can be in flight together: the colour it uploads (R16G16B16A16_SFLOAT, read in
+// GENERAL, as the present host hands the estimator its working colour), the host buffers, its command buffer and fence,
+// and its timestamp pair.
+struct FrameSlot
+{
     VkImage colour = VK_NULL_HANDLE;
     VkDeviceMemory colourMemory = VK_NULL_HANDLE;
     VkImageView colourView = VK_NULL_HANDLE;
+    Gpu::HostBuffer upload;
+    Gpu::HostBuffer field;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    bool pending = false;
+    uint64_t ticket = 0;
+    int t = -1;
+};
+
+// `depth` frames in flight: 1 waits for every frame before the next (Completed before the next Record, as a host seeing
+// each fence at once); more submits them back to back and sees each fence only when its objects come round again, so
+// the estimator's barriers between frames are what orders them, under the synchronization checks.
+std::vector<FrameResult> RunSequence(Gpu& gpu, const SynthMotion::VkPipelines& pipelines, const Sequence& s,
+                                     uint64_t& ticket, uint32_t depth)
+{
+    const VkDevice device = gpu.device;
+    const VkDeviceSize pixels = (VkDeviceSize) s.width * s.height;
+
+    std::vector<FrameSlot> slots(depth);
+    VkQueryPool timestamps = VK_NULL_HANDLE;
+    {
+        VkQueryPoolCreateInfo queryInfo { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+        queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        queryInfo.queryCount = 2 * depth;
+        Check(vkCreateQueryPool(device, &queryInfo, nullptr, &timestamps), "vkCreateQueryPool");
+    }
+    for (FrameSlot& slot : slots)
     {
         VkImageCreateInfo info { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
         info.imageType = VK_IMAGE_TYPE_2D;
-        info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        info.format = VK_FORMAT_R16G16B16A16_SFLOAT;
         info.extent = { s.width, s.height, 1 };
         info.mipLevels = 1;
         info.arrayLayers = 1;
         info.samples = VK_SAMPLE_COUNT_1_BIT;
         info.tiling = VK_IMAGE_TILING_OPTIMAL;
         info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        Check(vkCreateImage(device, &info, nullptr, &colour), "vkCreateImage colour");
+        Check(vkCreateImage(device, &info, nullptr, &slot.colour), "vkCreateImage colour");
         VkMemoryRequirements req {};
-        vkGetImageMemoryRequirements(device, colour, &req);
+        vkGetImageMemoryRequirements(device, slot.colour, &req);
         VkMemoryAllocateInfo allocate { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
         allocate.allocationSize = req.size;
         allocate.memoryTypeIndex = gpu.MemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        Check(vkAllocateMemory(device, &allocate, nullptr, &colourMemory), "vkAllocateMemory colour");
-        Check(vkBindImageMemory(device, colour, colourMemory, 0), "vkBindImageMemory colour");
+        Check(vkAllocateMemory(device, &allocate, nullptr, &slot.colourMemory), "vkAllocateMemory colour");
+        Check(vkBindImageMemory(device, slot.colour, slot.colourMemory, 0), "vkBindImageMemory colour");
         VkImageViewCreateInfo view { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-        view.image = colour;
+        view.image = slot.colour;
         view.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        view.format = VK_FORMAT_R8G8B8A8_UNORM;
+        view.format = info.format;
         view.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        Check(vkCreateImageView(device, &view, nullptr, &colourView), "vkCreateImageView colour");
+        Check(vkCreateImageView(device, &view, nullptr, &slot.colourView), "vkCreateImageView colour");
+        slot.upload = gpu.Buffer(pixels * 8, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        slot.field = gpu.Buffer(pixels * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        VkCommandBufferAllocateInfo cmdInfo { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cmdInfo.commandPool = gpu.pool;
+        cmdInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmdInfo.commandBufferCount = 1;
+        Check(vkAllocateCommandBuffers(device, &cmdInfo, &slot.cmd), "vkAllocateCommandBuffers");
+        VkFenceCreateInfo fenceInfo { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        Check(vkCreateFence(device, &fenceInfo, nullptr, &slot.fence), "vkCreateFence");
     }
-
-    const VkDeviceSize pixels = (VkDeviceSize) s.width * s.height;
-    Gpu::HostBuffer upload = gpu.Buffer(pixels * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-    Gpu::HostBuffer fieldReadback = gpu.Buffer(pixels * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
     // The estimator's images, made and initialised in a command buffer of their own, waited for: the builder's shape.
     SynthMotion::VkImages images;
@@ -434,90 +539,47 @@ std::vector<FrameResult> RunSequence(Gpu& gpu, const SynthMotion::VkPipelines& p
     SynthMotion::Estimator_Vk estimator;
     estimator.Restart();
 
-    std::vector<FrameResult> results;
-    for (int t = 0; t < s.frames; ++t)
+    std::vector<FrameResult> results(s.frames);
+    std::vector<uint8_t> rgba((size_t) pixels * 4);
+
+    // A frame's fence seen: its scene-change bit read (Completed), its time and its field read and scored.
+    const auto finish = [&](FrameSlot& slot)
     {
-        RenderFrame(s, t, upload.data, s.width * 4);
+        if (!slot.pending)
+            return;
+        Check(vkWaitForFences(device, 1, &slot.fence, VK_TRUE, 10ull * 1000 * 1000 * 1000), "vkWaitForFences");
+        slot.pending = false;
+        estimator.Completed(slot.ticket, images);
 
-        gpu.Begin();
-        VkCommandBuffer cmd = gpu.cmd;
-        // The whole frame is rewritten: its old contents are not needed, so the layout it was left in is not either.
-        ImageBarrier(cmd, colour, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
-                     VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                     VK_PIPELINE_STAGE_TRANSFER_BIT);
-        VkBufferImageCopy region {};
-        region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        region.imageExtent = { s.width, s.height, 1 };
-        vkCmdCopyBufferToImage(cmd, upload.buffer, colour, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        ImageBarrier(cmd, colour, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                     VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-
-        FrameResult fr {};
-        fr.t = t;
-        const uint64_t frameTicket = ++ticket;
-        vkCmdResetQueryPool(cmd, gpu.timestamps, 0, 2);
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, gpu.timestamps, 0);
-        fr.recorded = estimator.Record(cmd, pipelines, images, colourView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                       t == 0, frameTicket);
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpu.timestamps, 1);
-        if (!fr.recorded)
-            Fail("Record returned false");
-        fr.ready = estimator.Ready();
-        fr.sceneCutAfterRecord = estimator.SceneCut();
-
-        // The field out to the host. Record left its writes visible to transfer reads, in GENERAL.
+        FrameResult& fr = results[slot.t];
+        const uint32_t pair = static_cast<uint32_t>(&slot - slots.data());
+        uint64_t ticks[2] = {};
+        if (vkGetQueryPoolResults(device, timestamps, pair * 2, 2, sizeof(ticks), ticks, sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
         {
-            VkBufferImageCopy out {};
-            out.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-            out.imageExtent = { s.width, s.height, 1 };
-            vkCmdCopyImageToBuffer(cmd, images.motion.image, VK_IMAGE_LAYOUT_GENERAL, fieldReadback.buffer, 1, &out);
-            VkBufferMemoryBarrier toHost { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
-            toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-            toHost.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            toHost.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            toHost.buffer = fieldReadback.buffer;
-            toHost.size = VK_WHOLE_SIZE;
-            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1,
-                                 &toHost, 0, nullptr);
+            const uint64_t begin = ticks[0] & gpu.tickMask, end = ticks[1] & gpu.tickMask;
+            fr.gpuMs = end > begin ? (double) (end - begin) * gpu.tickNs / 1e6 : 0.0;
         }
-
-        if (s.kind == Kind::Abandon && t == kAbandonFrame)
-        {
-            // Recorded, ended, never submitted: the estimator must not count this frame.
-            gpu.EndWithoutSubmitting();
-            estimator.AbandonRecording();
-            fr.abandoned = true;
-            results.push_back(fr);
-            continue;
-        }
-
-        gpu.SubmitAndWait();
-        estimator.ConfirmExecuted();
-        estimator.Completed(frameTicket, images);
-        fr.sceneCutAfterConfirm = estimator.SceneCut();
-        fr.gpuMs = gpu.TimestampMs();
 
         if (!s.timingOnly)
         {
             Field field;
-            field.width = s.width;
-            field.height = s.height;
-            field.x.resize((size_t) pixels);
-            field.y.resize((size_t) pixels);
-            for (size_t i = 0; i < (size_t) pixels; ++i)
+            field.width = images.width; // what the estimator made, not what was asked for
+            field.height = images.height;
+            field.x.resize((size_t) field.width * field.height);
+            field.y.resize(field.x.size());
+            for (size_t i = 0; i < field.x.size(); ++i)
             {
                 uint16_t h[2];
-                std::memcpy(h, fieldReadback.data + i * 4, 4);
+                std::memcpy(h, slot.field.data + i * 4, 4);
                 field.x[i] = HalfToFloat(h[0]);
                 field.y[i] = HalfToFloat(h[1]);
             }
             fr.fieldW = field.width;
             fr.fieldH = field.height;
             const bool hudOnly = std::strncmp(s.name, "hud_", 4) == 0;
-            if (t > 0 && !hudOnly)
-                fr.scores = ScoreFrame(s, t, field);
+            if (slot.t > 0 && !hudOnly && field.width == s.width && field.height == s.height)
+                fr.scores = ScoreFrame(s, slot.t, field);
         }
 
         std::string line;
@@ -529,19 +591,111 @@ std::vector<FrameResult> RunSequence(Gpu& gpu, const SynthMotion::VkPipelines& p
                           sc.epeMean, sc.within1 * 100.0, sc.overHalf * 100.0, sc.medianX, sc.medianY, sc.gx, sc.gy);
             line += buf;
         }
-        Log("%-12s t=%d ready=%d cut=%d/%d gpu=%.3f ms%s", s.name, t, fr.ready ? 1 : 0, fr.sceneCutAfterRecord ? 1 : 0,
-            fr.sceneCutAfterConfirm ? 1 : 0, fr.gpuMs, line.c_str());
-        results.push_back(fr);
+        Log("%-16s t=%d ready=%d cut=%d gpu=%.3f ms%s", s.name, fr.t, fr.ready ? 1 : 0, fr.sceneCutAfterRecord ? 1 : 0,
+            fr.gpuMs, line.c_str());
+    };
+
+    for (int t = 0; t < s.frames; ++t)
+    {
+        FrameSlot& slot = slots[t % depth];
+        finish(slot);
+
+        // The frame as bytes, then as the half floats the host's working colour holds.
+        RenderFrame(s, t, rgba.data(), s.width * 4);
+        auto* halves = reinterpret_cast<uint16_t*>(slot.upload.data);
+        for (size_t i = 0; i < rgba.size(); ++i)
+            halves[i] = ToHalf(rgba[i] / 255.0f);
+
+        const VkCommandBuffer cmd = slot.cmd;
+        Check(vkResetCommandBuffer(cmd, 0), "vkResetCommandBuffer");
+        VkCommandBufferBeginInfo begin { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        Check(vkBeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer");
+
+        // The whole frame is rewritten: its old contents are not needed, so the layout it was left in is not either.
+        ImageBarrier(cmd, slot.colour, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                     VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                     VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkBufferImageCopy region {};
+        region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        region.imageExtent = { s.width, s.height, 1 };
+        vkCmdCopyBufferToImage(cmd, slot.upload.buffer, slot.colour, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        ImageBarrier(cmd, slot.colour, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                     VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+        FrameResult& fr = results[t];
+        fr.t = t;
+        const uint64_t frameTicket = ++ticket;
+        const uint32_t pair = t % depth;
+        vkCmdResetQueryPool(cmd, timestamps, pair * 2, 2);
+        // Once everything before it is done (the colour's upload above all, tens of megabytes from host memory at
+        // 3440x1440): the estimator's own time, which its first barrier waits for anyway.
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, timestamps, pair * 2);
+        fr.recorded =
+            estimator.Record(cmd, pipelines, images, slot.colourView, VK_IMAGE_LAYOUT_GENERAL, t == 0, frameTicket);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamps, pair * 2 + 1);
+        if (!fr.recorded)
+            Fail("Record returned false");
+        fr.ready = estimator.Ready();
+        fr.sceneCutAfterRecord = estimator.SceneCut();
+
+        // The field out to the host, into this frame's own buffer. Record left its writes visible to transfer reads.
+        {
+            VkBufferImageCopy out {};
+            out.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            out.imageExtent = { images.width, images.height, 1 };
+            vkCmdCopyImageToBuffer(cmd, images.motion.image, VK_IMAGE_LAYOUT_GENERAL, slot.field.buffer, 1, &out);
+            VkBufferMemoryBarrier toHost { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+            toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            toHost.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toHost.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toHost.buffer = slot.field.buffer;
+            toHost.size = VK_WHOLE_SIZE;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1,
+                                 &toHost, 0, nullptr);
+        }
+        Check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
+
+        if (s.kind == Kind::Abandon && t == kAbandonFrame)
+        {
+            // Recorded, ended, never submitted: the estimator must not count this frame.
+            estimator.AbandonRecording();
+            fr.abandoned = true;
+            Log("%-16s t=%d abandoned", s.name, t);
+            continue;
+        }
+
+        VkSubmitInfo submit { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &cmd;
+        Check(vkResetFences(device, 1, &slot.fence), "vkResetFences");
+        Check(vkQueueSubmit(gpu.queue, 1, &submit, slot.fence), "vkQueueSubmit");
+        estimator.ConfirmExecuted();
+        slot.pending = true;
+        slot.ticket = frameTicket;
+        slot.t = t;
     }
 
-    // Everything above was waited for (the abandoned frame never ran): the images are idle.
+    // The frames still in flight, oldest first.
+    for (int t = std::max(0, s.frames - (int) depth); t < s.frames; ++t)
+        finish(slots[t % depth]);
+
+    // Every frame was waited for (the abandoned one never ran): everything is idle.
     Check(vkQueueWaitIdle(gpu.queue), "vkQueueWaitIdle");
     SynthMotion::DestroyVkImages(device, images);
-    gpu.Free(upload);
-    gpu.Free(fieldReadback);
-    vkDestroyImageView(device, colourView, nullptr);
-    vkDestroyImage(device, colour, nullptr);
-    vkFreeMemory(device, colourMemory, nullptr);
+    for (FrameSlot& slot : slots)
+    {
+        gpu.Free(slot.upload);
+        gpu.Free(slot.field);
+        vkDestroyImageView(device, slot.colourView, nullptr);
+        vkDestroyImage(device, slot.colour, nullptr);
+        vkFreeMemory(device, slot.colourMemory, nullptr);
+        vkFreeCommandBuffers(device, gpu.pool, 1, &slot.cmd);
+        vkDestroyFence(device, slot.fence, nullptr);
+    }
+    vkDestroyQueryPool(device, timestamps, nullptr);
     return results;
 }
 } // namespace
@@ -583,6 +737,10 @@ int main(int argc, char** argv)
         { "abandon", Kind::Abandon, 1280, 720, 4, 0, 14 },
         { "time_1080p", Kind::Hud, 1920, 1080, 4, 0, 32, true },
         { "time_3440", Kind::Hud, 3440, 1440, 4, 0, 32, true },
+        // Three frames in flight, each fence seen only when its objects come round again: the estimator's barriers
+        // between frames order them, and Completed arrives late, as in the present host.
+        { "pan_+4x_inflight", Kind::Pan, 1280, 720, 4, 0, 14 },
+        { "cut_inflight", Kind::Cut, 1280, 720, 4, 0, 18 },
     };
 
     if (fopen_s(&g_report, g_reportPath, "w") != 0 || g_report == nullptr)
@@ -597,7 +755,11 @@ int main(int argc, char** argv)
     bool first = true;
     for (const auto& s : sequences)
     {
-        const auto results = RunSequence(gpu, pipelines, s, ticket);
+        // In flight too: the timing sequences, so the GPU is kept busy (and clocked up) as in a game, not idle between
+        // frames.
+        const uint32_t depth =
+            std::strstr(s.name, "_inflight") != nullptr || std::strncmp(s.name, "time_", 5) == 0 ? 3u : 1u;
+        const auto results = RunSequence(gpu, pipelines, s, ticket, depth);
         frames += (int) results.size();
         WriteSequence(s, results, first);
         first = false;
@@ -605,10 +767,14 @@ int main(int argc, char** argv)
 
     Check(vkDeviceWaitIdle(gpu.device), "vkDeviceWaitIdle");
     SynthMotion::DestroyVkPipelines(pipelines);
+    std::string firstText = g_firstValidation;
+    for (char& c : firstText)
+        c = (c == '"' || c == '\\' || c < ' ') ? '\'' : c;
     std::fprintf(g_report,
                  "\n], \"validation_errors\": %u, \"first_validation\": \"%s\", \"validation_active\": %s, "
-                 "\"wine_injected\": %u}\n",
-                 g_validationErrors.load(), "", g_validationActive ? "true" : "false", g_wineInjected.load());
+                 "\"sync_validation_active\": %s, \"wine_injected\": %u}\n",
+                 g_validationErrors.load(), firstText.c_str(), g_validationActive ? "true" : "false",
+                 g_syncActive ? "true" : "false", g_wineInjected.load());
     std::fclose(g_report);
     g_report = nullptr;
 

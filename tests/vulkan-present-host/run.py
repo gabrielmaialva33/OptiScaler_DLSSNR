@@ -932,13 +932,16 @@ NR_CASES = {
     # with the model off the present path, its field the model's motion guide once warmed up, under the validation
     # layer's synchronization checks.
     'nr-synth-motion': (True, None, False, 'build', True, None),
+    # The same at WorkingScale 0.5: the estimator reads the model's own input, so it and its field are at the working
+    # size, never a frame-size guide for a smaller colour.
+    'nr-synth-motion-half': (True, 0.5, False, 'build', True, None),
     # Its control: the same panning picture on zero motion. What the model makes of a pan it is told is still, for the
     # two read-back means to be set side by side.
     'nr-pan-zero': (True, None, False, 'build', True, None),
 }
 
 # More of the [DlssNr] section, for the cases that need it.
-NR_INI = {'nr-synth-motion': 'SynthMotion=true\n'}
+NR_INI = {'nr-synth-motion': 'SynthMotion=true\n', 'nr-synth-motion-half': 'SynthMotion=true\n'}
 # FFX's warm-up after every reset of the estimator: the frames a swapchain shows the model on zero motion before its
 # first field (frame indices 0 to 5).
 SYNTH_WARMUP = 6
@@ -949,6 +952,7 @@ NR_TIMING = {
     'nr-build-slow': ({'RETOQUE_SLOW_OFF_DEVICE_THREAD_MS': '400', 'RETOQUE_SLOW_OFF_DEVICE_THREAD_TOTAL_MS': '4000',
                        'RETOQUE_COUNT_OFF_THREAD_QUEUE': '1'}, ['--slow-build']),
     'nr-synth-motion': ({}, ['--pan', '4', '--frames', '40']),
+    'nr-synth-motion-half': ({}, ['--pan', '4', '--frames', '40']),
     'nr-pan-zero': ({}, ['--pan', '4', '--frames', '40']),
 }
 # The longest a present may take in nr-build-slow, while the model's build takes seconds: the round trip, the validation
@@ -1220,15 +1224,21 @@ def check_nr(name, facts, log):
                 evaluated_here = s['presents'] - building[s['name']]
                 evaluated_total += evaluated_here
                 timed += 1
-                # Stage 5: every swapchain starts the estimator over (a new swapchain is a cut), so its first frames
-                # on the model go out on zero motion, then on the field; without the key, never on a field.
+                # Stage 5: a new product (the first swapchain at a size) starts the estimator over, so its first
+                # frames on the model go out on zero motion, then on the field. A later swapchain at a size already
+                # built continues the estimator's history (a new swapchain resets the model, not the estimator): every
+                # frame may be on the field, all but a warm-up's at least. Without the key, never on a field.
                 parsed = NR.match(nr_text)
                 synthesized = int(parsed.group('synthesized') or 0) if parsed else 0
                 synthesized_total += synthesized
-                if synth:
+                if synth and building[s['name']]:
                     need(0 < synthesized <= evaluated_here - SYNTH_WARMUP,
                          f'{where}: {synthesized} of {evaluated_here} evaluated frames on the synthesized field '
-                         f'(at most {evaluated_here - SYNTH_WARMUP}, after the warm-up)')
+                         f'(at most {evaluated_here - SYNTH_WARMUP}, after the warm-up of a new product)')
+                elif synth:
+                    need(evaluated_here - SYNTH_WARMUP <= synthesized <= evaluated_here,
+                         f'{where}: {synthesized} of {evaluated_here} evaluated frames on the synthesized field (the '
+                         f'estimator continues across swapchains at a size: at least {evaluated_here - SYNTH_WARMUP})')
                 else:
                     need(synthesized == 0, f'{where}: {synthesized} frames on a synthesized field without SynthMotion')
             else:
@@ -1264,8 +1274,16 @@ def check_nr(name, facts, log):
             # pixels in a frame-size texture), and never off.
             made = [l for l in lines if "synthesized motion: the estimator's images made for" in l]
             need(len(made) == len(built_sizes), f'{len(made)} estimator image builds for {len(built_sizes)} sizes')
+            # At the model's working size, which the field is handed at too, scale 1 (working pixels).
+            factor = scale if scale is not None else 1.0
+            working = sorted(f'{int(w * factor + 0.5)}x{int(h * factor + 0.5)}' for w, h in built_sizes)
+            need(sorted(re.search(r'images made for (\d+x\d+), the model\'s working size', l).group(1) for l in made
+                        if re.search(r'images made for (\d+x\d+), the model\'s working size', l)) == working,
+                 f'estimator images not at the working sizes {working}: {made}')
             first_field = [l for l in lines if 'synthesized motion: the first field handed to the model at' in l]
-            need(first_field and all('(motion vector scale 1.000 x 1.000' in l for l in first_field),
+            need(first_field and all('(motion vector scale 1.000 x 1.000' in l for l in first_field) and
+                 all(re.search(r'handed to the model at (\d+x\d+), its working size', l) and
+                     re.search(r'handed to the model at (\d+x\d+)', l).group(1) in working for l in first_field),
                  f'first field lines: {first_field}')
             need(not any('synthesized motion is off' in l for l in lines),
                  next((l for l in lines if 'synthesized motion is off' in l), ''))
