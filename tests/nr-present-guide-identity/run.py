@@ -124,6 +124,7 @@ assert present.index('trackedSlot = usableSlot;') < present.index(count) < prese
 # The newest capture refused is decided on, like one used: the skip above then covers the presents after it. Only the
 # newest: a refused older pick leaves a newer capture to the next present.
 mark = ('if (guideOutcome == DlssNr::PresentGuideIdentity::Outcome::Refused &&\n'
+        '        DlssNr::PresentGuideIdentity::SettlesNewest(guides.decision.reason) &&\n'
         '        g_presentGuideRing.GetSlot(pickedSlot).sequence == newestRecordedSeq)\n'
         '    {\n        g_nrLastEnhancedRecordedSeq = newestRecordedSeq;\n    }')
 assert present.count(mark) == 1 and present.index(count) < present.index(mark)

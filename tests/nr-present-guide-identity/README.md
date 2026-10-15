@@ -46,6 +46,10 @@ runner does three things, under g++ C++20, ASan/UBSan and `-Werror`.
   decision's slot never names a capture refused earlier for a reason that cannot improve (device, extent, output base,
   render extent, an earlier use, age); a slot being read is never overwritten; the record's books balance. (That a
   refused pick is not read at its own present is the source guards' to hold: this run reads what the decision gives.)
+- **Which refusals settle the newest capture** (`SettlesNewest`): those that live in the capture and none that turn on
+  the present; over 20000 rounds on the production ring, a newest capture refused for one of them is refused again by
+  every later present with nothing newer (so the skip after it passes over nothing the rules would accept), while one
+  refused on extent is accepted by the next present at the settled size.
 - **Step 1's record**: what a window counts (used, refused by reason, the pass's own skip and the skips the rules would
   accept, none, the presents that enforced the lag limit, the uses past it where it was not enforced, each capture's
   lag and frame count once), that only a use moves rule 5's record (an untracked read is none), `MarkUsed` never going

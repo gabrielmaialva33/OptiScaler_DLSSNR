@@ -869,6 +869,78 @@ void LongRun()
     CHECK(lines >= seconds / 30 && lines <= seconds / 2 + 1);
 }
 
+// Which refusals of the newest capture settle it, so the presents after it with nothing newer skip (D5): every reason
+// that lives in the capture, none that turns on the present. Then on the production ring: a capture refused for one of
+// them is refused again by every later present that has nothing newer, so skipping those presents passes over nothing
+// the rules would accept; a capture refused on extent can be accepted by the next present once the size settles, which
+// is why that reason does not settle it.
+void SettledNewest()
+{
+    for (const Reason settles :
+         { Reason::Device, Reason::OutputBase, Reason::Ambiguous, Reason::Lag, Reason::Stale, Reason::Subrect })
+        CHECK(SettlesNewest(settles));
+    for (const Reason open :
+         { Reason::Accepted, Reason::NoCapture, Reason::Extent, Reason::Swapchain, Reason::Consumed })
+        CHECK(!SettlesNewest(open));
+
+    std::mt19937_64 rng(15);
+    int settled = 0;
+    for (int round = 0; round < 20000; ++round)
+    {
+        Sim s;
+        // A few frames of history.
+        for (int i = 0; i < static_cast<int>(rng() % 3); ++i)
+        {
+            s.Capture(D1, 1920, 1080);
+            s.PresentFrame(D1, SC1, 1920, 1080);
+        }
+        // Sometimes an earlier capture of the same frame at the same extent: the newest is then ambiguous.
+        if (rng() % 6 == 0)
+            s.Capture(D1, 1920, 1080);
+
+        // The newest capture, sometimes flawed in a way that lives in it, sometimes copied late (lag).
+        const size_t slot = s.ring.AcquireForRecord(Never);
+        Stamp st;
+        st.device = rng() % 6 == 0 ? D2 : D1;
+        st.outputWidth = 1920;
+        st.outputHeight = 1080;
+        st.outputBaseX = rng() % 6 == 0 ? 4u : 0u;
+        st.renderWidth = rng() % 6 == 0 ? 0u : 1280u;
+        st.renderHeight = 720;
+        s.tracker.StampCapture(slot, st, s.now);
+        const bool late = rng() % 4 == 0;
+        s.done[slot] = !late;
+        s.ring.CommitRecord(slot, 1280, 720, false, s.now, &s.done[slot], nullptr);
+        if (late)
+        {
+            s.PresentFrame(D1, SC1, 1920, 1080);
+            s.PresentFrame(D1, SC1, 1920, 1080);
+            s.done[slot] = true;
+        }
+
+        const Decision first = s.PresentFrame(D1, SC1, 1920, 1080);
+        CHECK(s.ring.NewestRecordedSequence() == s.ring.GetSlot(slot).sequence);
+        if (first.reason == Reason::Accepted || !SettlesNewest(first.reason))
+            continue;
+        ++settled;
+
+        // Every later present with nothing newer recorded refuses it again, or has nothing to offer.
+        for (int later = 0; later < 4; ++later)
+        {
+            s.now += static_cast<int64_t>(rng() % 120);
+            CHECK(s.PresentFrame(D1, SC1, 1920, 1080).reason != Reason::Accepted);
+        }
+    }
+    CHECK(settled > 1000);
+
+    // Extent does not settle: a present at a passing size refuses, and the next one at the settled size accepts.
+    Sim e;
+    e.enforceLag = false;
+    e.Capture(D1, 2560, 1440);
+    CHECK(e.PresentFrame(D1, SC1, 1920, 1080).reason == Reason::Extent);
+    CHECK(e.PresentFrame(D1, SC1, 2560, 1440).reason == Reason::Accepted);
+}
+
 // Step 1's record: what is counted, the line it writes, and how often.
 void WindowAndLine()
 {
@@ -1233,14 +1305,16 @@ int main()
     RegistryAndCounter();
     Scenarios();
     LongRun();
+    SettledNewest();
     WindowAndLine();
     SourceChange();
     StatusAndText();
     std::printf("PASS: present-guide identity: %d checks -- every rule alone and in order, rule 6 enforced and not, "
                 "narrowing only over 50000 random cases, null swapchain stamps, registry and frame counter, ring "
                 "scenarios (FG 2x/4x, late copy, the wrapped entry's lag, portrait, resize, second swapchain), a "
-                "20000-frame run that reads only what the rules accept and never overwrites a read in flight, step "
-                "1's window and line, the source-change reset, the status and its text\n",
+                "20000-frame run that reads only what the rules accept and never overwrites a read in flight, which "
+                "refusals settle the newest capture, step 1's window and line, the source-change reset, the status "
+                "and its text\n",
                 g_checks);
     return 0;
 }
