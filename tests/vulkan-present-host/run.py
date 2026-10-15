@@ -111,7 +111,17 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def no_game():
+    # The user's workstation is also the gaming machine. Check immediately before every prefix operation, including
+    # each separate case, so a game started after the suite began prevents the next launch.
+    game = subprocess.run('grep -l steamapps/common /proc/[0-9]*/maps 2>/dev/null', shell=True,
+                          capture_output=True, text=True)
+    if game.stdout.strip():
+        raise RuntimeError('game running: refusing prefix operation: ' + game.stdout.strip())
+
+
 def run(args, *, env=None, cwd=ROOT, logfile=None, timeout=600):
+    no_game()
     print('+', ' '.join(map(str, args)), flush=True)
     with open(logfile, 'w') as log:
         p = subprocess.run(list(map(str, args)), cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=log,
@@ -143,6 +153,7 @@ def check_dll(dll):
         raise RuntimeError(f'{dll} has no stage-3 present host in it (stale build); run ./build-local.sh Release')
     # A source newer than the DLL means the DLL is not what the tree says.
     sources = [ROOT / 'OptiScaler/hooks/Vulkan_Hooks.cpp', ROOT / 'OptiScaler/Config.h', ROOT / 'OptiScaler/Config.cpp',
+               ROOT / 'retoque/shaders/dlssnr/DlssNr_PresentHdr_Vk.h',
                ROOT / 'retoque/dlssnr/DlssNrFeature_Vk.cpp', ROOT / 'retoque/dlssnr/DlssNr_VkModelOwner.h',
                *sorted((ROOT / 'retoque/dlssnr').glob('DlssNr_VkPresent*'))]
     stale = [str(s.relative_to(ROOT)) for s in sources if s.stat().st_mtime > dll.stat().st_mtime]
@@ -232,6 +243,7 @@ def prepare_translated_prefix(wine):
     env = translated_env()
     prefix = Path(env['WINEPREFIX'])
     if not (prefix / 'drive_c/windows/system32').exists():
+        no_game()
         subprocess.run(['wine', 'cmd', '/c', 'exit'], env=env, stdin=subprocess.DEVNULL, capture_output=True,
                        timeout=300)
     system32 = prefix / 'drive_c/windows/system32'
@@ -283,6 +295,7 @@ def execute_case(name, dll, redist):
     elif enabled and key:
         args.append('--host-adds-src')
     with (OUT / f'{name}.log').open('w') as log:
+        no_game()
         process = subprocess.run(['wine', str(work / EXE)] + args, cwd=work, env=runtime_env(hide),
                                  stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=300)
     run_log = (OUT / f'{name}.log').read_text(errors='replace')
@@ -797,6 +810,7 @@ def execute_translated(name, dll, redist):
     if marker:
         (work / MARKER).write_text('')
     with (OUT / f'{name}.log').open('w') as log:
+        no_game()
         process = subprocess.run(['wine', str(work / TRANSLATED_EXE), '--' + api], cwd=work,
                                  env=translated_env(TRANSLATED_VALIDATION[api]),
                                  stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=300)
@@ -918,6 +932,10 @@ NGX_CORE = Path('/usr/lib/nvidia/wine')
 # name: (ApplyModel, WorkingScale or None, also present from the compute-only family, forwarder ('build': the one built
 # beside this DLL, 'kit': the kit's, older than dlssnr_abi_version), model staged, device extensions hidden)
 NR_CASES = {
+    'nr-hdr-off': (True, None, False, 'build', True, None),
+    'nr-hdr-half-synth': (True, 0.5, False, 'build', True, None),
+    'nr-hdr-control': (False, None, False, 'build', True, None),
+    'nr-hdr': (True, None, False, 'build', True, None),
     'nr-control': (False, None, True, 'build', True, None),
     'nr': (True, None, True, 'build', True, None),
     'nr-working-scale': (True, 0.5, False, 'build', True, None),
@@ -941,13 +959,24 @@ NR_CASES = {
 }
 
 # More of the [DlssNr] section, for the cases that need it.
-NR_INI = {'nr-synth-motion': 'SynthMotion=true\n', 'nr-synth-motion-half': 'SynthMotion=true\n'}
+NR_INI = {
+    'nr-hdr-off': 'HdrPresent=false\n',
+    'nr-hdr-half-synth': 'HdrPresent=true\nSynthMotion=true\n',
+    'nr-hdr-control': 'HdrPresent=true\n',
+    'nr-hdr': 'HdrPresent=true\n',
+    'nr-synth-motion': 'SynthMotion=true\n',
+    'nr-synth-motion-half': 'SynthMotion=true\n',
+}
 # FFX's warm-up after every reset of the estimator: the frames a swapchain shows the model on zero motion before its
 # first field (frame indices 0 to 5).
 SYNTH_WARMUP = 6
 
 # The test layer's timing knobs and the harness's arguments, for the cases that use them.
 NR_TIMING = {
+    'nr-hdr-off': ({'PROTON_ENABLE_WAYLAND': '1', 'PROTON_ENABLE_HDR': '1'}, ['--hdr', '--frames', '24']),
+    'nr-hdr-half-synth': ({'PROTON_ENABLE_WAYLAND': '1', 'PROTON_ENABLE_HDR': '1'}, ['--hdr', '--frames', '32']),
+    'nr-hdr-control': ({'PROTON_ENABLE_WAYLAND': '1', 'PROTON_ENABLE_HDR': '1'}, ['--hdr', '--frames', '24']),
+    'nr-hdr': ({'PROTON_ENABLE_WAYLAND': '1', 'PROTON_ENABLE_HDR': '1'}, ['--hdr', '--frames', '24']),
     'nr-stall-watch': ({'RETOQUE_STALL_PRESENT_AT': '30:2600'}, []),
     'nr-build-slow': ({'RETOQUE_SLOW_OFF_DEVICE_THREAD_MS': '400', 'RETOQUE_SLOW_OFF_DEVICE_THREAD_TOTAL_MS': '4000',
                        'RETOQUE_COUNT_OFF_THREAD_QUEUE': '1'}, ['--slow-build']),
@@ -989,7 +1018,7 @@ def nr_env(hide=None, knobs=None):
     del env['WINEPREFIX']
     env.update(STEAM_COMPAT_DATA_PATH=str(OUT / 'protonprefix-nr'),
                STEAM_COMPAT_CLIENT_INSTALL_PATH=str(Path.home() / '.local/share/Steam'), SteamGameId='0')
-    if hide or knobs:
+    if hide or (knobs and any(k.startswith('RETOQUE_') for k in knobs)):
         # The test layer below the validation layer takes the extension out of what the device offers, or applies
         # its timing knobs; it leaves TRANSFER_SRC alone.
         env.update(VK_INSTANCE_LAYERS=f'VK_LAYER_KHRONOS_validation:{HIDE_LAYER}', VK_ADD_LAYER_PATH=str(LAYER_DIR),
@@ -1028,6 +1057,7 @@ def execute_nr(name, dll, redist, files):
     (work / MARKER).write_text('')
     with (OUT / f'{name}.log').open('w') as log:
         knobs, args = NR_TIMING.get(name, ({}, []))
+        no_game()
         process = subprocess.run([str(files['proton']), 'run', str(work / NR_EXE)] + (['--cross'] if cross else []) +
                                  args, cwd=work, env=nr_env(hide, knobs), stdin=subprocess.DEVNULL, stdout=log,
                                  stderr=subprocess.STDOUT, timeout=900)
@@ -1051,6 +1081,59 @@ def execute_nr(name, dll, redist, files):
 # UNDEFINED. Measured 2026-10-14 with 310.8.SF and the 615.78.08 core: the only report of a whole run under synchronization
 # validation. Nothing else the model or the host does may be reported.
 MODEL_VUIDS = {'VUID-vkCmdDraw-None-09600'}
+
+
+def check_hdr(name, facts, log):
+    problems = []
+    enabled = name != 'nr-hdr-off'
+    apply_model = NR_CASES[name][0]
+    hdr = [s for s in facts['swapchains'] if s['name'].startswith('hdr-')]
+    if not hdr:
+        return ['HDR_SURFACE_UNAVAILABLE: offered ' + str(facts.get('offered'))], 'no HDR surface'
+    for sc in facts['swapchains']:
+        if sc['alpha_changed']:
+            problems.append(sc['name'] + ': alpha changed')
+        if sc['black'] or sc['nonfinite']:
+            problems.append(sc['name'] + ': black frame or nonfinite colour')
+        if name == 'nr-hdr-control' and sc['exact'] != sc['readbacks']:
+            problems.append(sc['name'] + ': control not bit-exact')
+    vuids = {v for v in facts.get('model_vuids', '').split(',') if v}
+    if not vuids <= MODEL_VUIDS:
+        problems.append('new model validation errors: ' + str(sorted(vuids)))
+    seen = {}
+    for sc in facts['swapchains']:
+        created = [re.search(r'swapchain 0x[0-9A-F]+ #(\d+) on device', l).group(1) for l in log.splitlines()
+                   if f'swapchain {sc["handle"]} #' in l and ' on device ' in l]
+        index = seen.get(sc['handle'], 0)
+        seen[sc['handle']] = index + 1
+        record = created[index] if index < len(created) else '?'
+        if not sc['name'].startswith('hdr-'):
+            continue
+        gone = [l for l in log.splitlines() if f'swapchain {sc["handle"]} #{record} destroyed after' in l]
+        pattern = (r'NR: evaluated [1-9]\d*' if enabled else
+                   r'NR: evaluated 0, refused ' + str(sc['presents']) + r' \(colour ')
+        if len(gone) != 1 or not re.search(pattern, gone[0]):
+            problems.append(sc['name'] + ': unexpected evaluation/refusal counters')
+        if not enabled and sc['exact'] != sc['readbacks']:
+            problems.append(sc['name'] + ': HdrPresent-off frame changed')
+        if name == 'nr-hdr-half-synth' and (not gone or not re.search(r'motion synthesized [1-9]', gone[0])):
+            problems.append(sc['name'] + ': no synthesized-motion frames')
+        if sc['readbacks'] == 0:
+            problems.append(sc['name'] + ': no readback')
+        if enabled and apply_model and sc['exact'] == sc['readbacks']:
+            problems.append(sc['name'] + ': model never changed the HDR image')
+    if enabled and ('HDR conversion on,' not in log or '203.0 nits (203-nit fallback)' not in log):
+        problems.append('missing submitted HDR conversion/profile/white line')
+    if enabled and 'HDR conversion resources built off the present path' not in log:
+        problems.append('no off-present HDR build')
+    if not enabled and ('HDR conversion on,' in log or 'HDR conversion resources built' in log):
+        problems.append('HDR conversion ran with HdrPresent off')
+    if 'the model is off on this device' in log:
+        problems.append('model latched off')
+    if '; the model freed' not in log:
+        problems.append('model not freed at device destruction')
+    action = 'conversion with real model' if enabled else 'HdrPresent off, HDR readbacks exact'
+    return problems, f'{len(hdr)} HDR swapchains, {action}, original alpha preserved; 0 host validation errors'
 
 
 def check_build_slow(name, facts, log):
@@ -1367,6 +1450,7 @@ def execute_route(name, dll, redist, files):
         (work / 'OptiScaler.ini').write_text(ini)
     args = ['--route'] + (['--wdx12'] if wdx12 else []) + (['--nr-toggle'] if toggle else [])
     with (OUT / f'{name}.log').open('w') as log:
+        no_game()
         process = subprocess.run([str(files['proton']), 'run', str(work / NR_EXE), *args], cwd=work,
                                  env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                  timeout=900)
@@ -1663,7 +1747,8 @@ def main():
                 problems, summary = check_route(name, facts, log)
             else:
                 facts, log = execute_nr(name, dll, redist, files)
-                checker = check_build_slow if name == 'nr-build-slow' else check_nr
+                checker = (check_hdr if name.startswith('nr-hdr') else
+                           check_build_slow if name == 'nr-build-slow' else check_nr)
                 problems, summary = checker(name, facts, log)
             results['cases'][name] = {'status': 'FAIL' if problems else 'PASS', 'problems': problems,
                                       'swapchains': facts['swapchains'], 'offered': facts['offered'],

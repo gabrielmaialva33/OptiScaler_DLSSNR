@@ -905,6 +905,27 @@ static void ColourPlans()
                                                               "(B8G8R8A8_UNORM, colour space 1000104001)");
     HAS(PlanColour(VK_FORMAT_R5G6B5_UNORM_PACK16, 0).refusal, "a format other than RGBA8/BGRA8 (format 4, colour "
                                                               "space 0)");
+    for (const auto format : { kFormatA2B10G10R10UnormPack32, kFormatA2R10G10B10UnormPack32 })
+    {
+        const auto hdr = PlanColour(format, kColourSpaceHdr10St2084, true);
+        CHECK(hdr.profile == 1 && hdr.Eligible() && !hdr.sdr && hdr.raw == format && hdr.refusal.empty());
+        CHECK(!PlanColour(format, kColourSpaceHdr10St2084, false).Eligible());
+        CHECK(!PlanColour(format, kColourSpaceExtendedSrgbLinear, true).Eligible());
+    }
+    CHECK(PlanColour(kFormatR16G16B16A16Sfloat, kColourSpaceExtendedSrgbLinear, true).profile == 2);
+    CHECK(!PlanColour(kFormatR16G16B16A16Sfloat, kColourSpaceHdr10St2084, true).Eligible());
+    CHECK(!PlanColour(kFormatR8G8B8A8Unorm, kColourSpaceHdr10St2084, true).Eligible());
+    CHECK(PlanColour(kFormatR8G8B8A8Unorm, kColourSpaceSrgbNonlinear, true).sdr);
+    BuildKey sdr { 3440, 1440, 3440, 1440, 0 };
+    auto hdr = sdr;
+    hdr.hdrProfile = 1;
+    hdr.rawFormat = kFormatA2B10G10R10UnormPack32;
+    CHECK(DecideBuild(false, BuildState::None, true, sdr, hdr) == BuildStep::Request);
+    CHECK(DecideBuild(false, BuildState::Running, true, sdr, hdr) == BuildStep::Wait);
+    CHECK(DecideBuild(false, BuildState::None, true, hdr, hdr) == BuildStep::Use);
+    auto other = hdr;
+    other.rawFormat = kFormatA2R10G10B10UnormPack32;
+    CHECK(DecideBuild(false, BuildState::None, true, hdr, other) == BuildStep::Request);
 }
 
 // The model's device extensions at vkCreateDevice: what the device offers and the application did not ask for.
@@ -1057,9 +1078,11 @@ static void SynthMotionDecisions()
 {
     // The key on, the device not refusing it, the model's working size (what the estimator runs at) no smaller than
     // it can: 517x389 at WorkingScale 0.5 is 259x195, enough; 480x270 at 0.5 is not.
-    CHECK(SynthWanted(true, false, 3440, 1440) && SynthWanted(true, false, 256, 128) && SynthWanted(true, false, 259, 195));
+    CHECK(SynthWanted(true, false, 3440, 1440) && SynthWanted(true, false, 256, 128) &&
+          SynthWanted(true, false, 259, 195));
     CHECK(!SynthWanted(false, false, 3440, 1440) && !SynthWanted(true, true, 3440, 1440));
-    CHECK(!SynthWanted(true, false, 255, 720) && !SynthWanted(true, false, 1280, 127) && !SynthWanted(true, false, 240, 135));
+    CHECK(!SynthWanted(true, false, 255, 720) && !SynthWanted(true, false, 1280, 127) &&
+          !SynthWanted(true, false, 240, 135));
 
     // A product with the estimator is another key: turning the key on or off is a rebuild, frames carried meanwhile.
     const BuildKey plain { 3440, 1440, 3440, 1440, 0 }, synth { 3440, 1440, 3440, 1440, 0, true };
@@ -1625,9 +1648,10 @@ int main()
         return 1;
     }
 
-    std::puts("PASS: registry state machine (records, reuse, many devices, unknowns, internal, lines), the round "
-              "trip's decisions (usage plan, route, ring, counters, transport lines) and cold NR's (colour plan, "
-              "device extensions, counters, one owner and the way back to the present host, NR lines), the model's build off "
-              "the present path, synthesized motion's decisions and the stall watchdog's table");
+    std::puts(
+        "PASS: registry state machine (records, reuse, many devices, unknowns, internal, lines), the round "
+        "trip's decisions (usage plan, route, ring, counters, transport lines) and cold NR's (colour plan, "
+        "device extensions, counters, one owner and the way back to the present host, NR lines), the model's build off "
+        "the present path, synthesized motion's decisions and the stall watchdog's table");
     return 0;
 }
