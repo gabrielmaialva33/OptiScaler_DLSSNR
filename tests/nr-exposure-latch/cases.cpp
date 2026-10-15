@@ -3,10 +3,71 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <limits>
+
+namespace Shader
+{
+struct int3
+{
+    int3(int, int, int) {}
+};
+struct ExposureTexture
+{
+    float r = 1.0f;
+    ExposureTexture Load(int3) const { return *this; }
+} gExposure;
+unsigned gUseGameExposure = 1;
+float gExposurePreMul = 1.0f;
+float gWhitePoint = 7.0f;
+inline float max(float a, float b) { return std::max(a, b); }
+inline float clamp(float a, float b, float c) { return std::clamp(a, b, c); }
+#include "white_point.h"
+} // namespace Shader
 
 int main()
 {
     using namespace DlssNr::Exposure;
+
+    // Keep the CPU fallback's own policy, including single-sided extremes and sanitization.
+    assert(WhitePoint(1, true, 7.0f, 1.0f, 1000.0f, 1.0f, 0.0f) == 0.01f);
+    assert(WhitePoint(1, true, 7.0f, 1.0f, 0.00001f, 1.0f, 0.0f) == 4096.0f);
+    assert(WhitePoint(1, true, 7.0f, NAN, 0.5f, NAN, 0.0f) == 2.0f);
+    assert(WhitePoint(1, true, 7.0f, 1.0f, NAN, 1.0f, 0.0f) == 7.0f);
+
+    using Shader::gExposure;
+    using Shader::gExposurePreMul;
+    using Shader::gUseGameExposure;
+    using Shader::gWhitePoint;
+    for (float sample : { NAN, INFINITY, -INFINITY, -1.0f, 0.0f, 1e-6f, 1e6f })
+    {
+        gExposure.r = sample;
+        assert(Shader::WhitePoint() == gWhitePoint);
+    }
+    gExposure.r = 1.0f;
+    for (float ratio : { NAN, INFINITY, -INFINITY, -1.0f, 0.0f, 0.009f, 4097.0f, std::nextafter(0.01f, 0.0f),
+                         std::nextafter(4096.0f, INFINITY) })
+    {
+        gExposurePreMul = ratio;
+        assert(Shader::WhitePoint() == gWhitePoint);
+    }
+    // Overflow during division also falls through.
+    gExposure.r = 0.5f;
+    gExposurePreMul = std::numeric_limits<float>::max();
+    assert(Shader::WhitePoint() == gWhitePoint);
+    gExposure.r = 1.0f;
+    for (float ratio : { 0.01f, 0.1f, 1.0f, 307.0f, 4096.0f })
+    {
+        gExposurePreMul = ratio;
+#ifdef VK_MODE
+        assert(Shader::WhitePoint() == gWhitePoint);
+#else
+        assert(Shader::WhitePoint() == ratio);
+#endif
+    }
+    gUseGameExposure = 0;
+    assert(Shader::WhitePoint() == gWhitePoint);
+    gWhitePoint = 0.0f;
+    assert(Shader::WhitePoint() == 1e-4f);
 
     // A normal game with a stable or slowly moving exposure never latches over 1000 readings.
     {
@@ -26,8 +87,8 @@ int main()
     // replaced latched on it; this one must not.
     {
         PlausibilityLatch latch;
-        const float logged[] = { 108.85f, 63.87f, 303.6f, 0.2836f, 1.07f, 0.43f, 0.10f, 3.63f, 2.71f, 1.72f,
-                                 19.58f, 15.13f, 8.52f, 307.0f, 0.103f, 28.08f, 50.48f, 11.68f };
+        const float logged[] = { 108.85f, 63.87f, 303.6f, 0.2836f, 1.07f,  0.43f,  0.10f,  3.63f,  2.71f,
+                                 1.72f,   19.58f, 15.13f, 8.52f,   307.0f, 0.103f, 28.08f, 50.48f, 11.68f };
         for (int round = 0; round < 50; ++round)
             for (float white : logged)
                 assert(!latch.Observe(white));
