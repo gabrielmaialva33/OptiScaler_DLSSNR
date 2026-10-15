@@ -173,6 +173,11 @@ tier = "wine"
 timeout = 600
 summary = "Drives the production NGX exports on a real D3D12 device and exercises the post-stage settling gate by sweeping the output extent. Runs under the local Proton (--runtime proton); bare wine reaches NR but its feature create returns FAIL_PlatformError. Includes successful shutdown and rejects runs without NR composition."
 
+[nr-present-guide-identity-msvc]
+tier = "wine"
+timeout = 900
+summary = "nr-present-guide-identity's decision cases and glue slice compiled by MSVC (private prefix copy) and run under Wine. No D3D12, no GPU."
+
 [synth-motion-d3d12]
 tier = "wine"
 timeout = 1800
@@ -256,7 +261,7 @@ summary = "Present-time guide snapshot ring selection, completion tracking, and 
 [nr-present-guide-identity]
 tier = "host"
 timeout = 120
-summary = "Present-guide identity, step 0 (log only): every rule of the decision header alone and in order, narrowing only, null swapchain stamps, ring scenarios, the window and its line, the glue sliced from the renderer, and guards that both consumers still read today's slot."
+summary = "Present-guide identity, step 1: every rule alone and in order, rule 6 enforced at the boundary only, narrowing only, ring scenarios, a long run that reads only accepted captures, the window and its line, the source-change reset, the status and the menu line, the glue sliced from the renderer, and guards that both consumers read only the decision's slot."
 
 [repo-privacy]
 tier = "host"

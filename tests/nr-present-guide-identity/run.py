@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Present-guide identity, step 0 (docs/dlssnr/design/present-real-guides.md): the production decision header on the
+"""Present-guide identity, step 1 (docs/dlssnr/design/present-real-guides.md): the production decision header on the
 host, the production glue sliced out of the renderer and run against fakes, and source guards that the present pass
-and the bridge still read the slot PickForPresent gave them. No GPU, no D3D12, no NGX, no game."""
+and the bridge read only the slot the identity rules return. No GPU, no D3D12, no NGX, no game."""
 from pathlib import Path
 import re
 import subprocess
@@ -61,41 +61,90 @@ assert '#include <dlssnr/DlssNr_PresentGuideIdentity.h>' in renderer
 
 glue = between(renderer, 'struct PresentGuideIdentityState\n', 'static void ReleasePresentTemporal()')
 
-# The glue only reads the ring: it never picks, records, invalidates or tracks a slot, never touches a clone's read
-# bookkeeping, and never writes a flag the pass decides on.
-for forbidden in ('PickForPresent(', 'AcquireForRecord(', 'CommitRecord(', 'InvalidateSlot(', 'Reset()', 'Submission::',
-                  'readUsage', 'presentReadUsage', 'readTracked', 'writeUsage', 'g_nrLastEnhancedRecordedSeq =',
-                  'g_bridgeRead', 'g_temporalValid', 'g_resetOnReturn', 'g_nr.', 'g_presentSkips'):
+# The glue reads the ring and never changes it: it never picks, records, invalidates or tracks a slot, never touches a
+# clone's read bookkeeping, and never writes a flag the pass decides on. Its one write outside its own state is the
+# model reset a lasting source change owes (D3), in NoteGuideSource only.
+for forbidden in ('PickForPresent(', 'AcquireForRecord(', 'CommitRecord(', 'InvalidateSlot(', 'g_presentGuideRing.Reset',
+                  'Submission::', 'readUsage', 'presentReadUsage', 'readTracked', 'writeUsage',
+                  'g_nrLastEnhancedRecordedSeq', 'g_bridgeRead', 'g_presentGuideClones', 'g_temporalValid', 'g_nr.',
+                  'g_presentSkips'):
     assert forbidden not in glue, f'the identity glue must not touch {forbidden}'
+assert glue.count('g_resetOnReturn') == 1
+source_note = function(renderer, 'static bool NoteGuideSource(')
+assert 'if (!history.Note(game))\n        return history.Established() == 1;\n\n    g_resetOnReturn = true;' in source_note
+# The bridge's list is not asked for its device on a ring that never recorded.
+bridge_ask_fn = function(renderer, 'static GuideAsk AskBridgeGuides(')
+assert bridge_ask_fn.index('if (g_presentGuideRing.NewestRecordedSequence() == 0)\n        return {};') < \
+    bridge_ask_fn.index('GetDevice(')
+# A use moves rule 5's record whether or not the present is logged.
+count_fn = function(renderer, 'static void CountGuideIdentity(')
+assert 'consumer.MarkUsed(g_presentGuideRing.GetSlot(picked).sequence);' in count_fn
 
-# The observers return nothing, so there is no answer for a caller to act on.
-for name in ('StampPresentGuide', 'NoteGuideIdentity', 'NotePresentPassIdentity', 'NoteBridgeIdentity'):
-    assert renderer.count(f'static void {name}(') == 1, name
-assert renderer.count('NoteGuideIdentity(') == 3  # its definition and the two consumers' notes
+# A ring that never recorded is not asked: no boundary, no presenter, no decision, no source.
+ask_fn = function(renderer, 'static GuideAsk AskGuideIdentity(')
+assert ask_fn.index('if (g_presentGuideRing.NewestRecordedSequence() == 0)\n        return ask;') < ask_fn.index('AtPresent(')
+assert 'ask.present.enforceLag = enforceLag;' in ask_fn
+assert 'return AskGuideIdentity(g_guideIdentity.present, device, presenter, width, height, picked, boundary);' in \
+    function(renderer, 'static GuideAsk AskPresentPassGuides(')
+assert 'return AskGuideIdentity(g_guideIdentity.bridge, device, presenter, width, height, picked, false);' in \
+    function(renderer, 'static GuideAsk AskBridgeGuides(')
 
-# One log line, written only when the window says one is due.
-assert glue.count('LOG_') == 1
-assert re.search(r'if \(consumer\.Note\([^;]*\)\)\s*\{\s*LOG_INFO\("\{\}", line\);\s*\}', glue, re.S)
+# Two log calls, each a preformatted line: the window's, when Note says one is due, and the source change's, rationed.
+assert glue.count('LOG_') == 2
+assert re.search(r'consumer\.Note\([^;]*\)\)\s*\{\s*LOG_INFO\("\{\}", line\);\s*\}', glue, re.S)
+assert re.search(r'if \(\+\+resets <= 3 \|\| resets % 100 == 0\)\s*\{\s*LOG_INFO\("\{\}",', source_note, re.S)
 
-# RunPresentPass: the note comes right after the pick and before today's skip; today's read still uses pickedSlot,
-# and nothing in the pass looks at a decision.
+# RunPresentPass: the identity is asked right after the pick, and what the pass reads is the slot it answers -- never
+# the pick itself, so a refused capture is never tracked or read. The skip stays, before any read, and is counted.
 present = function(renderer, 'void RunPresentPass(')
-pick = ('const size_t pickedSlot = g_presentGuideRing.PickForPresent(isEligible, nowMs);\n'
-        '    NotePresentPassIdentity(swapchain, device, width, height, pickedSlot);\n')
-assert present.count(pick) == 1, 'the present pass notes the decision right after its pick'
-assert present.count('PickForPresent(') == 1 and present.count('NotePresentPassIdentity(') == 1
+pick = ('const size_t pickedSlot = g_presentGuideRing.PickForPresent(isEligible, nowMs);\n')
+ask = ('const GuideAsk guides = AskPresentPassGuides(device, presenter, width, height, pickedSlot, boundary);\n'
+       '    const size_t usableSlot = guides.decision.slot;\n')
+assert present.count(pick) == 1 and present.count('PickForPresent(') == 1
+assert present.count(ask) == 1 and present.index(pick) < present.index(ask)
+assert present.count('AskPresentPassGuides(') == 1
+assert 'const void* const presenter = PresentGuidePresenter(swapchain);' in present
+assert present.index('PresentGuidePresenter(swapchain)') < present.index('std::unique_lock<std::mutex> nrLock(g_nrMutex);')
+# pickedSlot is handed to the identity and the record only, and read for its sequence when it was refused.
+assert len(re.findall(r'\bpickedSlot\b', present)) == 5, re.findall(r'.*\bpickedSlot\b.*', present)
+for read in ('if (usableSlot < DlssNr::PresentGuides::kRingSize)', 'auto& clone = g_presentGuideClones[usableSlot];',
+             'trackedSlot = usableSlot;', 'temporalSeq = g_presentGuideRing.GetSlot(usableSlot).sequence;'):
+    assert present.count(read) == 1, f'the read changed: {read}'
+assert len(re.findall(r'g_presentGuideClones\[', present)) == present.count('g_presentGuideClones[usableSlot]') + \
+    present.count('g_presentGuideClones[trackedSlot]')
 skip = 'newestRecordedSeq > 0 && newestRecordedSeq == g_nrLastEnhancedRecordedSeq'
-assert present.count(skip) == 1 and present.index(pick) < present.index(skip)
-assert skip in function(renderer, 'static void NotePresentPassIdentity('), 'the note and the pass skip on one test'
-for today in ('if (pickedSlot < DlssNr::PresentGuides::kRingSize)', 'auto& clone = g_presentGuideClones[pickedSlot];',
-              'trackedSlot = pickedSlot;', 'temporalSeq = g_presentGuideRing.GetSlot(pickedSlot).sequence;',
-              'g_nrLastEnhancedRecordedSeq = newestRecordedSeq;'):
-    assert present.count(today) == 1, f'today\'s read changed: {today}'
-# Whole words, so another decision in the pass (the HDR present's PresentColourDecision) is not mistaken for this one,
-# nor PresentBoundary::Decide, the route's own decision about the game's DLSS-G (DlssNr_PresentBoundary.h).
-for decision in (r'(?<!PresentBoundary::)\bDecide\(', r'\bDecision\b', r'\bg_guideIdentity\b',
-                 r'\bPresentGuideIdentity::'):
-    assert not re.search(decision, present), f'RunPresentPass reads the decision: {decision}'
+assert present.count(skip) == 1 and present.index(ask) < present.index(skip)
+skip_body = present[present.index(skip):present.index('if (usableSlot < DlssNr::PresentGuides::kRingSize)')]
+assert 'CountPresentPassGuides(guides, pickedSlot, DlssNr::PresentGuideIdentity::Outcome::Skipped);' in skip_body
+assert 'return;' in skip_body
+count = ('const auto guideOutcome = DlssNr::PresentGuideIdentity::OutcomeOf(guides.decision, temporalValid);\n'
+         '    CountPresentPassGuides(guides, pickedSlot, guideOutcome);')
+assert present.count(count) == 1
+assert present.index('trackedSlot = usableSlot;') < present.index(count) < present.index('nrLock.unlock();\n\n    static ZeroGuides')
+# The newest capture refused is decided on, like one used: the skip above then covers the presents after it. Only the
+# newest: a refused older pick leaves a newer capture to the next present.
+mark = ('if (guideOutcome == DlssNr::PresentGuideIdentity::Outcome::Refused &&\n'
+        '        g_presentGuideRing.GetSlot(pickedSlot).sequence == newestRecordedSeq)\n'
+        '    {\n        g_nrLastEnhancedRecordedSeq = newestRecordedSeq;\n    }')
+assert present.count(mark) == 1 and present.index(count) < present.index(mark)
+assert present.count('g_nrLastEnhancedRecordedSeq = newestRecordedSeq;') == 2
+source = ('if (temporalValid || !cfg.DlssNrRequireDlss.value_or_default())\n'
+          '        gameGuidesHold = NotePresentPassGuideSource(temporalValid, !g_sourceIsPresent.load());')
+assert present.count(source) == 1 and present.index(count) < present.index(source)
+assert present.index(source) < present.index('if (!g_sourceIsPresent.exchange(true))')
+# ZeroGuideReset waits while the game's guides hold the history; the RequireDlss skip says it waited.
+assert present.count('frame.Reset = cfg.DlssNrZeroGuideReset.value_or_default() && !gameGuidesHold;') == 1
+waiting = present[present.index('if (!temporalValid && cfg.DlssNrRequireDlss.value_or_default())'):]
+waiting = waiting[:waiting.index('return;')]
+assert 'NotePresentGuideWaiting();' in waiting
+# The route the status names is the present entry's own word, set once the placement chose it.
+assert present.count('g_presentRouteAtMs = NowMs();') == 1
+assert present.index('if (verdict == DlssNr::PresentBoundary::PresentVerdict::Declined)') < \
+    present.index('g_presentRouteAtMs = NowMs();') < present.index(pick)
+# What a frame without the game's guides ran on, after the synthesized motion is recorded.
+fallback = 'if (!temporalValid)\n        NotePresentGuideFallback(motion != s_dummyGuides.Motion());'
+assert present.count(fallback) == 1
+assert present.index('g_presentMotion->Record(') < present.index(fallback) < present.index('EvaluateAtPresent(')
 
 # At the default HookMethod (1) and with the pass off, RunPresentPass returns before the pick.
 assert 'CustomOptional<uint32_t> DlssNrHookMethod { 1 };' in config
@@ -104,23 +153,33 @@ assert present.index('if (!cfg.DlssNrEnabled.value_or_default())') < present.ind
 assert present.index('if (verdict == DlssNr::PresentBoundary::PresentVerdict::Upscaled)') < present.index(pick)
 assert present.index('if (verdict == DlssNr::PresentBoundary::PresentVerdict::Declined)') < present.index(pick)
 
-# CapturedPresentGuides: the same for the bridge.
+# CapturedPresentGuides: the same for the bridge. It reads the slot the rules return through ReadCapturedGuides, which
+# tracks the read before handing anything out.
 bridge = function(renderer, 'bool CapturedPresentGuides(')
-bridge_pick = ('const size_t pickedSlot = g_presentGuideRing.PickForPresent(isEligible, NowMs());\n'
-               '    NoteBridgeIdentity(cmdList, presenter, presentWidth, presentHeight, pickedSlot);\n')
-assert bridge.count(bridge_pick) == 1, 'the bridge notes the decision right after its pick'
-for today in ('if (pickedSlot >= DlssNr::PresentGuides::kRingSize)\n        return false;',
-              'auto& clone = g_presentGuideClones[pickedSlot];',
-              'g_bridgeRead = { true, pickedSlot, cmdList, savedUsage, savedPresentUsage, savedTracked };'):
-    assert bridge.count(today) == 1, f'the bridge\'s read changed: {today}'
-for decision in ('Decide(', 'Decision', 'g_guideIdentity', 'PresentGuideIdentity::'):
-    assert decision not in bridge, f'CapturedPresentGuides reads the decision: {decision}'
-bridge_note = function(renderer, 'static void NoteBridgeIdentity(')
-assert '!cfg.DlssNrEnabled.value_or_default() || cfg.DlssNrHookMethod.value_or_default() != 2' in bridge_note
+bridge_pick = 'const size_t pickedSlot = g_presentGuideRing.PickForPresent(isEligible, NowMs());\n'
+bridge_ask = ('const GuideAsk guides = AskBridgeGuides(cmdList, presenter, presentWidth, presentHeight, pickedSlot);\n'
+              '    const bool read = ReadCapturedGuides(guides.decision.slot, cmdList, depth, motion, frame);\n')
+assert bridge.count(bridge_pick) == 1 and bridge.count(bridge_ask) == 1
+assert bridge.index(bridge_pick) < bridge.index(bridge_ask)
+assert len(re.findall(r'\bpickedSlot\b', bridge)) == 3  # the pick, the ask, the record
+assert 'g_presentGuideClones' not in bridge and 'Submission::Track' not in bridge
+assert ('CountBridgeGuides(guides, pickedSlot, DlssNr::PresentGuideIdentity::OutcomeOf(guides.decision, read), '
+        'presenter);') in flat(bridge)
+read_fn = function(renderer, 'static bool ReadCapturedGuides(')
+assert read_fn.index('if (slot >= DlssNr::PresentGuides::kRingSize)\n        return false;') < read_fn.index('Track(')
+assert read_fn.index('Submission::Track(cmdList, clone.presentReadUsage)') < read_fn.index('*depth = clone.depth;')
+assert 'g_bridgeRead = { true, slot, cmdList, savedUsage, savedPresentUsage, savedTracked };' in read_fn
+bridge_count = function(renderer, 'static bool CountBridgeGuides(')
+assert ('presenter != nullptr && cfg.DlssNrEnabled.value_or_default() && cfg.DlssNrHookMethod.value_or_default() == 2'
+        in flat(bridge_count))
 assert ('ID3D12CommandQueue* queue = nullptr, const void* presenter = nullptr, unsigned int presentWidth = 0, '
-        'unsigned int presentHeight = 0);') in flat(feature)
+        'unsigned int presentHeight = 0, bool* gameGuidesHold = nullptr);') in flat(feature)
 assert flat(host).count('CapturedPresentGuides(cmdList, &capturedDepth, &capturedMotion, &captured, queue, this, '
-                        'sourceWidth, sourceHeight)') == 1
+                        'sourceWidth, sourceHeight, &gameGuidesHold)') == 1
+assert ('if (motion == _guides.Motion() && Config::Instance()->DlssNrZeroGuideReset.value_or_default() && '
+        '!gameGuidesHold)') in flat(host)
+assert '*gameGuidesHold = hold;' in bridge
+assert 'if (capturedMotion == nullptr)\n        NotePresentGuideFallback(motion != _guides.Motion());' in host
 
 # CaptureTemporal: one stamp, after both copies are recorded and right before the commit. It runs only where the
 # capture does: HookMethod 2, or 0 with the present hook live.
@@ -139,8 +198,22 @@ assert 'if (DlssNr::PresentBoundary::UpscaledCapturesForPresent(boundary, Presen
 release = function(renderer, 'static void ReleasePresentTemporal(')
 assert release.index('g_presentGuideRing.Reset();') < release.index('g_guideIdentity = {};')
 
-print('PASS: source guards -- pure header, the glue only reads the ring, observers return nothing, one gated log '
-      'line; RunPresentPass and CapturedPresentGuides read the slot PickForPresent gave them and never a decision; '
+# The status line names the guides from the decisions of the last second, never from g_temporalValid (D3); the menu's
+# guides line sits with it, and only a present host's decisions publish it.
+status = function(renderer, 'const char* HookStatus(')
+assert 'g_temporalValid' not in re.sub(r'//[^\n]*', '', status)
+assert status.count('RecentGuideStatus(&guides)') == 1 and status.count('RouteText(') == 2
+assert 'if (presenting && PresentRouteLive())' in status
+assert 'waiting for DLSS temporal inputs' not in status  # one wording for waiting: RouteText's
+assert 'swapchain source with DLSS temporal inputs' not in renderer
+menu = (retoque / 'dlssnr/DlssNr_Menu.cpp').read_text()
+assert menu.count('DlssNr::PresentGuidesLine()') == 1
+assert menu.index('const char* status = DlssNr::HookStatus();') < menu.index('DlssNr::PresentGuidesLine()')
+assert glue.count('g_guideStatus = ') == 1 and 'g_guideStatus = ' in function(renderer, 'static void CountGuideIdentity(')
+
+print('PASS: source guards -- pure header; the glue reads the ring and writes only the reset a held source change '
+      'owes; RunPresentPass and CapturedPresentGuides read the slot the rules return, never the pick, and track it '
+      'before use; the skip stays and is counted; rule 6 enforced at the boundary only; the status reads no latch; '
       'stamp before commit; inert at HookMethod=1, off, and on an empty ring', flush=True)
 
 # --- The header's cases, then the glue as the renderer has it --------------------------------------------------

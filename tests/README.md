@@ -29,7 +29,7 @@ entry, or the next run tells you.
 | Tier | Needs | Suites |
 |---|---|---|
 | `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `windows-installer`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
-| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session, and they and `synth-motion-vk` a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `synth-motion-vk`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback` |
+| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session, and they and `synth-motion-vk` a working Vulkan loader | `nr-gpu-timing-d3d12`, `synth-motion-d3d12`, `synth-motion-vk`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback`, `nr-present-guide-identity-msvc` |
 | `wip` | registered, no runner yet | — |
 
 The wine tier is serial on purpose. These suites compile through the single msvc-wine
@@ -85,11 +85,13 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   the panel. No D3D11 device, NGX or DLSS.
 - `nr-present-guides` — selection and completion tracking for the present-time guide snapshot ring
   (`DlssNr_PresentGuideRing.h`), preventing cross-queue GPU waits and DLSS-G deadlocks.
-- `nr-present-guide-identity` — step 0 of `docs/dlssnr/design/present-real-guides.md`, log only: the identity
-  decision (`DlssNr_PresentGuideIdentity.h`) rule by rule and in its first-failing order, that it only ever narrows the
-  ring's pick, the null swapchain stamp, ring scenarios (frame generation, a late copy, portraits, a resize, a second
-  swapchain), the per-window record and its line and rate, and the renderer's glue sliced out and run against fakes.
-  Source guards hold that the present pass and the bridge still read the slot `PickForPresent` gave them. No GPU.
+- `nr-present-guide-identity` — step 1 of `docs/dlssnr/design/present-real-guides.md`: the identity decision
+  (`DlssNr_PresentGuideIdentity.h`) rule by rule and in its first-failing order, rule 6 enforced and not, that it only
+  ever narrows the ring's pick, the null swapchain stamp, ring scenarios (frame generation, a late copy, the wrapped
+  entry's lag, portraits, a resize, a second swapchain), a long run that reads only what the rules accept and never
+  overwrites a read in flight, the per-window record and its line and rate, the source-change reset, the status and
+  the menu's guides line, and the renderer's glue sliced out and run against fakes. Source guards hold that the present
+  pass and the bridge read only the decision's slot. No GPU.
 - `bridge-lifetime` — production D3D11/D3D12 bridge waits, failed submission, resize,
   ownership and deferred release against scripted COM/Win32 fakes, and which FG input and output
   the bridge is built for. Also a refused presenter resize and its recovery, and the D3D12 overlay's
@@ -224,6 +226,9 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-gpu-timing-d3d12` — real D3D12 timestamp queries in an isolated prefix. It
   never loads NGX and never launches a game.
+- `nr-present-guide-identity-msvc` — `nr-present-guide-identity`'s decision cases and its glue slice, compiled by
+  MSVC in a private copy of the prefix and run under Wine: the same checks through the compiler and standard library
+  the DLL ships with. No D3D12.
 - `dlssnr-loopback` — drives the production NGX exports, NR composition, resolution changes
   and shutdown on a real GPU under Proton.
 - `synth-motion-d3d12` — the synthesized-motion estimator on a real D3D12 device: endpoint
