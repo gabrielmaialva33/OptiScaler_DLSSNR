@@ -485,24 +485,28 @@ An A/B worth one more session: the same scene with `Dx11Upscaler=dlss_12` (route
 DLSS hands its guides to the ring), the identity line then coming from the same bridge consumer, against native DLSS
 with this step, for the frame time and the picture.
 
-### Sons Of The Forest under Proton, 2026-10-15: native D3D11 DLSS is not offered, so step 3 cannot run here
+### Measured: Sons Of The Forest under Proton, 2026-10-15
 
-Build `c49fd27c`, GE-Proton, RTX 4090, driver 615.78.08, `Dx11Upscaler=dlss` and `HookMethod=2` set for the run. The
-game initialised NGX on D3D11 (`NVSDK_NGX_D3D11_Init_Ext`, AppId 4919, `GetCapabilityParameters` result 1) and never
-created a feature: its graphics menu offered no DLSS. The driver's Wine NGX core logged, once:
+Build `c49fd27c`, GE-Proton, RTX 4090, driver 615.78.08, `[Upscalers] Dx11Upscaler=dlss`, `[DlssNr] Enabled=true`,
+`HookMethod=2`, the game's own DLSS chosen under Graphics -> Dynamic Resolution -> DLSS. (A first session looked as if
+native D3D11 DLSS were not offered under Proton; the option had simply not been chosen, and lives under Dynamic
+Resolution, not anti-aliasing. The Wine NGX core's one-off `NGXGetPathUsingQAI ... too many attempts to query adapter
+info` in that log is harmless: DLSS was created and ran with it present.)
 
 ```
-NVSDK Feature 32765: [NGXGetPathUsingQAI:526] error: too many attempts to query adapter info
+DLSS-NR native D3D11 guides: carrying the game's depth (format 19 3440x1440) and motion (format 33 3440x1440) from its native D3D11 DLSS to the present pass through the D3D12 bridge (legacy shared handles); output 3440x1440
+DLSS-NR present host: using the upscaler's own depth and motion, not the zero guides
+DLSS-NR native D3D11 guides: 2265 evaluates in 30.0 s | 2265 carried to the present pass, 0 not | depth format 19 3440x1440, motion format 33 3440x1440, output 3440x1440
+DLSS-NR present guides, identity applied, D3D11 bridge: 2265 presents in 30.0 s, lag limit enforced on 0 | 2265 used the game's depth and motion, 0 refused, 0 skipped with no new capture, 0 had none | ...
 ```
 
-The same game, same machine, with `Dx11Upscaler=dlss_12` (2026-09-06 and 09-14 logs) created its DLSS feature on every
-run, with no such error: there OptiScaler answers the capability query with its own D3D12 DLSS. So with `dlss` the
-capabilities come from the Wine core's D3D11 path, which cannot query the adapter under DXVK here and reports DLSS
-unavailable; the game hides the option. Native D3D11 DLSS is what route (c) exists for, so step 3 is **not testable
-on this Proton setup**. Its validation moves to a machine where native D3D11 DLSS runs (native Windows: Rafael's PC).
-Both test titles were put back as they were (`dlss_12` for Sons Of The Forest, `auto` for Palworld, no `HookMethod`
-line). Under Proton, route (b) (`dlss_12`) remains the one that gives a D3D11 DLSS game NR on its real guides, with
-the depth-stencil caveat found above.
+- Formats, logged for the first time: depth `R32G8X24_TYPELESS` (19, a depth-stencil with a stencil plane, so upstream's
+  `DepthTransfer` path), motion `R16G16_FLOAT` (33), both at the output size.
+- Steady state from the first window after the last feature rebuild: every window carried every evaluate and used the
+  game's guides on every present (about 73 fps), no refusal.
+- A 45-second stretch with no DLSS evaluates (a menu or load) fell back to zero or synthesized guides with one history
+  restart each way (`the model's history restarts on ...`), as the source-change rule says.
+- Judged by the user: runs well. Not yet measured: the GPU cost of the transport, Palworld, native Windows.
 
 ## Config surface
 
