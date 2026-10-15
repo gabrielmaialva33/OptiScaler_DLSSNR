@@ -62,6 +62,53 @@ def flat(text):
     return re.sub(r'\s+', ' ', text)
 
 
+def empty_submit_calls(text):
+    """Find literal zero-count/null-array QueueSubmit(2/KHR) calls, including dispatch-table spellings.
+
+    This is a source guard, not data-flow analysis: forwarded application arguments are deliberately untouched.
+    Match argument nesting so a queue lookup or cast cannot hide the second/third argument.
+    """
+    text = re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"',
+                  lambda m: re.sub(r'[^\n]', ' ', m[0]), text, flags=re.S)
+    for match in re.finditer(r'\b\w*queuesubmit(?:2(?:khr)?)?\s*\(', text, re.I):
+        args, start, depth = [], match.end(), 0
+        for i in range(start, len(text)):
+            c = text[i]
+            if c == ')' and depth == 0:
+                args.append(text[start:i].strip())
+                break
+            if c == ',' and depth == 0:
+                args.append(text[start:i].strip())
+                start = i + 1
+            elif c in '([{':
+                depth += 1
+            elif c in ')]}':
+                depth -= 1
+        if len(args) != 4:
+            continue
+        count, submits = (re.sub(r'[()\s]', '', a) for a in args[1:3])
+        zero = r'(?:0[xX])?0+[uUlL]*'
+        if re.fullmatch(zero, count) or re.fullmatch(r'(?:nullptr|NULL|VK_NULL_HANDLE|' + zero + r')', submits):
+            yield text.count('\n', 0, match.start()) + 1, args
+
+
+# Prove the scanner catches either bad argument, across both APIs and dispatch-table names; comments do not count.
+for api in ('vkQueueSubmit', 'dev.fn.queueSubmit', 'vkQueueSubmit2', 'dev->fn.queueSubmit2KHR'):
+    for args in ('q, 0, &info, f', 'getQueue(dev, index), 0U, &info, f', 'q, 1, nullptr, f',
+                 'q, 1, NULL, f', 'q, 1, (VK_NULL_HANDLE), f', 'q, 1, 0, f'):
+        assert list(empty_submit_calls(f'{api}({args});')), (api, args)
+    assert not list(empty_submit_calls(f'{api}(q, 1, &info, VK_NULL_HANDLE);'))
+    assert not list(empty_submit_calls(f'// {api}(q, 0, nullptr, f);\n/* {api}(q, 0, nullptr, f); */'))
+
+bad_submits = []
+for path in sorted((root / 'retoque').rglob('*')):
+    if path.suffix in ('.cpp', '.h', '.hpp', '.cc', '.cxx', '.c'):
+        bad_submits += [f'{path.relative_to(root)}:{line}: {args}'
+                        for line, args in empty_submit_calls(path.read_text())]
+assert not bad_submits, 'fork submits need a non-null, non-empty submit array:\n' + '\n'.join(bad_submits)
+print('PASS: every fork QueueSubmit/QueueSubmit2/KHR call avoids literal zero count and null submit arrays')
+
+
 # --- Source guards ----------------------------------------------------------------------------------------------
 
 # The headers are standard library only (the registry includes the transport header, the transport header the cold-NR
@@ -189,8 +236,8 @@ assert prepare.index('try_lock_for') < prepare.index('submit(workQueue, info.wai
 present_hook = code(function(host, 'VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, '
                                    'const VkPresentInfoKHR* info, void* returnAddress)'))
 assert present_hook.index('presentLock = std::unique_lock(locks->present)') < present_hook.index('Prepare(')
-# The round trip's own submits go below every hook on vkQueueSubmit (the host's trampoline), and its device functions
-# are resolved below OptiScaler's hooks: no other hook's lock is ever taken inside the transport's.
+# The round trip's own submits use the host's trampoline. With the bundle installed the next layer can still be
+# Vulkan_wDx12, so the submit-array guard above applies even to fence-only drains.
 assert 'dev->fn.queueSubmit = below;' in code(function(host, 'VkResult VKAPI_CALL hkCreateDevice('))
 assert 'out = reinterpret_cast<Pfn>(VulkanHooks::GetDeviceProcAddr(device, name));' in body
 # A cross-family chain cut short after the release still hands the present a valid image: the recovery is recorded
@@ -352,7 +399,7 @@ assert start_hb.count('std::try_to_lock') == 2 and 'try_lock_for' not in start_h
 assert start_hb.index('locks->present, std::try_to_lock') < start_hb.index('locks->submit, std::try_to_lock')
 assert start_hb.index('try_to_lock') < start_hb.index('createFence(') < \
     start_hb.index('BeginAfterUpscaleHandBack(') < start_hb.index('queueSubmit(')
-assert 'dev.fn.queueSubmit(queues[submitted].first, 0, nullptr, fences[submitted])' in start_hb
+assert 'dev.fn.queueSubmit(queues[submitted].first, 1, &submitInfo, fences[submitted])' in start_hb
 assert start_hb.index('queueSubmit(') < start_hb.index('held.clear();')
 # A failed drain submit calls the hand-back off; a lost device destroys nothing, fences included.
 failed = start_hb[start_hb.index('if (failure != VK_SUCCESS)'):]
@@ -382,7 +429,7 @@ assert teardown.index('DrainForDestroy(') < teardown.index('AfterUpscaleDeviceGo
     < teardown.index('ShutdownPresentNgx(dev.device, unproven, dev.lines);')
 drain_destroy = flat(code(function(host, 'bool DrainForDestroy(DeviceTransport& dev, uint64_t budgetNs)')))
 assert 'if (dev.lost || queues.empty()) return false;' in drain_destroy
-assert drain_destroy.index('queueSubmit(queue, 0, nullptr, fence)') < drain_destroy.index('waitForFences(')
+assert drain_destroy.index('queueSubmit(queue, 1, &submitInfo, fence)') < drain_destroy.index('waitForFences(')
 # Fences destroyed only once seen signalled (or never submitted): a failed wait keeps them.
 after_wait = drain_destroy[drain_destroy.index('waitForFences('):]
 assert after_wait.index('if (result != VK_SUCCESS) return false;') < after_wait.index('destroyFence(')

@@ -696,7 +696,8 @@ cases below hold the exports byte-identical).
   one lock per queue held across that present would close the cycle.
 - **Below OptiScaler's own hooks.** The round trip's device functions are resolved through
   `VulkanHooks::GetDeviceProcAddr` (the bundle's trampoline, or the plain export without the bundle), and its submits
-  go through the host's own trampoline of the device's `vkQueueSubmit`, below every hook on it. The independent review
+  go through the host's own trampoline of the device's `vkQueueSubmit`. This was initially described as below every
+  hook; the stage-3 DOOM finding below shows wDx12 can still sit underneath it. The independent review
   found why that matters: resolved through the bundle's `vkGetDeviceProcAddr`, the host's submit became Vulkan_wDx12's
   hook, which takes a queue lock of its own before calling down into the host's -- the reverse of an application
   submit's order, a deadlock in exactly DOOM Eternal's configuration. All of these are resolved before the host's
@@ -1119,8 +1120,8 @@ the route's side in `DlssNrFeature_Vk.cpp`):
 - **The drain.** Every queue of the device the application retrieved is try-locked (its present lock, then its submit
   lock, as a borrower takes them; one another thread holds is tried again at the next present: the host never waits
   here), a fence is made per queue, the hand-back is marked begun in the arbiter (`BeginHandBack`, refused if the route
-  asked in the meantime), and each fence is submitted on an empty batch (`vkQueueSubmit` with no batch and a fence,
-  below every hook), so it signals once everything submitted to its queue before it has completed -- the command
+  asked in the meantime), and each fence is submitted on an empty batch (`vkQueueSubmit` with count 1, a non-null
+  `VkSubmitInfo` with `sType` set and all other fields zero, and the fence), so it signals once everything submitted to its queue before it has completed -- the command
   buffers the route last recorded into among them. The fences are polled at later presents, never waited for.
 - **Finish.** When every fence was seen signalled, the route's lock is try-locked (held means the route is evaluating:
   next present) and the arbiter finishes the hand-back: **Done** releases the token and the route's objects are freed
@@ -1213,6 +1214,55 @@ twice, drains of about 100 ms at the harness's rate under validation, six featur
 off or abandoned, the route's objects freed at exit before NGX was shut down (returned 1), no validation report of
 anyone's but the model's known one. Not validated: a game (the next DOOM run, below), a render thread recording while the hand-back
 drains (one thread does both in the harness: host tier only), a fence that never signals.
+
+### DOOM Eternal: the downstream wDx12 submit hook rejected the drain
+
+The game run on build `cec50409` reached the ten-second hand-back, but every attempt was called off. The reported
+log lines were (device handle omitted):
+
+```text
+[E] Invalid parameters to hk_vkQueueSubmit
+DLSS-NR Vulkan present host: device ...: a hand-back drain submit returned -3; the hand-back is called off, the after-upscale route keeps the model
+```
+
+The pair repeated every ten seconds; with DLSS off the route kept the model and NR never ran at present. The
+cancel path safely destroyed the fences that were never submitted. The failure was not a lost device or a leak.
+`dev.fn.queueSubmit` can reach `Vulkan_wDx12::hk_vkQueueSubmit` below the host; the earlier claim that the trampoline
+is below every hook was too strong. That hook rejects `pSubmits == nullptr` with
+`VK_ERROR_INITIALIZATION_FAILED` (-3), even though
+[Vulkan permits a zero-count/null-array submit](https://docs.vulkan.org/refpages/latest/refpages/source/vkQueueSubmit.html).
+
+Both fork-owned fence-only submits now pass count 1 and an empty `VkSubmitInfo` with its `sType` set:
+`StartHandBack`, and `DrainForDestroy` (the bounded destroy drain introduced by `559a54a7`). There are no command
+buffers, waits or signals in the batch; the fence still follows prior queue work. The after-upscale implementation
+in `DlssNrFeature_Vk.cpp` records commands but has no queue-submit call; the audit found no other zero-count/null-array
+submit or Submit2/KHR equivalent under `retoque/`. No upstream hook is changed.
+
+The host-tier guard now scans all fork C/C++ sources for that pattern, including Submit2/KHR and dispatch-table
+spellings; it failed on both drain sites before the fix. The existing `nr-route-quiet` passed because it creates
+`optiscaler_skip_vulkan_hooks`: `VulkanHooks::Hook` returns before installing wDx12. The new
+`nr-route-quiet-wdx12` companion leaves the bundle enabled, disables only the overlay, and clears the diagnostic
+wDx12-disable environment override. A deliberate zero-count/null-array probe through the application's device
+proc address must return -3 and produce exactly one rejection line, proving the actual production hook is active;
+no further rejection is permitted during two hand-backs and the bounded device-destroy drain. It uses the same
+read-back, ownership-order and synchronization-validation checks as the original case. A real DOOM retest remains
+separate; this change does not deploy a DLL into the running game.
+
+The companion's negative control on the retained pre-fix build `80374044` reproduced both -3 hand-back failures.
+Its bounded destroy drain also failed, so the route's objects were abandoned and validation reported
+`VUID-vkDestroyDevice-device-05137` (live child objects at destroy). This is distinct from the safe cancellation of
+never-submitted hand-back fences. On the fixed build, the first companion run completed the two hand-backs and
+clean teardown with zero host validation errors, but the checker falsely called four exact read-backs in its first
+nine-second window an early takeover because it required five. The bounded waiting windows now require a nonempty
+sample and reject every changed frame; unlike the post-hand-back phases, their length cannot be extended for a slow
+machine without crossing the hand-back deadline. An empty sample and a sample with one changed frame are rejected.
+
+Final validation on build `da4988a1`: all 49 host suites passed; `nr-route-quiet` and
+`nr-route-quiet-wdx12` both passed under Proton with synchronization validation. The wDx12 case saw exactly the
+one deliberate probe rejection, drained in 94 and 96 ms, read back 79 exact frames in each early waiting window,
+then edited every judged post-hand-back frame, and freed the route's objects before NGX shutdown at exit. Both
+cases had zero host validation errors and six occurrences each of the model's already-allowed
+`VUID-vkCmdDraw-None-09600`. This proves the hook-chain regression in the harness, not a new DOOM game run.
 
 ### What the next DOOM Eternal run should show
 

@@ -203,6 +203,23 @@ freed before it goes` ahead of `NGX shut down on the device before it goes (retu
 nothing called off or abandoned. Measured 2026-10-14: drains of about 100 ms (a few presents at the harness's rate
 under validation), about 80 read-backs exact before each hand-back.
 
+`nr-route-quiet-wdx12` repeats those phases with the Vulkan bundle enabled (no skip marker, no `SkipHooks`),
+the overlay disabled, and `OPTISCALER_DISABLE_VULKAN_WDX12_HOOKS` removed from the child environment. Before the
+first frame, the harness resolves `vkQueueSubmit` through `vkGetDeviceProcAddr` and probes a zero-count/null-array
+submit with no fence. Vulkan permits it, but the real `Vulkan_wDx12::hk_vkQueueSubmit` must return
+`VK_ERROR_INITIALIZATION_FAILED`; the harness records `wdx12_probed=true`. The log must contain exactly one
+`Invalid parameters to hk_vkQueueSubmit` (that probe), followed by two successful hand-backs and the bounded drain
+at device destruction. This catches the DOOM failure the original `nr-route-quiet` missed: its skip marker prevents
+`VulkanHooks::Hook` from installing the wDx12 bundle. The companion uses the production hook, not a mock or a
+modified OptiScaler DLL. The fixed nine-second waiting windows require at least one read-back and every read-back
+exact; they impose no frame-rate minimum (the enabled bundle once yielded four exact read-backs, falsely rejected
+by the old minimum of five). The judged post-hand-back phases still run for at least twelve presents.
+Neither harness reproduces DOOM's full rendering workload.
+
+Verified on `da4988a1`: both route cases pass, including wDx12's two hand-backs and bounded destroy drain (94/96 ms
+hand-back drains, zero host validation errors). As a negative control, the retained `80374044` DLL fails the new
+case with two -3 hand-back rejections and a rejected destroy drain, followed by a live-child-object validation error.
+
 What NVIDIA's model records into the host's command buffer is validated too. One report comes from it, once per
 feature build: `VUID-vkCmdDraw-None-09600`, an image of its own named `nv.ngx.dlssnr.resource` used in GENERAL at its
 first evaluate without ever leaving UNDEFINED. The application counts reports naming an `nv.ngx.*` object apart

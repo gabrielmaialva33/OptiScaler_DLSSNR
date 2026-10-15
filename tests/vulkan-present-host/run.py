@@ -1095,7 +1095,7 @@ def check_nr(name, facts, log):
 # after-upscale route running the model on its output; then the feature released and nothing evaluated until 14 s after
 # the last evaluate, longer than the present host waits (kAfterUpscaleIdleMs); twice. The phases' read-backs say who
 # ran the model when: until 9 s after the last evaluate the route (frames unedited), from 12 s the present host.
-ROUTE_CASES = {'nr-route-quiet'}
+ROUTE_CASES = {'nr-route-quiet', 'nr-route-quiet-wdx12'}
 ROUTE_IDLE_S = 10  # retoque/dlssnr/DlssNr_VkModelOwner.h, kAfterUpscaleIdleMs
 
 
@@ -1113,12 +1113,18 @@ def execute_route(name, dll, redist, files):
     # OptiScaler's own FSR 2.2 as the game's upscaler: nothing but the model to supply, and the evaluate's path to the
     # after-upscale route is the one every OptiScaler upscaler takes. DLSS stays on, so NGX initialises through the
     # driver's core, as a game's does.
-    ini = ini_for(False, True, True, True, level=1) + '[Upscalers]\nVulkanUpscaler=fsr22\n'
+    wdx12 = name == 'nr-route-quiet-wdx12'
+    ini = ini_for(False, True, True, not wdx12, level=1) + '[Upscalers]\nVulkanUpscaler=fsr22\n'
     (work / 'OptiScaler.ini').write_text(ini)
-    (work / MARKER).write_text('')
+    if not wdx12:
+        (work / MARKER).write_text('')
+    env = nr_env()
+    # Do not inherit a diagnostic override that silently removes the chain this case must exercise.
+    env.pop('OPTISCALER_DISABLE_VULKAN_WDX12_HOOKS', None)
+    args = ['--route'] + (['--wdx12'] if wdx12 else [])
     with (OUT / f'{name}.log').open('w') as log:
-        process = subprocess.run([str(files['proton']), 'run', str(work / NR_EXE), '--route'], cwd=work,
-                                 env=nr_env(), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+        process = subprocess.run([str(files['proton']), 'run', str(work / NR_EXE), *args], cwd=work,
+                                 env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                  timeout=900)
     run_log = (OUT / f'{name}.log').read_text(errors='replace')
     facts = json.loads((work / 'result.json').read_text())
@@ -1143,6 +1149,14 @@ def check_route(name, facts, log):
         if not condition:
             problems.append(message)
 
+    wdx12 = name == 'nr-route-quiet-wdx12'
+    need(facts.get('wdx12_probed') is wdx12, 'wDx12 chain probe did not match the case')
+    # One rejection is the application's deliberate, Vulkan-valid zero-batch probe. No host drain may add one.
+    need(log.count('Invalid parameters to hk_vkQueueSubmit') == int(wdx12),
+         'unexpected wDx12 submit rejections (only the chain probe may be rejected)')
+    if wdx12:
+        need('Skipping vulkan-1.dll hooks' not in log, 'the Vulkan bundle was skipped')
+        need('Skipping Vulkan_wDx12 hooks' not in log, 'wDx12 was disabled')
     lines = log.splitlines()
     phases = {p['name']: p for p in facts.get('phases', [])}
     expected = ['cold', 'on', 'off-waiting', 'off-handing-back', 'off-back', 'on-again', 'off-again-waiting',
@@ -1164,8 +1178,11 @@ def check_route(name, facts, log):
                                                                    f'for the route: {p}')
     for name_ in ('off-waiting', 'off-again-waiting'):
         p = phases[name_]
-        need(p['readbacks'] >= 5 and p['exact'] == p['readbacks'], f'{name_}: the model went back to the present host '
-                                                                   f'before {ROUTE_IDLE_S} s: {p}')
+        # This phase ends at a fixed deadline; the enabled bundle can make it produce fewer than five read-backs.
+        # Require actual coverage, and reject any edited frame. A frame-count floor here would test throughput.
+        need(p['readbacks'] > 0, f'{name_}: no read-back before the hand-back deadline: {p}')
+        need(p['exact'] == p['readbacks'], f'{name_}: the model went back to the present host '
+                                         f'before {ROUTE_IDLE_S} s: {p}')
 
     def count(text):
         return sum(1 for l in lines if text in l)

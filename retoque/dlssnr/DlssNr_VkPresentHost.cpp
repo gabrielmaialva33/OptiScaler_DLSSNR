@@ -53,8 +53,8 @@
 // The two kinds are kept apart because the legacy Vulkan overlay below the present hook submits to a graphics queue
 // (through the submit hook) while holding a lock of its own that another thread's present on that queue waits for:
 // a single lock per queue, held across that present's call down, would close the cycle. The round trip's own submits
-// go through the host's trampoline, below every hook on vkQueueSubmit (the bundle's takes a queue lock of its own),
-// and its other device functions are resolved below OptiScaler's hooks (VulkanHooks::GetDeviceProcAddr).
+// go through the host's trampoline, below the host's hook on vkQueueSubmit (the bundle may still take its own queue
+// lock), and its other device functions are resolved below OptiScaler's hooks (VulkanHooks::GetDeviceProcAddr).
 
 namespace
 {
@@ -1154,12 +1154,14 @@ void StartHandBack(DeviceTransport& dev)
         return;
     }
 
+    const VkSubmitInfo submitInfo { VK_STRUCTURE_TYPE_SUBMIT_INFO };
     size_t submitted = 0;
     VkResult failure = VK_SUCCESS;
     for (; submitted < queues.size(); ++submitted)
     {
-        // No batch, only the fence: it signals when all work submitted to the queue before it has completed.
-        failure = dev.fn.queueSubmit(queues[submitted].first, 0, nullptr, fences[submitted]);
+        // An empty batch signals the fence after prior queue work. A zero-count/null-array submit is valid
+        // Vulkan, but the next layer can be Vulkan_wDx12, which rejects a null submit array.
+        failure = dev.fn.queueSubmit(queues[submitted].first, 1, &submitInfo, fences[submitted]);
         if (failure != VK_SUCCESS)
             break;
     }
@@ -1315,6 +1317,7 @@ bool DrainForDestroy(DeviceTransport& dev, uint64_t budgetNs)
 
     std::vector<VkFence> fences;
     VkFenceCreateInfo fenceInfo { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    const VkSubmitInfo submitInfo { VK_STRUCTURE_TYPE_SUBMIT_INFO };
     bool submitted = true;
     for (const auto& [queue, locks] : queues)
     {
@@ -1325,7 +1328,8 @@ bool DrainForDestroy(DeviceTransport& dev, uint64_t budgetNs)
             break;
         }
 
-        const VkResult result = dev.fn.queueSubmit(queue, 0, nullptr, fence);
+        // As in StartHandBack, keep the submit array non-null for the downstream Vulkan_wDx12 hook.
+        const VkResult result = dev.fn.queueSubmit(queue, 1, &submitInfo, fence);
         if (result != VK_SUCCESS)
         {
             dev.fn.destroyFence(dev.device, fence, nullptr); // never submitted
@@ -3149,9 +3153,9 @@ VkResult VKAPI_CALL hkCreateDevice(VkPhysicalDevice physical, const VkDeviceCrea
 
     HookDevice(*device);
 
-    // The round trip's own submits go through the host's trampoline of the device's vkQueueSubmit, below every hook
-    // on it, its own included: they take no other hook's lock, and the borrowed queue's locks they need are taken
-    // explicitly.
+    // The round trip's own submits go through the host's trampoline of the device's vkQueueSubmit. The next layer
+    // can still be Vulkan_wDx12 (as in DOOM), so even fence-only submits need a non-null submit array. The borrowed
+    // queue's host locks are taken explicitly.
     if (!internal)
     {
         const void* real = reinterpret_cast<const void*>(VulkanHooks::GetDeviceProcAddr(*device, "vkQueueSubmit"));
