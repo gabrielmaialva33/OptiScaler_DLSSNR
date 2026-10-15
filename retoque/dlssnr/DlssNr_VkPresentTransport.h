@@ -332,19 +332,20 @@ inline SlotChoice ChooseSlot(const std::vector<SlotState>& states, const std::ve
 enum class Skip : uint8_t
 {
     None,
-    ObserveOnly,    // the swapchain is not eligible (its creation line says why)
-    DeviceOff,      // the device's transport stopped (a lost device, a failed drain, too many retained semaphores)
-    MultiSwapchain, // one present for several swapchains: the waits belong to the whole call
-    ImageUnknown,   // an index past the images the application fetched, or no images fetched
-    NoAcquire,      // no acquire of the image observed since its last present
-    TooManyWaits,   // more than kMaxWaits semaphores
-    NoRoute,        // no legal queue for the image (the window line says the first reason)
-    QueueChange,    // a different work queue while the previous one's round trips are still in flight
-    RingBusy,       // every slot pending after kSlotWaitNs
-    QueueBusy,      // the graphics queue to borrow stayed locked by another thread for kQueueLockWaitMs
-    SetupFailed,    // a work image, pool, buffer, fence or semaphore could not be made
-    RecordFailed,   // a command buffer could not be recorded
-    SubmitFailed,   // the first submit failed without consuming anything
+    ObserveOnly,     // the swapchain is not eligible (its creation line says why)
+    DeviceOff,       // the device's transport stopped (a lost device, a failed drain, too many retained semaphores)
+    MultiSwapchain,  // one present for several swapchains: the waits belong to the whole call
+    ImageUnknown,    // an index past the images the application fetched, or no images fetched
+    NoAcquire,       // no acquire of the image observed since its last present
+    TooManyWaits,    // more than kMaxWaits semaphores
+    NoRoute,         // no legal queue for the image (the window line says the first reason)
+    QueueChange,     // a different work queue while the previous one's round trips are still in flight
+    RingBusy,        // every slot pending after kSlotWaitNs
+    QueueBusy,       // the graphics queue to borrow stayed locked by another thread for kQueueLockWaitMs
+    SetupFailed,     // a work image, pool, buffer, fence or semaphore could not be made
+    RecordFailed,    // a command buffer could not be recorded
+    SubmitFailed,    // the first submit failed without consuming anything
+    FrameGeneration, // stage 4: frame generation makes or takes this present; carried untouched until it is proven
     Count,
 };
 
@@ -378,6 +379,8 @@ inline const char* SkipName(Skip skip)
         return "record failed";
     case Skip::SubmitFailed:
         return "submit failed";
+    case Skip::FrameGeneration:
+        return "frame generation";
     default:
         return "none";
     }

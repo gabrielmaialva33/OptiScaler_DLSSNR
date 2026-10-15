@@ -3,6 +3,7 @@
 #include "DlssNr_VkPresentHost.h"
 #include "DlssNrFeature_Dx12.h"
 #include "DlssNr_VkModelOwner.h"
+#include "DlssNr_VkPresentFg.h"
 #include "DlssNr_VkPresentModel.h"
 #include "DlssNr_VkPresentRegistry.h"
 #include "DlssNr_VkPresentTransport.h"
@@ -224,6 +225,93 @@ void Log(const std::vector<std::string>& lines)
         LOG_INFO("{}", line);
 }
 
+// --- Stage 4: frame generation and the pacer trace ----------------------------------------------------------------
+
+// [DlssNr] VulkanPresentTrace and VulkanPresentFgTransport, read at Install with the host (a change needs a restart).
+std::atomic<bool> g_traceOn { false };
+std::atomic<bool> g_fgTransport { false };
+
+// The trace's windows, and Streamline's messages counted for it. Two leaf locks: nothing is called under either, and
+// never one under the other (the counts are copied out before the trace's lock is taken).
+std::mutex g_traceMutex;
+PacerTrace g_trace;
+std::mutex g_streamlineMutex;
+StreamlineCounts g_streamline;
+
+StreamlineCounts StreamlineNow()
+{
+    std::lock_guard lock(g_streamlineMutex);
+    return g_streamline;
+}
+
+// What OptiScaler knows of frame generation at this present: the three process-wide signals the D3D12 present pass
+// reads (PresentBoundary::Inputs), and whether the present is OptiScaler's Vulkan FSR-FG output's (its presenter's
+// queue) or the game's into it (its swapchain).
+FgFacts FgFactsFor(VkQueue queue, VkSwapchainKHR swapchain)
+{
+    auto& state = State::Instance();
+    FgFacts facts;
+    facts.gameDlssgSet = state.dlssgLastSetMode != sl::DLSSGMode::eOff;
+    facts.gameDlssgCount = state.dlssgDetectedInterpolationCount;
+    if (auto* fg = state.currentFG; fg != nullptr && fg->IsActive() && !fg->IsPaused())
+        facts.ownD3d12Fg = true;
+    if (auto* vk = state.currentVkFG; vk != nullptr)
+    {
+        facts.vkFgQueue = vk->OwnsQueue(queue);
+        facts.vkFgSwapchain = vk->OwnsSwapchain(swapchain);
+    }
+    return facts;
+}
+
+// The presenting thread's name (GetThreadDescription: vkd3d-proton names its threads), read once per thread.
+const std::string& ThreadName()
+{
+    thread_local bool read = false;
+    thread_local std::string name;
+    if (read)
+        return name;
+    read = true;
+
+    using PFN_GetThreadDescription = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+    static const auto getDescription = []() -> PFN_GetThreadDescription
+    {
+        for (const wchar_t* module : { L"kernelbase.dll", L"kernel32.dll" })
+        {
+            if (HMODULE handle = GetModuleHandleW(module); handle != nullptr)
+            {
+                if (auto function = KernelBaseProxy::GetProcAddress_()(handle, "GetThreadDescription"))
+                    return reinterpret_cast<PFN_GetThreadDescription>(function);
+            }
+        }
+        return nullptr;
+    }();
+
+    PWSTR description = nullptr;
+    if (getDescription != nullptr && SUCCEEDED(getDescription(GetCurrentThread(), &description)) &&
+        description != nullptr)
+    {
+        for (const wchar_t* c = description; *c != 0 && name.size() < 48; ++c)
+            name += *c < 0x80 && *c >= 0x20 && *c != 0x22 ? static_cast<char>(*c) : '?';
+        LocalFree(description);
+    }
+    return name;
+}
+
+// The first VkPresentIdKHR's id for the first swapchain, if the present carries one.
+std::optional<uint64_t> PresentIdOf(const VkPresentInfoKHR& info)
+{
+    for (auto chain = static_cast<const VkBaseInStructure*>(info.pNext); chain != nullptr; chain = chain->pNext)
+    {
+        if (chain->sType == VK_STRUCTURE_TYPE_PRESENT_ID_KHR)
+        {
+            const auto* ids = reinterpret_cast<const VkPresentIdKHR*>(chain);
+            if (ids->swapchainCount >= 1 && ids->pPresentIds != nullptr)
+                return ids->pPresentIds[0];
+        }
+    }
+    return std::nullopt;
+}
+
 // --- Queue locks ------------------------------------------------------------------------------------------------
 //
 // vkQueueSubmit and its kind need the queue externally synchronised. Inside the application's present, the presenting
@@ -429,6 +517,7 @@ struct DeviceTransport
     HandBackDrain handBack;         // the model taken back from the after-upscale route, while its queues drain
     std::chrono::steady_clock::time_point handBackNotBefore; // after a drain submit failed: not tried again until then
     HandBackDiagnostics handBackDiagnostics;                 // once per distinct blocker in a due episode
+    uint32_t fgSaid = 0; // stage 4: the frame-generation shapes already said for this device, one bit each
 };
 
 TrackedMutex<std::mutex> g_transportMutex;
@@ -1766,6 +1855,7 @@ struct Prepared
     VkDevice device = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     uint32_t image = 0;
+    FgShape fg = FgShape::None;        // stage 4: what frame generation makes of this present
     std::vector<std::string> warnings; // logged after every lock is released
 };
 
@@ -1812,6 +1902,12 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
         return prep;
     };
 
+    // Stage 4: what frame generation makes of this present, decided before anything of the transport. Until stage 4 is
+    // proven its presents go down untouched -- or, with the pacer experiment's key, with the round trip and no NR --
+    // and the model stands down on the device (FgCarry, "Stage 4" in the design note).
+    prep.fg = ClassifyFg(FgFactsFor(queue, info.pSwapchains != nullptr ? info.pSwapchains[0] : VK_NULL_HANDLE));
+    const FgCarry fgCarry = DecideFg(prep.fg, g_fgTransport.load(std::memory_order_relaxed));
+
     // Before any of the refusals below, which return before the transport is looked at: a model on this device stands
     // down when NR is off or another route wants it, whatever becomes of this present.
     {
@@ -1819,7 +1915,28 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
         if (DeviceTransport* dev = FindDevice(prep.device))
         {
             ActivityStage("housekeeping (stand-down, hand-back)");
-            Housekeep(*dev);
+            if (fgCarry == FgCarry::Normal)
+            {
+                Housekeep(*dev);
+            }
+            else
+            {
+                // No hand-back begins beside frame generation (one already draining finishes), the model's frames
+                // in flight are seen complete, and it stands down once they are.
+                if (dev->handBack.active)
+                    PollHandBack(*dev);
+                for (auto& [handle, sc] : dev->swapchains)
+                    prep.outcome.completions += Poll(*dev, sc, times);
+                StandDown(*dev);
+
+                const uint32_t bit = 1u << static_cast<uint32_t>(prep.fg);
+                if ((dev->fgSaid & bit) == 0)
+                {
+                    dev->fgSaid |= bit;
+                    dev->lines.push_back(DeviceName(*dev) + ": " +
+                                         FgUnsupportedText(prep.fg, fgCarry == FgCarry::TransportOnly));
+                }
+            }
             // Early refusals below never assign devFound. Flush now, under the transport lock, so a due hand-back's
             // diagnostics are visible even when no swapchain can be carried. Log only after leaving Prepare.
             for (std::string& line : dev->lines)
@@ -1828,6 +1945,8 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
         }
     }
 
+    if (fgCarry == FgCarry::Untouched)
+        return skip(Skip::FrameGeneration);
     if (info.swapchainCount != 1)
         return skip(Skip::MultiSwapchain);
     if (!view->desc.transport)
@@ -1937,7 +2056,9 @@ Prepared Prepare(VkQueue queue, const VkPresentInfoKHR& info, const PresentView*
     // Stage 3: the model, when this frame may be shown to it, decided before anything is recorded. The swapchain's next
     // frame of the model starts the history over unless this one reaches it.
     ActivityStage("deciding the model's part (claim, admission)");
-    const NrDecision nr = DecideNr(*dev, sc, route.workFamily);
+    const NrDecision nr = fgCarry == FgCarry::TransportOnly
+                              ? NrDecision { NrSkip::FrameGeneration, FgUnsupportedText(prep.fg, true) }
+                              : DecideNr(*dev, sc, route.workFamily);
     const bool cut = sc.nrCut;
     sc.nrCut = true;
 
@@ -2505,10 +2626,12 @@ void OnDestroyDevice(PFN_vkDestroyDevice next, VkDevice device, const VkAllocati
     HostActivity activity("vkDestroyDevice", H(device));
     std::string line;
     std::vector<std::string> modelLines;
+    RecordId deviceId = 0;
     {
         TransportLock lock;
         if (DeviceTransport* dev = FindDevice(device))
         {
+            deviceId = dev->id;
             line = "DLSS-NR Vulkan present host: device " + Hex(H(device)) + " #" + std::to_string(dev->id) +
                    " destroyed; " + TeardownDevice(*dev);
             modelLines.swap(dev->lines);
@@ -2517,6 +2640,18 @@ void OnDestroyDevice(PFN_vkDestroyDevice next, VkDevice device, const VkAllocati
     }
 
     Log(modelLines);
+
+    // The trace's last windows for the device's swapchains, and for those not on record.
+    if (g_traceOn.load(std::memory_order_relaxed) && deviceId != 0)
+    {
+        const StreamlineCounts streamline = StreamlineNow();
+        std::vector<std::string> traceLines;
+        {
+            std::lock_guard lock(g_traceMutex);
+            traceLines = g_trace.FlushDevice(static_cast<uint32_t>(deviceId), streamline);
+        }
+        Log(traceLines);
+    }
 
     {
         std::lock_guard lock(g_registryMutex);
@@ -2772,6 +2907,19 @@ void OnDestroySwapchain(PFN_vkDestroySwapchainKHR next, VkDevice device, VkSwapc
         if (!line.empty())
             LOG_INFO("{}", line);
 
+        // The trace's last, partial window for it.
+        if (g_traceOn.load(std::memory_order_relaxed))
+        {
+            const StreamlineCounts streamline = StreamlineNow();
+            std::optional<std::string> traceLine;
+            {
+                std::lock_guard lock(g_traceMutex);
+                traceLine = g_trace.Flush(H(swapchain), streamline);
+            }
+            if (traceLine.has_value())
+                LOG_INFO("{}", *traceLine);
+        }
+
         activity.scope.Stage("calling down vkDestroySwapchainKHR");
         next(device, swapchain, allocator);
 
@@ -2872,6 +3020,7 @@ VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInf
     if (info == nullptr)
         return next(queue, info);
 
+    const auto entered = std::chrono::steady_clock::now();
     HostActivity activity("vkQueuePresentKHR", H(queue));
 
     // For the whole present, the call down included: a thread borrowing this queue for a round trip waits for it.
@@ -2929,18 +3078,59 @@ VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInf
     Log(lines);
 
     activity.scope.Stage("calling down vkQueuePresentKHR");
+    VkResult result = VK_SUCCESS;
     if (prep.wait == VK_NULL_HANDLE)
-        return next(queue, info);
+    {
+        result = next(queue, info);
+    }
+    else
+    {
+        // A copy of the caller's present info, its pNext chain (present fences, present modes, present ids) by
+        // pointer, with one change: the wait.
+        VkPresentInfoKHR local = *info;
+        local.waitSemaphoreCount = 1;
+        local.pWaitSemaphores = &prep.wait;
 
-    // A copy of the caller's present info, its pNext chain (present fences, present modes, present ids) by pointer,
-    // with one change: the wait.
-    VkPresentInfoKHR local = *info;
-    local.waitSemaphoreCount = 1;
-    local.pWaitSemaphores = &prep.wait;
+        result = next(queue, &local);
+        activity.scope.Stage("after the present");
+        AfterPresent(prep, result);
+    }
 
-    const VkResult result = next(queue, &local);
-    activity.scope.Stage("after the present");
-    AfterPresent(prep, result);
+    // Stage 4's pacer trace ([DlssNr] VulkanPresentTrace): this present, end to end, into its swapchain's window.
+    if (g_traceOn.load(std::memory_order_relaxed) && info->swapchainCount >= 1 && info->pSwapchains != nullptr)
+    {
+        TraceSample sample;
+        sample.swapchain = H(info->pSwapchains[0]);
+        sample.swapchainId = viewed ? static_cast<uint32_t>(view.swapchainId) : 0;
+        sample.deviceId = viewed ? static_cast<uint32_t>(view.deviceId) : 0;
+        sample.nowUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(entered.time_since_epoch()).count());
+        sample.callUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - entered).count());
+        sample.threadId = static_cast<uint32_t>(GetCurrentThreadId());
+        sample.threadName = ThreadName();
+        sample.callerName = std::string(who.name);
+        sample.queue = H(queue);
+        sample.waits = info->waitSemaphoreCount;
+        sample.hostSignal = prep.wait != VK_NULL_HANDLE;
+        sample.untouched = prep.outcome.skip == Skip::FrameGeneration;
+        sample.presentId = PresentIdOf(*info);
+        sample.result = static_cast<int32_t>(result);
+        sample.completions = prep.outcome.completions;
+        sample.ring = prep.outcome.ring;
+        sample.waitNs = prep.outcome.waitNs;
+        sample.fg = viewed ? prep.fg : ClassifyFg(FgFactsFor(queue, info->pSwapchains[0]));
+
+        const StreamlineCounts streamline = StreamlineNow();
+        std::optional<std::string> traceLine;
+        {
+            std::lock_guard lock(g_traceMutex);
+            traceLine = g_trace.Add(sample, streamline);
+        }
+        if (traceLine.has_value())
+            LOG_INFO("{}", *traceLine);
+    }
+
     return result;
 }
 
@@ -3533,6 +3723,19 @@ template <typename Pfn> void Attach(Pfn& original, void* hook)
 }
 } // namespace
 
+void DlssNr::VkPresentHost::NoteStreamline(int level, const char* message)
+{
+    if (!g_traceOn.load(std::memory_order_relaxed) || message == nullptr)
+        return;
+
+    const StreamlineKind kind = ClassifyStreamline(level, message);
+    if (kind == StreamlineKind::Info)
+        return;
+
+    std::lock_guard lock(g_streamlineMutex);
+    g_streamline.Add(kind, message);
+}
+
 void* DlssNr::VkPresentHost::OriginalPresentCaller(void* returnAddress)
 {
     return t_presentCaller != nullptr ? t_presentCaller : returnAddress;
@@ -3628,6 +3831,9 @@ void DlssNr::VkPresentHost::Install(HMODULE vulkan1)
 
     g_installed = true;
     g_module = vulkan1;
+    g_traceOn.store(Config::Instance()->DlssNrVulkanPresentTrace.value_or_default(), std::memory_order_relaxed);
+    g_fgTransport.store(Config::Instance()->DlssNrVulkanPresentFgTransport.value_or_default(),
+                        std::memory_order_relaxed);
 
     // The stall watchdog: every half second, an activity inside the host for longer than its allowance is logged with
     // its stage, the locks it holds and, for a lock it waits on, the holder. It reads the table with atomics only and
@@ -3651,4 +3857,13 @@ void DlssNr::VkPresentHost::Install(HMODULE vulkan1)
                  ? "while the rest of OptiScaler's Vulkan hooks stay off ([Vulkan] SkipHooks or the marker); this "
                    "host is the one exception"
                  : "beside OptiScaler's own Vulkan hooks");
+    if (g_traceOn.load() || g_fgTransport.load())
+        LOG_INFO("DLSS-NR Vulkan present host (stage 4 of nr-vulkan-present-host.md): {}{}",
+                 g_traceOn.load() ? "the pacer trace is on ([DlssNr] VulkanPresentTrace): a line per swapchain every "
+                                    "10 s"
+                                  : "",
+                 g_fgTransport.load() ? std::string(g_traceOn.load() ? "; " : "") +
+                                            "beside frame generation the round trip is kept, without NR ([DlssNr] "
+                                            "VulkanPresentFgTransport, the pacer experiment's submission-only arm)"
+                                      : std::string());
 }
