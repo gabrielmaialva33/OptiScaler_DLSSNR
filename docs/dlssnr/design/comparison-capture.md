@@ -324,8 +324,8 @@ as good as public too.
 - **GPU work: none.** No copy is recorded unless the request flag is set and the state allows it.
 - **CPU per frame, before the first request:** one relaxed atomic load at the top of `Dispatch` (`Poll`), and one
   more at the record site on a frame the pass wrote (`Wanted`). When GPU timing is on, its metadata asks `Wanted`
-  too. After a capture, an idle frame costs the session's own check besides: one more relaxed load and an
-  empty-vector test.
+  too. After a capture, an idle frame costs the session's own check besides: its first-use guard, one more relaxed
+  load and an empty-vector test.
 - **The menu with NR off:** nothing; the panel returns before it asks the capture anything.
 - **The trigger-file poll is not zero.** `CheckCaptureTrigger` runs a `std::filesystem::exists` once per 60
   frames (`DlssNr_Dx12.cpp:709-723`). That is existing cost, and it is the only thing that lets a session be
@@ -542,7 +542,9 @@ follow the rules as native Windows judges them. These are the items it raised th
   only once all three files are in place. It protects the new stem even when that stem sorts first (a clock set
   back), and counts only the files it actually removed.
 - **A failed write says why.** `WriteViaTemporary` names the step that failed (open, write, close or rename) and the
-  system's reason, never a path. The log line is `writing <stem> failed (open: Permission denied); nothing kept`.
+  system's reason, never a path. The log line reads like `writing <stem> failed (open: Permission denied); nothing
+  kept`. That wording is glibc's. The CRT words errno its own way, and a rename or folder error comes from Windows in
+  the system's language.
 - **The folder is checked first.** `EnsureDirectory` runs before the means, the adapter query and the model lookup;
   where the folder cannot exist, none of those is worth doing.
 - **Nothing exists before the first request.** `g_used` gates `Poll`, `Wanted`, `Shutdown` and the status the menu
@@ -550,9 +552,17 @@ follow the rules as native Windows judges them. These are the items it raised th
   while NR is off.
 - **A throw at the record site withdraws the capture.** Describing the frame allocates (`TimingContract`,
   `std::format`), and the timing metadata beside it was already inside `try`. The record site now is too. A throw
-  hands the request back to idle with "The capture failed while the frame was being recorded; nothing was captured
-  (see the log)." Whatever was allocated before the throw is kept, not freed, because copies may already be recorded
-  into it.
+  hands the request back to idle with "The capture failed while the frame was being described or recorded; nothing
+  was captured (see the log).", and logs the exception's text each time. Whatever was allocated before the throw is
+  kept, not freed, because copies may already be recorded into it.
+- **Nothing leaves the writer thread.** An exception out of a detached thread calls `std::terminate`, which would end
+  the game. `WritePair` now runs inside `try`, and the writes inside it count a throw as a failed write, so the pair
+  is removed. `WriteViaTemporary` catches a writer that throws, then closes and removes its temporary file.
+- **Numbers do not follow the game's locale.** The record's numbers (white point, means) go through `std::to_chars`.
+  The CRT is shared with the game, and `snprintf` would print `1,25` under a decimal-comma locale such as pt-BR or
+  de-DE. `std::to_chars` gives what `std::format("{:.6g}")` gave before, digit for digit. The test holds this over
+  200,000 values, and under pt_BR where that locale is installed. (The builders' first version used `snprintf`; the
+  second review caught it before any build shipped.)
 - **The proxy is refused at the request.** With `UseProxy` on, `Dispatch` returns before the record site, so the
   refusal there could never be reached: a trigger-file request expired after 5 s with the wrong reason. The trigger
   file's log now gives the actual reason: the proxy, a capture already under way, or the capture off after a
@@ -577,3 +587,10 @@ safe unless the GPU runs 32 dispatches behind); a recording on a list the game d
 gives up after 1,200 dispatches with a reason that blames the GPU (safe, rare, no common path found); the two readback
 allocations on the render thread on the capture frame, which the in-game run should read from the frame times; and
 the disabled, not hidden, button on native Vulkan (DEVELOPMENT.md section 2.3).
+
+A second independent review then read these fixes, and its findings are folded in above (the locale, the writer
+thread, the exception's text, tighter source guards). It raised two more items, left as they are. The first:
+`Abandon` can withdraw a press the frame never took, if a new press lands in the instant between a throw and its
+catch. That costs one "capture failed" line and a second press. The second: if `Track` throws after both readbacks
+were allocated, they are kept although nothing was recorded into them. That is conservative, and costs memory only
+on that path.

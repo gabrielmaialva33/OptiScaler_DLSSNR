@@ -25,15 +25,20 @@ What it holds: the pure half of the same-frame comparison capture
   names, which names are ours, and the 64-pair cap over a shuffled list and in a real directory, where foreign files
   survive and a stray `.tmp` goes with its stem.
 - **Write then rename**: the final name never exists while the file is written; a failed write leaves neither name,
-  and says which step failed (open, write, close, rename) in the system's words, never with the path.
+  and says which step failed (open, write, close, rename) in the system's words, never with the path; a writer that
+  throws is a failed write, its file closed and its temporary removed.
 - **The folder**: created with its parents; refused with a reason when a file holds its name; in a real read-only
-  directory, refused, with nothing left behind, not even a temporary (skipped, and said, where the permission bits
-  do not bind, as for a superuser). Rotation after a write in a real folder: the oldest pairs go, the pair just
-  written stays even under an older name, the count is of files actually removed, a read-only folder loses nothing
-  and counts nothing, and foreign or non-ASCII names are never touched.
+  directory, refused, with nothing left behind, not even a temporary. Rotation after a write in a real folder: the
+  oldest pairs go, the pair just written stays even under an older name, the count is of files actually removed, and
+  foreign or non-ASCII names are never touched; and in a read-only folder nothing is lost and nothing counted. The two
+  read-only cases are skipped, and say so, where the permission bits do not bind (a superuser); the second is the only
+  check that tells counting removals from counting victims.
 - **The record**: one entry per key, `;` and anything outside printable ASCII replaced, valid as tEXt; and the
   production builders' (`FillFrameRecord`, `FillWriteRecord`) exact text and key order, the build, route,
   resolution, time, executable and settings (the preset and working scale) among them, for a PNG and for a PFM.
+  Numbers are held digit for digit against `std::format("{:.6g}")` (what v1 wrote) over 200,000 values, and the
+  record is rebuilt under a decimal-comma locale (pt_BR, de_DE or fr_FR, whichever is installed; skipped, and said,
+  when none is), because the CRT is the game's and a game may set one.
 
 `run.py` checks the files from the other side. Each image case is a source surface laid out like a readback (rows on
 a 256-byte pitch from a 512-byte offset, padding filled with bytes no file may contain) plus the file the production
@@ -50,14 +55,18 @@ though the inputs carried a home path, a Windows profile, a Wine home and a tail
 Source guards hold the integration: nothing waits for the GPU or maps a readback outside the writer thread; the
 readback helpers exist once (`DlssNr_Readback.h`); the backend sets no record key itself, fills the builders' inputs
 from nothing that may be a path, and the builders take only their inputs and literals; the executable reaches the
-record only as its sanitised stem; `PairCapture::Poll()` sits before the first return in `Dispatch`; `Poll` and
-`Wanted` read `g_used` before they touch the session, and only a request sets it; the record site is guarded by
-`wrote && Wanted()`, sits inside `try` with a throw withdrawing the capture, comes after the stabilizer and copies
+record only as its sanitised stem; `PairCapture::Poll()` sits before the first return in `Dispatch`; `Poll`,
+`Wanted`, `Shutdown`, `AbandonAfterError` and the menu's status read `g_used` before they touch the session, and
+`RequestPairCapture` is the one place that sets it; a request under the driver proxy is refused at once; the menu asks
+nothing while NR is off and hides a setting's refusal once the setting is off; `FormatNumber` uses `std::to_chars`;
+`WritePair` runs inside `try` on the writer thread, and a throw while the files are written counts as a failed write;
+the record site is guarded by `wrote && Wanted()`, sits inside `try` with a throw withdrawing the capture, comes after
+the stabilizer and copies
 `hdrCopy` (NON_PIXEL_SHADER_RESOURCE) and the target (UNORDERED_ACCESS); the burst's "before" is `hdrCopy`;
 `TimingMetadata` and the capture share `TimingContract`, which carries the preset, the working scale and the sizes,
 and a frame that may carry a capture is labelled `capture_active` in the timing metadata; the record site does no file
 search or file read (the model's facts are found by the writer); the writer checks the folder before anything else and
-rotates only after the pair was written; the trigger file asks for the pair, for the burst on `burst`, and logs the
+rotates once, only after the pair was written; the trigger file asks for the pair, for the burst on `burst`, and logs the
 reason a request was not taken; `Shutdown` calls the capture's; the bridge host labels its frames; and
 `DlssNr_PairCapture.cpp` is in both project files once.
 
@@ -81,6 +90,12 @@ rotation counting victims instead of removals, `Poll` touching the session befor
 write, the pt-BR entry of a continued literal removed, and the record site without its exception guard. One did not
 fail, and cannot on this host: `EnsureDirectory`'s `is_directory` after creation, with a file holding the folder's name.
 libstdc++'s `create_directories` already reports that as an error. The check stays as a guard for the MSVC runtime.
+
+A second review of those fixes added these, each shown to fail on its injected defect: `FormatNumber` through
+`snprintf` (the locale case), a writer exception escaping `WriteViaTemporary`, the writer thread without its catch,
+`g_used` set outside the request, the menu's status read without the gate, a second rotation on the failure path, the
+proxy refusal removed from the request, the menu dropping `ReasonStillApplies`, and a builder value from a helper
+call.
 
 ## What this does not cover
 

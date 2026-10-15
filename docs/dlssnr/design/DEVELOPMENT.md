@@ -123,8 +123,8 @@ are checked top to bottom and the first that applies wins.
 Invariant checks against this table: absent wherever there is no frame of the pass to capture (rule 2); one control
 (rule 3); every disabled row says why. A frame format the files cannot hold, or a surface that is not a single-sample
 2D texture, is refused when the press reaches a frame (`RefusalFor`, settings before surfaces), and the reason is
-shown on the line. It is not predicted before the press: predicting it would cost a store on every frame, and the
-capture's idle cost is one load (comparison-capture.md, section 4.7).
+shown on the line. It is not predicted before the press: predicting it would cost a store on every frame, and before
+the first request the capture's idle cost is one relaxed load per call site (comparison-capture.md, section 4.7).
 
 ---
 
