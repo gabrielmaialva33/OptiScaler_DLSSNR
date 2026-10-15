@@ -129,6 +129,24 @@ Source guards:
 - The present detour goes in at swapchain creation, not in `vkCreateDevice` (so it lands on top of the bundle's).
 - `VulkanPresentHost`'s four config points and the ini comment's honest words; the project builds the files.
 
+Off the present path (DOOM Eternal's startup hang, 2026-10-14; `DlssNr_VkPresentBuild.h`):
+
+- The build's state machine: nothing built on a frame; requested, carried while queued or running, adopted once over
+  and then used; a new size, working scale or family is a new build; a latched failure ends it; DOOM's churn (841x671,
+  then a 3440x1440 swapchain presented once and replaced) costs two builds and carries the frames in between; a resize
+  while a job runs is adopted, then asked again.
+- The stall watchdog's table: nothing before an activity's allowance (2 s, 5 s for the build), then one line per
+  occupancy and again every 10 s, naming the entry point, its object, its stage, the host locks it holds and, for a lock
+  it waits on, the holder thread and what that thread is doing (or that it is outside the host's entry points); slots
+  reused as new occupancies; a full table records nothing and waits for nothing. The tracked lock's owner through
+  recursion, read by another thread.
+- Source guards: `Admit` and `Record` initialise nothing, bring no core up, allocate no image and create no feature;
+  the builder does it all, never touches the route's state or locks, never waits for the GPU but through the host's
+  bounded submit, forgets (never frees) what an orphaned or GPU-pending job made; no NGX call on the present path while
+  a job runs; a job in flight keeps the model and its token; the build's submit borrows the work queue's locks bounded,
+  never the transport lock, and waits for its fence after giving them back; vkDestroyDevice waits for a build, bounded;
+  the watchdog starts only after `Install`'s gate and takes no lock; every entry point records an activity.
+
 ## What this does not cover
 
 No Vulkan, no Detours, no Windows: the production glue in `DlssNr_VkPresentHost.cpp` is checked by source only here.

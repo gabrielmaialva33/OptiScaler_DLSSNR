@@ -272,6 +272,7 @@ struct SwapchainFacts
     uint64_t alphaChanged = 0;
     uint32_t black = 0; // read-backs whose every colour channel came back zero
     bool destroyed = false;
+    double maxPresentMs = 0.0; // the longest vkQueuePresentKHR call, the host's hook and everything below included
 };
 
 // One phase of --route, with the read-backs of the frames presented in it counted apart.
@@ -321,6 +322,7 @@ struct App
     bool route = false;
     bool wdx12 = false;
     bool nrToggle = false;
+    bool slowBuild = false;
     bool wdx12Probed = false;
     HMODULE optiscaler = nullptr;
     std::vector<PhaseFacts> phases;
@@ -760,10 +762,14 @@ struct App
         present.swapchainCount = 1;
         present.pSwapchains = &target.swapchain;
         present.pImageIndices = &index;
+        const auto presentStart = std::chrono::steady_clock::now();
         const VkResult result = vkQueuePresentKHR(target.queue, &present);
+        const double presentMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - presentStart).count();
         Require(result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR,
                 "present of " + swapchains[target.facts].name + " returned " + std::to_string(result));
         ++swapchains[target.facts].presents;
+        swapchains[target.facts].maxPresentMs = std::max(swapchains[target.facts].maxPresentMs, presentMs);
 
         Check(vkQueueWaitIdle(target.queue), "wait for presentation");
         if (readback)
@@ -926,7 +932,9 @@ struct App
         // The game's start window: nothing upscaled, the present host runs the model at present.
         // The input-enabled overlay has a seven-second startup splash. Let it finish before judging the route's
         // unedited frames; the cold phase itself already expects the present host to change the picture.
-        presentUntil("cold", Clock::now() + Ms(nrToggle ? 10000 : 1500), 12);
+        // First the model's build, off the present path: its frames are carried unchanged until the product is adopted.
+        presentUntil("cold-build", Clock::now() + Ms(2000));
+        presentUntil("cold", Clock::now() + Ms(nrToggle ? 8000 : 1500), 12);
 
         const auto init = Ngx<PFN_NgxInit>("NVSDK_NGX_VULKAN_Init");
         const auto capabilities = Ngx<PFN_NgxParams>("NVSDK_NGX_VULKAN_GetCapabilityParameters");
@@ -1129,10 +1137,90 @@ struct App
         DestroyWindow(owner);
     }
 
+    // --- --slow-build: the model's build slowed (by the test layer) while presents and swapchain churn go on --------
+
+    void Resize(uint32_t width, uint32_t height)
+    {
+        RECT outer {}, client {};
+        GetWindowRect(window, &outer);
+        GetClientRect(window, &client);
+        SetWindowPos(window, nullptr, 0, 0, width + (outer.right - outer.left) - client.right,
+                     height + (outer.bottom - outer.top) - client.bottom, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        for (int i = 0; i < 10; ++i)
+        {
+            Pump();
+            Sleep(20);
+        }
+    }
+
+    // DOOM Eternal's startup churn, with the layer slowing every allocation, pipeline and NVX module made off the
+    // device's creating thread -- the model's builder -- while this thread presents: a swapchain presented once and
+    // destroyed (#9), its replacement at the same size, a resize to a second size while a build runs, and back.
+    // Every present is timed; none may wait on the model.
+    void RunSlowBuild()
+    {
+        Init();
+        MakeDevice();
+        ProbeValidation();
+
+        VkSurfaceFormatKHR format {};
+        for (const auto& f : offered)
+            if (format.format == VK_FORMAT_UNDEFINED && Sdr(f.format, f.colorSpace))
+                format = f;
+        Require(format.format != VK_FORMAT_UNDEFINED, "the surface offers no SDR RGBA8/BGRA8 format");
+        RECT client {};
+        GetClientRect(window, &client);
+        const uint32_t width = static_cast<uint32_t>(client.right), height = static_cast<uint32_t>(client.bottom);
+
+        using Clock = std::chrono::steady_clock;
+        const auto presentFor = [&](Target& target, int milliseconds)
+        {
+            const auto end = Clock::now() + std::chrono::milliseconds(milliseconds);
+            while (Clock::now() < end)
+                Frame(target);
+        };
+
+        Target target;
+        MakeSwapchain(target, "once", format, graphicsQueue, graphicsFamily);
+        Frame(target); // the build is asked for here, and runs on
+        Check(vkDeviceWaitIdle(device), "idle before destroying the one-present swapchain");
+        DestroySwapchain(target); // destroyed one present after the model was asked for, as #9
+
+        MakeSwapchain(target, "same-size", format, graphicsQueue, graphicsFamily);
+        presentFor(target, 1500);
+
+        Resize(517, 389);
+        MakeSwapchain(target, "resized", format, graphicsQueue, graphicsFamily);
+        presentFor(target, 1500);
+
+        Resize(width, height);
+        MakeSwapchain(target, "back", format, graphicsQueue, graphicsFamily);
+        presentFor(target, 12000);
+
+        // A last size, one present -- a build is asked for and runs, slowed -- and the device destroyed at once: its
+        // destruction waits for the build under way before anything of the model's goes.
+        Resize(600, 400);
+        MakeSwapchain(target, "last", format, graphicsQueue, graphicsFamily);
+        Frame(target);
+
+        Check(vkDeviceWaitIdle(device), "final idle");
+        DestroySwapchain(target);
+        vkDestroyDevice(device, nullptr);
+        vkDestroySurfaceKHR(instance, surface, nullptr);
+        auto destroyDebug = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT"));
+        destroyDebug(instance, messenger, nullptr);
+        vkDestroyInstance(instance, nullptr);
+        DestroyWindow(window);
+        DestroyWindow(owner);
+    }
+
     void Run()
     {
         if (route)
             return RunRoute();
+        if (slowBuild)
+            return RunSlowBuild();
 
         Init();
         MakeDevice();
@@ -1228,7 +1316,8 @@ struct App
                 << ", \"readbacks\": " << s.readbacks << ", \"exact\": " << s.exact
                 << ", \"mae_mean\": " << (s.readbacks ? s.maeSum / s.readbacks : 0.0) << ", \"mae_max\": " << s.maeMax
                 << ", \"max_diff\": " << s.maxDiff << ", \"alpha_changed\": " << s.alphaChanged
-                << ", \"black\": " << s.black << ", \"destroyed\": " << (s.destroyed ? "true" : "false") << "}";
+                << ", \"black\": " << s.black << ", \"destroyed\": " << (s.destroyed ? "true" : "false")
+                << ", \"max_present_ms\": " << s.maxPresentMs << "}";
         }
         out << "],\n  \"wdx12_probed\": " << (wdx12Probed ? "true" : "false");
         out << ",\n  \"phases\": [";
@@ -1261,6 +1350,8 @@ int main(int argc, char** argv)
                 app.wdx12 = true;
             else if (!strcmp(argv[i], "--nr-toggle"))
                 app.nrToggle = true;
+            else if (!strcmp(argv[i], "--slow-build"))
+                app.slowBuild = true;
             else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
                 app.frames = static_cast<uint32_t>(std::atoi(argv[++i]));
             else

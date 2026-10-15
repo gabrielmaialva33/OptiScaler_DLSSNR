@@ -445,6 +445,33 @@ NR = re.compile(
     r'(?P<max>[\d.]+) ms)(?:; first refusal: (?P<first>.+))?$')
 
 
+def nr_building_problems(where, text, presents, first_at_size):
+    """A swapchain the model ran on, built off the present path ("Off the present path" in the design note): the first
+    swapchain at a size carries its first frames unchanged while the model is built (`model building`, at least one),
+    every later one at a size already built none; everything else evaluated. Returns (problems, building)."""
+    m = NR.match(text)
+    if not m:
+        return [f'{where}: NR text unparsed: {text!r}'], 0
+    problems = []
+    skips = counts(m.group('skips'))
+    building = skips.get('model building', 0)
+    if set(skips) - {'model building'}:
+        problems.append(f'{where}: NR refusals other than building: {skips}')
+    if int(m.group('refused')) != building or int(m.group('evaluated')) + building != presents:
+        problems.append(f'{where}: NR evaluated {m.group("evaluated")} + building {building} != {presents} presents')
+    if first_at_size and not 1 <= building < presents:
+        problems.append(f'{where}: the first swapchain at its size carried {building} frames while the model was built')
+    if not first_at_size and building != 0:
+        problems.append(f'{where}: {building} frames carried for a build at a size already built')
+    if building and not (m.group('first') or '').startswith('the model is being built for '):
+        problems.append(f'{where}: NR first refusal {m.group("first")!r}')
+    if m.group('last') is None:
+        problems.append(f'{where}: no pass GPU time was measured')
+    if int(m.group('resets')) < 1:
+        problems.append(f'{where}: NR history resets {m.group("resets")}')
+    return problems, building
+
+
 def nr_problems(where, text, evaluated, refused, skips, first=None, resets=None, timed=None):
     """`text` is a line's "NR: ..." part."""
     m = NR.match(text)
@@ -455,9 +482,20 @@ def nr_problems(where, text, evaluated, refused, skips, first=None, resets=None,
         problems.append(f'{where}: NR evaluated {m.group("evaluated")} != {evaluated}')
     if int(m.group('refused')) != refused:
         problems.append(f'{where}: NR refused {m.group("refused")} != {refused}')
-    if counts(m.group('skips')) != skips:
+    got = counts(m.group('skips'))
+    got_first = m.group('first')
+    # Off the present path ("Off the present path" in the design note): a model that cannot come up on a device says so
+    # once its build is over; the frames before that are refused as building, a few per device at most.
+    if 'model unavailable' in skips and 'model building' in got:
+        building = got.pop('model building')
+        got['model unavailable'] = got.get('model unavailable', 0) + building
+        if building > 3:
+            problems.append(f'{where}: {building} frames refused as building before the model was found unavailable')
+        if (got_first or '').startswith('the model is being built for '):
+            got_first = first
+    if got != skips:
         problems.append(f'{where}: NR refusals {m.group("skips")!r} != {skips}')
-    if first is not None and m.group('first') != first:
+    if first is not None and got_first != first:
         problems.append(f'{where}: NR first refusal {m.group("first")!r} != {first!r}')
     if first is None and refused == 0 and m.group('first') is not None:
         problems.append(f'{where}: an NR refusal where none was expected: {m.group("first")!r}')
@@ -886,7 +924,21 @@ NR_CASES = {
     'nr-no-extensions': (True, None, False, 'build', True, 'VK_NVX_binary_import'),
     'nr-old-forwarder': (True, None, False, 'kit', True, None),
     'nr-no-model': (True, None, False, 'build', False, None),
+    # Off the present path (DOOM Eternal's startup hang, 2026-10-14): the stall watchdog names a present held 2.6 s
+    # below the host's hook (the test layer); and the model's build slowed while presents and swapchain churn go on.
+    'nr-stall-watch': (True, None, False, 'build', True, None),
+    'nr-build-slow': (True, None, False, 'build', True, None),
 }
+
+# The test layer's timing knobs and the harness's arguments, for the cases that use them.
+NR_TIMING = {
+    'nr-stall-watch': ({'RETOQUE_STALL_PRESENT_AT': '30:2600'}, []),
+    'nr-build-slow': ({'RETOQUE_SLOW_OFF_DEVICE_THREAD_MS': '400', 'RETOQUE_SLOW_OFF_DEVICE_THREAD_TOTAL_MS': '12000',
+                       'RETOQUE_COUNT_OFF_THREAD_QUEUE': '1'}, ['--slow-build']),
+}
+# The longest a present may take in nr-build-slow, while the model's build takes seconds: the round trip, the validation
+# layer and the call down at this harness's rate, nothing of the model's build.
+SLOW_BUILD_PRESENT_MS = 300.0
 
 
 def nr_proton():
@@ -911,17 +963,22 @@ def nr_files(dll):
     return files, missing
 
 
-def nr_env(hide=None):
+def nr_env(hide=None, knobs=None):
     # Under Proton, which sets the prefix up for NGX itself: the driver's core and nvngx in system32, the NGXCore
     # registry key, dxvk-nvapi. Its own overrides are appended to these; the validation layer runs as in every case.
     env = runtime_env(False)
     del env['WINEPREFIX']
     env.update(STEAM_COMPAT_DATA_PATH=str(OUT / 'protonprefix-nr'),
                STEAM_COMPAT_CLIENT_INSTALL_PATH=str(Path.home() / '.local/share/Steam'), SteamGameId='0')
-    if hide:
-        # The test layer below the validation layer takes the extension out of what the device offers.
+    if hide or knobs:
+        # The test layer below the validation layer takes the extension out of what the device offers, or applies
+        # its timing knobs; it leaves TRANSFER_SRC alone.
         env.update(VK_INSTANCE_LAYERS=f'VK_LAYER_KHRONOS_validation:{HIDE_LAYER}', VK_ADD_LAYER_PATH=str(LAYER_DIR),
-                   RETOQUE_HIDE_TRANSFER_SRC='0', RETOQUE_HIDE_DEVICE_EXTENSIONS=hide)
+                   RETOQUE_HIDE_TRANSFER_SRC='0')
+    if hide:
+        env.update(RETOQUE_HIDE_DEVICE_EXTENSIONS=hide)
+    if knobs:
+        env.update(knobs)
     return env
 
 
@@ -950,8 +1007,9 @@ def execute_nr(name, dll, redist, files):
     (work / 'OptiScaler.ini').write_text(ini)
     (work / MARKER).write_text('')
     with (OUT / f'{name}.log').open('w') as log:
-        process = subprocess.run([str(files['proton']), 'run', str(work / NR_EXE)] + (['--cross'] if cross else []),
-                                 cwd=work, env=nr_env(hide), stdin=subprocess.DEVNULL, stdout=log,
+        knobs, args = NR_TIMING.get(name, ({}, []))
+        process = subprocess.run([str(files['proton']), 'run', str(work / NR_EXE)] + (['--cross'] if cross else []) +
+                                 args, cwd=work, env=nr_env(hide, knobs), stdin=subprocess.DEVNULL, stdout=log,
                                  stderr=subprocess.STDOUT, timeout=900)
     run_log = (OUT / f'{name}.log').read_text(errors='replace')
     facts = json.loads((work / 'result.json').read_text())
@@ -975,6 +1033,103 @@ def execute_nr(name, dll, redist, files):
 MODEL_VUIDS = {'VUID-vkCmdDraw-None-09600'}
 
 
+def check_build_slow(name, facts, log):
+    """nr-build-slow: the model's builds, slowed by the test layer on every thread but the one presenting, run while the
+    application presents and churns its swapchains; no present waits on them. Frames are carried unchanged while a build
+    runs, and edited once its product is adopted."""
+    problems = []
+
+    def need(condition, message):
+        if not condition:
+            problems.append(message)
+
+    lines = log.splitlines()
+    names = [s['name'] for s in facts['swapchains']]
+    need(names == ['once', 'same-size', 'resized', 'back', 'last'], f'swapchains {names}')
+    if problems:
+        return problems, ''
+
+    building = {}
+    seen = {}
+    for s in facts['swapchains']:
+        where = f'{s["name"]} ({s["width"]}x{s["height"]})'
+        # A handle value comes back for a later swapchain here (once, then back): the k-th creation is this one.
+        created = [re.search(r'swapchain 0x[0-9A-F]+ #(\d+) on device', l).group(1) for l in lines
+                   if f'DLSS-NR Vulkan present host: swapchain {s["handle"]} #' in l and ' on device ' in l]
+        k = seen.get(s['handle'], 0)
+        seen[s['handle']] = k + 1
+        record = created[k] if k < len(created) else '?'
+        gone = [l for l in lines if f'DLSS-NR Vulkan present host: swapchain {s["handle"]} #{record} destroyed after'
+                in l]
+        need(len(gone) == 1, f'{where}: {len(gone)} destruction lines')
+        if not gone:
+            continue
+        m = re.search(r'destroyed after (\d+) presents; transported (\d+), skipped (\d+)', gone[-1])
+        need(m is not None and int(m.group(1)) == int(m.group(2)) == s['presents'] and m.group(3) == '0',
+             f'{where}: not every present carried: {gone[-1]}')
+        n = NR.match(gone[-1][gone[-1].index('; NR: ') + 2:]) if '; NR: ' in gone[-1] else None
+        need(n is not None, f'{where}: no NR counters')
+        if n is None:
+            continue
+        skips = counts(n.group('skips'))
+        building[s['name']] = skips.get('model building', 0)
+        need(set(skips) <= {'model building'}, f'{where}: refusals other than building: {skips}')
+        need(int(n.group('evaluated')) + building[s['name']] == s['presents'], f'{where}: {gone[-1]}')
+        # Carried frames come first in a swapchain, the model's after: only carried ones come back exactly.
+        need(s['exact'] <= building[s['name']], f'{where}: {s["exact"]} exact read-backs, {building[s["name"]]} '
+                                                f'frames carried')
+        need(s['alpha_changed'] == 0 and s['black'] == 0, f'{where}: alpha {s["alpha_changed"]}, black {s["black"]}')
+
+    # The build asked for at the one present runs on through the churn: every frame of it carried, the resize included.
+    need(building.get('once') == 1, f'the one-present swapchain was not carried while the build ran: {building}')
+    need(all(building.get(n) == s['presents'] for n, s in zip(names[1:3], facts['swapchains'][1:3])),
+         f'frames of the churn reached the model while it was being built: {building}')
+    back = facts['swapchains'][3]
+    need(back['readbacks'] > back['exact'] and back['mae_mean'] > 0, f'the model never ran after the churn: {back}')
+    # The device destroyed one present after a build was asked for at a last size: its destruction waited for it, and
+    # the model's objects were freed with nothing left to the device (validation is clean of live children at destroy).
+    need(building.get('last') == 1, f'the last swapchain was not carried while its build ran: {building}')
+    waited = [re.search(r'waited (\d+) ms for the model.s build under way before the device goes', l) for l in lines]
+    waited = [int(m.group(1)) for m in waited if m]
+    need(len(waited) == 1 and waited[0] > 0, f'the device did not wait for the build under way: {waited}')
+    # Behind the host's back on the queues: the builder's one submit per build, no idle wait (NGX's own included).
+    offthread = (Path(OUT / 'cases' / name / 'layer-offthread.txt').read_text().split()
+                 if (OUT / 'cases' / name / 'layer-offthread.txt').exists() else [])
+    need(len(offthread) == 4 and int(offthread[3]) == 0 and int(offthread[1]) == len(ready),
+         f'queue calls off the presenting thread: {offthread} for {len(ready)} builds')
+
+    # The builds: asked for on the present path, made off it, slowly (the layer), adopted when over.
+    asked = [l for l in lines if 'the model is being built for ' in l and 'off the present path; frames are carried' in l]
+    ready = [re.search(r'the model is ready at (\d+x\d+), built off the present path in (\d+) ms', l) for l in lines]
+    ready = [(m.group(1), int(m.group(2))) for m in ready if m]
+    need(len(asked) >= 1 and len(ready) >= 1 and len(ready) <= len(asked), f'builds asked {len(asked)}, ready '
+                                                                           f'{len(ready)}')
+    slowest = max((ms for _, ms in ready), default=0)
+    need(slowest >= 2000, f'no build was slowed enough to prove anything (slowest {slowest} ms)')
+    longest = max(s['max_present_ms'] for s in facts['swapchains'])
+    need(longest < SLOW_BUILD_PRESENT_MS, f'a present took {longest:.1f} ms while builds took up to {slowest} ms')
+    for text in ('the model is off on this device', 'called off', 'faulted'):
+        need(not any(text in l for l in lines), f'a line with {text!r}')
+    # The watchdog names a long build (it holds no host lock), and vkDestroyDevice waiting for one; never a present.
+    stalls = [l[l.index('STALL: ') + 7:] for l in lines if 'DLSS-NR Vulkan present host: STALL: ' in l]
+    need(all((' in model build ' in s and s.endswith('holds no host lock')) or
+             (' in vkDestroyDevice ' in s and "waiting for the model's build under way (bounded)" in s) for s in stalls),
+         f'stall lines other than the build and the destroy waiting for it: {stalls}')
+    gone = [l for l in lines if f'DLSS-NR Vulkan present host: device {facts["device"]} #' in l and 'destroyed;' in l]
+    need(len(gone) == 1 and gone[0].endswith('; the model freed'), f'device destruction: {gone}')
+    vuids = set(v for v in facts.get('model_vuids', '').split(',') if v)
+    need(vuids <= MODEL_VUIDS, f'validation reports of the model\'s own objects beyond those known: {sorted(vuids)}')
+
+    summary = (f'{sum(s["presents"] for s in facts["swapchains"])} presents over the churn (one present, same size, '
+               f'resized, back), {sum(building.values())} carried while {len(ready)} builds ran off the present path '
+               f'(slowest {slowest} ms, layer-slowed), the longest present {longest:.1f} ms; '
+               f'{len(stalls)} watchdog line(s), all for the build; vkDestroyDevice waited '
+               f'{waited[0] if waited else "?"} ms for a build under way; off the presenting thread '
+               f'{offthread[1] if offthread else "?"} submits (the builder\'s), '
+               f'{offthread[3] if offthread else "?"} idle waits; 0 validation errors of the host\'s')
+    return problems, summary
+
+
 def check_nr(name, facts, log):
     """The model ran on every SDR present it should have, or was refused for the case's reason; what the application
     read back is what that means: exact where the model did not run or ApplyModel is off, changed but close where it
@@ -988,6 +1143,15 @@ def check_nr(name, facts, log):
 
     lines = log.splitlines()
     need(sum(1 for l in lines if INSTALL_LINE in l) == 1, 'expected one install line')
+    # The stall watchdog: silent, but in nr-stall-watch, where the test layer holds the 30th present 2.6 s below the
+    # host's hook: then one line naming the present, its stage, and the present lock it holds.
+    stalls = [l[l.index('STALL: ') + 7:] for l in lines if 'DLSS-NR Vulkan present host: STALL: ' in l]
+    if name == 'nr-stall-watch':
+        need(len(stalls) == 1 and re.fullmatch(r'thread \d+ in vkQueuePresentKHR \(0x[0-9A-F]+\) for 2\.\d s: calling '
+                                               r'down vkQueuePresentKHR; holds the present lock', stalls[0]),
+             f'the stalled present was not named as expected: {stalls}')
+    else:
+        need(not stalls, f'stall lines: {stalls}')
     device = [l for l in lines if f'DLSS-NR Vulkan present host: device {facts["device"]} #' in l and 'created by' in l]
     need(len(device) == 1, f'expected one line for the device, found {len(device)}')
     if device:
@@ -1010,6 +1174,8 @@ def check_nr(name, facts, log):
 
     evaluated_total = timed = 0
     seen = {}
+    built_sizes = set()
+    building = {}
     for s in facts['swapchains']:
         where = f'{s["name"]} ({s["format"]}, colour space {s["color_space"]}, {s["width"]}x{s["height"]})'
         # A handle value can come back for a later swapchain: the k-th creation line of it is this one's record.
@@ -1029,8 +1195,12 @@ def check_nr(name, facts, log):
             if not s['sdr']:
                 problems.extend(nr_problems(where, nr_text, 0, s['presents'], {'colour': s['presents']}))
             elif runs:
-                problems.extend(nr_problems(where, nr_text, s['presents'], 0, {}, resets=lambda n: n >= 1, timed=True))
-                evaluated_total += s['presents']
+                size = (s['width'], s['height'])
+                found, building[s['name']] = nr_building_problems(where, nr_text, s['presents'],
+                                                                  size not in built_sizes)
+                problems.extend(found)
+                built_sizes.add(size)
+                evaluated_total += s['presents'] - building[s['name']]
                 timed += 1
             else:
                 problems.extend(nr_problems(where, nr_text, 0, s['presents'], {refusal[0]: s['presents']}, refusal[1]))
@@ -1040,9 +1210,11 @@ def check_nr(name, facts, log):
                                                f'changed where the picture had to come back exactly (largest change '
                                                f'{s["max_diff"]}, mean {s["mae_mean"]:.3f})')
         else:
-            # The model ran and its edit landed: changed, close, opaque, not black.
-            need(s['exact'] * 2 <= s['readbacks'], f'{where}: {s["exact"]} of {s["readbacks"]} read-backs unchanged '
-                                                   'with the model applied')
+            # The model ran and its edit landed: changed, close, opaque, not black. Only the frames carried while it was
+            # built (the first ones) may come back exactly.
+            need(s['exact'] <= building.get(s['name'], 0) and s['exact'] < s['readbacks'],
+                 f'{where}: {s["exact"]} of {s["readbacks"]} read-backs unchanged with the model applied '
+                 f'({building.get(s["name"], 0)} frames carried while it was built)')
             need(0 < s['mae_mean'] and s['mae_max'] <= 25.0, f'{where}: mean change {s["mae_mean"]:.3f}, largest '
                                                              f'mean {s["mae_max"]:.3f} (eight-bit steps)')
             need(s['alpha_changed'] == 0 and s['black'] == 0, f'{where}: alpha changed {s["alpha_changed"]}, black '
@@ -1078,7 +1250,8 @@ def check_nr(name, facts, log):
     sdr = [s for s in facts['swapchains'] if s['sdr']]
     summary = (f'{len(facts["swapchains"])} swapchains ({", ".join(s["name"] for s in facts["swapchains"])}), '
                f'{sum(s["presents"] for s in facts["swapchains"])} presents, '
-               + (f'the model ran on all {evaluated_total} SDR presents, '
+               + (f'the model ran on {evaluated_total} SDR presents ({sum(building.values())} carried while it was '
+                  f'built off the present path, {len(building and [v for v in building.values() if v])} build(s)), '
                   + ('every read-back exact (ApplyModel off)' if not apply_model else
                      f'SDR read-backs changed by a mean of '
                      f'{sum(s["mae_mean"] for s in sdr) / max(len(sdr), 1):.2f} eight-bit steps (largest frame mean '
@@ -1163,11 +1336,13 @@ def check_route(name, facts, log):
         need('Skipping vulkan-1.dll hooks' not in log, 'the Vulkan bundle was skipped')
         need('Skipping Vulkan_wDx12 hooks' not in log, 'wDx12 was disabled')
     lines = log.splitlines()
+    stalls = [l for l in lines if 'DLSS-NR Vulkan present host: STALL: ' in l]
+    need(not stalls, f'stall lines: {stalls}')
     phases = {p['name']: p for p in facts.get('phases', [])}
-    expected = ['cold', 'on', 'off-waiting', 'off-handing-back', 'off-back', 'on-again', 'off-again-waiting',
+    expected = ['cold-build', 'cold', 'on', 'off-waiting', 'off-handing-back', 'off-back', 'on-again', 'off-again-waiting',
                 'off-again-handing-back', 'off-again-back', 'on-at-exit']
     if toggle:
-        expected = ['cold', 'on', 'toggle-off', 'off-waiting', 'nr-disabled', 'toggle-on', 'off-handing-back',
+        expected = ['cold-build', 'cold', 'on', 'toggle-off', 'off-waiting', 'nr-disabled', 'toggle-on', 'off-handing-back',
                     'off-back', 'on-again', 'toggle-off-again', 'off-again-waiting', 'nr-disabled-again',
                     'toggle-on-again', 'off-again-handing-back', 'off-again-back', 'on-at-exit']
         blocker = 'hand-back due but not started: NR off ([DlssNr] Enabled=false)'
@@ -1201,6 +1376,11 @@ def check_route(name, facts, log):
         p = phases[name_]
         need(p['readbacks'] >= 5 and p['exact'] == 0 and p['mae_mean'] > 0,
              f'{name_}: the present host did not run the model on every frame: {p}')
+    # The model's first build, off the present path: frames carried unchanged while it ran (the overlay's splash, in
+    # the toggle case, keeps these frames from being compared).
+    if not toggle:
+        p = phases['cold-build']
+        need(p['readbacks'] >= 1 and p['exact'] >= 1, f'cold-build: no frame carried while the model was built: {p}')
     for name_, evaluates in (('on', 30), ('on-again', 30), ('on-at-exit', 10)):
         p = phases[name_]
         need(p['evaluates'] == evaluates and p['evaluates'] == p['presents'], f'{name_}: evaluates {p}')
@@ -1416,7 +1596,8 @@ def main():
                 problems, summary = check_route(name, facts, log)
             else:
                 facts, log = execute_nr(name, dll, redist, files)
-                problems, summary = check_nr(name, facts, log)
+                checker = check_build_slow if name == 'nr-build-slow' else check_nr
+                problems, summary = checker(name, facts, log)
             results['cases'][name] = {'status': 'FAIL' if problems else 'PASS', 'problems': problems,
                                       'swapchains': facts['swapchains'], 'offered': facts['offered'],
                                       'phases': facts.get('phases')}
