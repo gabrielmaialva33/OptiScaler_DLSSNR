@@ -307,3 +307,8 @@ summary = "LSFG at x3/x4 through the fork of FFX's swapchain (study branch): Mfg
 tier = "wine"
 timeout = 900
 summary = "Production D3D12 HDR conversion: exact HDR10/scRGB GPU identity, known edits, resource refusals and a real ten-bit swapchain/PQ-support probe; no NGX."
+
+[nr-ab-compare]
+tier = "host"
+timeout = 120
+summary = "Offline Stage 0/1 capture metrics on synthetic PNG/PFM/raw pairs, temporal controls, provenance validation and CLI refusals; stdlib only."
