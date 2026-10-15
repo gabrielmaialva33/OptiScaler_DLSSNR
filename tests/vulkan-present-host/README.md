@@ -183,6 +183,26 @@ driver's core or a Proton the cases print SKIP.
 | `nr-old-forwarder` | true | auto | no | the kit's (2026-09-03, no `dlssnr_abi_version`) | yes | refused, `nvngx.dll_dlssnr.dll is from a different build`; every read-back exact |
 | `nr-no-model` | true | auto | no | built | no | refused, `nvngx_dlssnr.dll was not found beside OptiScaler or the game`; every read-back exact |
 
+`nr-route-quiet` runs `nr.cpp --route`: a game that turns its upscaler on and off, DOOM Eternal's shape (2026-10-14:
+the game's DLSS turned off left the after-upscale route holding the model for the session). One B8G8R8A8 swapchain
+presented throughout; NGX initialised through OptiScaler's own `NVSDK_NGX_VULKAN_*` exports, as a game calls them, with
+`[Upscalers] VulkanUpscaler=fsr22` (OptiScaler's FSR 2.2 behind them, so no DLSS is needed: the evaluate reaches the
+after-upscale route the way every OptiScaler upscaler does) on a device that enables what FSR 2.2's shaders declare
+(`shaderInt16`, `shaderFloat16`). The phases, each with its read-backs counted apart: `cold` (1.5 s, the present host
+runs the model on every frame), then twice `on` (a feature created, 30 evaluates at 640x360 -> 1280x720, the route
+running the model on the upscaler's output), the feature released, and presents only until 9 s after the last
+evaluate (`off-waiting`), 12 s (`off-handing-back`) and 14 s (`off-back`; it and `cold` go on until they have a dozen
+frames, so a loaded machine thins them instead of emptying them); then `on-at-exit` (10 evaluates, the feature
+released) and the device destroyed with the route holding the model. It must hold: every `cold` and `off-back`
+read-back changed (the present host's model), every `on` and `off-waiting` one exact (the host stood down, and did not
+take the model back before 10 s); in the log, in this order and twice, `this route waits`, `the model stood down and
+was freed`, `this route has the model again (the present host stood down)`, `has not asked for the model for 10 s:
+taking it back`, `the after-upscale route's model was freed for the hand-back (its feature at 1280x720`, `the model is
+the present host's again`; then the stand-down once more, and at exit `the after-upscale route's objects on the device
+freed before it goes` ahead of `NGX shut down on the device before it goes (returned 1)`; three feature builds of each,
+nothing called off or abandoned. Measured 2026-10-14: drains of about 100 ms (a few presents at the harness's rate
+under validation), about 80 read-backs exact before each hand-back.
+
 What NVIDIA's model records into the host's command buffer is validated too. One report comes from it, once per
 feature build: `VUID-vkCmdDraw-None-09600`, an image of its own named `nv.ngx.dlssnr.resource` used in GENERAL at its
 first evaluate without ever leaving UNDEFINED. The application counts reports naming an `nv.ngx.*` object apart
@@ -201,8 +221,9 @@ any other frame.
   here judges image quality or motion (the guides are zeros: a moving camera smears).
 - Cold NR: no RGBA8 or non-SDR swapchain (the surface offers none here; the colour plan is held on the host tier), no
   CONCURRENT image, no device lost mid-frame, no failed submit with a model frame in it, no live toggle of NR or the
-  working scale, no after-upscale route or D3D12 route beside the host (the arbiter is held on the host tier), no
-  translated title with the model.
+  working scale, no D3D12 route beside the host, no translated title with the model. The after-upscale route runs
+  beside it only in `nr-route-quiet`, behind OptiScaler's FSR 2.2 rather than DLSS, with one thread presenting and
+  evaluating (a game's render thread recording while the hand-back drains is held on the host tier only).
 - No concurrent presents from two threads, no application thread submitting to a borrowed graphics queue while the
   cross-family route runs (the queue lock exists for it; nothing here contends), no device loss, no failed submit in
   the middle of the cross-family chain, no late installation (the host is installed before the application creates

@@ -13,6 +13,14 @@
 // what was presented: byte for byte, the mean and largest change of a colour channel, and alpha. What NR is expected
 // to have done is the runner's to judge from those facts against OptiScaler.log; this application asserts only that
 // the run is valid (validation active and clean, every call succeeding).
+//
+// With --route it is instead a game that turns its upscaler on and off (DOOM Eternal's shape, 2026-10-14): one
+// swapchain presented throughout; NGX initialised through OptiScaler's own NVSDK_NGX_VULKAN_* exports, as a game
+// calls them, and a super-sampling feature created and evaluated every frame for a few seconds (OptiScaler runs its
+// upscaler, then the after-upscale route runs the model on its output, inside the evaluate's command buffer); then the
+// feature released and nothing evaluated for longer than the present host waits before taking the model back; twice.
+// Each phase's read-backs are counted apart, so the runner can tell the frames the present host's model edited from
+// those it did not.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -20,8 +28,11 @@
 #include <windows.h>
 #include <vulkan/vulkan.h>
 
+#include "nvsdk_ngx_vk.h"
+
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -263,6 +274,30 @@ struct SwapchainFacts
     bool destroyed = false;
 };
 
+// One phase of --route, with the read-backs of the frames presented in it counted apart.
+struct PhaseFacts
+{
+    std::string name;
+    uint32_t presents = 0;
+    uint32_t evaluates = 0;
+    uint32_t readbacks = 0;
+    uint32_t exact = 0;
+    double maeSum = 0.0;
+};
+
+// OptiScaler's NGX exports, as a game reaches them.
+using PFN_NgxInit = NVSDK_NGX_Result (*)(unsigned long long, const wchar_t*, VkInstance, VkPhysicalDevice, VkDevice,
+                                         PFN_vkGetInstanceProcAddr, PFN_vkGetDeviceProcAddr,
+                                         const NVSDK_NGX_FeatureCommonInfo*, NVSDK_NGX_Version);
+using PFN_NgxParams = NVSDK_NGX_Result (*)(NVSDK_NGX_Parameter**);
+using PFN_NgxDestroyParams = NVSDK_NGX_Result (*)(NVSDK_NGX_Parameter*);
+using PFN_NgxCreate = NVSDK_NGX_Result (*)(VkDevice, VkCommandBuffer, NVSDK_NGX_Feature, NVSDK_NGX_Parameter*,
+                                           NVSDK_NGX_Handle**);
+using PFN_NgxEvaluate = NVSDK_NGX_Result (*)(VkCommandBuffer, const NVSDK_NGX_Handle*, NVSDK_NGX_Parameter*,
+                                             PFN_NVSDK_NGX_ProgressCallback);
+using PFN_NgxRelease = NVSDK_NGX_Result (*)(NVSDK_NGX_Handle*);
+using PFN_NgxShutdown1 = NVSDK_NGX_Result (*)(VkDevice);
+
 struct App
 {
     HINSTANCE module = GetModuleHandleW(nullptr);
@@ -283,6 +318,11 @@ struct App
     bool nvxOffered = false;
     uint32_t frames = 12;
     bool cross = false;
+    bool route = false;
+    HMODULE optiscaler = nullptr;
+    std::vector<PhaseFacts> phases;
+    PhaseFacts* phase = nullptr; // the phase read-backs are counted in, with --route
+    int64_t phaseFrom = 0;       // ... the first frame number counted in it
 
     std::vector<SwapchainFacts> swapchains;
 
@@ -322,6 +362,7 @@ struct App
 
         auto dll = LoadLibraryW(L".\\dxgi.dll");
         Require(dll != nullptr, "could not load OptiScaler as dxgi.dll");
+        optiscaler = dll;
 
         VkDebugUtilsMessengerCreateInfoEXT debug { VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT };
         debug.messageSeverity =
@@ -413,12 +454,29 @@ struct App
             queues[count].pQueuePriorities = &priority;
             ++count;
         }
-        const char* extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+        const char* extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME };
         VkDeviceCreateInfo info { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
         info.queueCreateInfoCount = count;
         info.pQueueCreateInfos = queues;
         info.enabledExtensionCount = 1;
         info.ppEnabledExtensionNames = extensions;
+
+        // With --route, what a game running FSR 2.2 enables: its shaders declare Int16 and Float16.
+        VkPhysicalDeviceFeatures features {};
+        VkPhysicalDeviceShaderFloat16Int8FeaturesKHR float16 {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES_KHR
+        };
+        if (route)
+        {
+            VkPhysicalDeviceFeatures supported {};
+            vkGetPhysicalDeviceFeatures(physical, &supported);
+            Require(supported.shaderInt16 == VK_TRUE, "the device has no shaderInt16, which FSR 2.2 needs");
+            features.shaderInt16 = VK_TRUE;
+            float16.shaderFloat16 = VK_TRUE;
+            info.pEnabledFeatures = &features;
+            info.pNext = &float16;
+            info.enabledExtensionCount = 2;
+        }
         Check(vkCreateDevice(physical, &info, nullptr, &device), "vkCreateDevice");
         vkGetDeviceQueue(device, graphicsFamily, 0, &graphicsQueue);
         if (computeFamily != UINT32_MAX)
@@ -588,6 +646,12 @@ struct App
             }
         }
         const double mae = eightBit ? double(sum) / (double(w) * h * 3) : (exact ? 0.0 : 255.0);
+        if (phase != nullptr && target.expected[index] >= phaseFrom)
+        {
+            ++phase->readbacks;
+            phase->exact += exact ? 1 : 0;
+            phase->maeSum += mae;
+        }
         ++facts.readbacks;
         facts.exact += exact ? 1 : 0;
         facts.maeSum += mae;
@@ -704,8 +768,303 @@ struct App
             Frame(target);
     }
 
+    // --- --route: the game's upscaler on, off, on, off ---------------------------------------------------------
+
+    struct Image
+    {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkFormat format = VK_FORMAT_UNDEFINED;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        NVSDK_NGX_Resource_VK ngx {};
+    };
+
+    Image MakeImage(VkFormat format, uint32_t width, uint32_t height, VkImageUsageFlags usage, bool readWrite)
+    {
+        Image img;
+        img.format = format;
+        img.width = width;
+        img.height = height;
+        VkImageCreateInfo info { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        info.imageType = VK_IMAGE_TYPE_2D;
+        info.format = format;
+        info.extent = { width, height, 1 };
+        info.mipLevels = 1;
+        info.arrayLayers = 1;
+        info.samples = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        info.usage = usage;
+        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        Check(vkCreateImage(device, &info, nullptr, &img.image), "vkCreateImage");
+        VkMemoryRequirements requirements {};
+        vkGetImageMemoryRequirements(device, img.image, &requirements);
+        uint32_t type = UINT32_MAX;
+        for (uint32_t i = 0; i < memory.memoryTypeCount && type == UINT32_MAX; ++i)
+            if ((requirements.memoryTypeBits & (1u << i)) &&
+                (memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+                type = i;
+        Require(type != UINT32_MAX, "no device-local memory type for an image");
+        VkMemoryAllocateInfo allocate { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = type;
+        Check(vkAllocateMemory(device, &allocate, nullptr, &img.memory), "vkAllocateMemory (image)");
+        Check(vkBindImageMemory(device, img.image, img.memory, 0), "vkBindImageMemory");
+        VkImageViewCreateInfo view { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        view.image = img.image;
+        view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view.format = format;
+        view.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        Check(vkCreateImageView(device, &view, nullptr, &img.view), "vkCreateImageView");
+        img.ngx.Type = NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW;
+        img.ngx.Resource.ImageViewInfo.ImageView = img.view;
+        img.ngx.Resource.ImageViewInfo.Image = img.image;
+        img.ngx.Resource.ImageViewInfo.SubresourceRange = view.subresourceRange;
+        img.ngx.Resource.ImageViewInfo.Format = format;
+        img.ngx.Resource.ImageViewInfo.Width = width;
+        img.ngx.Resource.ImageViewInfo.Height = height;
+        img.ngx.ReadWrite = readWrite;
+        return img;
+    }
+
+    void FreeImage(Image& img)
+    {
+        vkDestroyImageView(device, img.view, nullptr);
+        vkDestroyImage(device, img.image, nullptr);
+        vkFreeMemory(device, img.memory, nullptr);
+        img = Image {};
+    }
+
+    template <typename Pfn> Pfn Ngx(const char* name)
+    {
+        auto address = reinterpret_cast<Pfn>(GetProcAddress(optiscaler, name));
+        Require(address != nullptr, std::string("OptiScaler does not export ") + name);
+        return address;
+    }
+
+    // One command buffer on the graphics queue, recorded by `record`, submitted and waited for.
+    template <typename Record> void OneShot(Record record)
+    {
+        VkCommandPoolCreateInfo poolInfo { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+        poolInfo.queueFamilyIndex = graphicsFamily;
+        VkCommandPool pool = VK_NULL_HANDLE;
+        Check(vkCreateCommandPool(device, &poolInfo, nullptr, &pool), "command pool (route)");
+        VkCommandBufferAllocateInfo ai { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        ai.commandPool = pool;
+        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        ai.commandBufferCount = 1;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        Check(vkAllocateCommandBuffers(device, &ai, &cmd), "command buffer (route)");
+        VkCommandBufferBeginInfo begin { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        Check(vkBeginCommandBuffer(cmd, &begin), "begin (route)");
+        record(cmd);
+        Check(vkEndCommandBuffer(cmd), "end (route)");
+        VkSubmitInfo submit { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &cmd;
+        Check(vkQueueSubmit(graphicsQueue, 1, &submit, VK_NULL_HANDLE), "submit (route)");
+        Check(vkQueueWaitIdle(graphicsQueue), "wait (route)");
+        vkDestroyCommandPool(device, pool, nullptr);
+    }
+
+    void Begin(const char* name)
+    {
+        phases.push_back(PhaseFacts {});
+        phases.back().name = name;
+        phase = &phases.back();
+        phaseFrom = nextFrame;
+    }
+
+    void RunRoute()
+    {
+        Init();
+        MakeDevice();
+        ProbeValidation();
+        phases.reserve(16); // Begin keeps a pointer into it
+
+        VkSurfaceFormatKHR format {};
+        for (const auto& f : offered)
+            if (format.format == VK_FORMAT_UNDEFINED && Sdr(f.format, f.colorSpace))
+                format = f;
+        Require(format.format != VK_FORMAT_UNDEFINED, "the surface offers no SDR RGBA8/BGRA8 format");
+        Target target;
+        MakeSwapchain(target, "route", format, graphicsQueue, graphicsFamily);
+
+        using Clock = std::chrono::steady_clock;
+        // Frames are begun until `end`; under the validation layer one takes up to a few hundred milliseconds, which
+        // the phases' bounds leave room for.
+        // With `atLeast`, frames go on past `end` until that many were presented: a phase whose read-backs are judged
+        // must have some, however slowly a loaded machine presents (a phase counts only the read-backs of its own
+        // frames it makes itself, so a few fewer than its presents: the swapchain's images).
+        const auto presentUntil = [&](const char* name, Clock::time_point end, uint32_t atLeast = 0)
+        {
+            Begin(name);
+            while (Clock::now() < end || phase->presents < atLeast)
+            {
+                Frame(target);
+                ++phase->presents;
+            }
+        };
+        using Ms = std::chrono::milliseconds;
+
+        // The game's start window: nothing upscaled, the present host runs the model at present.
+        presentUntil("cold", Clock::now() + Ms(1500), 12);
+
+        const auto init = Ngx<PFN_NgxInit>("NVSDK_NGX_VULKAN_Init");
+        const auto capabilities = Ngx<PFN_NgxParams>("NVSDK_NGX_VULKAN_GetCapabilityParameters");
+        const auto destroyParams = Ngx<PFN_NgxDestroyParams>("NVSDK_NGX_VULKAN_DestroyParameters");
+        const auto create = Ngx<PFN_NgxCreate>("NVSDK_NGX_VULKAN_CreateFeature1");
+        const auto evaluate = Ngx<PFN_NgxEvaluate>("NVSDK_NGX_VULKAN_EvaluateFeature");
+        const auto release = Ngx<PFN_NgxRelease>("NVSDK_NGX_VULKAN_ReleaseFeature");
+        const auto shutdown = Ngx<PFN_NgxShutdown1>("NVSDK_NGX_VULKAN_Shutdown1");
+
+        Require(init(0x5245544F51ull, L".", instance, physical, device, vkGetInstanceProcAddr, vkGetDeviceProcAddr,
+                     nullptr, NVSDK_NGX_Version_API) == NVSDK_NGX_Result_Success,
+                "NVSDK_NGX_VULKAN_Init through OptiScaler failed");
+        NVSDK_NGX_Parameter* params = nullptr;
+        Require(capabilities(&params) == NVSDK_NGX_Result_Success && params != nullptr,
+                "NVSDK_NGX_VULKAN_GetCapabilityParameters through OptiScaler failed");
+
+        // A game's buffers: half-resolution colour, depth and motion, and the upscaler's output, which the route
+        // runs the model over.
+        constexpr uint32_t renderW = 640, renderH = 360, outW = 1280, outH = 720;
+        const VkImageUsageFlags input = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        Image colour = MakeImage(VK_FORMAT_R16G16B16A16_SFLOAT, renderW, renderH, input, false);
+        Image depth = MakeImage(VK_FORMAT_R32_SFLOAT, renderW, renderH, input, false);
+        Image motion = MakeImage(VK_FORMAT_R16G16_SFLOAT, renderW, renderH, input, false);
+        Image output = MakeImage(VK_FORMAT_R16G16B16A16_SFLOAT, outW, outH,
+                                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                 true);
+        OneShot(
+            [&](VkCommandBuffer cmd)
+            {
+                for (Image* img : { &colour, &depth, &motion, &output })
+                {
+                    VkImageMemoryBarrier b { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    b.image = img->image;
+                    b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                    b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                                         nullptr, 0, nullptr, 1, &b);
+                    // A flat colour, a constant depth, no motion, and an output the upscaler overwrites.
+                    VkClearColorValue value {};
+                    if (img == &colour)
+                        value = { { 0.4f, 0.3f, 0.2f, 1.0f } };
+                    else if (img == &depth)
+                        value = { { 0.5f, 0.0f, 0.0f, 0.0f } };
+                    vkCmdClearColorImage(cmd, img->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value, 1,
+                                         &b.subresourceRange);
+                    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    // As NGX takes them: inputs in SHADER_READ_ONLY_OPTIMAL, the output in GENERAL.
+                    b.newLayout = img == &output ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                                         0, nullptr, 0, nullptr, 1, &b);
+                }
+            });
+
+        // The game turns its upscaler on: a feature made, evaluated with every frame `evaluates` times, released. When
+        // the last evaluate began: the route asks inside it, so the present host may not take the model back before
+        // that + kAfterUpscaleIdleMs.
+        const auto upscalerOn = [&](const char* name, int evaluates)
+        {
+            params->Set(NVSDK_NGX_Parameter_Width, renderW);
+            params->Set(NVSDK_NGX_Parameter_Height, renderH);
+            params->Set(NVSDK_NGX_Parameter_OutWidth, outW);
+            params->Set(NVSDK_NGX_Parameter_OutHeight, outH);
+            params->Set(NVSDK_NGX_Parameter_PerfQualityValue, static_cast<int>(NVSDK_NGX_PerfQuality_Value_MaxQuality));
+            params->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,
+                        static_cast<int>(NVSDK_NGX_DLSS_Feature_Flags_MVLowRes));
+            params->Set(NVSDK_NGX_Parameter_CreationNodeMask, 1u);
+            params->Set(NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
+            NVSDK_NGX_Handle* handle = nullptr;
+            NVSDK_NGX_Result created = NVSDK_NGX_Result_Fail;
+            OneShot([&](VkCommandBuffer cmd)
+                    { created = create(device, cmd, NVSDK_NGX_Feature_SuperSampling, params, &handle); });
+            Require(created == NVSDK_NGX_Result_Success && handle != nullptr,
+                    "NVSDK_NGX_VULKAN_CreateFeature1 through OptiScaler returned " +
+                        std::to_string(static_cast<unsigned>(created)));
+
+            Begin(name);
+            Clock::time_point lastAsk;
+            for (int i = 0; i < evaluates; ++i)
+            {
+                lastAsk = Clock::now();
+                NVSDK_NGX_Result result = NVSDK_NGX_Result_Fail;
+                OneShot(
+                    [&](VkCommandBuffer cmd)
+                    {
+                        params->Set(NVSDK_NGX_Parameter_Color, static_cast<void*>(&colour.ngx));
+                        params->Set(NVSDK_NGX_Parameter_Output, static_cast<void*>(&output.ngx));
+                        params->Set(NVSDK_NGX_Parameter_Depth, static_cast<void*>(&depth.ngx));
+                        params->Set(NVSDK_NGX_Parameter_MotionVectors, static_cast<void*>(&motion.ngx));
+                        params->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, 0.0f);
+                        params->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, 0.0f);
+                        params->Set(NVSDK_NGX_Parameter_MV_Scale_X, 1.0f);
+                        params->Set(NVSDK_NGX_Parameter_MV_Scale_Y, 1.0f);
+                        params->Set(NVSDK_NGX_Parameter_Reset, i == 0 ? 1 : 0);
+                        params->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, renderW);
+                        params->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, renderH);
+                        params->Set(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, 16.6f);
+                        result = evaluate(cmd, handle, params, nullptr);
+                    });
+                Require(result == NVSDK_NGX_Result_Success, "NVSDK_NGX_VULKAN_EvaluateFeature through OptiScaler "
+                                                            "returned " +
+                                                                std::to_string(static_cast<unsigned>(result)));
+                ++phase->evaluates;
+                Frame(target);
+                ++phase->presents;
+            }
+
+            Require(release(handle) == NVSDK_NGX_Result_Success, "NVSDK_NGX_VULKAN_ReleaseFeature failed");
+            return lastAsk;
+        };
+
+        for (int cycle = 0; cycle < 2; ++cycle)
+        {
+            const Clock::time_point lastAsk = upscalerOn(cycle == 0 ? "on" : "on-again", 30);
+
+            // ... and off: nothing evaluated for longer than the present host waits (10 s) before taking the model
+            // back: the frames until 9 s after the last ask must be the route's (unedited), those from 12 s on the
+            // present host's again.
+            presentUntil(cycle == 0 ? "off-waiting" : "off-again-waiting", lastAsk + Ms(9000));
+            presentUntil(cycle == 0 ? "off-handing-back" : "off-again-handing-back", lastAsk + Ms(12000));
+            presentUntil(cycle == 0 ? "off-back" : "off-again-back", lastAsk + Ms(14000), 12);
+        }
+
+        // On once more, and the game exits with the route holding the model: its objects go with the device.
+        upscalerOn("on-at-exit", 10);
+        phase = nullptr;
+
+        Check(vkDeviceWaitIdle(device), "idle before NGX's shutdown");
+        destroyParams(params);
+        shutdown(device);
+        for (Image* img : { &colour, &depth, &motion, &output })
+            FreeImage(*img);
+
+        DestroySwapchain(target);
+        vkDestroyDevice(device, nullptr);
+        vkDestroySurfaceKHR(instance, surface, nullptr);
+        auto destroyDebug = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT"));
+        destroyDebug(instance, messenger, nullptr);
+        vkDestroyInstance(instance, nullptr);
+        DestroyWindow(window);
+        DestroyWindow(owner);
+    }
+
     void Run()
     {
+        if (route)
+            return RunRoute();
+
         Init();
         MakeDevice();
         ProbeValidation();
@@ -802,6 +1161,15 @@ struct App
                 << ", \"max_diff\": " << s.maxDiff << ", \"alpha_changed\": " << s.alphaChanged
                 << ", \"black\": " << s.black << ", \"destroyed\": " << (s.destroyed ? "true" : "false") << "}";
         }
+        out << "],\n  \"phases\": [";
+        for (size_t i = 0; i < phases.size(); ++i)
+        {
+            const auto& f = phases[i];
+            out << (i ? ",\n    " : "\n    ") << "{\"name\": \"" << f.name << "\", \"presents\": " << f.presents
+                << ", \"evaluates\": " << f.evaluates << ", \"readbacks\": " << f.readbacks
+                << ", \"exact\": " << f.exact << ", \"mae_mean\": " << (f.readbacks ? f.maeSum / f.readbacks : 0.0)
+                << "}";
+        }
         out << "]\n}\n";
         return out.str();
     }
@@ -817,6 +1185,8 @@ int main(int argc, char** argv)
         {
             if (!strcmp(argv[i], "--cross"))
                 app.cross = true;
+            else if (!strcmp(argv[i], "--route"))
+                app.route = true;
             else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
                 app.frames = static_cast<uint32_t>(std::atoi(argv[++i]));
             else

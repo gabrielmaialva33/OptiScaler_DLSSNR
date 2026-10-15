@@ -210,24 +210,44 @@ uint64_t OwnerNowMs()
             .count());
 }
 
-// The after-upscale route, at an evaluate it is about to run on `device`. False while the present host holds the model.
+// The after-upscale route, at an evaluate it is about to run on `device`, with g_vkMutex held. False while the present
+// host holds the model.
 bool ClaimModelForAfterUpscale(VkDevice device)
 {
     VkModelOwner::Verdict verdict;
+    bool held = false;
     {
         std::lock_guard<std::mutex> lock(g_ownerMutex);
+        held = g_owner.Owner() == VkModelOwner::Who::AfterUpscale;
         verdict = g_owner.AfterUpscale(reinterpret_cast<uint64_t>(device), OwnerNowMs());
     }
 
-    static bool said = false;
+    // Said at each change, not each frame: the model changes hands at most once per kAfterUpscaleIdleMs each way.
+    static bool waiting = false;
+    static bool everHeld = false;
 
-    if (!verdict.granted && !said)
+    if (!verdict.granted)
     {
-        said = true;
-        LOG_INFO("DLSS-NR Vulkan: this route waits: {}", verdict.reason);
+        if (!waiting)
+            LOG_INFO("DLSS-NR Vulkan: this route waits: {}", verdict.reason);
+        waiting = true;
+        return false;
     }
 
-    return verdict.granted;
+    if (!held)
+    {
+        // The forwarder keeps one float slot for the process and the present host's parameter block may keep floats
+        // elsewhere than this route's: found again for this route's block before anything is written to it.
+        g_vk.floatSlotKnown = false;
+
+        if (everHeld || waiting)
+            LOG_INFO("DLSS-NR Vulkan: this route has the model again{}",
+                     waiting ? " (the present host stood down)" : " (after handing it back)");
+    }
+
+    everHeld = true;
+    waiting = false;
+    return true;
 }
 
 void Fail(const char* why)
@@ -907,6 +927,17 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     // when the present host is off, so the route is what it was.
     if (!ClaimModelForAfterUpscale(device))
         return;
+
+    // Whatever this evaluate records, the present host's hand-back counts the route's quiet from its end, not from the
+    // ask above: a cold feature build inside it can take a while (DlssNr_VkModelOwner.h, "The way back").
+    struct RecordingDone
+    {
+        ~RecordingDone()
+        {
+            std::lock_guard<std::mutex> lock(g_ownerMutex);
+            g_owner.AfterUpscaleDone(OwnerNowMs());
+        }
+    } recordingDone;
 
     g_vk.instance = instance;
     g_vk.physicalDevice = physicalDevice;
@@ -1596,6 +1627,57 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     }
 }
 
+namespace
+{
+// Everything of the after-upscale route's, on a live device, once nothing the GPU runs can still use it: the caller
+// proved that (ShutdownVk waits for the device to go idle; a hand-back to the present host drained every queue of the
+// device behind fences of its own). NGX stays initialised on the device: it is the device's, and goes with it.
+void FreeRouteObjects()
+{
+    if (g_vk.feature != nullptr && g_fwd.release != nullptr)
+        g_fwd.release(g_vk.feature);
+
+    g_vk.feature = nullptr;
+
+    DestroyImage(g_vk.output);
+    DestroyImage(g_vk.proxy);
+    DestroyImage(g_vk.proxySmall);
+    DestroyImage(g_vk.outputNative);
+    DestroyImage(g_vk.keep);
+    DestroyImage(g_vk.meter);
+    DestroyMeterReadback();
+
+    g_vk.pass.reset();
+    g_vk.superUp.reset();
+    g_vk.superDown.reset();
+    g_vk.nrScaler = Scaler::Count;
+
+    if (g_vk.capabilityParams != nullptr)
+    {
+        NVSDK_NGX_VULKAN_DestroyParameters(g_vk.capabilityParams);
+        g_vk.capabilityParams = nullptr;
+    }
+
+    if (g_vk.queryPool != VK_NULL_HANDLE && g_vk.device != VK_NULL_HANDLE)
+    {
+        vkDestroyQueryPool(g_vk.device, g_vk.queryPool, nullptr);
+        g_vk.queryPool = VK_NULL_HANDLE;
+    }
+
+    g_vk.timedFrames = 0;
+    g_vk.meterFrames = 0;
+    g_vk.exposureLatch.Reset();
+    g_vk.lastGpuTime.reset();
+
+    g_vk.device = VK_NULL_HANDLE;
+    g_vk.width = 0;
+    g_vk.height = 0;
+    g_vk.ngxInitialised = false;
+    g_vk.floatSlotKnown = false;
+    g_vk.reset = true;
+}
+} // namespace
+
 void ShutdownVk(bool deviceAlive)
 {
     if (!deviceAlive)
@@ -1648,46 +1730,113 @@ void ShutdownVk(bool deviceAlive)
     if (g_vk.device != VK_NULL_HANDLE)
         vkDeviceWaitIdle(g_vk.device);
 
-    if (g_vk.feature != nullptr && g_fwd.release != nullptr)
-        g_fwd.release(g_vk.feature);
+    FreeRouteObjects();
+}
 
-    g_vk.feature = nullptr;
+// ---------------------------------------------------------------------------------------------
+// The way back to the Vulkan present host (DlssNr_VkPresentModel.h, DlssNr_VkModelOwner.h): the after-upscale route's
+// side of a hand-back, and of its device going.
+// ---------------------------------------------------------------------------------------------
 
-    DestroyImage(g_vk.output);
-    DestroyImage(g_vk.proxy);
-    DestroyImage(g_vk.proxySmall);
-    DestroyImage(g_vk.outputNative);
-    DestroyImage(g_vk.keep);
-    DestroyImage(g_vk.meter);
-    DestroyMeterReadback();
+bool AfterUpscaleIdleOn(VkDevice device)
+{
+    std::lock_guard<std::mutex> lock(g_ownerMutex);
+    return device != VK_NULL_HANDLE &&
+           g_owner.IdleAfterUpscaleDevice(OwnerNowMs()) == reinterpret_cast<uint64_t>(device);
+}
 
-    g_vk.pass.reset();
-    g_vk.superUp.reset();
-    g_vk.superDown.reset();
-    g_vk.nrScaler = Scaler::Count;
+bool BeginAfterUpscaleHandBack(VkDevice device)
+{
+    std::lock_guard<std::mutex> lock(g_ownerMutex);
+    return g_owner.BeginHandBack(reinterpret_cast<uint64_t>(device), OwnerNowMs());
+}
 
-    if (g_vk.capabilityParams != nullptr)
+AfterUpscaleHandBack FinishAfterUpscaleHandBack(VkDevice device, std::vector<std::string>& lines)
+{
+    // The route's lock, then the owner's, as the route takes them; never waited for under the host's transport lock.
+    // Held by the route evaluating, which asks for the model (calling the hand-back off) or returns without recording.
+    std::unique_lock<std::mutex> route(g_vkMutex, std::try_to_lock);
+    if (!route.owns_lock())
+        return AfterUpscaleHandBack::Busy;
+
+    VkModelOwner::HandBack result;
     {
-        NVSDK_NGX_VULKAN_DestroyParameters(g_vk.capabilityParams);
-        g_vk.capabilityParams = nullptr;
+        std::lock_guard<std::mutex> lock(g_ownerMutex);
+        result = g_owner.FinishHandBack(reinterpret_cast<uint64_t>(device));
     }
 
-    if (g_vk.queryPool != VK_NULL_HANDLE && g_vk.device != VK_NULL_HANDLE)
+    if (result == VkModelOwner::HandBack::Cancelled)
+        return AfterUpscaleHandBack::Cancelled;
+    if (result == VkModelOwner::HandBack::NotRetiring)
+        return AfterUpscaleHandBack::NotRetiring;
+
+    // The token is released, and the route cannot take it back before this returns: its lock is held. Nothing of the
+    // route's is in flight: it recorded nothing since the hand-back began (it would have called it off), and the
+    // command buffers it recorded into before were submitted ahead of the drain's fences, all of which signalled.
+    if (g_vk.device == device)
     {
-        vkDestroyQueryPool(g_vk.device, g_vk.queryPool, nullptr);
-        g_vk.queryPool = VK_NULL_HANDLE;
+        const bool feature = g_vk.feature != nullptr;
+        const std::string size = std::to_string(g_vk.width) + "x" + std::to_string(g_vk.height);
+        FreeRouteObjects();
+
+        if (feature)
+            SessionGuardOff();
+
+        lines.push_back(std::string("DLSS-NR Vulkan: the after-upscale route's model was freed for the hand-back (") +
+                        (feature ? "its feature at " + size + ", " : "no feature, ") +
+                        "its images, pass and parameter block); NGX stays initialised on the device");
+    }
+    else
+    {
+        lines.push_back("DLSS-NR Vulkan: the after-upscale route had nothing on the device to free for the hand-back");
     }
 
-    g_vk.timedFrames = 0;
-    g_vk.meterFrames = 0;
-    g_vk.exposureLatch.Reset();
-    g_vk.lastGpuTime.reset();
+    return AfterUpscaleHandBack::Done;
+}
 
-    g_vk.device = VK_NULL_HANDLE;
-    g_vk.width = 0;
-    g_vk.height = 0;
-    g_vk.ngxInitialised = false;
-    g_vk.reset = true;
+void CancelAfterUpscaleHandBack(VkDevice device)
+{
+    std::lock_guard<std::mutex> lock(g_ownerMutex);
+    g_owner.CancelHandBack(reinterpret_cast<uint64_t>(device));
+}
+
+void AfterUpscaleDeviceGone(VkDevice device, bool forgetOnly, std::vector<std::string>& lines)
+{
+    // The route's lock may be waited for here: the route never takes the host's transport lock or a queue's present
+    // lock, and vkDestroyDevice holds no queue's submit lock.
+    {
+        std::lock_guard<std::mutex> route(g_vkMutex);
+
+        if (device != VK_NULL_HANDLE && g_vk.device == device)
+        {
+            const bool feature = g_vk.feature != nullptr;
+
+            if (forgetOnly)
+            {
+                // Nothing called on a lost device, nor on one whose GPU was not proven done: forgotten, its destruction
+                // frees them.
+                ShutdownVk(false);
+                lines.push_back("DLSS-NR Vulkan: the after-upscale route's objects on the device are abandoned with it "
+                                "(the device is lost, or work on it was never seen complete)");
+            }
+            else
+            {
+                // Freed before the device goes and before NGX is shut down on it (its children must go first, the
+                // feature before NGX): the host drained every queue of the device behind fences of its own, all seen
+                // signalled, so nothing the GPU runs can still use them -- no device-wide wait, which could block every
+                // present unbounded on a hung GPU.
+                FreeRouteObjects();
+                lines.push_back("DLSS-NR Vulkan: the after-upscale route's objects on the device freed before it "
+                                "goes");
+            }
+
+            if (feature)
+                SessionGuardOff();
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(g_ownerMutex);
+    g_owner.DeviceGone(reinterpret_cast<uint64_t>(device));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2554,8 +2703,9 @@ VkPresentAdmission PresentHostMustYield(VkDevice device)
                                 "stands down" };
 
     std::lock_guard<std::mutex> lock(g_ownerMutex);
-    if (g_owner.PresentHostMustYield(reinterpret_cast<uint64_t>(device), OwnerNowMs()))
-        return { NrSkip::AfterUpscale, VkModelOwner::kAfterUpscaleWants };
+    const uint64_t now = OwnerNowMs();
+    if (g_owner.PresentHostMustYield(reinterpret_cast<uint64_t>(device), now))
+        return { NrSkip::AfterUpscale, g_owner.YieldReason(now) };
 
     return {};
 }

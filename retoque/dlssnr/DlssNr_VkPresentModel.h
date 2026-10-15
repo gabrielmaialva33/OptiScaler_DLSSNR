@@ -121,6 +121,41 @@ VkPresentAdmission PresentHostMustYield(VkDevice device);
 // The present host gave the model up on `device`: released or abandoned, nothing of its in flight.
 void ReleaseModelFromPresentHost(VkDevice device);
 
+// The way back from the after-upscale route (DlssNr_VkModelOwner.h, "The way back"): a game that stops calling its
+// upscaler never gives the model up, so once the route has not asked for VkModelOwner::kAfterUpscaleIdleMs the present
+// host takes it back on the route's device. In this order, each with the host's transport lock held:
+//
+// AfterUpscaleIdleOn: whether the route holds the model on `device` and has gone quiet, so a hand-back may begin.
+bool AfterUpscaleIdleOn(VkDevice device);
+
+// The hand-back begins: false when it may not (the route asked since). From true on, the route asking again calls it
+// off; the host drains every queue of the device behind a fence of its own, submitted only after this.
+bool BeginAfterUpscaleHandBack(VkDevice device);
+
+enum class AfterUpscaleHandBack : uint8_t
+{
+    Done,        // the route's objects were freed and the token released: the present host may claim the model
+    Cancelled,   // the route asked again after the hand-back began: it keeps the model and everything of its
+    Busy,        // the route's lock was held (it is evaluating): try again at the next present
+    NotRetiring, // no hand-back was under way
+};
+
+// Every drain fence was seen signalled. Takes the route's lock without waiting (Busy when it is held); on Done frees
+// the route's objects, which nothing the GPU runs can still use: the route recorded nothing since the hand-back began,
+// and everything it recorded before was submitted ahead of the fences. Lines for the log.
+AfterUpscaleHandBack FinishAfterUpscaleHandBack(VkDevice device, std::vector<std::string>& lines);
+
+// The drain cannot finish (a drain submit failed, the device was lost or is being destroyed): the route keeps the
+// model.
+void CancelAfterUpscaleHandBack(VkDevice device);
+
+// At vkDestroyDevice, before the call down and before NGX is shut down on the device: the after-upscale route's objects
+// on `device` freed, the host having drained every queue of it behind its own fences, or, with `forgetOnly` (a lost
+// device, work on it never seen complete, a drain that did not finish), only forgotten; and whichever route held the
+// token on it gives it back, so a route that never evaluates again does not hold the model for a device that no longer
+// exists. Lines for the log.
+void AfterUpscaleDeviceGone(VkDevice device, bool forgetOnly, std::vector<std::string>& lines);
+
 // At vkDestroyDevice, before the call down, with the device's model released or abandoned: the driver's NGX core the
 // host brought up on it shut down, and NGX through the forwarder (which answers only for the device it initialised, so
 // one the after-upscale route initialised goes too), so neither answers "initialised" for a later device that gets this

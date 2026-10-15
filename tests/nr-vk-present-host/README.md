@@ -50,8 +50,21 @@ The registry's state machine and the transport's decisions, with plain integers 
   of the window and destruction lines; `ViewPresent`'s instance and retirement.
 - The one-owner arbiter (`DlssNr_VkModelOwner.h`): the present host takes the model when nobody holds it, keeps it on
   its device and refuses another device; the after-upscale route asking is refused while the present host holds it
-  and makes it yield; the present host stays down while the route asked within half a second and for good once it
-  owns the model; releases only by the holder.
+  and makes it yield; the present host stays down while the route asked within half a second and while it owns the
+  model; releases only by the holder.
+- The way back (DOOM Eternal, 2026-10-14): the route quiet for `kAfterUpscaleIdleMs` (10 s), counted from the end of
+  its last recording (`AfterUpscaleDone`), is handed back, on its own device only, through `BeginHandBack` /
+  `FinishHandBack(device)`; never while it records, however long one evaluate takes; refused for the present host with
+  its own reason while it drains; three cycles of DLSS on (stand down), a minute of evaluates (never idle), DLSS off
+  (idle only at 10 s, then Done and the present host takes it again); a hand-back called off by the route asking while
+  it drains (twice, once going quiet again) and one cancelled for a failed drain, another device's cancel or finish
+  changing nothing; twenty pauses a millisecond short of the window that never lose the model; a clock read out of
+  order; the token following the route's own device change; `DeviceGone` for both owners and during a hand-back; and
+  the review's case, a drain on d1 when the route moves to d2 and d1 then goes (destroyed, lost or drained): the
+  hand-back ends and d2 can be handed back later. And frames slower than the live window: a route refused at T keeps
+  the host down (`kAfterUpscaleWaiting`, and yielding if it still holds the model) until it takes the model 1.6 s
+  later; a route refused once that never asks again lapses after the idle window, a clock read out of order not
+  counting as quiet, and the host's `Take` ends the reservation.
 - Two devices alive at once whose swapchains have the same handle value: no aliasing. A device destroyed takes its
   queues and swapchains; a new device with the old handle value, and a queue and swapchain with the old values too,
   are new records with new ids; a create that returns a handle still on record replaces it and is counted.
@@ -80,9 +93,21 @@ Source guards:
   the destroy returned. In `DlssNrFeature_Vk.cpp`: the after-upscale route asks the arbiter where it commits to a frame;
   the present model touches nothing of the route's state; its encode is passthrough and the downsample and resolve are
   copies of it; the working scale never goes above native; NGX's device shutdowns are called with their out count.
+- The way back: begun only with no model of the host's on the device, NR on, a swapchain the model may see and the
+  route quiet there; every queue of the device try-locked (present, then submit; never waited for), the fences made
+  before and submitted after `BeginAfterUpscaleHandBack`, each on an empty batch; a failed drain submit calls it off
+  and a lost device destroys nothing; the route freed only after every fence was seen signalled, its lock try-locked
+  and the token released first, never after a failed drain submit, without a device-wide wait; the route records
+  nothing before it asks, and a guard right after its claim ends its recording window when the evaluate returns; it
+  finds the forwarder's float slot again when it takes the token from nobody; the device going ends a hand-back before
+  the route's objects go and before NGX is shut down -- freed once the host drained every queue of the device behind
+  fences of its own within a bound (`DrainForDestroy`; no device-wide wait anywhere), only forgotten, and NGX only
+  forgotten too, when the device is lost, work on it was never seen complete or the drain did not finish -- and its
+  token with them.
 - The application's waits are consumed only by a submit that ran: recording precedes it, every refusal comes before
-  it; the work queue's lock is taken before the transport's; nothing is logged or called down while the transport's
-  lock is held. Retirement drains before it frees and destroys nothing of a lost device (DEVELOPMENT.md rule 8).
+  it; the work queue's lock is taken before the transport's; nothing of the host's own is logged or called down while
+  the transport's lock is held (what the model's or the route's frees log underneath it, as a stand-down's release
+  always has, is theirs; the guard reads the host's functions only). Retirement drains before it frees and destroys nothing of a lost device (DEVELOPMENT.md rule 8).
 - What the host never does: Reflex, the frame limiter, `TickFrozenCheck`, upscaler timing, the overlay, spoofing, NGX
   of its own (the model is `DlssNrFeature_Vk.cpp`'s), the after-upscale route's state, a device-wide idle wait. Its
   own Vulkan calls are eight read-only queries from vulkan-1.dll and the device functions it resolves per device; no
