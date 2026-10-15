@@ -14,11 +14,88 @@
 #include <cstdint>
 #include <cstdio>
 #include <iterator>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace DlssNr::VkPresentHost
 {
+// Hand-back policy and diagnostics, shared with the host-tier tests. An off/on toggle never resets the route's
+// quiet clock. Diagnostics are per due episode, including reasons that alternate across frames.
+struct HandBackReadiness
+{
+    bool enabled = true;
+    bool hasModel = false;
+    bool retryDelay = false;
+    std::string unavailable;
+};
+
+inline std::string HandBackBlockReason(const HandBackReadiness& state)
+{
+    if (!state.enabled)
+        return "NR off ([DlssNr] Enabled=false)";
+    if (state.hasModel)
+        return "the present host still has a model (waiting for its frames to complete)";
+    if (state.retryDelay)
+        return "retry backoff after an earlier drain failure";
+    return state.unavailable;
+}
+
+class HandBackDiagnostics
+{
+    struct Reason
+    {
+        std::string text;
+        uint64_t firstMs;
+        bool reported = false;
+    };
+    std::vector<Reason> _reasons;
+
+  public:
+    bool Blocked(const std::string& reason, uint64_t nowMs, uint64_t delayMs = 0)
+    {
+        Reason* found = nullptr;
+        for (auto& item : _reasons)
+            if (item.text == reason)
+                found = &item;
+        if (found == nullptr)
+        {
+            _reasons.push_back({ reason, nowMs });
+            found = &_reasons.back();
+        }
+        if (found->reported || nowMs < found->firstMs || nowMs - found->firstMs < delayMs)
+            return false;
+        found->reported = true;
+        return true;
+    }
+    void Reset() { _reasons.clear(); }
+};
+
+struct QueueLocks
+{
+    std::recursive_timed_mutex submit;
+    std::recursive_timed_mutex present;
+    uint32_t family = UINT32_MAX;
+    uint32_t index = UINT32_MAX;
+};
+
+// Called under the current present lock and transport mutex. Never wait for another queue whose presenter may be
+// waiting for that mutex. The caller releases all previously acquired locks on failure by leaving its RAII scope.
+inline const char* TryHandBackQueueLocks(QueueLocks& locks,
+                                         std::vector<std::unique_lock<std::recursive_timed_mutex>>& held)
+{
+    std::unique_lock<std::recursive_timed_mutex> present(locks.present, std::try_to_lock);
+    if (!present.owns_lock())
+        return "present";
+    std::unique_lock<std::recursive_timed_mutex> submit(locks.submit, std::try_to_lock);
+    if (!submit.owns_lock())
+        return "submit";
+    held.push_back(std::move(present));
+    held.push_back(std::move(submit));
+    return nullptr;
+}
+
 // --- Formats and colour spaces ---------------------------------------------------------------------------------
 
 inline constexpr uint32_t kFormatR8G8B8A8Unorm = 37;
