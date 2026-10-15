@@ -6119,6 +6119,15 @@ static bool PresentHookLive()
 // The pass at the game's own Present, ahead of its DLSS-G (RunPresentPass's boundary entry), ran within the last half
 // second. While it is live the entries below it stand down.
 static std::atomic<long long> g_boundaryAtMs { 0 };
+
+// A present entry chose to run the pass (past the placement and the interim refusal) within the last half second: the
+// present route is the one in use, whether or not its guides have been decided on yet. For HookStatus.
+static std::atomic<long long> g_presentRouteAtMs { 0 };
+static bool PresentRouteLive()
+{
+    const long long at = g_presentRouteAtMs.load();
+    return at != 0 && NowMs() - at < 500;
+}
 static bool BoundaryLive()
 {
     const long long at = g_boundaryAtMs.load();
@@ -6169,17 +6178,29 @@ static void ParkNrClone(ID3D12Resource*& res, const DlssNr::Submission::Usage& u
     g_nrRetired.push_back(r);
 }
 
-// Present-guide identity, step 0 of docs/dlssnr/design/present-real-guides.md: the stamp each capture carries, and
-// what the identity rules (DlssNr_PresentGuideIdentity.h) would have answered at each present. Log only: nothing here
-// changes which slot a present reads, and nothing here runs at HookMethod=1 or without a capture. Guarded by
-// g_nrMutex, which every user already holds: the capture, both consumers' presents, and shutdown.
+// Present-guide identity, step 1 of docs/dlssnr/design/present-real-guides.md: the stamp each capture carries, the
+// rules every present's pick goes through before the pass may read it, the record of what each present did, the
+// reset a lasting change of guide source owes the model, and the status the menu and the status line read. Nothing
+// here runs at HookMethod=1, and with a ring that never recorded (a title with no upscaler) nothing but the status.
+// Guarded by g_nrMutex, which every user already holds: the capture, both consumers' presents, and shutdown. The
+// status goes out through atomics and is read without it.
 struct PresentGuideIdentityState
 {
     DlssNr::PresentGuideIdentity::Tracker tracker;
     DlssNr::PresentGuideIdentity::Consumer present { "D3D12 present" };
     DlssNr::PresentGuideIdentity::Consumer bridge { "D3D11 bridge" };
+    DlssNr::PresentGuideIdentity::SourceHistory presentSource;
+    DlssNr::PresentGuideIdentity::SourceHistory bridgeSource;
+    DlssNr::PresentGuideIdentity::StatusWindow status;
 };
 static PresentGuideIdentityState g_guideIdentity;
+
+// The last second of guide outcomes, from whichever present host ran, and when it was published; and what that host
+// did with its last frame that had no guides of the game's (PresentGuideIdentity::Fallback). For HookStatus and the
+// menu.
+static std::atomic<uint64_t> g_guideStatus { 0 };
+static std::atomic<long long> g_guideStatusAtMs { 0 };
+static std::atomic<uint8_t> g_guideFallback { static_cast<uint8_t>(DlssNr::PresentGuideIdentity::Fallback::Zero) };
 
 // The stamp, at capture: which device, what the upscaler produced and where, how much of the guides is real.
 static void StampPresentGuide(size_t slot, NVSDK_NGX_Parameter* params, const DlssNrFrameInfo& frame,
@@ -6206,76 +6227,202 @@ static void StampPresentGuide(size_t slot, NVSDK_NGX_Parameter* params, const Dl
     g_guideIdentity.tracker.StampCapture(slot, stamp, NowMs());
 }
 
-// What the rules would have answered for this present, counted against what the present does today. Never touches
-// the ring: it reads the slots and writes only its own record.
-static void NoteGuideIdentity(DlssNr::PresentGuideIdentity::Consumer& consumer, const void* device,
-                              const void* presenter, unsigned int width, unsigned int height, size_t picked,
-                              DlssNr::PresentGuideIdentity::Today today)
+// Who presents, for rule 3: the swapchain's window, so that the game's Streamline proxy at the boundary and the
+// swapchain beneath it (the wrapped entry) are one presenter, not two that would refuse each other's captures. The
+// swapchain itself when it has no window. Called before the lock: a call into the swapchain under it is not needed.
+static const void* PresentGuidePresenter(IDXGISwapChain3* swapchain)
 {
-    // A ring that never recorded -- a title with no upscaler -- has nothing to identify and says nothing.
+    HWND window = nullptr;
+
+    if (swapchain != nullptr && SUCCEEDED(swapchain->GetHwnd(&window)) && window != nullptr)
+        return window;
+
+    return swapchain;
+}
+
+// One present's question to the identity rules, and the facts it was asked with, which the record needs again.
+struct GuideAsk
+{
+    DlssNr::PresentGuideIdentity::Decision decision {};
+    DlssNr::PresentGuideIdentity::Present present {};
+    bool asked = false; // false: the ring never recorded, so there was nothing to identify and nothing was marked
+};
+
+// The rules over this present's pick (D2): the answer's slot is the pick or none. Marks a frame boundary and notes
+// the presenter. A ring that never recorded -- a title with no upscaler -- is not asked: no boundary, no presenter.
+static GuideAsk AskGuideIdentity(const DlssNr::PresentGuideIdentity::Consumer& consumer, const void* device,
+                                 const void* presenter, unsigned int width, unsigned int height, size_t picked,
+                                 bool enforceLag)
+{
+    GuideAsk ask;
+
     if (g_presentGuideRing.NewestRecordedSequence() == 0)
-        return;
+        return ask;
 
-    DlssNr::PresentGuideIdentity::Present present;
-    present.device = device;
-    present.width = width;
-    present.height = height;
-    present.swapchain = presenter;
-    present.lastConsumed = consumer.LastConsumed();
-    present.nowMs = NowMs();
+    ask.asked = true;
+    ask.present.device = device;
+    ask.present.width = width;
+    ask.present.height = height;
+    ask.present.swapchain = presenter;
+    ask.present.lastConsumed = consumer.LastConsumed();
+    ask.present.nowMs = NowMs();
+    ask.present.enforceLag = enforceLag;
+    ask.decision = g_guideIdentity.tracker.AtPresent(picked, g_presentGuideRing, ask.present);
+    return ask;
+}
 
-    const auto decision = g_guideIdentity.tracker.AtPresent(picked, g_presentGuideRing, present);
+// What the present did with the answer: in the consumer's window (a line when one is due) when `logged`, and in the
+// status, published once a second. A use moves rule 5's record whether it is logged or not: a host that is not logged
+// may still be running the pass (a bridge host built at HookMethod=2 keeps going after it changes).
+static void CountGuideIdentity(DlssNr::PresentGuideIdentity::Consumer& consumer, const GuideAsk& ask, size_t picked,
+                               DlssNr::PresentGuideIdentity::Outcome outcome, bool logged)
+{
+    // The steady clock, through NowMs, which reads it, so the windows run on the clock the rest of the glue uses.
+    const DlssNr::PresentGuideIdentity::Clock::time_point now { std::chrono::milliseconds(NowMs()) };
 
     std::string line;
-    if (consumer.Note(decision, picked, g_presentGuideRing, g_guideIdentity.tracker.Stamped(), present, today,
-                      std::chrono::steady_clock::now(), &line))
+    if (ask.asked && logged &&
+        consumer.Note(ask.decision, picked, g_presentGuideRing, g_guideIdentity.tracker.Stamped(), ask.present, outcome,
+                      now, &line))
     {
         LOG_INFO("{}", line);
     }
-}
-
-// The D3D12 present pass, right after its pick. Today it reads the picked slot, unless no capture was recorded since
-// its last pass, the skip that follows the pick in RunPresentPass; the same test is made here.
-static void NotePresentPassIdentity(IDXGISwapChain3* swapchain, ID3D12Device* device, unsigned int width,
-                                    unsigned int height, size_t picked)
-{
-    using DlssNr::PresentGuideIdentity::Today;
-
-    const auto newestRecordedSeq = g_presentGuideRing.NewestRecordedSequence();
-    const bool skips = newestRecordedSeq > 0 && newestRecordedSeq == g_nrLastEnhancedRecordedSeq;
-    const Today today = skips ? Today::Skipped : picked < DlssNr::PresentGuides::kRingSize ? Today::Read : Today::None;
-
-    NoteGuideIdentity(g_guideIdentity.present, device, swapchain, width, height, picked, today);
-}
-
-// The D3D11 bridge's present host, right after its pick in CapturedPresentGuides. Today it reads the picked slot
-// whenever the slot holds both copies; it has no skip. A host once built keeps asking after the pass is switched off
-// or HookMethod leaves 2, the only value the bridge is built for; it is not counted then, nor is a caller that names
-// no presenter.
-static void NoteBridgeIdentity(ID3D12GraphicsCommandList* cmdList, const void* presenter, unsigned int width,
-                               unsigned int height, size_t picked)
-{
-    using DlssNr::PresentGuideIdentity::Today;
-
-    const Config& cfg = *Config::Instance();
-
-    if (g_presentGuideRing.NewestRecordedSequence() == 0 || presenter == nullptr || cmdList == nullptr ||
-        !cfg.DlssNrEnabled.value_or_default() || cfg.DlssNrHookMethod.value_or_default() != 2)
+    else if (ask.asked && !logged && outcome == DlssNr::PresentGuideIdentity::Outcome::Used)
     {
-        return;
+        consumer.MarkUsed(g_presentGuideRing.GetSlot(picked).sequence);
     }
 
-    // The device the bridge's list reads the copies on. Compared as an identity only; the list keeps it alive.
+    DlssNr::PresentGuideIdentity::Status second;
+    if (g_guideIdentity.status.Add(outcome, ask.decision.reason, now, &second))
+    {
+        g_guideStatus = DlssNr::PresentGuideIdentity::Pack(second);
+        g_guideStatusAtMs = NowMs();
+    }
+}
+
+// A change of guide source that has held for kSourceStable presents drops the model's history once (D3), through the
+// same request a route switch makes. Said the first three times and then every hundredth. Every present whose pass
+// runs is noted, a ring that never recorded included: its frames are the zero or synthesized side, so the change to
+// the game's guides when captures start is a change like any other, and a title that never captures never changes.
+// The answer: whether the game's guides still hold the history after this present, which a single miss does not
+// change (the ZeroGuideReset policy waits for that too).
+static bool NoteGuideSource(DlssNr::PresentGuideIdentity::SourceHistory& history, bool game, const char* consumer)
+{
+    if (!history.Note(game))
+        return history.Established() == 1;
+
+    g_resetOnReturn = true;
+
+    static unsigned long long resets = 0;
+    if (++resets <= 3 || resets % 100 == 0)
+    {
+        LOG_INFO("{}", std::string("DLSS-NR present guides, ") + consumer + ": the model's history restarts on " +
+                           (game ? "the game's depth and motion" : "zero or synthesized guides") + ", held for " +
+                           std::to_string(DlssNr::PresentGuideIdentity::kSourceStable) + " frames (" +
+                           std::to_string(resets) + " so far)");
+    }
+
+    return history.Established() == 1;
+}
+
+// The D3D12 present pass, right after its pick. Rule 6 is enforced at the game's own Present only (`boundary`).
+static GuideAsk AskPresentPassGuides(ID3D12Device* device, const void* presenter, unsigned int width,
+                                     unsigned int height, size_t picked, bool boundary)
+{
+    return AskGuideIdentity(g_guideIdentity.present, device, presenter, width, height, picked, boundary);
+}
+
+static void CountPresentPassGuides(const GuideAsk& ask, size_t picked, DlssNr::PresentGuideIdentity::Outcome outcome)
+{
+    CountGuideIdentity(g_guideIdentity.present, ask, picked, outcome, true);
+}
+
+// For a present whose pass runs. `routeStarts`: the first present on this route since the upscaled one ran, which
+// resets the model on its own; the source is counted from there. True while the game's guides hold the history.
+static bool NotePresentPassGuideSource(bool game, bool routeStarts)
+{
+    if (routeStarts)
+        g_guideIdentity.presentSource.Reset();
+
+    return NoteGuideSource(g_guideIdentity.presentSource, game, "D3D12 present");
+}
+
+// The D3D12 pass under RequireDlss, on a frame with no guides the rules accept: shown as the game drew it.
+static void NotePresentGuideWaiting()
+{
+    g_guideFallback = static_cast<uint8_t>(DlssNr::PresentGuideIdentity::Fallback::Waiting);
+}
+
+// The D3D11 bridge's present host, right after its pick in CapturedPresentGuides. A host once built keeps asking after
+// the pass is switched off or HookMethod leaves 2, the only value the bridge is built for; the answer still holds
+// then, but the present is not logged. Rule 6 is not enforced here: nothing has measured this route.
+static GuideAsk AskBridgeGuides(ID3D12GraphicsCommandList* cmdList, const void* presenter, unsigned int width,
+                                unsigned int height, size_t picked)
+{
+    // A ring that never recorded (Divinity, any bridge title with no upscaler): nothing to ask, so not even the list.
+    if (g_presentGuideRing.NewestRecordedSequence() == 0)
+        return {};
+
+    // The device the bridge's list reads the copies on. Compared as an identity only; the list keeps it alive. A
+    // list with no device is asked with none, which rule 1 refuses.
     ID3D12Device* device = nullptr;
-    if (FAILED(cmdList->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
-        return;
-    device->Release();
+    if (cmdList != nullptr && SUCCEEDED(cmdList->GetDevice(IID_PPV_ARGS(&device))) && device != nullptr)
+        device->Release();
+    else
+        device = nullptr;
 
-    const bool reads = picked < DlssNr::PresentGuides::kRingSize && g_presentGuideClones[picked].depth != nullptr &&
-                       g_presentGuideClones[picked].motion != nullptr;
+    return AskGuideIdentity(g_guideIdentity.bridge, device, presenter, width, height, picked, false);
+}
 
-    NoteGuideIdentity(g_guideIdentity.bridge, device, presenter, width, height, picked,
-                      reads ? Today::Read : Today::None);
+// True while the game's guides hold the bridge's history.
+static bool CountBridgeGuides(const GuideAsk& ask, size_t picked, DlssNr::PresentGuideIdentity::Outcome outcome,
+                              const void* presenter)
+{
+    const Config& cfg = *Config::Instance();
+    const bool logged =
+        presenter != nullptr && cfg.DlssNrEnabled.value_or_default() && cfg.DlssNrHookMethod.value_or_default() == 2;
+
+    CountGuideIdentity(g_guideIdentity.bridge, ask, picked, outcome, logged);
+    return NoteGuideSource(g_guideIdentity.bridgeSource, outcome == DlssNr::PresentGuideIdentity::Outcome::Used,
+                           "D3D11 bridge");
+}
+
+void NotePresentGuideFallback(bool synthesized)
+{
+    using DlssNr::PresentGuideIdentity::Fallback;
+    g_guideFallback = static_cast<uint8_t>(synthesized ? Fallback::Synthesized : Fallback::Zero);
+}
+
+// The last second of guide outcomes, when a present host published one lately: the present route is running.
+static bool RecentGuideStatus(DlssNr::PresentGuideIdentity::Status* status)
+{
+    const long long at = g_guideStatusAtMs.load();
+
+    if (at == 0 || NowMs() - at > 2000)
+        return false;
+
+    *status = DlssNr::PresentGuideIdentity::Unpack(g_guideStatus.load());
+    return true;
+}
+
+static DlssNr::PresentGuideIdentity::Fallback RecentGuideFallback()
+{
+    return static_cast<DlssNr::PresentGuideIdentity::Fallback>(g_guideFallback.load());
+}
+
+static DlssNr::PresentGuideIdentity::Source RecentGuideSource(const DlssNr::PresentGuideIdentity::Status& status)
+{
+    return DlssNr::PresentGuideIdentity::SourceOf(status, RecentGuideFallback());
+}
+
+std::string PresentGuidesLine()
+{
+    DlssNr::PresentGuideIdentity::Status status;
+
+    if (!Config::Instance()->DlssNrEnabled.value_or_default() || !RecentGuideStatus(&status))
+        return {};
+
+    return DlssNr::PresentGuideIdentity::GuidesLine(status, RecentGuideFallback());
 }
 
 static void ReleasePresentTemporal()
@@ -6952,6 +7099,14 @@ const char* HookStatus()
 
     const uint32_t method = Config::Instance()->DlssNrHookMethod.value_or_default();
 
+    // The guides a present route runs on come from what its presents did in the last second (present-real-guides.md,
+    // D3), not from g_temporalValid, which latches on the first capture and kept saying "with DLSS temporal inputs"
+    // after the upscaler had gone quiet. Routing still reads the latch; this does not. Which route is in use is the
+    // present entry's own word (PresentRouteLive), so a present route that has not decided on guides yet -- its first
+    // second, or frames it declines before its pick -- is still named as present.
+    DlssNr::PresentGuideIdentity::Status guides;
+    const bool presenting = RecentGuideStatus(&guides);
+
     if (method == 2)
     {
         if (BoundaryLive())
@@ -6959,19 +7114,21 @@ const char* HookStatus()
         if (DlssNr::PresentBoundary::g_lastDeclined.load())
             return "present: declined, the game's DLSS-G interpolates before this pass (HookMethod=1 edits the frames "
                    "it interpolates)";
-        if (g_temporalValid.load())
-            return "present: active, swapchain source with DLSS temporal inputs";
-        if (Config::Instance()->DlssNrRequireDlss.value_or_default())
-            return "present: waiting for DLSS temporal inputs from the upscaler";
-        return "present: active, presentation backbuffer with dummy temporal inputs";
+        if (presenting)
+            return DlssNr::PresentGuideIdentity::RouteText(false, RecentGuideSource(guides));
+        if (PresentRouteLive())
+            return "present: active on the swapchain's backbuffer";
+        return "present: no present has reached the pass yet";
     }
 
     if (method == 0)
     {
         if (DlssNr::PresentBoundary::g_gameDlssgSeen.load())
             return "auto: upscaled, the game's DLSS-G would interpolate before a present pass";
-        if (g_temporalValid.load() && PresentHookLive())
-            return "auto: present, swapchain source with DLSS temporal inputs";
+        if (presenting && PresentRouteLive())
+            return DlssNr::PresentGuideIdentity::RouteText(true, RecentGuideSource(guides));
+        if (PresentRouteLive())
+            return "auto: present, on the swapchain's backbuffer";
         return "auto: upscaled, the upscaler has handed over no temporal inputs yet";
     }
 
@@ -7066,6 +7223,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     }
 
     DlssNr::PresentBoundary::g_lastDeclined = false;
+    g_presentRouteAtMs = NowMs();
 
     // Fail-open startup guard: defer neural composition during initial frames (first 4 flips)
     // so swapchains, window sizing, and DXGI/VKD3D presentation pipelines settle into a steady state.
@@ -7174,6 +7332,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
 
     const unsigned int width = (unsigned int) bbDesc.Width;
     const unsigned int height = bbDesc.Height;
+    const void* const presenter = PresentGuidePresenter(swapchain);
 
     // This is the present thread. Everything below that the render thread also touches -- the
     // backbuffer copy's retirement (the retired list Dispatch trims), the captured guides, the failure
@@ -7265,7 +7424,12 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     };
 
     const size_t pickedSlot = g_presentGuideRing.PickForPresent(isEligible, nowMs);
-    NotePresentPassIdentity(swapchain, device, width, height, pickedSlot);
+
+    // The identity rules over that pick (present-real-guides.md, step 1). The pass reads the slot they return: the
+    // pick, or none when a rule refused it, and then the frame falls back below exactly as with no capture. A refused
+    // slot is never tracked or read. Rule 6 (lag) is enforced at the game's own Present only, where it was measured.
+    const GuideAsk guides = AskPresentPassGuides(device, presenter, width, height, pickedSlot, boundary);
+    const size_t usableSlot = guides.decision.slot;
 
     DlssNr::Submission::Usage savedReadUsage {};
     DlssNr::Submission::Usage savedPresentReadUsage {};
@@ -7275,7 +7439,9 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
     const auto newestRecordedSeq = g_presentGuideRing.NewestRecordedSequence();
     if (newestRecordedSeq > 0 && newestRecordedSeq == g_nrLastEnhancedRecordedSeq)
     {
-        // No new capture has been recorded since the last enhanced present: skip present (Correction 5)
+        // No new capture has been recorded since the last enhanced present: skip present (Correction 5). This is the
+        // present with no capture of its own -- a generated frame, or the upscaler gone quiet -- which D5 says skips.
+        CountPresentPassGuides(guides, pickedSlot, DlssNr::PresentGuideIdentity::Outcome::Skipped);
         ++g_presentSkips;
         nrLock.unlock();
         DropPresentList(slot);
@@ -7284,9 +7450,9 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         return;
     }
 
-    if (pickedSlot < DlssNr::PresentGuides::kRingSize)
+    if (usableSlot < DlssNr::PresentGuides::kRingSize)
     {
-        auto& clone = g_presentGuideClones[pickedSlot];
+        auto& clone = g_presentGuideClones[usableSlot];
         savedReadUsage = clone.readUsage;
         savedReadTracked = clone.readTracked;
         savedPresentReadUsage = clone.presentReadUsage;
@@ -7296,14 +7462,14 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         if (tracked)
         {
             clone.readTracked = true;
-            trackedSlot = pickedSlot;
+            trackedSlot = usableSlot;
             depth = clone.depth;
             motion = clone.motion;
             frame = clone.frame;
             frame.DepthState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             frame.MotionState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             temporalValid = (depth != nullptr && motion != nullptr);
-            temporalSeq = g_presentGuideRing.GetSlot(pickedSlot).sequence;
+            temporalSeq = g_presentGuideRing.GetSlot(usableSlot).sequence;
         }
         else
         {
@@ -7329,6 +7495,27 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         }
     }
 
+    const auto guideOutcome = DlssNr::PresentGuideIdentity::OutcomeOf(guides.decision, temporalValid);
+    CountPresentPassGuides(guides, pickedSlot, guideOutcome);
+
+    // The newest capture refused for good: decided on as surely as one used, so a later present with nothing newer
+    // recorded has no capture of its own and skips above (D5) instead of running the fallback -- a generated frame of a
+    // game's own frame generation that OptiScaler does not replace reaches this entry. A refused older pick (a newer
+    // capture still being copied), or a refusal that turns on this present (SettlesNewest), is left to the next one.
+    if (guideOutcome == DlssNr::PresentGuideIdentity::Outcome::Refused &&
+        DlssNr::PresentGuideIdentity::SettlesNewest(guides.decision.reason) &&
+        g_presentGuideRing.GetSlot(pickedSlot).sequence == newestRecordedSeq)
+    {
+        g_nrLastEnhancedRecordedSeq = newestRecordedSeq;
+    }
+
+    // The source the model's history is built on, for a pass that runs: under RequireDlss a frame without the game's
+    // guides is skipped below and is not a source change. While the game's guides hold the history, a frame that
+    // misses them takes no ZeroGuideReset either: that is a miss, not a scene without motion (D3).
+    bool gameGuidesHold = false;
+    if (temporalValid || !cfg.DlssNrRequireDlss.value_or_default())
+        gameGuidesHold = NotePresentPassGuideSource(temporalValid, !g_sourceIsPresent.load());
+
     nrLock.unlock();
 
     static ZeroGuides s_dummyGuides;
@@ -7345,6 +7532,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
         DropPresentList(slot);
         backbuffer->Release();
         device->Release();
+        NotePresentGuideWaiting();
         ReportSkipOnce("the present hook is waiting for the upscaler's temporal inputs");
         return;
     }
@@ -7382,7 +7570,7 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
 
         // See DlssNrZeroGuideReset: no real motion, so optionally no history to ghost from. Ours, not the
         // game's, and it says so.
-        frame.Reset = cfg.DlssNrZeroGuideReset.value_or_default();
+        frame.Reset = cfg.DlssNrZeroGuideReset.value_or_default() && !gameGuidesHold;
         frame.ResetIsPolicy = frame.Reset;
     }
 
@@ -7460,6 +7648,10 @@ void RunPresentPass(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue, bool 
             frame.MotionState = GuideRestState(true);
         }
     }
+
+    // What a frame without the game's guides ran on, for the status (HookStatus, the menu's guides line).
+    if (!temporalValid)
+        NotePresentGuideFallback(motion != s_dummyGuides.Motion());
 
     if (fgHook)
         g_lastFgFlip = g_presentFlip;
@@ -8356,10 +8548,52 @@ void SynthMotionGuide::Release()
     _reportedFailure = false;
 }
 
+// The bridge's read of one slot, under g_nrMutex: tracked before it is handed out, or not handed out at all.
+static bool ReadCapturedGuides(size_t slot, ID3D12GraphicsCommandList* cmdList, ID3D12Resource** depth,
+                               ID3D12Resource** motion, DlssNrFrameInfo* frame)
+{
+    if (slot >= DlssNr::PresentGuides::kRingSize)
+        return false;
+
+    auto& clone = g_presentGuideClones[slot];
+    if (clone.depth == nullptr || clone.motion == nullptr || cmdList == nullptr)
+        return false;
+
+    // The read is tracked before it is handed out, or the copy is not handed out: an untracked read could be
+    // overwritten by the next capture while the bridge's list still reads it. What Track changed is kept so
+    // AbandonCapturedGuides can undo it when the bridge drops its recording without executing it.
+    // isReadInFlight decides on presentReadUsage, so the bridge's read goes there too, or every slot it read
+    // would look in flight for good and the bridge would lose its guides after four frames.
+    const auto savedUsage = clone.readUsage;
+    const auto savedPresentUsage = clone.presentReadUsage;
+    const bool savedTracked = clone.readTracked;
+    clone.presentReadUsage = {};
+    if (!DlssNr::Submission::Track(cmdList, clone.readUsage) ||
+        !DlssNr::Submission::Track(cmdList, clone.presentReadUsage))
+    {
+        clone.readUsage = savedUsage;
+        clone.presentReadUsage = savedPresentUsage;
+        return false;
+    }
+    clone.readTracked = true;
+    g_bridgeRead = { true, slot, cmdList, savedUsage, savedPresentUsage, savedTracked };
+
+    *depth = clone.depth;
+    *motion = clone.motion;
+    *frame = clone.frame;
+    // The owned copies rest in NON_PIXEL_SHADER_RESOURCE, whatever the game's barrier override says.
+    frame->DepthState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    frame->MotionState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    return true;
+}
+
 bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** depth, ID3D12Resource** motion,
                            DlssNrFrameInfo* frame, ID3D12CommandQueue* queue, const void* presenter,
-                           unsigned int presentWidth, unsigned int presentHeight)
+                           unsigned int presentWidth, unsigned int presentHeight, bool* gameGuidesHold)
 {
+    if (gameGuidesHold != nullptr)
+        *gameGuidesHold = false;
+
     if (depth == nullptr || motion == nullptr || frame == nullptr)
         return false;
 
@@ -8381,41 +8615,18 @@ bool CapturedPresentGuides(ID3D12GraphicsCommandList* cmdList, ID3D12Resource** 
     };
 
     const size_t pickedSlot = g_presentGuideRing.PickForPresent(isEligible, NowMs());
-    NoteBridgeIdentity(cmdList, presenter, presentWidth, presentHeight, pickedSlot);
 
-    if (pickedSlot >= DlssNr::PresentGuides::kRingSize)
-        return false;
+    // The identity rules over that pick (present-real-guides.md, step 1): the bridge reads the slot they return, the
+    // pick or none. A refused slot is not touched, and the host falls back to its zeros or synthesized motion.
+    const GuideAsk guides = AskBridgeGuides(cmdList, presenter, presentWidth, presentHeight, pickedSlot);
+    const bool read = ReadCapturedGuides(guides.decision.slot, cmdList, depth, motion, frame);
 
-    auto& clone = g_presentGuideClones[pickedSlot];
-    if (clone.depth == nullptr || clone.motion == nullptr || cmdList == nullptr)
-        return false;
+    const bool hold = CountBridgeGuides(guides, pickedSlot,
+                                        DlssNr::PresentGuideIdentity::OutcomeOf(guides.decision, read), presenter);
+    if (gameGuidesHold != nullptr)
+        *gameGuidesHold = hold;
 
-    // The read is tracked before it is handed out, or the copy is not handed out: an untracked read could be
-    // overwritten by the next capture while the bridge's list still reads it. What Track changed is kept so
-    // AbandonCapturedGuides can undo it when the bridge drops its recording without executing it.
-    // isReadInFlight decides on presentReadUsage, so the bridge's read goes there too, or every slot it read
-    // would look in flight for good and the bridge would lose its guides after four frames.
-    const auto savedUsage = clone.readUsage;
-    const auto savedPresentUsage = clone.presentReadUsage;
-    const bool savedTracked = clone.readTracked;
-    clone.presentReadUsage = {};
-    if (!DlssNr::Submission::Track(cmdList, clone.readUsage) ||
-        !DlssNr::Submission::Track(cmdList, clone.presentReadUsage))
-    {
-        clone.readUsage = savedUsage;
-        clone.presentReadUsage = savedPresentUsage;
-        return false;
-    }
-    clone.readTracked = true;
-    g_bridgeRead = { true, pickedSlot, cmdList, savedUsage, savedPresentUsage, savedTracked };
-
-    *depth = clone.depth;
-    *motion = clone.motion;
-    *frame = clone.frame;
-    // The owned copies rest in NON_PIXEL_SHADER_RESOURCE, whatever the game's barrier override says.
-    frame->DepthState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    frame->MotionState = (int) D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    return true;
+    return read;
 }
 
 // The bridge abandoned the recording its captured guides were read in: the read never executes, so the slot's

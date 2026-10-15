@@ -806,11 +806,12 @@ void RenderMenu(Config* config, float menuResScale)
                 if (ImGui::Checkbox(Localization::Label("Require DLSS temporal inputs"), &requireDlss))
                     config->DlssNrRequireDlss = requireDlss;
 
-                HelpMarker("Present needs the game's depth and motion to reproject its history. With this "
-                           "on, a frame that has no temporal inputs yet is shown as the game rendered "
-                           "it. With it off, the pass runs on dummy temporals -- constant depth, no "
-                           "motion -- and treats the scene as standing still, which is right for a "
-                           "title whose upscaler is not DLSS.");
+                HelpMarker("Present needs the game's depth and motion to reproject its history, and uses "
+                           "them only on the frame they were captured for. With this on, a frame that "
+                           "has none -- none captured yet, or one that cannot be shown to be its own -- "
+                           "is shown as the game rendered it. With it off, the pass runs on dummy "
+                           "temporals -- constant depth, no motion -- and treats the scene as standing "
+                           "still, which is right for a title whose upscaler is not DLSS.");
 
                 bool synthMotion = config->DlssNrSynthMotion.value_or_default();
                 if (ImGui::Checkbox(Localization::Label("Synthesized motion"), &synthMotion))
@@ -869,6 +870,14 @@ void RenderMenu(Config* config, float menuResScale)
                     ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", status);
                 else if (status != nullptr && status[0] != '\0')
                     ImGui::TextUnformatted(status);
+
+                // The guides the present route ran on over the last second, and what the identity rules refused
+                // (present-real-guides.md, step 1). Read-only, and only while a present host is deciding: not on the
+                // upscaled route (HookMethod=1, Auto's), unless a D3D11 bridge host built at HookMethod=2 still runs,
+                // and not with the pass off.
+                const std::string guides = DlssNr::PresentGuidesLine();
+                if (!guides.empty())
+                    ImGui::TextWrapped("%s", guides.c_str());
             }
         }
 

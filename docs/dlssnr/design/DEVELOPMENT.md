@@ -126,6 +126,31 @@ Invariant checks against this table: absent wherever there is no frame of the pa
 shown on the line. It is not predicted before the press: predicting it would cost a store on every frame, and before
 the first request the capture's idle cost is one relaxed load per call site (comparison-capture.md, section 4.7).
 
+### 2.4 Status → present guides line (`DlssNr_Menu.cpp`, `PresentGuidesLine`)
+
+One read-only line under the status line (present-real-guides.md, step 1). `GuidesLine` in
+`DlssNr_PresentGuideIdentity.h` writes it from the last second of a present host's outcomes, and
+`tests/nr-present-guide-identity` holds every row; the menu only draws it. Rows are checked top to bottom.
+
+| State | Line |
+|-------|------|
+| `[DlssNr] Enabled` off, native Vulkan, or the D3D11 route line in its no-pass row | **none** |
+| no present host decided in the last two seconds (the upscaled route at HookMethod=1 or Auto's, the pass declined before its pick; a D3D11 bridge host built at HookMethod=2 keeps deciding after a switch to 1, and its line stays, truthfully) | **none** |
+| every present of the second skipped (nothing captured since the last capture used) | "Guides: no new frame from the upscaler; frames are shown as the game drew them" |
+| the game's guides used on every frame the pass ran on | "Guides: the game's depth and motion, on every frame" ("..., on every frame the pass ran on" when some skipped) |
+| the game's guides on some frames | "Guides: the game's depth and motion on U of P frames; R refused (reason), N with none" (+ ", shown as the game drew them" when the D3D12 pass waited on them) |
+| none used, and the D3D12 pass waited (`RequireDlss`) | "Guides: none the rules accept yet; frames are shown as the game drew them" |
+| none used, the last frame without them ran on synthesized motion | "Guides: synthesized motion" |
+| none used, otherwise (zeros; the D3D11 bridge never waits, whatever `RequireDlss` says) | "Guides: zero (no motion)" |
+
+The last three add "; the game's refused on R of P frames (reason)" when the rules refused any, and every row but the
+first two and the skip row adds "; S with no new frame from the upscaler" when some presents skipped. The reason is
+the most frequent refusal of the second. "Waited" is what the host reported doing, not the setting: the D3D12 pass's
+`RequireDlss` skip reports it, and a frame that ran on zeros or synthesized motion reports that instead.
+
+Invariant checks against this table: it is a statement, not a control, and it exists only while a present host is
+deciding (rule 2); the status line above it never names the guides from `g_temporalValid` (`nr-invariants`, section 6).
+
 ---
 
 ## 3. Per-change-type review (run BEFORE deploy)

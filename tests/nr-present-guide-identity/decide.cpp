@@ -1,12 +1,14 @@
 // The present-guide identity decision (retoque/dlssnr/DlssNr_PresentGuideIdentity.h) on the production header:
 // every rule alone, the first-failing order, narrowing only, the swapchain stamp's null semantics, the registry and
-// the frame counter, scenarios on the production ring, and step 0's window and line.
+// the frame counter, scenarios on the production ring, a long run that reads only what the rules accept, step 1's
+// window and line, the source-change reset, and the status the menu and the status line read.
 
 #include <dlssnr/DlssNr_PresentGuideIdentity.h>
 
 #include <cassert>
 #include <cstdio>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -201,7 +203,7 @@ void EveryRuleAlone()
 
     // Rule 6: no more than kLag boundaries behind; a stamp ahead of the present is not "behind".
     {
-        static_assert(kLag == 1, "the cases below assume the note's starting value");
+        static_assert(kLag == 1, "the cases below assume the measured value");
         Stamp s = Good();
         Present p = GoodPresent();
         s.presentEpoch = p.epoch - 2;
@@ -212,6 +214,35 @@ void EveryRuleAlone()
         CHECK(DecideOne(s, p) == Reason::Accepted);
         s.presentEpoch = p.epoch + 1;
         CHECK(DecideOne(s, p) == Reason::Accepted);
+    }
+
+    // Rule 6 where it is not enforced (every entry but the game's own Present): a capture past the limit is accepted
+    // and marked, one within it is not marked, and the rules after it still refuse.
+    {
+        Fixture f;
+        Stamp s = Good();
+        Present p = GoodPresent();
+        p.enforceLag = false;
+        s.presentEpoch = p.epoch - 3;
+        size_t slot = f.Capture(s, 1000);
+        Decision d = Decide(slot, f.ring, f.stamps, p);
+        CHECK(d.reason == Reason::Accepted && d.slot == slot && d.lagBeyond);
+
+        Fixture g;
+        slot = g.Capture(Good(), 1000);
+        d = Decide(slot, g.ring, g.stamps, p);
+        CHECK(d.reason == Reason::Accepted && !d.lagBeyond);
+
+        Fixture h;
+        s.renderWidth = 0;
+        slot = h.Capture(s, 1000);
+        d = Decide(slot, h.ring, h.stamps, p);
+        CHECK(d.reason == Reason::Subrect && d.slot == kRingSize && !d.lagBeyond);
+
+        // A refusal never carries the mark, enforced or not.
+        p.enforceLag = true;
+        d = Decide(slot, h.ring, h.stamps, p);
+        CHECK(d.reason == Reason::Lag && !d.lagBeyond);
     }
 
     // Rule 7: the ring's age limit, with the present's clock; a clock of zero does not judge age.
@@ -317,7 +348,7 @@ std::vector<Reason> Failing(size_t picked, const Ring& ring, const Stamps& stamp
         { Reason::Swapchain, s.swapchain != nullptr ? s.swapchain != p.swapchain : p.swapchainsOnDevice != 1 },
         { Reason::Ambiguous, FrameCaptures(picked, ring, stamps) != 1 },
         { Reason::Consumed, slot.sequence <= p.lastConsumed },
-        { Reason::Lag, lag > kLag },
+        { Reason::Lag, lag > kLag && p.enforceLag },
         { Reason::Stale, p.nowMs > 0 && slot.capturedAtMs > 0 && p.nowMs - slot.capturedAtMs > kPresentGuideMaxAgeMs },
         { Reason::Subrect, s.renderWidth == 0 || s.renderHeight == 0 || s.renderWidth > s.outputWidth ||
                                s.renderHeight > s.outputHeight },
@@ -345,7 +376,7 @@ void NarrowingOnly()
     const auto sometimes = [&rng](auto good, auto& pool)
     { return rng() % 8 == 0 ? pool[rng() % std::size(pool)] : good; };
 
-    size_t accepted = 0, none = 0;
+    size_t accepted = 0, none = 0, lagBeyond = 0;
     size_t reasons[kReasons] {};
 
     for (int round = 0; round < 50000; ++round)
@@ -385,12 +416,26 @@ void NarrowingOnly()
         p.epoch = good.epoch;
         p.lastConsumed = rng() % 6 == 0 ? rng() % 5 : 0;
         p.nowMs = rng() % 8 == 0 ? 0 : t + static_cast<int64_t>(rng() % 6 == 0 ? 300 : 10);
+        p.enforceLag = rng() % 3 != 0;
 
         const size_t picked = rng() % (kRingSize + 1);
         const Decision d = Decide(picked, f.ring, f.stamps, p);
 
         CHECK(d.slot == picked || d.slot == kRingSize);
         CHECK((d.slot != kRingSize) == (d.reason == Reason::Accepted));
+
+        // The mark: on an acceptance only, exactly when the capture is past the limit and the limit is not enforced.
+        if (d.reason == Reason::Accepted)
+        {
+            const Stamp& s = f.stamps[picked];
+            const uint64_t lag = p.epoch > s.presentEpoch ? p.epoch - s.presentEpoch : 0;
+            CHECK(d.lagBeyond == (lag > kLag && !p.enforceLag));
+            lagBeyond += d.lagBeyond ? 1 : 0;
+        }
+        else
+        {
+            CHECK(!d.lagBeyond);
+        }
 
         if (picked >= kRingSize || !f.ring.GetSlot(picked).recorded)
         {
@@ -409,7 +454,7 @@ void NarrowingOnly()
     }
 
     // Every reason was the answer somewhere, so the order was exercised, not just the happy path.
-    CHECK(accepted > 0 && none > 0);
+    CHECK(accepted > 0 && none > 0 && lagBeyond > 0);
     for (size_t r = static_cast<size_t>(Reason::Device); r < kReasons; ++r)
         CHECK(reasons[r] > 0);
 }
@@ -485,7 +530,8 @@ void RegistryAndCounter()
     }
 }
 
-// The production ring, the production tracker, and a present that reads the way RunPresentPass reads today.
+// The production ring, the production tracker, and a present that reads what the rules accept, as RunPresentPass
+// does since step 1: the capture it uses is the one rule 5 then compares against.
 struct Sim
 {
     Ring ring;
@@ -494,6 +540,7 @@ struct Sim
     int64_t now = 1000;
     uint64_t lastConsumed = 0;
     uint64_t lastLag = 0;
+    bool enforceLag = true;
 
     size_t Capture(const void* device, uint32_t w, uint32_t h, bool completed = true)
     {
@@ -522,13 +569,13 @@ struct Sim
         p.swapchain = chain;
         p.lastConsumed = lastConsumed;
         p.nowMs = now;
+        p.enforceLag = enforceLag;
         const Decision d = tracker.AtPresent(picked, ring, p);
         CHECK(p.epoch == tracker.Epoch());
         if (picked < kRingSize)
-        {
             lastLag = p.epoch - tracker.Stamped()[picked].presentEpoch;
-            lastConsumed = std::max(lastConsumed, ring.GetSlot(picked).sequence);
-        }
+        if (d.reason == Reason::Accepted)
+            lastConsumed = std::max(lastConsumed, ring.GetSlot(d.slot).sequence);
         now += 16;
         return d;
     }
@@ -570,17 +617,44 @@ void Scenarios()
         }
     }
 
-    // A copy that completes late: the next present is offered the read capture again (consumed), the one after it
-    // the late capture, two boundaries behind (lag).
+    // A copy that completes late: the next present is offered the used capture again (consumed, so it falls back),
+    // the one after it the late capture, two boundaries behind: refused where the lag limit is enforced, used and
+    // marked where it is not.
+    for (const bool enforce : { true, false })
     {
         Sim s;
+        s.enforceLag = enforce;
         s.Capture(D1, 1920, 1080);
         CHECK(s.PresentFrame(D1, SC1, 1920, 1080).reason == Reason::Accepted);
         const size_t late = s.Capture(D1, 1920, 1080, false);
         CHECK(s.PresentFrame(D1, SC1, 1920, 1080).reason == Reason::Consumed);
         s.done[late] = true;
-        CHECK(s.PresentFrame(D1, SC1, 1920, 1080).reason == Reason::Lag);
+        const Decision d = s.PresentFrame(D1, SC1, 1920, 1080);
         CHECK(s.lastLag == 2);
+        CHECK(enforce ? d.reason == Reason::Lag : (d.reason == Reason::Accepted && d.lagBeyond));
+    }
+
+    // The wrapped entry as measured (9eb4f6e6): each capture completes only after the present of its own frame, so
+    // every present is offered the previous frame's, two boundaries behind. Where the limit is enforced none would be
+    // used; where it is not (the wrapped entry, step 1) each is used once, marked, and never offered as unused again.
+    for (const bool enforce : { true, false })
+    {
+        Sim s;
+        s.enforceLag = enforce;
+        size_t previous = s.Capture(D1, 1920, 1080, false);
+        CHECK(s.PresentFrame(D1, SC1, 1920, 1080).reason == Reason::NoCapture);
+        int used = 0;
+        for (int i = 0; i < 100; ++i)
+        {
+            const size_t next = s.Capture(D1, 1920, 1080, false);
+            s.done[previous] = true;
+            const Decision d = s.PresentFrame(D1, SC1, 1920, 1080);
+            CHECK(s.lastLag == 2);
+            CHECK(enforce ? d.reason == Reason::Lag : (d.reason == Reason::Accepted && d.lagBeyond));
+            used += d.reason == Reason::Accepted ? 1 : 0;
+            previous = next;
+        }
+        CHECK(used == (enforce ? 0 : 100));
     }
 
     // A portrait, then the main view at another extent: the newest is the main view and it is accepted.
@@ -666,111 +740,256 @@ void Scenarios()
     }
 }
 
-// A long run on the production ring with drops, late copies, generated frames and the odd portrait: the answer is
-// always the pick or nothing, and the step-0 record's books balance.
+// A long run on the production ring, read the way step 1 reads it: a present tracks the slot the rules returned and
+// nothing else, and a read stays in flight on the "GPU" for a while. Captures are dropped, completed late or at another
+// extent or device, generated presents and portraits come and go, and two entries alternate, one enforcing the lag
+// limit. Held throughout:
+//   - the answer is the pick or nothing, and a refused pick is never read;
+//   - a capture refused for something that cannot get better (its device, extent, output base or render extent, an
+//     earlier use, its age, or its lag at an entry that enforces it) is never read later either;
+//   - the ring never overwrites a slot whose read is in flight;
+//   - the record's books balance.
 void LongRun()
 {
     std::mt19937_64 rng(7);
-    Sim s;
+    Ring ring;
+    Tracker tracker;
     Consumer consumer("sim");
+    bool done[kRingSize] {};
+    struct Read
+    {
+        bool inFlight = false;
+        int completesAt = 0;
+        uint64_t sequence = 0;
+    } reads[kRingSize];
+    std::set<uint64_t> refusedForGood;
+    int64_t now = 1000;
     Clock::time_point t {};
-    uint32_t presents = 0, lines = 0;
+    uint32_t presents = 0, lines = 0, used = 0, refused = 0;
+    int tick = 0;
+
+    const auto inFlight = [](void* token) { return token != nullptr && static_cast<Read*>(token)->inFlight; };
 
     for (int frame = 0; frame < 20000; ++frame)
     {
-        if (rng() % 20 != 0)
-            s.Capture(D1, 1920, 1080, rng() % 10 != 0);
-        if (rng() % 50 == 0)
-            s.Capture(D1, 512, 512);
+        // The GPU finishes reads.
+        for (auto& read : reads)
+            read.inFlight = read.inFlight && read.completesAt > tick;
+
+        const int captures = rng() % 20 == 0 ? 0 : (rng() % 30 == 0 ? 2 : 1);
+        for (int c = 0; c < captures; ++c)
+        {
+            const size_t slot = ring.AcquireForRecord(inFlight);
+            if (slot >= kRingSize)
+                continue;
+
+            CHECK(!reads[slot].inFlight);
+            Stamp s;
+            s.device = rng() % 200 == 0 ? D2 : D1;
+            s.outputWidth = rng() % 50 == 0 ? 512 : 1920;
+            s.outputHeight = s.outputWidth == 512 ? 512 : 1080;
+            s.outputBaseX = rng() % 300 == 0 ? 8 : 0;
+            s.renderWidth = rng() % 300 == 0 ? 0 : 1280;
+            s.renderHeight = 720;
+            tracker.StampCapture(slot, s, now);
+            done[slot] = rng() % 10 != 0;
+            ring.CommitRecord(slot, 1280, 720, false, now, &done[slot], &reads[slot]);
+        }
+
         for (size_t i = 0; i < kRingSize; ++i)
-            s.done[i] = s.done[i] || rng() % 3 == 0;
+            done[i] = done[i] || rng() % 3 == 0;
 
         const int fg = rng() % 4 == 0 ? 2 : 1;
         for (int g = 0; g < fg; ++g)
         {
-            const size_t picked = s.ring.PickForPresent([](void* tok) { return *static_cast<bool*>(tok); }, s.now);
+            const size_t picked = ring.PickForPresent([](void* tok) { return *static_cast<bool*>(tok); }, now);
             Present p;
             p.device = D1;
             p.width = 1920;
             p.height = 1080;
             p.swapchain = SC1;
             p.lastConsumed = consumer.LastConsumed();
-            p.nowMs = s.now;
-            const Decision d = s.tracker.AtPresent(picked, s.ring, p);
+            p.nowMs = now;
+            p.enforceLag = (frame / 500) % 2 == 0; // the boundary for a while, then another entry
+            const Decision d = tracker.AtPresent(picked, ring, p);
             CHECK(d.slot == picked || d.slot == kRingSize);
 
-            const Today today = picked < kRingSize ? Today::Read : Today::None;
+            // The read: the decision's slot, tracked; nothing when refused.
+            bool read = false;
+            if (d.slot < kRingSize)
+            {
+                const uint64_t sequence = ring.GetSlot(d.slot).sequence;
+                CHECK(refusedForGood.count(sequence) == 0);
+
+                reads[d.slot] = { true, tick + 1 + static_cast<int>(rng() % 3), sequence };
+                read = true;
+                ++used;
+            }
+            else if (picked < kRingSize && d.reason != Reason::NoCapture)
+            {
+                ++refused;
+                const bool forGood = d.reason == Reason::Device || d.reason == Reason::Extent ||
+                                     d.reason == Reason::OutputBase || d.reason == Reason::Subrect ||
+                                     d.reason == Reason::Consumed || d.reason == Reason::Stale;
+                if (forGood)
+                    refusedForGood.insert(ring.GetSlot(picked).sequence);
+            }
+
+            const Outcome outcome = OutcomeOf(d, read);
+            CHECK(outcome != Outcome::Refused || !read);
             std::string line;
             const uint64_t before = consumer.LastConsumed();
-            lines += consumer.Note(d, picked, s.ring, s.tracker.Stamped(), p, today, t, &line) ? 1 : 0;
+            lines += consumer.Note(d, picked, ring, tracker.Stamped(), p, outcome, t, &line) ? 1 : 0;
             CHECK(consumer.LastConsumed() >= before);
+            CHECK(outcome != Outcome::Used || consumer.LastConsumed() >= ring.GetSlot(d.slot).sequence);
             ++presents;
 
             const Counts& open = consumer.Open();
-            CHECK(open.read + open.skipped + open.none == open.presents);
-            uint32_t reasons = 0;
-            for (uint32_t n : open.readReasons)
-                reasons += n;
-            CHECK(reasons == open.read);
+            CHECK(open.used + Refusals(open) + open.skipped + open.none == open.presents);
+            CHECK(open.enforced <= open.presents && open.lagBeyond <= open.used);
 
-            s.now += 8;
+            now += 8;
             t += std::chrono::milliseconds(8);
+            ++tick;
+        }
+
+        // A slot in flight still holds the capture that was read from it.
+        for (size_t i = 0; i < kRingSize; ++i)
+        {
+            if (reads[i].inFlight)
+                CHECK(ring.GetSlot(i).sequence == reads[i].sequence);
         }
     }
+
+    // Every kind of answer happened, so the properties above were tested, not vacuous.
+    CHECK(used > 1000 && refused > 100 && !refusedForGood.empty());
 
     // About 200 s of presents: a line at least every 30 s, and at most one per 2 s.
     const auto seconds = static_cast<uint32_t>(presents * 8 / 1000);
     CHECK(lines >= seconds / 30 && lines <= seconds / 2 + 1);
 }
 
-// Step 0's record: what is counted, the line it writes, and how often.
+// Which refusals of the newest capture settle it, so the presents after it with nothing newer skip (D5): every reason
+// that lives in the capture, none that turns on the present. Then on the production ring: a capture refused for one of
+// them is refused again by every later present that has nothing newer, so skipping those presents passes over nothing
+// the rules would accept; a capture refused on extent can be accepted by the next present once the size settles, which
+// is why that reason does not settle it.
+void SettledNewest()
+{
+    for (const Reason settles :
+         { Reason::Device, Reason::OutputBase, Reason::Ambiguous, Reason::Lag, Reason::Stale, Reason::Subrect })
+        CHECK(SettlesNewest(settles));
+    for (const Reason open :
+         { Reason::Accepted, Reason::NoCapture, Reason::Extent, Reason::Swapchain, Reason::Consumed })
+        CHECK(!SettlesNewest(open));
+
+    std::mt19937_64 rng(15);
+    int settled = 0;
+    for (int round = 0; round < 20000; ++round)
+    {
+        Sim s;
+        // A few frames of history.
+        for (int i = 0; i < static_cast<int>(rng() % 3); ++i)
+        {
+            s.Capture(D1, 1920, 1080);
+            s.PresentFrame(D1, SC1, 1920, 1080);
+        }
+        // Sometimes an earlier capture of the same frame at the same extent: the newest is then ambiguous.
+        if (rng() % 6 == 0)
+            s.Capture(D1, 1920, 1080);
+
+        // The newest capture, sometimes flawed in a way that lives in it, sometimes copied late (lag).
+        const size_t slot = s.ring.AcquireForRecord(Never);
+        Stamp st;
+        st.device = rng() % 6 == 0 ? D2 : D1;
+        st.outputWidth = 1920;
+        st.outputHeight = 1080;
+        st.outputBaseX = rng() % 6 == 0 ? 4u : 0u;
+        st.renderWidth = rng() % 6 == 0 ? 0u : 1280u;
+        st.renderHeight = 720;
+        s.tracker.StampCapture(slot, st, s.now);
+        const bool late = rng() % 4 == 0;
+        s.done[slot] = !late;
+        s.ring.CommitRecord(slot, 1280, 720, false, s.now, &s.done[slot], nullptr);
+        if (late)
+        {
+            s.PresentFrame(D1, SC1, 1920, 1080);
+            s.PresentFrame(D1, SC1, 1920, 1080);
+            s.done[slot] = true;
+        }
+
+        const Decision first = s.PresentFrame(D1, SC1, 1920, 1080);
+        CHECK(s.ring.NewestRecordedSequence() == s.ring.GetSlot(slot).sequence);
+        if (first.reason == Reason::Accepted || !SettlesNewest(first.reason))
+            continue;
+        ++settled;
+
+        // Every later present with nothing newer recorded refuses it again, or has nothing to offer.
+        for (int later = 0; later < 4; ++later)
+        {
+            s.now += static_cast<int64_t>(rng() % 120);
+            CHECK(s.PresentFrame(D1, SC1, 1920, 1080).reason != Reason::Accepted);
+        }
+    }
+    CHECK(settled > 1000);
+
+    // Extent does not settle: a present at a passing size refuses, and the next one at the settled size accepts.
+    Sim e;
+    e.enforceLag = false;
+    e.Capture(D1, 2560, 1440);
+    CHECK(e.PresentFrame(D1, SC1, 1920, 1080).reason == Reason::Extent);
+    CHECK(e.PresentFrame(D1, SC1, 2560, 1440).reason == Reason::Accepted);
+}
+
+// Step 1's record: what is counted, the line it writes, and how often.
 void WindowAndLine()
 {
     // The line, from counts set by hand.
     {
         Counts c;
-        c.presents = 5;
-        c.read = 3;
+        c.presents = 6;
+        c.enforced = 6;
+        c.used = 3;
         c.skipped = 1;
         c.none = 1;
-        c.readReasons[static_cast<size_t>(Reason::Accepted)] = 2;
-        c.readReasons[static_cast<size_t>(Reason::Lag)] = 1;
-        c.lag = { 0, 2, 1, 0, 0 };
-        c.frame = { 3, 0, 0 };
+        c.refused[static_cast<size_t>(Reason::Lag)] = 1;
+        c.lag = { 0, 3, 1, 0, 0 };
+        c.frame = { 4, 0, 0 };
         const std::string expected =
-            "DLSS-NR present guides, identity check (log only, nothing refused), D3D12 present: 5 presents in 2.0 s | "
-            "today 3 read a capture, 1 skipped with no new capture, 1 had none | of those read, 2 would pass, 1 would "
-            "be refused (lag 1) | skipped but would pass 0 | epoch lag of new captures 0:0 1:2 2:1 3:0 4+:0 | "
-            "captures per frame at their extent 1:3 2:0 3+:0";
+            "DLSS-NR present guides, identity applied, D3D12 present: 6 presents in 2.0 s, lag limit enforced on 6 | "
+            "3 used the game's depth and motion, 1 refused (lag 1), 1 skipped with no new capture, 1 had none | "
+            "skipped but would pass 0 | used past the lag limit where it is not enforced 0 | epoch lag of new captures "
+            "0:0 1:3 2:1 3:0 4+:0 | captures per frame at their extent 1:4 2:0 3+:0";
         const std::string line = FormatLine("D3D12 present", c, std::chrono::milliseconds(2049));
         if (line != expected)
             std::fprintf(stderr, "got:      %s\nexpected: %s\n", line.c_str(), expected.c_str());
         CHECK(line == expected);
 
-        c.readReasons[static_cast<size_t>(Reason::Extent)] = 4;
-        c.readReasons[static_cast<size_t>(Reason::Ambiguous)] = 2;
-        c.read += 6;
+        c.refused[static_cast<size_t>(Reason::Extent)] = 4;
+        c.refused[static_cast<size_t>(Reason::Ambiguous)] = 2;
         c.presents += 6;
+        c.enforced = 0;
         c.skippedWouldPass = 1;
+        c.lagBeyond = 2;
         c.haveMismatch = true;
         c.mismatch.outputWidth = 3840;
         c.mismatch.outputHeight = 2160;
-        c.mismatch.outputBaseX = 0;
-        c.mismatch.outputBaseY = 0;
         c.mismatchWidth = 1920;
         c.mismatchHeight = 1080;
         const std::string second = FormatLine("D3D11 bridge", c, std::chrono::milliseconds(31500));
-        CHECK(
-            second ==
-            "DLSS-NR present guides, identity check (log only, nothing refused), D3D11 bridge: 11 presents in 31.5 s | "
-            "today 9 read a capture, 1 skipped with no new capture, 1 had none | of those read, 2 would pass, 7 would "
-            "be refused (extent 4, ambiguous 2, lag 1) | skipped but would pass 1 | epoch lag of new captures 0:0 "
-            "1:2 2:1 3:0 4+:0 | captures per frame at their extent 1:3 2:0 3+:0 | last extent refusal: output "
-            "3840x2160 at (0,0), backbuffer 1920x1080");
+        const std::string expectedSecond =
+            "DLSS-NR present guides, identity applied, D3D11 bridge: 12 presents in 31.5 s, lag limit enforced on 0 | "
+            "3 used the game's depth and motion, 7 refused (extent 4, ambiguous 2, lag 1), 1 skipped with no new "
+            "capture, 1 had none | skipped but would pass 1 | used past the lag limit where it is not enforced 2 | "
+            "epoch lag of new captures 0:0 1:3 2:1 3:0 4+:0 | captures per frame at their extent 1:4 2:0 3+:0 | last "
+            "extent refusal: output 3840x2160 at (0,0), backbuffer 1920x1080";
+        if (second != expectedSecond)
+            std::fprintf(stderr, "got:      %s\nexpected: %s\n", second.c_str(), expectedSecond.c_str());
+        CHECK(second == expectedSecond);
     }
 
-    // What Note counts: today's three outcomes, the decision over reads, would-pass skips, and a capture's lag and
-    // frame count once, at the first present it is offered to.
+    // What Note counts: the four outcomes, refusals by reason, skips the rules would accept, the mark, and a capture's
+    // lag and frame count once, at the first present it is offered to. Only a use moves rule 5's record.
     {
         Fixture f;
         Stamp s = Good();
@@ -781,20 +1000,53 @@ void WindowAndLine()
         Clock::time_point t {};
         std::string line;
 
-        Decision d = Decide(slot, f.ring, f.stamps, p);
-        CHECK(!c.Note(d, slot, f.ring, f.stamps, p, Today::Read, t, &line));
+        // Refused first (another extent): counted, and the record of uses does not move.
+        Present wide = p;
+        wide.width = 2560;
+        Decision d = Decide(slot, f.ring, f.stamps, wide);
+        CHECK(d.reason == Reason::Extent);
+        CHECK(!c.Note(d, slot, f.ring, f.stamps, wide, OutcomeOf(d, false), t, &line));
+        CHECK(c.LastConsumed() == 0);
+        CHECK(c.Open().haveMismatch && c.Open().mismatchWidth == 2560);
+
+        d = Decide(slot, f.ring, f.stamps, p);
+        CHECK(OutcomeOf(d, true) == Outcome::Used && OutcomeOf(d, false) == Outcome::None);
+        CHECK(!c.Note(d, slot, f.ring, f.stamps, p, Outcome::Used, t, &line));
         CHECK(c.LastConsumed() == f.ring.GetSlot(slot).sequence);
         p.lastConsumed = c.LastConsumed();
         p.epoch = 11;
         d = Decide(slot, f.ring, f.stamps, p);
-        CHECK(d.reason == Reason::Consumed);
-        CHECK(!c.Note(d, slot, f.ring, f.stamps, p, Today::Skipped, t, &line));
-        CHECK(!c.Note({}, kRingSize, f.ring, f.stamps, p, Today::None, t, &line));
+        CHECK(d.reason == Reason::Consumed && OutcomeOf(d, false) == Outcome::Refused);
+        CHECK(!c.Note(d, slot, f.ring, f.stamps, p, Outcome::Skipped, t, &line));
+        CHECK(!c.Note({}, kRingSize, f.ring, f.stamps, p, OutcomeOf({}, false), t, &line));
+
+        // An accepted capture whose read could not be tracked is none, and moves no record.
+        const uint64_t record = c.LastConsumed();
+        Fixture g;
+        const size_t other = g.Capture(Good(), 1000);
+        const Decision untracked = Decide(other, g.ring, g.stamps, GoodPresent());
+        CHECK(untracked.reason == Reason::Accepted && OutcomeOf(untracked, false) == Outcome::None);
+        Consumer quiet("y");
+        CHECK(!quiet.Note(untracked, other, g.ring, g.stamps, GoodPresent(), Outcome::None, t, &line));
+        CHECK(quiet.LastConsumed() == 0 && quiet.Open().none == 1 && quiet.Open().used == 0);
+        CHECK(c.LastConsumed() == record);
+
+        // MarkUsed: the record of a use without counting it, never backwards.
+        quiet.MarkUsed(5);
+        quiet.MarkUsed(3);
+        CHECK(quiet.LastConsumed() == 5 && quiet.Open().presents == 1);
+
+        // A use past the limit where it is not enforced is marked.
+        Decision marked { slot, Reason::Accepted, true };
+        Present relaxed = p;
+        relaxed.enforceLag = false;
+        CHECK(!c.Note(marked, slot, f.ring, f.stamps, relaxed, Outcome::Used, t, &line));
 
         const Counts& o = c.Open();
-        CHECK(o.presents == 3 && o.read == 1 && o.skipped == 1 && o.none == 1);
-        CHECK(o.readReasons[static_cast<size_t>(Reason::Accepted)] == 1);
-        CHECK(o.skippedWouldPass == 0);
+        CHECK(o.presents == 5 && o.enforced == 4 && o.used == 2 && o.skipped == 1 && o.none == 1);
+        CHECK(c.LastConsumed() == f.ring.GetSlot(slot).sequence);
+        CHECK(o.refused[static_cast<size_t>(Reason::Extent)] == 1 && Refusals(o) == 1);
+        CHECK(o.skippedWouldPass == 0 && o.lagBeyond == 1);
         CHECK(o.lag[1] == 1 && o.lag[2] == 0); // counted once, at lag 1, not again at lag 2
         CHECK(o.frame[0] == 1);
     }
@@ -823,15 +1075,15 @@ void WindowAndLine()
             if (forceLag)
                 d = { kRingSize, Reason::Lag }; // a refusal, to change what the window looks like
             s.now += 16;
-            return c.Note(d, picked, s.ring, s.tracker.Stamped(), p, Today::Read, t + at, &line);
+            return c.Note(d, picked, s.ring, s.tracker.Stamped(), p, OutcomeOf(d, d.slot < kRingSize), t + at, &line);
         };
 
         using std::chrono::milliseconds;
         CHECK(!present(milliseconds(0), false));
         CHECK(!present(milliseconds(1999), false));
         CHECK(present(milliseconds(2000), false));
-        CHECK(line.find(": 3 presents in 2.0 s") != std::string::npos);
-        CHECK(line.find("of those read, 3 would pass, 0 would be refused |") != std::string::npos);
+        CHECK(line.find(": 3 presents in 2.0 s, lag limit enforced on 3") != std::string::npos);
+        CHECK(line.find("| 3 used the game's depth and motion, 0 refused, 0 skipped") != std::string::npos);
         CHECK(line.find("epoch lag of new captures 0:0 1:3 2:0") != std::string::npos);
 
         // Steady: the same buckets in use. Held until 30 s after the last line, then the whole interval at once.
@@ -845,7 +1097,7 @@ void WindowAndLine()
         // A refusal appears: a new bucket, written once kWindow has passed, not kSteadyWindow.
         CHECK(!present(milliseconds(33000), true));
         CHECK(present(milliseconds(34000), true));
-        CHECK(line.find("would be refused (lag 2)") != std::string::npos);
+        CHECK(line.find(" 2 refused (lag 2)") != std::string::npos);
 
         // An hour of the same: a line every 30 s, no more.
         int lines = 0;
@@ -855,6 +1107,192 @@ void WindowAndLine()
 
         c.Reset();
         CHECK(c.LastConsumed() == 0 && c.Open().presents == 0);
+    }
+}
+
+// D3's reset: a single miss, or an alternation, never resets; a change that holds for kSourceStable presents resets
+// once, in either direction; the first source to hold is the start and does not.
+void SourceChange()
+{
+    static_assert(kSourceStable == 4, "the cases below assume the starting value");
+
+    SourceHistory h;
+    CHECK(h.Established() == -1);
+
+    // The start: the first frame refused (step 0's ambiguous at start-up), then the game's guides. No reset.
+    CHECK(!h.Note(false));
+    for (int i = 0; i < 10; ++i)
+        CHECK(!h.Note(true));
+    CHECK(h.Established() == 1);
+
+    // Single misses, and an alternation: no reset, ever.
+    for (int i = 0; i < 100; ++i)
+    {
+        CHECK(!h.Note(false));
+        CHECK(!h.Note(true));
+    }
+    for (int i = 0; i < 100; ++i)
+    {
+        CHECK(!h.Note(false));
+        CHECK(!h.Note(false));
+        CHECK(!h.Note(false));
+        CHECK(!h.Note(true));
+    }
+    CHECK(h.Established() == 1);
+
+    // A change that holds: one reset, on its kSourceStable-th frame, then none while it stays.
+    CHECK(!h.Note(false));
+    CHECK(!h.Note(false));
+    CHECK(!h.Note(false));
+    CHECK(h.Note(false));
+    CHECK(h.Established() == 0);
+    for (int i = 0; i < 50; ++i)
+        CHECK(!h.Note(false));
+
+    // And back.
+    int resets = 0;
+    for (int i = 0; i < 50; ++i)
+        resets += h.Note(true) ? 1 : 0;
+    CHECK(resets == 1 && h.Established() == 1);
+
+    // Reset forgets: the next source to hold is a start again.
+    h.Reset();
+    for (int i = 0; i < 10; ++i)
+        CHECK(!h.Note(false));
+    CHECK(h.Established() == 0);
+
+    // A random run: never two resets closer than kSourceStable presents, and every reset is a held change.
+    std::mt19937_64 rng(4);
+    SourceHistory r;
+    int last = -100, total = 0;
+    bool run[kSourceStable] {};
+    for (int i = 0; i < 100000; ++i)
+    {
+        const bool game = rng() % 7 != 0 ? (i / 997) % 2 == 0 : rng() % 2 == 0;
+        run[i % kSourceStable] = game;
+        if (r.Note(game))
+        {
+            CHECK(i - last >= static_cast<int>(kSourceStable));
+            for (const bool b : run)
+                CHECK(b == game);
+            last = i;
+            ++total;
+        }
+    }
+    CHECK(total > 10);
+}
+
+// The status: packed and unpacked without the lock, one second at a time, and the words the status line and the menu
+// make of it.
+void StatusAndText()
+{
+    // Pack and unpack, saturating.
+    {
+        Status s;
+        s.presents = 61;
+        s.used = 60;
+        s.refused = 1;
+        s.skipped = 3;
+        s.top = Reason::Ambiguous;
+        const Status u = Unpack(Pack(s));
+        CHECK(u.presents == 61 && u.used == 60 && u.refused == 1 && u.skipped == 3 && u.top == Reason::Ambiguous);
+
+        s.presents = 1u << 20;
+        s.top = Reason::Subrect;
+        const Status big = Unpack(Pack(s));
+        CHECK(big.presents == kStatusCountMax && big.used == 60 && big.top == Reason::Subrect);
+        CHECK(Unpack(0).presents == 0 && Unpack(0).top == Reason::Accepted);
+        for (size_t r = 0; r < kReasons; ++r)
+        {
+            Status one;
+            one.top = static_cast<Reason>(r);
+            CHECK(Unpack(Pack(one)).top == one.top);
+        }
+    }
+
+    // One second at a time: skips apart, refusals by reason, the most frequent named.
+    {
+        StatusWindow w;
+        Clock::time_point t {};
+        Status out;
+        CHECK(!w.Add(Outcome::Used, Reason::Accepted, t, &out));
+        CHECK(!w.Add(Outcome::Refused, Reason::Lag, t + std::chrono::milliseconds(100), &out));
+        CHECK(!w.Add(Outcome::Refused, Reason::Extent, t + std::chrono::milliseconds(200), &out));
+        CHECK(!w.Add(Outcome::Refused, Reason::Extent, t + std::chrono::milliseconds(300), &out));
+        CHECK(!w.Add(Outcome::Skipped, Reason::Consumed, t + std::chrono::milliseconds(400), &out));
+        CHECK(!w.Add(Outcome::None, Reason::NoCapture, t + std::chrono::milliseconds(999), &out));
+        CHECK(w.Add(Outcome::Used, Reason::Accepted, t + std::chrono::milliseconds(1000), &out));
+        CHECK(out.presents == 6 && out.used == 2 && out.refused == 3 && out.skipped == 1);
+        CHECK(out.top == Reason::Extent);
+
+        // The next second starts empty.
+        CHECK(!w.Add(Outcome::Used, Reason::Accepted, t + std::chrono::milliseconds(1500), &out));
+        CHECK(w.Add(Outcome::Used, Reason::Accepted, t + std::chrono::milliseconds(2000), &out));
+        CHECK(out.presents == 2 && out.used == 2 && out.refused == 0 && out.top == Reason::Accepted);
+    }
+
+    // Which source a second names, and the status line's literal for it.
+    {
+        Status s;
+        s.presents = 10;
+        s.used = 1;
+        CHECK(SourceOf(s, Fallback::Waiting) == Source::Game);
+        s.used = 0;
+        CHECK(SourceOf(s, Fallback::Waiting) == Source::Waiting);
+        CHECK(SourceOf(s, Fallback::Synthesized) == Source::Synthesized);
+        CHECK(SourceOf(s, Fallback::Zero) == Source::Zero);
+        Status skipping;
+        skipping.skipped = 60;
+        CHECK(SourceOf(skipping, Fallback::Zero) == Source::Skipping);
+        CHECK(SourceOf(skipping, Fallback::Waiting) == Source::Skipping);
+
+        CHECK(std::string(RouteText(false, Source::Game)) == "present: active, the game's depth and motion");
+        CHECK(std::string(RouteText(true, Source::Game)) == "auto: present, the game's depth and motion");
+        CHECK(std::string(RouteText(false, Source::Synthesized)) == "present: active, synthesized motion");
+        CHECK(std::string(RouteText(false, Source::Zero)) == "present: active, zero guides (no motion)");
+        CHECK(std::string(RouteText(false, Source::Waiting)) == "present: waiting for the game's depth and motion");
+        CHECK(std::string(RouteText(true, Source::Skipping)) ==
+              "auto: present, no new frame from the upscaler (shown as the game drew it)");
+        // Never the latch's old claim.
+        for (const Source source :
+             { Source::Game, Source::Synthesized, Source::Zero, Source::Waiting, Source::Skipping })
+        {
+            for (const bool autoRoute : { false, true })
+                CHECK(std::string(RouteText(autoRoute, source)).find("DLSS temporal inputs") == std::string::npos);
+        }
+    }
+
+    // The menu's line, row by row of DEVELOPMENT.md section 2.4.
+    {
+        Status s;
+        s.presents = 60;
+        s.used = 60;
+        CHECK(GuidesLine(s, Fallback::Zero) == "Guides: the game's depth and motion, on every frame");
+        s.skipped = 2;
+        CHECK(GuidesLine(s, Fallback::Zero) == "Guides: the game's depth and motion, on every frame the pass ran on; "
+                                               "2 with no new frame from the upscaler");
+        s.skipped = 0;
+        s.used = 57;
+        s.refused = 2;
+        s.top = Reason::Ambiguous;
+        CHECK(GuidesLine(s, Fallback::Synthesized) ==
+              "Guides: the game's depth and motion on 57 of 60 frames; 2 refused (ambiguous), 1 with none");
+        CHECK(GuidesLine(s, Fallback::Waiting) == "Guides: the game's depth and motion on 57 of 60 frames; 2 refused "
+                                                  "(ambiguous), 1 with none, shown as the game drew them");
+        s.used = 0;
+        s.refused = 60;
+        s.top = Reason::Extent;
+        CHECK(GuidesLine(s, Fallback::Synthesized) ==
+              "Guides: synthesized motion; the game's refused on 60 of 60 frames (extent)");
+        s.refused = 0;
+        s.skipped = 5;
+        CHECK(GuidesLine(s, Fallback::Zero) == "Guides: zero (no motion); 5 with no new frame from the upscaler");
+        CHECK(GuidesLine(s, Fallback::Waiting) == "Guides: none the rules accept yet; frames are shown as the game "
+                                                  "drew them; 5 with no new frame from the upscaler");
+        Status skipping;
+        skipping.skipped = 60;
+        CHECK(GuidesLine(skipping, Fallback::Waiting) ==
+              "Guides: no new frame from the upscaler; frames are shown as the game drew them");
     }
 }
 } // namespace
@@ -867,10 +1305,16 @@ int main()
     RegistryAndCounter();
     Scenarios();
     LongRun();
+    SettledNewest();
     WindowAndLine();
-    std::printf("PASS: present-guide identity: %d checks -- every rule alone and in order, narrowing only over 50000 "
-                "random cases, null swapchain stamps, registry and frame counter, ring scenarios (FG 2x/4x, late copy, "
-                "portrait, resize, second swapchain), step 0's window and line\n",
+    SourceChange();
+    StatusAndText();
+    std::printf("PASS: present-guide identity: %d checks -- every rule alone and in order, rule 6 enforced and not, "
+                "narrowing only over 50000 random cases, null swapchain stamps, registry and frame counter, ring "
+                "scenarios (FG 2x/4x, late copy, the wrapped entry's lag, portrait, resize, second swapchain), a "
+                "20000-frame run that reads only what the rules accept and never overwrites a read in flight, which "
+                "refusals settle the newest capture, step 1's window and line, the source-change reset, the status "
+                "and its text\n",
                 g_checks);
     return 0;
 }

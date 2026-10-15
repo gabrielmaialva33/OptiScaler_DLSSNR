@@ -405,6 +405,24 @@ if bool_reads == 0:
 if len(failures) == before:
     print(f'PASS: {bool_reads} DlssNr settings read into a bool are all bool settings')
 
+# --- 6. The status line reads no latch ----------------------------------------------------------------------------
+# g_temporalValid is set by the first capture and cleared only at shutdown, so a status that read it kept saying "with
+# DLSS temporal inputs" over frames that ran on zero guides (present-real-guides.md, D3). Routing may read it; the
+# status line (HookStatus) names the guides from what the present did in the last second instead.
+before = len(failures)
+renderer_text = (nr / 'shaders/dlssnr/DlssNr_Dx12.cpp').read_text()
+status_at = renderer_text.find('const char* HookStatus()\n{')
+if status_at < 0:
+    fail('HookStatus() not found in DlssNr_Dx12.cpp; the latch check no longer matches the code')
+else:
+    status_body = renderer_text[status_at:renderer_text.index('\n}\n', status_at)]
+    if re.search(r'\bg_temporalValid\b', re.sub(r'//[^\n]*', '', status_body)):
+        fail('HookStatus reads g_temporalValid again: the status line would claim the game\'s guides after they stop')
+    if 'RecentGuideStatus(' not in status_body:
+        fail('HookStatus no longer reads the recent guide status; the latch check no longer matches the code')
+if len(failures) == before:
+    print('PASS: the status line names the guides from the last second, not the g_temporalValid latch')
+
 if failures:
     for message in failures:
         print(f'FAIL: {message}')
