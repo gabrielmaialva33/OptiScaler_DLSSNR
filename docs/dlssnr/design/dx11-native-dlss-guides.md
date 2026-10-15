@@ -485,6 +485,25 @@ An A/B worth one more session: the same scene with `Dx11Upscaler=dlss_12` (route
 DLSS hands its guides to the ring), the identity line then coming from the same bridge consumer, against native DLSS
 with this step, for the frame time and the picture.
 
+### Sons Of The Forest under Proton, 2026-10-15: native D3D11 DLSS is not offered, so step 3 cannot run here
+
+Build `c49fd27c`, GE-Proton, RTX 4090, driver 615.78.08, `Dx11Upscaler=dlss` and `HookMethod=2` set for the run. The
+game initialised NGX on D3D11 (`NVSDK_NGX_D3D11_Init_Ext`, AppId 4919, `GetCapabilityParameters` result 1) and never
+created a feature: its graphics menu offered no DLSS. The driver's Wine NGX core logged, once:
+
+```
+NVSDK Feature 32765: [NGXGetPathUsingQAI:526] error: too many attempts to query adapter info
+```
+
+The same game, same machine, with `Dx11Upscaler=dlss_12` (2026-09-06 and 09-14 logs) created its DLSS feature on every
+run, with no such error: there OptiScaler answers the capability query with its own D3D12 DLSS. So with `dlss` the
+capabilities come from the Wine core's D3D11 path, which cannot query the adapter under DXVK here and reports DLSS
+unavailable; the game hides the option. Native D3D11 DLSS is what route (c) exists for, so step 3 is **not testable
+on this Proton setup**. Its validation moves to a machine where native D3D11 DLSS runs (native Windows: Rafael's PC).
+Both test titles were put back as they were (`dlss_12` for Sons Of The Forest, `auto` for Palworld, no `HookMethod`
+line). Under Proton, route (b) (`dlss_12`) remains the one that gives a D3D11 DLSS game NR on its real guides, with
+the depth-stencil caveat found above.
+
 ## Config surface
 
 **No new key.** Where DLSS runs for a D3D11 game is already one quantity, `Dx11Upscaler` (`dlss`
