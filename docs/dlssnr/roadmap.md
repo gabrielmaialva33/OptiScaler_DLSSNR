@@ -15,8 +15,9 @@ and only then the change, as [nr-before-dlssg.md](design/nr-before-dlssg.md) did
   - **Real guides at present, step 1** ([present-real-guides.md](design/present-real-guides.md)): Crimson Desert at its own
     Present used the game's depth and motion on every frame of every window but one ambiguous start-up frame, lag 1
     throughout; the picture judged fine.
-  - **HUD at present under DLSS-G** ([hud-protection.md](design/hud-protection.md)): with `UiProtection` on, the HUD
-    stopped smearing and shaking on camera turns in Crimson Desert, DLSS-G at 4x.
+  - **HUD at present under DLSS-G**: on `a2d02037` the HUD smeared and shook on camera turns in Crimson Desert (DLSS-G
+    at 4x); on `acf885e7` it did not, with `UiProtection` on and with it off, so the protection is not what fixed it
+    and stays off by default. The cause is not isolated; step 1 of the real guides is the main change between the two.
   - **The Vulkan present host without the game's DLSS** ([nr-vulkan-present-host.md](design/nr-vulkan-present-host.md)):
     the model built off the present path with a stall watchdog (DOOM Eternal's one start-up hang in eight launches;
     one clean launch since, more wanted), the way back from a quiet DLSS (4-5 ms drains), and synthesized motion on
