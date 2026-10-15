@@ -894,7 +894,7 @@ is off).
   before the pass, compute write -> transfer read after it; every earlier frame's use of the working colour is in the
   source scope of its UNDEFINED transition.
 - **What the model may be shown** (`PlanColour`, `DlssNr_VkPresentNr.h`): RGBA8/BGRA8, UNORM or sRGB, in the sRGB
-  non-linear colour space -- SDR only, as the D3D12 present pass without its HDR conversion. HDR10, scRGB, HLG, ten-bit,
+  non-linear colour space -- SDR only in stage 3 without `HdrPresent` (see the 2026-10-15 HDR integration below). HDR10, scRGB, HLG, ten-bit,
   float and any other format are refused with format and colour space named (`an HDR10 swapchain (PQ, Rec.2020)
   (A2B10G10R10_UNORM_PACK32, colour space 1000104008): the present host's NR takes SDR only; the frame is shown as the
   game rendered it`), on the creation line and as the window's first refusal, and the round trip carries them unchanged.
@@ -1346,7 +1346,7 @@ one has no `dlssnr_vk_shutdown`) and the model beside `winmm.dll`; the bundle on
   none` and one of `bufferDeviceAddress already enabled`, `enabled by the host`, or `off in the application's create
   info, not edited`.
 - Its swapchain's creation line `; the model may run on it (B8G8R8A8_UNORM, sRGB non-linear)` -- or, with the game's
-  HDR on, `; the model will not run on it: an HDR10 swapchain ...`, and nothing else changes.
+  HDR on with `HdrPresent=false`, `; the model will not run on it: an HDR10 swapchain ...`, and nothing else changes.
 - At the first present: `the model initialised on device ... (cold ...)`, `the model's images built for 3440x1440
   (working 3440x1440)`, `the model's feature is up at 3440x1440`, `the model runs at present on ...` (the first present
   is slow: NGX and the model come up inside it).
@@ -1671,3 +1671,106 @@ Local documentation links, whitespace and the fourteen-suite registry listing we
 suites themselves were not run for this documentation change.
 Eventual C++ uses the pinned `/usr/lib/llvm20/bin/clang-format`; this documentation needs no build. (2026-10-14:
 the pin is clang-format 22 through `uvx` now, and stage 1's C++ is clean under it.)
+
+
+## HDR present conversion (2026-10-15 build plan)
+
+Reuse Retoque's shared HDR conversion SPIR-V. With HdrPresent on, admit packed ten-bit UNORM with
+HDR10_ST2084, and R16G16B16A16_SFLOAT with EXTENDED_SRGB_LINEAR. Preserve the existing refusal and SDR
+path when off; reject all other pairs. Keep a named 203-nit fallback: no reliable Vulkan SDR-white source is
+established. The D3D12 counterpart was reported successful by Gabriel in Crimson Desert, HDR10 at 3440x1440,
+about 0.12 ms conversion under Proton/Wayland; that is not Vulkan-host validation.
+
+The model's off-present worker owns the entire HDR product: immutable decode/encode descriptor sets and
+constants, pipeline, original encoded image, FP16 linear image and encoded output. BuildKey includes profile
+and raw format, so resize/colour changes rebuild before adoption. Every product follows the model's existing
+submitted-ticket retirement and abandon-on-loss path. No conversion allocation or pipeline build on present.
+
+The host retains its plain transfer round trip, ownership transfers and semaphore contract. HDR skips the SDR
+blits: Record receives the raw transfer image, copies into the owned original, decodes into signed Rec.709
+FP16 (80 nits/unit), runs the existing linear-HDR NR composition, re-encodes with the original bound, and copies
+back. All transfer/compute dependencies are explicit. Immutable descriptors need no per-frame update or new
+ring; images are serialized on the existing work queue. SynthMotion keeps reading the model's encoded proxy.
+Check sampled/storage/transfer and format-less storage-write capabilities before creating a product.
+
+Host tests cover profile pairs, off behavior, rebuild identity and lifecycle wiring; the real-model harness will
+probe local Proton Wayland/HDR surface support and exercise conversion under synchronization validation. If
+HDR surfaces are unavailable, report that explicitly and validate actual offscreen HDR-format images instead.
+Obtain independent read-only resource/queue/lifetime review and run the capped host suite, gated/locked build
+and Wine tests before committing/reporting. No deployment.
+
+Format-less writes follow the [Vulkan image interface contract](https://docs.vulkan.org/spec/latest/chapters/interfaces.html)
+and per-format [format feature requirements](https://docs.vulkan.org/spec/latest/chapters/formats.html).
+
+
+### HDR as built and measured
+
+Implemented on `feat/hdr-present-vulkan` from `34e9c5a7`. The shared shader and main composition constants are
+unchanged. Both HDR shader targets were regenerated after correcting their consumer comment; DXIL, SPIR-V and
+both generated headers remained byte-identical. `nr-invariants` now also compares the Vulkan conversion's four
+16-byte-record scalars with the shared HLSL cbuffer. Uniform record offsets respect the device's alignment.
+
+The original image needs sampling and transfers, not storage. On the local NVIDIA driver, A2R10G10B10 is offered
+for HDR presentation but lacks storage-image support. That profile therefore encodes to A2B10G10R10 and performs a
+same-size nearest blit to reorder channels into the raw image; both blit format capabilities are checked. The
+identity control below measured exact original codes after this path. This measured result is not a promise about
+all drivers' numeric UNORM blit conversions. Unsupported capabilities leave the game frame unchanged and name the
+reason. A conversion-only build failure is remembered for that profile/format/extent; a different product, including
+SDR, can rebuild. A lost device remains terminal.
+
+Independent read-only review found and prompted a fix to a loss-handoff gap: cleanup must observe a completed
+worker's lost-device result even before adopting it. Retired cleanup now checks it; release checks before and after
+adoption; abandonment retains the result; housekeeping tells the transport before further work. Normal HDR
+products retire on the same submitted tickets as the model, with no additional semaphore or queue ownership path.
+
+The first successful GPU validation used GE-Proton11-7, Wayland/HDR enabled, the RTX 4090 and the real NVIDIA model.
+The local surface offered all three supported combinations: format 97 / colour space 1000104002 (scRGB), and formats
+58 and 64 / colour space 1000104008 (HDR10). These were **real WSI swapchains**, not a simulated or offscreen fallback.
+Core and synchronization validation were active and proved by the harness's deliberate validation probe.
+HDR inputs span four alpha levels; readbacks check every alpha, reject all-black frames and non-finite FP16 RGB.
+The HDR `mae` field remains an equality sentinel (0 or 255), not a colour-error measurement.
+
+| Case | Evidence |
+|---|---|
+| `nr-hdr-control` | Decode, real model, identity resolve and encode; each HDR profile's readbacks exact with `ApplyModel=false`. |
+| `nr-hdr` | Model edits reach each of the three HDR profiles; original alpha preserved; SDR before and after HDR works. |
+| `nr-hdr-off` | All HDR frames exact and refused for colour, no HDR resources or submitted-conversion log. |
+| `nr-hdr-half-synth` | All three HDR profiles run at half working size; synthesized fields used after warm-up. |
+| `nr-control`, `nr`, `nr-synth-motion` | Existing SDR identity, model edits, cross-family transport and synthesized-motion regressions pass. |
+| Full host tier | All 49 suites PASS in the capped systemd scope, including HDR math and the extended NR invariants/source guards. |
+
+There were no host validation errors. The harness still reports NVIDIA's pre-existing
+`VUID-vkCmdDraw-None-09600`, specifically attributed to a named `nv.ngx.*` image, separately; it does not suppress a
+new VUID or a report on host resources. The pass GPU interval includes HDR conversion, model and resolve; no
+standalone Vulkan conversion-time claim is made.
+
+The successful HDR sequence destroys/drains the old swapchain before creating its replacement. GE-Proton11-7's
+Wayland colour-management protocol aborted an overlapping replacement with `wp_color_manager_v1: CM Surface already
+exists`, before the HDR pass ran. Existing SDR cases retain `oldSwapchain` overlap coverage. Consequently HDR
+cross-family operation and overlapping/in-flight HDR swapchain retirement are source-reviewed, not established by
+this WSI run. Device-loss cleanup is also source-guarded/reviewed, not a driver-loss injection result.
+
+New lines (prefix shown without the logger's timestamp/function):
+
+```text
+DLSS-NR Vulkan present host: HDR conversion resources built off the present path for WIDTHxHEIGHT, FORMAT
+DLSS-NR Vulkan present host: HDR conversion on, HDR10 (PQ, Rec.2020) at WIDTHxHEIGHT: linear Rec.709 FP16, SDR white 203.0 nits (203-nit fallback) x Paper white; original codes bound for reconstruction
+DLSS-NR Vulkan present host: HDR conversion on, scRGB (FP16, linear) at WIDTHxHEIGHT: linear Rec.709 FP16, SDR white 203.0 nits (203-nit fallback) x Paper white; original codes bound for reconstruction
+DLSS-NR Vulkan present host: the model is off on this device: HDR conversion format capabilities unavailable; the frame stays original
+DLSS-NR Vulkan present host: the model is off on this device: HDR conversion resources could not be built; the frame stays original
+```
+
+The first line is emitted after adoption of the worker's completed log; the submitted conversion line occurs once
+per built product, only after its recording was submitted. The swapchain creation line also names HDR10/scRGB when
+eligible. No SDR-white source is guessed: the white source is always explicitly `203-nit fallback` on Vulkan.
+
+DOOM Eternal remains the next game check, with `PROTON_ENABLE_WAYLAND=1 PROTON_ENABLE_HDR=1`, in-game HDR,
+`[DlssNr] VulkanPresentHost=true`, `Enabled=true`, `HdrPresent=true`. With DLSS/upscaler evaluations absent, expect
+HDR10 colour space 1000104008, off-present build followed by the conversion line, and increasing NR evaluated
+counters. DLSS on should yield to the after-upscale route; after it goes quiet the existing hand-back precedes the
+host's return. Check F7 off/on, SDR/HDR toggles, resize/alt-tab, highlights, saturated colours, HUD and repeated DLSS
+cycles. This task did not deploy or run DOOM and makes no game-visual-quality claim.
+
+Rafael's native Windows run must repeat real HDR10/scRGB validation and readbacks (especially A2R10's reorder),
+exercise resize/overlapping swapchains and teardown, and judge game colour/highlights/HUD. The current tests cover
+API correctness and numerical identity/control properties, not the appearance of the real game's edited frame.

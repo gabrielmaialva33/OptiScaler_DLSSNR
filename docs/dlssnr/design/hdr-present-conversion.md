@@ -712,3 +712,41 @@ Where the code differs from sections 4 to 7, and why:
   recovery now acts on these frames when the ini enables it.
 - **Not written**: the wine-tier `tests/nr-hdr-d3d12` (the identity test on a real D3D12 device) and the
   `dlssnr-loopback` leg. The host tier covers the maths, the decision, the record and the bridge's sequence.
+
+## 12. Vulkan present integration (2026-10-15)
+
+The Vulkan present host now consumes the existing `DlssNr_PresentHdr_Shader_Vk.h`. Its profile comes from each
+swapchain's format and colour space: either packed ten-bit channel order with HDR10 ST2084, or FP16 with extended
+sRGB linear. `[DlssNr] HdrPresent=false` keeps the previous refusal and SDR remains on its previous blit/composition
+path. With conversion enabled an unsupported pair is still carried unchanged.
+
+The model builder creates the original-format reference, linear FP16 and encoded-output images, the pipeline, two
+immutable descriptor sets and two aligned 16-byte uniform records. Nothing of the conversion is allocated, mapped or
+rewritten at present. Profile and raw format join the build key, so SDR/HDR changes retire the previous product and
+request a new build; presents continue unchanged during the build. All three images and the descriptor/pipeline
+bundle follow the model's completion tickets. Device loss abandons both current and retired products, including a
+loss reported by a completed build before the present path adopts it.
+
+Recording copies the transport image into the original reference, decodes PQ/Rec.2020 into linear Rec.709 scRGB units
+(or copies linear scRGB), runs the existing composition and real model, re-encodes with the original bound, and
+copies the encoded result back into the transport image. Its entry/exit layout remains `TRANSFER_DST_OPTIMAL`.
+The transport still owns every application wait, work submit and present signal; the conversion adds no submit,
+semaphore or queue wait. The original alpha and reference-bypass contract are those of the shared shader in section
+11. Synthesized motion continues to consume the model's encoded proxy.
+
+There is no DXGI output on this route. No Wine/Vulkan SDR-white query was established as a reliable equivalent of
+`DISPLAYCONFIG_SDR_WHITE_LEVEL`, so Vulkan uses **203 nits**, explicitly named as the fallback in its submitted-frame
+log, multiplied by Paper white. The profile's linear composition uses the existing reversible transfer and optional
+highlight recovery. No fields of `DlssNrConstants` or the main composition cbuffer changed; no shader arithmetic or
+bytecode changed for this integration.
+
+Per-format checks require sampled and transfer-source/destination support for the reference, plus storage and
+formatless storage-write support for FP16 and the encoded output, and legal image usage and dimensions. A2R10
+is presentable/sampleable but lacks storage support on the local NVIDIA driver: it uses an A2B10 encoded output
+and a same-size nearest blit that reorders channels, with source/destination blit support checked as well. A conversion-specific capability/allocation
+failure declines that product. It does not permanently poison a later SDR product on the same device. Device loss
+and model faults remain terminal.
+
+Vulkan's existing pass GPU interval includes decode and encode. It does **not** report a separately measured
+conversion interval as the D3D12 present host does. See `nr-vulkan-present-host.md` for validation evidence and the
+remaining game/native-Windows checks.

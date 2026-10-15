@@ -298,3 +298,20 @@ any other frame.
 - vkd3d-proton under the validation layer (above).
 
 Never install the DLL from `artifacts/` into a game; the cases' markers live only under `artifacts/cases/`.
+
+### HDR present profiles
+
+`--only nr-hdr-control,nr-hdr` requests Proton Wayland/HDR and enables `VK_EXT_swapchain_colorspace` when offered.
+It presents SDR, each offered HDR10/scRGB profile, then SDR again, using the production host and real model.
+The control sets `ApplyModel=false` and requires bit-exact readbacks; the active case requires edited HDR frames,
+original alpha across four levels, finite FP16 colour and no all-black frame, the off-present resource-build log and the submitted conversion/203-nit fallback log. Both retain
+core and synchronization validation (only the existing, specifically attributed NVIDIA model VUID is allowed).
+If the surface offers no HDR profile the case reports `HDR_SURFACE_UNAVAILABLE`; that is not HDR WSI coverage.
+
+Every compiler/runner launch checks `/proc/*/maps` for a running Steam game and refuses to start when one is found.
+On the shared workstation invoke the suite under `flock -o ~/.cache/retoque-wt/msvc-prefix.lock`, as for builds.
+
+`nr-hdr-off` holds all HDR readbacks exact with conversion disabled; `nr-hdr-half-synth` combines HDR with
+half-size model input and synthesized motion. The HDR cases destroy the prior swapchain before replacing it:
+GE-Proton11-7's Wayland colour-management protocol aborts overlapping replacements with `CM Surface already exists`.
+The existing SDR cases still cover `oldSwapchain` overlap. This is a WSI harness limitation, not a host workaround.
