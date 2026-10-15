@@ -496,6 +496,11 @@ The two surfaces differ in shape; nothing was captured.	As duas superfícies tê
 Waiting for the next frame the pass writes...	Aguardando o próximo quadro que o passe escrever...
 Waiting for the GPU to finish the copies...	Aguardando a GPU terminar as cópias...
 Writing the files...	Gravando os arquivos...
+# 2026-10-15: the comparison capture's review fixes: a surface the copy cannot take, a failure while the frame was
+# recorded, and a request made while one is under way.
+This frame is not a single-sample 2D texture; nothing was captured.	Este quadro não é uma textura 2D de amostra única; nada foi capturado.
+The capture failed while the frame was being recorded; nothing was captured (see the log).	A captura falhou enquanto o quadro era registrado; nada foi capturado (veja o log).
+A capture is already under way.	Já há uma captura em andamento.
 # 2026-10-13: the LSFG panel under FSR FG Settings (study branch; tools/lsfg-study/MFG_PRESENTER.md): its controls, the
 # multiplier and what it says about the swapchain the game started with, and the status line.
 LSFG 3.1 Interpolator (Lossless Scaling)	Interpolador LSFG 3.1 (Lossless Scaling)

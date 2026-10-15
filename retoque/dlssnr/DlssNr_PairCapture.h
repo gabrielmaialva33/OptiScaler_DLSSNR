@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -22,6 +23,8 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -64,6 +67,11 @@ inline constexpr const char* kReasonNoCompletion =
     "The GPU never confirmed the copies; nothing was written, and the capture is off for this session.";
 inline constexpr const char* kReasonHandOff = "The writer could not be started.";
 inline constexpr const char* kReasonWrite = "The files could not be written (see the log).";
+inline constexpr const char* kReasonShape = "The two surfaces differ in shape; nothing was captured.";
+inline constexpr const char* kReasonSurface = "This frame is not a single-sample 2D texture; nothing was captured.";
+inline constexpr const char* kReasonInternal =
+    "The capture failed while the frame was being recorded; nothing was captured (see the log).";
+inline constexpr const char* kReasonBusy = "A capture is already under way.";
 
 // --- State machine ---------------------------------------------------------------------------------------------
 
@@ -266,6 +274,23 @@ template <class Backend> class Session
         phase_.store(Phase::Idle, std::memory_order_release);
     }
 
+    // Render thread: the record site failed part way (an exception while the frame was described or recorded). A
+    // request it took, or one still waiting, goes back to idle with the reason, so the button does not stay
+    // "waiting". Whatever Record allocated before the failure never reached pending_, so it is never released: kept,
+    // not freed, because copies may already be recorded into it. A recording that completed (Pending) is untouched.
+    void Abandon(const char* reason)
+    {
+        for (const Phase from : { Phase::Recording, Phase::Requested })
+        {
+            Phase expected = from;
+            if (phase_.compare_exchange_strong(expected, Phase::Idle, std::memory_order_acq_rel))
+            {
+                Settle(false, reason, {});
+                return;
+            }
+        }
+    }
+
     // Lets go of what is proven done; whatever is not is kept for the rest of the process, not freed.
     void Shutdown(Backend& backend)
     {
@@ -413,6 +438,54 @@ inline ButtonState ButtonFor(const ButtonInputs& in)
     return state;
 }
 
+// Whether the last capture's reason still describes the panel. A refusal for a setting -- Compare, the debug view,
+// the driver proxy -- is not shown once that setting is off, so the line never asks the user to turn off what is
+// already off. Every other reason is about the attempt itself and stays until the next one.
+inline bool ReasonStillApplies(const char* reason, const ButtonInputs& in)
+{
+    if (reason == kReasonCompare)
+        return in.compare != 0;
+    if (reason == kReasonDebugView)
+        return in.debugView != 0;
+    if (reason == kReasonProxy)
+        return in.proxy;
+    return true;
+}
+
+// --- The record site's refusal -----------------------------------------------------------------------------------
+
+struct RefusalInputs
+{
+    bool proxy = false;                  // [DlssNr] UseProxy
+    uint32_t compare = 0;                // [DlssNr] Compare
+    uint32_t debugView = 0;              // [DlssNr] DebugView
+    bool directoryFailed = false;        // the folder could not be created this session
+    const char* formatRefusal = nullptr; // ImageFile::PlanFor's refusal for the processed surface's format
+    bool singleSample2d = true;          // both surfaces are single-sample 2D textures
+    bool sameShape = true;               // the same width, height and typed format
+};
+
+// Why the frame at the record site is not captured, or null. The first that applies wins, settings before the
+// surfaces, so the reason shown is the one the user can act on first.
+inline const char* RefusalFor(const RefusalInputs& in)
+{
+    if (in.proxy)
+        return kReasonProxy;
+    if (in.compare != 0)
+        return kReasonCompare;
+    if (in.debugView != 0)
+        return kReasonDebugView;
+    if (in.directoryFailed)
+        return kReasonDirectory;
+    if (in.formatRefusal != nullptr)
+        return in.formatRefusal;
+    if (!in.singleSample2d)
+        return kReasonSurface;
+    if (!in.sameShape)
+        return kReasonShape;
+    return nullptr;
+}
+
 // --- Names -----------------------------------------------------------------------------------------------------
 
 // A UTC time, as the record has it and as file names have it. UTC so the two agree and a daylight-saving change
@@ -556,16 +629,18 @@ inline bool ParseName(std::string_view name, std::string* stem = nullptr)
     return true;
 }
 
-// The files to delete so that, with one more capture written, at most keepPairs stems remain: the oldest stems by
-// name -- which is by time, the stamp leading every name -- and every file of each. Names that are not ours are
-// never returned.
-inline std::vector<std::string> RotationVictims(const std::vector<std::string>& names, size_t keepPairs)
+// The files to delete so that, with one more capture, at most keepPairs stems remain: the oldest stems by name --
+// which is by time, the stamp leading every name -- and every file of each. Names that are not ours are never
+// returned. protect, when given, is that one more capture, already written: its files are neither counted nor ever
+// returned, even when its name sorts first (a clock set back).
+inline std::vector<std::string> RotationVictims(const std::vector<std::string>& names, size_t keepPairs,
+                                                std::string_view protect = {})
 {
     std::set<std::string> stems;
     for (const std::string& name : names)
     {
         std::string stem;
-        if (ParseName(name, &stem))
+        if (ParseName(name, &stem) && (protect.empty() || stem != protect))
             stems.insert(stem);
     }
 
@@ -593,31 +668,100 @@ inline std::vector<std::string> RotationVictims(const std::vector<std::string>& 
     return victims;
 }
 
+// A directory entry's name as ASCII, from the platform's own string (wide on Windows, bytes elsewhere), so no
+// conversion can throw on a name it cannot represent. False for anything that is not plain ASCII: never one of ours.
+template <class Char> bool AsciiName(const std::basic_string<Char>& name, std::string& out)
+{
+    out.clear();
+    for (const Char c : name)
+    {
+        const auto code = static_cast<std::make_unsigned_t<Char>>(c);
+        if (code == 0 || code >= 0x80)
+            return false;
+        out.push_back(static_cast<char>(code));
+    }
+    return true;
+}
+
+// After a capture is written: deletes the oldest pairs in directory so that at most keepPairs remain, the one just
+// written (protect) always among them, and returns how many files were actually removed. Run after the write, not
+// before, so a write that fails costs no older pair. Names that are not ours are never touched; a file that cannot be
+// removed (a read-only folder) is left and not counted.
+inline size_t RotateFolder(const std::filesystem::path& directory, size_t keepPairs, std::string_view protect)
+{
+    std::error_code ec;
+    std::vector<std::string> names;
+    for (std::filesystem::directory_iterator it(directory, ec), end; !ec && it != end; it.increment(ec))
+    {
+        std::string ascii;
+        if (AsciiName(it->path().filename().native(), ascii))
+            names.push_back(std::move(ascii));
+    }
+    size_t removed = 0;
+    for (const std::string& victim : RotationVictims(names, keepPairs, protect))
+    {
+        std::error_code removeError;
+        if (std::filesystem::remove(directory / victim, removeError) && !removeError)
+            ++removed;
+    }
+    return removed;
+}
+
+// The text for an errno value, or nothing when none was set. Never a path.
+inline std::string ErrnoText(int error) { return error != 0 ? std::generic_category().message(error) : std::string(); }
+
+// Creates the capture folder and its parents when they are not there. False, with why (the system's words, never a
+// path), when it cannot be created -- a read-only game directory -- or something that is not a folder has its name.
+inline bool EnsureDirectory(const std::filesystem::path& directory, std::string* why = nullptr)
+{
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (!ec && std::filesystem::is_directory(directory, ec))
+        return true;
+    if (why != nullptr)
+        *why = ec ? ec.message() : std::string("something that is not a folder has its name");
+    return false;
+}
+
 // Writes a file under its name plus ".tmp" and renames it into place, so a half-written file never sits under a
 // final name: a write that fails, or a process that ends mid-write, leaves at most the ".tmp" (which ParseName
 // counts with its stem, so the cap clears it). open(path) returns a FILE* opened for binary writing -- _wfopen on
-// Windows -- and write(FILE*) returns whether every byte went out.
+// Windows -- and write(FILE*) returns whether every byte went out. On failure why, when given, names the step that
+// failed (open, write, close, rename) and the system's reason, never a path.
 template <class Open, class Write>
-bool WriteViaTemporary(const std::filesystem::path& final, Open&& open, Write&& write)
+bool WriteViaTemporary(const std::filesystem::path& final, Open&& open, Write&& write, std::string* why = nullptr)
 {
+    const auto fail = [why](const char* step, const std::string& detail)
+    {
+        if (why != nullptr)
+            *why = detail.empty() ? std::string(step) : std::string(step) + ": " + detail;
+        return false;
+    };
+
     std::filesystem::path temporary = final;
     temporary += ".tmp";
+    errno = 0;
     std::FILE* file = open(temporary);
     if (file == nullptr)
-        return false;
+        return fail("open", ErrnoText(errno));
+    errno = 0;
     const bool wrote = write(file);
+    const int writeError = errno;
+    errno = 0;
     const bool closed = std::fclose(file) == 0;
+    const int closeError = errno;
     std::error_code ec;
     if (!wrote || !closed)
     {
         std::filesystem::remove(temporary, ec);
-        return false;
+        return !wrote ? fail("write", ErrnoText(writeError)) : fail("close", ErrnoText(closeError));
     }
     std::filesystem::rename(temporary, final, ec);
     if (ec)
     {
+        const std::string message = ec.message();
         std::filesystem::remove(temporary, ec);
-        return false;
+        return fail("rename", message);
     }
     return true;
 }
@@ -731,4 +875,106 @@ class Record
 
 // The keyword the PNG's tEXt chunk carries the record under.
 inline constexpr const char* kTextKeyword = "Retoque.Provenance";
+
+// A number in the record: six significant digits, as printf's %g.
+inline std::string FormatNumber(double value)
+{
+    char text[32];
+    std::snprintf(text, sizeof(text), "%.6g", value);
+    return text;
+}
+
+// What the record site knows about the frame, already reduced to what may be published: no field is, or may become,
+// a path (tests/nr-capture holds the keys and the exact text these make).
+struct FrameRecordInputs
+{
+    std::string build;   // the build stamp the menu title shows: commit and date
+    std::string timeUtc; // UtcStamp::iso
+    std::string exe;     // SanitizeExeStem of the executable's stem
+    const char* route = "unknown";
+    const char* surface = "unknown";
+    uint32_t hookMethod = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t originalFormat = 0; // DXGI_FORMAT numbers
+    uint32_t processedFormat = 0;
+    ImageFile::Plan plan;
+    bool linearHdr = false;
+    bool held = false;
+    bool carried = false;
+    double whitePoint = 0.0;
+    uint64_t frame = 0;
+    uint64_t present = 0;
+    std::string
+        settings; // TimingContract: every setting that shapes the picture, the preset and working scale among them
+};
+
+// The first half of the record, set at the record site on the render thread (comparison-capture.md, section 4.4).
+inline void FillFrameRecord(Record& r, const FrameRecordInputs& in)
+{
+    r.Set("record", "retoque-comparison-capture");
+    r.Set("record_version", "1");
+    r.Set("build", in.build);
+    r.Set("time_utc", in.timeUtc);
+    r.Set("exe", in.exe);
+    r.Set("route", in.route);
+    r.Set("surface", in.surface);
+    r.Set("hook_method", std::to_string(in.hookMethod));
+    r.Set("original", "the frame the pass read (hdrCopy)");
+    r.Set("processed", "the frame the pass wrote");
+    r.Set("width", std::to_string(in.width));
+    r.Set("height", std::to_string(in.height));
+    r.Set("original_format", ImageFile::FormatName(in.originalFormat));
+    r.Set("processed_format", ImageFile::FormatName(in.processedFormat));
+    r.Set("file_kind", ImageFile::FileKindName(in.plan.kind));
+    if (in.plan.quantisedFrom != nullptr)
+        r.Set("quantised_from", in.plan.quantisedFrom);
+    r.Set("linear_hdr", in.linearHdr ? "1" : "0");
+    r.Set("held", in.held ? "1" : "0");
+    r.Set("carried", in.carried ? "1" : "0");
+    r.Set("white_point", FormatNumber(in.whitePoint));
+    r.Set("frame", std::to_string(in.frame));
+    r.Set("present", std::to_string(in.present));
+    r.Set("settings", in.settings);
+}
+
+// What the writer thread learns before the files are written: how completion was proven, the model and the adapter
+// (versions and names, never their paths), each image's mean, and the names the pair is written under.
+struct WriteRecordInputs
+{
+    Completion completion = Completion::AssumedFrames;
+    std::string modelVersion = "unknown";
+    std::string modelBytes = "unknown";
+    std::string ngxLoader = "unknown";
+    std::string ngxRoute = "unknown";
+    std::string gpu = "unknown";
+    std::string gpuDriver = "unknown";
+    ImageFile::Mean means[2];
+    bool pfm = false;
+    uint32_t seq = 0;
+    std::string files[3]; // the original, the processed and the sidecar: file names, never paths
+};
+
+// The second half of the record, set on the writer thread before the first byte, so both images carry the same one.
+inline void FillWriteRecord(Record& r, const WriteRecordInputs& in)
+{
+    r.Set("completion", CompletionName(in.completion));
+    r.Set("model_version", in.modelVersion);
+    r.Set("model_bytes", in.modelBytes);
+    r.Set("ngx_loader", in.ngxLoader);
+    r.Set("ngx_route", in.ngxRoute);
+    r.Set("gpu", in.gpu);
+    r.Set("gpu_driver", in.gpuDriver);
+    r.Set("mean_original", FormatNumber(in.means[0].Value()));
+    r.Set("mean_processed", FormatNumber(in.means[1].Value()));
+    if (in.pfm)
+    {
+        r.Set("nonfinite_original", std::to_string(in.means[0].nonFinite));
+        r.Set("nonfinite_processed", std::to_string(in.means[1].nonFinite));
+    }
+    r.Set("seq", std::to_string(in.seq));
+    r.Set("original_file", in.files[0]);
+    r.Set("processed_file", in.files[1]);
+    r.Set("sidecar", in.files[2]);
+}
 } // namespace DlssNr::PairCapture

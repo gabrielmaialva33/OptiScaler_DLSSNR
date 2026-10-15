@@ -9,13 +9,16 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -69,14 +72,15 @@ struct FakeBackend
     int tracks = 0;
     int copies = 0;
     int copiesThisRecording = 0; // Track must come before any copy of the recording it tracks
-    std::set<int> live;     // ids allocated and not released or leaked
-    std::set<int> leaked;   // ids handed to Leak
-    std::set<int> writer;   // ids the writer holds a reference to
-    std::set<int> released; // ids released by the session
+    std::set<int> live;          // ids allocated and not released or leaked
+    std::set<int> leaked;        // ids handed to Leak
+    std::set<int> writer;        // ids the writer holds a reference to
+    std::set<int> released;      // ids released by the session
     std::set<int> completedLists;
     std::set<int> readyLists;
     int hands = 0;
     bool handFails = false;
+    bool copyThrows = false; // an exception part way through a recording, as the record site can meet one
     std::string lastPayload;
     Completion lastCompletion = Completion::AssumedFrames;
     // Anything a real backend could block in. The template must never call one; nothing here can be called to wait.
@@ -105,6 +109,8 @@ struct FakeBackend
     void Copy(Recording&, int, Readback& rb)
     {
         CHECK(rb.id != 0);
+        if (copyThrows)
+            throw std::runtime_error("copy");
         ++copies;
         ++copiesThisRecording;
     }
@@ -179,7 +185,7 @@ static void StateMachine()
         CHECK(b.hands == 1 && b.lastPayload == "first" && b.lastCompletion == Completion::Submission);
         CHECK(s.Current() == Phase::Writing);
         s.Poll(b, 10);
-        CHECK(b.hands == 1); // exactly one write
+        CHECK(b.hands == 1);                                 // exactly one write
         CHECK(b.released.empty() && s.RetainedCount() == 1); // completed is not ready
         b.readyLists.insert(1);
         s.Poll(b, 10);
@@ -331,6 +337,43 @@ static void StateMachine()
         CHECK(b.released.count(1) == 1 && b.released.count(2) == 1); // list 1's pair, the first allocated
         ++g_cases;
     }
+
+    // An exception part way through the record site: the request it took goes back to idle with the reason, and what
+    // was allocated -- copies may already be recorded into it -- is never released. A request still waiting is
+    // withdrawn the same way; a recording that completed, and an idle session, are untouched.
+    {
+        Session<FakeBackend> s;
+        FakeBackend b;
+        FakeBackend::Recording rec;
+        s.Abandon(kReasonInternal);
+        CHECK(s.Current() == Phase::Idle && s.LastOutcome().reason == nullptr); // idle: nothing to withdraw
+
+        CHECK(s.Request(0));
+        b.copyThrows = true;
+        bool threw = false;
+        try
+        {
+            s.Record(b, rec, FakePayload { "t" }, nullptr);
+        }
+        catch (const std::runtime_error&)
+        {
+            threw = true;
+        }
+        CHECK(threw && s.Current() == Phase::Recording && b.live.size() == 2);
+        s.Abandon(kReasonInternal);
+        CHECK(s.Current() == Phase::Idle && !s.LastOutcome().ok && s.LastOutcome().reason == kReasonInternal);
+        CHECK(b.released.empty() && b.live.size() == 2 && s.RetainedCount() == 0);
+
+        CHECK(s.Request(0));
+        s.Abandon(kReasonInternal);
+        CHECK(s.Current() == Phase::Idle);
+
+        b.copyThrows = false;
+        CHECK(s.Request(0) && s.Record(b, rec, FakePayload { "u" }, nullptr));
+        s.Abandon(kReasonInternal);
+        CHECK(s.Current() == Phase::Pending);
+        ++g_cases;
+    }
 }
 
 // --- The menu button ---------------------------------------------------------------------------------------------
@@ -379,6 +422,127 @@ static void Button()
         state = ButtonFor(i);
         CHECK(state.shown && !state.enabled && state.reason == row.reason);
     }
+
+    // Rows are checked top to bottom and the first that applies wins: every condition set at once, then cleared one
+    // row at a time, shows each row's reason in the table's order.
+    {
+        ButtonInputs i = in;
+        i.proxy = true;
+        i.compare = 1;
+        i.debugView = 2;
+        i.phase = Phase::Pending;
+        i.directoryFailed = true;
+        i.gaveUp = true;
+        CHECK(ButtonFor(i).reason == kReasonProxy);
+        i.proxy = false;
+        CHECK(ButtonFor(i).reason == kReasonCompare);
+        i.compare = 0;
+        CHECK(ButtonFor(i).reason == kReasonDebugView);
+        i.debugView = 0;
+        CHECK(ButtonFor(i).reason == kReadingWords);
+        i.phase = Phase::Idle;
+        CHECK(ButtonFor(i).reason == kReasonDirectory);
+        i.directoryFailed = false;
+        CHECK(ButtonFor(i).reason == kReasonNoCompletion);
+        i.gaveUp = false;
+        CHECK(ButtonFor(i).enabled);
+
+        ButtonInputs v = in;
+        v.proxy = true;
+        v.nativeVulkan = true;
+        CHECK(ButtonFor(v).reason == kReasonVulkan); // native Vulkan before every D3D12 row
+        v.enabled = false;
+        CHECK(!ButtonFor(v).shown); // NR off before everything
+    }
+
+    // The last outcome's line: a refusal for a setting is not shown once the setting is off; anything about the
+    // attempt itself stays.
+    {
+        ButtonInputs now = in;
+        CHECK(!ReasonStillApplies(kReasonCompare, now) && !ReasonStillApplies(kReasonDebugView, now) &&
+              !ReasonStillApplies(kReasonProxy, now));
+        now.compare = 2;
+        now.debugView = 1;
+        now.proxy = true;
+        CHECK(ReasonStillApplies(kReasonCompare, now) && ReasonStillApplies(kReasonDebugView, now) &&
+              ReasonStillApplies(kReasonProxy, now));
+        for (const char* attempt :
+             { kReasonExpired, kReasonWrite, kReasonRetained, kReasonAllocation, kReasonHandOff, kReasonShape,
+               kReasonSurface, kReasonInternal, kReasonDirectory, IF::kRefusalFormat })
+            CHECK(ReasonStillApplies(attempt, in));
+    }
+    ++g_cases;
+}
+
+// --- The record site's refusal -----------------------------------------------------------------------------------
+
+static void Refusals()
+{
+    CHECK(RefusalFor(RefusalInputs {}) == nullptr);
+
+    // Each alone gives its own reason.
+    {
+        RefusalInputs i;
+        i.proxy = true;
+        CHECK(RefusalFor(i) == kReasonProxy);
+        i = {};
+        i.compare = 2;
+        CHECK(RefusalFor(i) == kReasonCompare);
+        i = {};
+        i.debugView = 4;
+        CHECK(RefusalFor(i) == kReasonDebugView);
+        i = {};
+        i.directoryFailed = true;
+        CHECK(RefusalFor(i) == kReasonDirectory);
+        i = {};
+        i.formatRefusal = IF::kRefusalFormat;
+        CHECK(RefusalFor(i) == IF::kRefusalFormat);
+        i = {};
+        i.singleSample2d = false;
+        CHECK(RefusalFor(i) == kReasonSurface);
+        i = {};
+        i.sameShape = false;
+        CHECK(RefusalFor(i) == kReasonShape);
+    }
+
+    // All at once, cleared in order: settings before surfaces, so the reason shown is the one to act on first.
+    {
+        RefusalInputs i;
+        i.proxy = true;
+        i.compare = 1;
+        i.debugView = 1;
+        i.directoryFailed = true;
+        i.formatRefusal = IF::kRefusalFormat;
+        i.singleSample2d = false;
+        i.sameShape = false;
+        CHECK(RefusalFor(i) == kReasonProxy);
+        i.proxy = false;
+        CHECK(RefusalFor(i) == kReasonCompare);
+        i.compare = 0;
+        CHECK(RefusalFor(i) == kReasonDebugView);
+        i.debugView = 0;
+        CHECK(RefusalFor(i) == kReasonDirectory);
+        i.directoryFailed = false;
+        CHECK(RefusalFor(i) == IF::kRefusalFormat);
+        i.formatRefusal = nullptr;
+        CHECK(RefusalFor(i) == kReasonSurface);
+        i.singleSample2d = true;
+        CHECK(RefusalFor(i) == kReasonShape);
+        i.sameShape = true;
+        CHECK(RefusalFor(i) == nullptr);
+    }
+
+    // The format refusal is the plan's: a format outside the table is declined; a linear FP16 frame is not (it is a
+    // PFM), nor a display-referred one (an 8-bit PNG, quantised).
+    {
+        RefusalInputs i;
+        i.formatRefusal = IF::PlanFor(85 /* B5G6R5 */, false).refusal;
+        CHECK(RefusalFor(i) == IF::kRefusalFormat);
+        i.formatRefusal = IF::PlanFor(IF::Dxgi::R16G16B16A16_FLOAT, true).refusal;
+        CHECK(RefusalFor(i) == nullptr);
+        i.formatRefusal = IF::PlanFor(IF::Dxgi::R16G16B16A16_FLOAT, false).refusal;
+        CHECK(RefusalFor(i) == nullptr);
+    }
     ++g_cases;
 }
 
@@ -416,11 +580,11 @@ static void Names(const fs::path& out)
     CHECK(ParseName(stem + ".original.png", &parsed) && parsed == stem);
     CHECK(ParseName(stem + ".processed.pfm.tmp", &parsed) && parsed == stem);
     CHECK(ParseName("20261013-123456-a.b-c_d-1234.json", &parsed) && parsed == "20261013-123456-a.b-c_d-1234");
-    for (const char* foreign : { "notes.txt", "20261013-123456-Game-007.png", "20261013-123456-Game-07.json",
-                                 "2026101-123456-Game-007.json", "20261013_123456-Game-007.json",
-                                 "20261013-123456--007.json", "20261013-123456-Game-007.original.png.bak",
-                                 "20261013-123456-.hidden-007.json", "20261013-123456-Ga me-007.json",
-                                 "x20261013-123456-Game-007.json", "20261013-123456-Game-0a7.json" })
+    for (const char* foreign :
+         { "notes.txt", "20261013-123456-Game-007.png", "20261013-123456-Game-07.json", "2026101-123456-Game-007.json",
+           "20261013_123456-Game-007.json", "20261013-123456--007.json", "20261013-123456-Game-007.original.png.bak",
+           "20261013-123456-.hidden-007.json", "20261013-123456-Ga me-007.json", "x20261013-123456-Game-007.json",
+           "20261013-123456-Game-0a7.json" })
         CHECK(!ParseName(foreign));
 
     // The cap over a list: 70 stems, every part of each, a stray .tmp and foreign files.
@@ -470,6 +634,19 @@ static void Names(const fs::path& out)
     CHECK(left.size() == kMaxPairs - 1);
     CHECK(fs::exists(dir / "readme.txt") && fs::exists(dir / "screenshot.png") &&
           fs::exists(dir / "20261013-000000-Game.json"));
+
+    // After the write: the pair just written is protected, counted as the one more, and never a victim, even when its
+    // name sorts first because the clock went back.
+    {
+        const std::vector<std::string> four = { stems[0] + ".json", stems[1] + ".json", stems[2] + ".json",
+                                                stems[3] + ".json", stems[3] + ".original.png" };
+        auto after = RotationVictims(four, 2, stems[3]);
+        CHECK((after == std::vector<std::string> { stems[0] + ".json", stems[1] + ".json" }));
+        after = RotationVictims(four, 2, stems[0]); // written under an older name: kept, the next oldest go
+        CHECK((after == std::vector<std::string> { stems[1] + ".json", stems[2] + ".json" }));
+        CHECK(RotationVictims(four, kMaxPairs, stems[0]).empty());
+        CHECK(RotationVictims({ stems[0] + ".json" }, 1, stems[0]).empty());
+    }
     ++g_cases;
 }
 
@@ -500,6 +677,116 @@ static void WriteThenRename(const fs::path& out)
     CHECK(!fs::exists(failed) && !fs::exists(failedTemporary));
 
     CHECK(!WriteViaTemporary(dir / "missing" / "x.json", OpenPortable, [](std::FILE*) { return true; }));
+    ++g_cases;
+}
+
+// --- The folder: created, refused, read-only ----------------------------------------------------------------------
+
+static size_t CountEntries(const fs::path& dir)
+{
+    return static_cast<size_t>(std::distance(fs::directory_iterator(dir), fs::directory_iterator()));
+}
+
+static void Folders(const fs::path& out)
+{
+    const fs::path base = out / "folders";
+    std::error_code ec;
+    for (const char* sub : { "readonly", "rotation-ro" })
+        fs::permissions(base / sub, fs::perms::owner_all, fs::perm_options::replace, ec);
+    fs::remove_all(base);
+    fs::create_directories(base);
+
+    // Created with its parents; there already is fine.
+    std::string why;
+    CHECK(EnsureDirectory(base / "a" / "b", &why) && fs::is_directory(base / "a" / "b") && why.empty());
+    CHECK(EnsureDirectory(base / "a" / "b", &why));
+
+    // A file where the folder should be: refused with the reason, the file untouched.
+    std::ofstream(base / "file") << "x";
+    CHECK(!EnsureDirectory(base / "file", &why) && !why.empty() && fs::is_regular_file(base / "file"));
+    why.clear();
+    CHECK(!EnsureDirectory(base / "file" / "sub", &why) && !why.empty());
+
+    // The step that failed, in the system's words and never with the path.
+    why.clear();
+    CHECK(!WriteViaTemporary(
+        base / "missing" / "20261015-123456-Game-001.json", OpenPortable, [](std::FILE*) { return true; }, &why));
+    CHECK(why.rfind("open: ", 0) == 0 && why.find(base.string()) == std::string::npos);
+    why.clear();
+    CHECK(!WriteViaTemporary(
+        base / "20261015-123456-Game-002.json", OpenPortable,
+        [](std::FILE*)
+        {
+            errno = ENOSPC;
+            return false;
+        },
+        &why));
+    CHECK(why == "write: " + std::generic_category().message(ENOSPC));
+    CHECK(!fs::exists(base / "20261015-123456-Game-002.json") &&
+          !fs::exists(base / "20261015-123456-Game-002.json.tmp"));
+    // A rename that cannot land (a folder holds the final name): reported, the temporary gone, the folder untouched.
+    fs::create_directories(base / "20261015-123456-Game-003.json" / "inside");
+    why.clear();
+    CHECK(!WriteViaTemporary(
+        base / "20261015-123456-Game-003.json", OpenPortable,
+        [](std::FILE* f) { return std::fwrite("{}", 1, 2, f) == 2; }, &why));
+    CHECK(why.rfind("rename: ", 0) == 0 && !fs::exists(base / "20261015-123456-Game-003.json.tmp") &&
+          fs::is_directory(base / "20261015-123456-Game-003.json" / "inside"));
+
+    // Rotation after a write, in a real folder: the oldest pairs go, the one just written stays even under an older
+    // name, the count is of files actually removed, and nothing foreign is touched -- a name that is not ASCII
+    // included, however much it looks like ours.
+    const fs::path rot = base / "rotation";
+    fs::create_directories(rot);
+    const char* stamps[] = { "20261015-000001", "20261015-000002", "20261015-000003", "20261015-000004" };
+    std::vector<std::string> made;
+    for (const char* stamp : stamps)
+    {
+        const std::string stem = Stem(stamp, "Game", 1);
+        made.push_back(stem);
+        for (const Part part : { Part::Original, Part::Processed, Part::Sidecar })
+            std::ofstream(rot / FileName(stem, part, IF::FileKind::Png8)) << "x";
+    }
+    std::ofstream(rot / "notes.txt") << "x";
+    std::ofstream(rot / "20261015-000000-G\xc3\xa4me-001.json") << "x";
+    CHECK(RotateFolder(rot, 2, made[0]) == 6); // made[1] and made[2], three files each
+    CHECK(fs::exists(rot / (made[0] + ".json")) && fs::exists(rot / (made[3] + ".json")) &&
+          !fs::exists(rot / (made[1] + ".json")) && !fs::exists(rot / (made[2] + ".original.png")));
+    CHECK(fs::exists(rot / "notes.txt") && fs::exists(rot / "20261015-000000-G\xc3\xa4me-001.json"));
+    CHECK(RotateFolder(rot, 2, made[0]) == 0);
+    CHECK(RotateFolder(base / "no-such-folder", 2, made[0]) == 0);
+
+    // A read-only game directory and a read-only capture folder. The permission bits do not bind a superuser, so these
+    // run only where a probe file cannot be created, and say when they did not.
+    const fs::path ro = base / "readonly";
+    fs::create_directories(ro);
+    const fs::path rotRo = base / "rotation-ro";
+    fs::create_directories(rotRo);
+    for (const std::string& stem : made)
+        std::ofstream(rotRo / (stem + ".json")) << "x";
+    fs::permissions(ro, fs::perms::owner_read | fs::perms::owner_exec, fs::perm_options::replace);
+    fs::permissions(rotRo, fs::perms::owner_read | fs::perms::owner_exec, fs::perm_options::replace);
+    std::FILE* probe = std::fopen((ro / "probe").string().c_str(), "wb");
+    if (probe != nullptr)
+    {
+        std::fclose(probe);
+        fs::remove(ro / "probe", ec);
+        std::printf("nr-capture: SKIP read-only folders: permission bits are not enforced for this user\n");
+    }
+    else
+    {
+        why.clear();
+        CHECK(!EnsureDirectory(ro / "retoque-captures", &why) && !why.empty() &&
+              why.find(ro.string()) == std::string::npos);
+        why.clear();
+        CHECK(!WriteViaTemporary(
+            ro / "20261015-123456-Game-001.json", OpenPortable, [](std::FILE*) { return true; }, &why));
+        CHECK(why.rfind("open: ", 0) == 0);
+        CHECK(CountEntries(ro) == 0); // nothing left behind, not even a temporary
+        CHECK(RotateFolder(rotRo, 1, made[3]) == 0 && CountEntries(rotRo) == made.size()); // nothing removed or counted
+    }
+    fs::permissions(ro, fs::perms::owner_all, fs::perm_options::replace);
+    fs::permissions(rotRo, fs::perms::owner_all, fs::perm_options::replace);
     ++g_cases;
 }
 
@@ -550,6 +837,130 @@ static void Provenance(const fs::path& out)
     CHECK(!IF::PngKeywordValid("") && !IF::PngKeywordValid(" lead") && !IF::PngKeywordValid("trail ") &&
           !IF::PngKeywordValid("two  spaces") && !IF::PngKeywordValid(std::string(80, 'k')));
     CHECK(!IF::PngTextValid("bad\nline") && !IF::PngTextValid("\xc3\xa9"));
+    ++g_cases;
+}
+
+// The record the capture writes, exactly: every key, in order, with the text each value takes. The brief's fields --
+// build, route, the preset and working scale (inside settings, the timing contract's text), the resolution, the time
+// and the executable -- are here by name, and a key lost from either builder fails this.
+static void RecordExact(const fs::path& out)
+{
+    FrameRecordInputs frame;
+    frame.build = "0.9.0 38e0d621 2026-10-15 12:00:00";
+    frame.timeUtc = FormatUtc(1792067696).iso; // 2026-10-15 12:34:56 UTC
+    frame.exe = SanitizeExeStem(L"CrimsonDesert");
+    frame.route = "d3d12-present";
+    frame.surface = "present-final";
+    frame.hookMethod = 2;
+    frame.width = 3440;
+    frame.height = 1440;
+    frame.originalFormat = IF::Dxgi::R16G16B16A16_FLOAT;
+    frame.processedFormat = IF::Dxgi::R16G16B16A16_FLOAT;
+    frame.plan = IF::PlanFor(IF::Dxgi::R16G16B16A16_FLOAT, false);
+    frame.held = true;
+    frame.whitePoint = 1.25f;
+    frame.frame = 1234;
+    frame.present = 5678;
+    frame.settings = "stage=present render=2293x960 compose=3440x1440 model=1720x720 scale=0.5 passes=1 "
+                     "pass1=[preset=0,style=0]";
+
+    WriteRecordInputs write;
+    write.completion = Completion::Submission;
+    write.modelVersion = "310.8.2.0";
+    write.modelBytes = "123456789";
+    write.ngxLoader = "32.0.16.1691";
+    write.ngxRoute = "loader-routes-feature-18";
+    write.gpu = "NVIDIA GeForce RTX 4090";
+    write.gpuDriver = "32.0.15.7700";
+    write.means[0].Add(0.25f);
+    write.means[0].Add(0.75f);
+    write.means[1].Add(0.5f);
+    write.means[1].Add(1.0f);
+    write.seq = 7;
+    const std::string stem = Stem(FormatUtc(1792067696).compact, frame.exe, write.seq);
+    write.files[0] = FileName(stem, Part::Original, frame.plan.kind);
+    write.files[1] = FileName(stem, Part::Processed, frame.plan.kind);
+    write.files[2] = FileName(stem, Part::Sidecar, frame.plan.kind);
+
+    Record r;
+    FillFrameRecord(r, frame);
+    FillWriteRecord(r, write);
+    const std::string expected =
+        "record=retoque-comparison-capture;record_version=1;build=0.9.0 38e0d621 2026-10-15 12:00:00;"
+        "time_utc=2026-10-15T12:34:56Z;exe=CrimsonDesert;route=d3d12-present;surface=present-final;hook_method=2;"
+        "original=the frame the pass read (hdrCopy);processed=the frame the pass wrote;width=3440;height=1440;"
+        "original_format=R16G16B16A16_FLOAT;processed_format=R16G16B16A16_FLOAT;file_kind=png8;quantised_from=fp16;"
+        "linear_hdr=0;held=1;carried=0;white_point=1.25;frame=1234;present=5678;"
+        "settings=stage=present render=2293x960 compose=3440x1440 model=1720x720 scale=0.5 passes=1 "
+        "pass1=[preset=0,style=0];"
+        "completion=submission-fence;model_version=310.8.2.0;model_bytes=123456789;ngx_loader=32.0.16.1691;"
+        "ngx_route=loader-routes-feature-18;gpu=NVIDIA GeForce RTX 4090;gpu_driver=32.0.15.7700;mean_original=0.5;"
+        "mean_processed=0.75;seq=7;original_file=20261015-123456-CrimsonDesert-007.original.png;"
+        "processed_file=20261015-123456-CrimsonDesert-007.processed.png;sidecar=20261015-123456-CrimsonDesert-007.json";
+    if (r.Line() != expected)
+        std::fprintf(stderr, "record line:\n%s\n", r.Line().c_str());
+    CHECK(r.Line() == expected);
+    CHECK(IF::PngTextValid(r.Line()));
+    std::ofstream(out / "record_exact.txt", std::ios::binary) << r.Line();
+    std::ofstream(out / "record_exact.json", std::ios::binary) << r.Json();
+
+    // A linear HDR frame: a PFM, no quantisation key, and the count of values that are not finite.
+    FrameRecordInputs hdr = frame;
+    hdr.route = "after-upscale";
+    hdr.surface = "upscaler-output";
+    hdr.linearHdr = true;
+    hdr.plan = IF::PlanFor(IF::Dxgi::R16G16B16A16_FLOAT, true);
+    WriteRecordInputs hdrWrite = write;
+    hdrWrite.completion = Completion::AssumedFrames;
+    hdrWrite.pfm = true;
+    hdrWrite.means[1].Add(std::numeric_limits<float>::infinity());
+    Record h;
+    FillFrameRecord(h, hdr);
+    FillWriteRecord(h, hdrWrite);
+    CHECK(h.Find("quantised_from") == nullptr && *h.Find("file_kind") == "pfm" && *h.Find("linear_hdr") == "1");
+    CHECK(*h.Find("completion") == "assumed-8-frames" && *h.Find("nonfinite_original") == "0" &&
+          *h.Find("nonfinite_processed") == "1" && *h.Find("mean_processed") == "0.75");
+    std::vector<std::string> keys;
+    for (const auto& item : h.Items())
+        keys.push_back(item.first);
+    const std::vector<std::string> expectedKeys = { "record",
+                                                    "record_version",
+                                                    "build",
+                                                    "time_utc",
+                                                    "exe",
+                                                    "route",
+                                                    "surface",
+                                                    "hook_method",
+                                                    "original",
+                                                    "processed",
+                                                    "width",
+                                                    "height",
+                                                    "original_format",
+                                                    "processed_format",
+                                                    "file_kind",
+                                                    "linear_hdr",
+                                                    "held",
+                                                    "carried",
+                                                    "white_point",
+                                                    "frame",
+                                                    "present",
+                                                    "settings",
+                                                    "completion",
+                                                    "model_version",
+                                                    "model_bytes",
+                                                    "ngx_loader",
+                                                    "ngx_route",
+                                                    "gpu",
+                                                    "gpu_driver",
+                                                    "mean_original",
+                                                    "mean_processed",
+                                                    "nonfinite_original",
+                                                    "nonfinite_processed",
+                                                    "seq",
+                                                    "original_file",
+                                                    "processed_file",
+                                                    "sidecar" };
+    CHECK(keys == expectedKeys);
     ++g_cases;
 }
 
@@ -605,7 +1016,8 @@ static void Conversions(const fs::path& out)
         const auto p = IF::PlanFor(f, false);
         CHECK(p.kind == IF::FileKind::Png8 && p.srgb && p.refusal == nullptr && p.quantisedFrom == nullptr);
     }
-    CHECK(IF::PlanFor(R10G10B10A2_UNORM, false).kind == IF::FileKind::Png16 && !IF::PlanFor(R10G10B10A2_UNORM, false).srgb);
+    CHECK(IF::PlanFor(R10G10B10A2_UNORM, false).kind == IF::FileKind::Png16 &&
+          !IF::PlanFor(R10G10B10A2_UNORM, false).srgb);
     for (uint32_t f : { R16G16B16A16_FLOAT, R16G16B16A16_TYPELESS, R32G32B32A32_FLOAT, R11G11B10_FLOAT })
     {
         CHECK(IF::PlanFor(f, true).kind == IF::FileKind::Pfm && IF::PlanFor(f, true).refusal == nullptr);
@@ -810,9 +1222,12 @@ int main(int argc, char** argv)
 
     StateMachine();
     Button();
+    Refusals();
     Names(out);
     WriteThenRename(out);
+    Folders(out);
     Provenance(out);
+    RecordExact(out);
     Conversions(out);
     Images(out);
 

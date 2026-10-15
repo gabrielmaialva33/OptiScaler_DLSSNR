@@ -233,9 +233,13 @@ static bool RenderPresentHdr(Config* config)
 // capture, disabled with the reason wherever a press could not give the pair.
 static void RenderPairCapture(Config* config, bool nativeVulkan)
 {
+    // NR off: no button (ButtonFor's first row), and nothing of the capture is asked for.
+    if (!config->DlssNrEnabled.value_or_default())
+        return;
+
     const auto status = DlssNr::GetPairCaptureStatus();
     PairCapture::ButtonInputs in;
-    in.enabled = config->DlssNrEnabled.value_or_default();
+    in.enabled = true;
     in.nativeVulkan = nativeVulkan;
     in.d3d12Ran = DlssNr::IsRunning();
     in.proxy = config->DlssNrUseProxy.value_or_default();
@@ -266,7 +270,7 @@ static void RenderPairCapture(Config* config, bool nativeVulkan)
         ImGui::TextDisabled("%s", Localization::Tr(button.reason));
     else if (status.ok && !status.lastStem.empty())
         ImGui::TextDisabled(Localization::Tr("Saved %s (the pair and its .json)"), status.lastStem.c_str());
-    else if (status.reason != nullptr)
+    else if (status.reason != nullptr && PairCapture::ReasonStillApplies(status.reason, in))
         ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", Localization::Tr(status.reason));
 }
 
