@@ -15,7 +15,7 @@
 #include <filesystem>
 #include <format>
 #include <string_view>
-#include <vulkan/vulkan.hpp>
+#include <vulkan/vulkan.h>
 #include <hooks/Streamline_LogRepeat.h>
 
 inline const char* project_id_override = "24480451-f00d-face-1304-0308dabad187";

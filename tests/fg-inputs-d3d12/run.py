@@ -48,7 +48,7 @@ def generate():
             raise RuntimeError('cannot instrument tag origin mutation')
         adapter = adapter.replace(statement, '#ifndef MUTATE_ORIGIN\n' + statement + '\n#endif')
     (OUT / 'tag_production.inc').write_text(fakes + adapter)
-    output = (ROOT / 'OptiScaler/framegen/dlssg/DLSSG_Dx12.cpp').read_text()
+    output = (ROOT / 'OptiScaler/framegen/dlssg/DLSSG_Common.cpp').read_text()
     begin = output.index('    sl::Constants constData = {};')
     end = output.index('    auto frameId = static_cast<uint32_t>(willDispatchFrame);', begin)
     apply = '    _gameCamera.Apply(willDispatchFrame, constData);'
@@ -177,7 +177,7 @@ def main():
                 results[name] = {'status': 'PASS', 'output': [line for line in text.splitlines()
                                   if line.startswith(('PASS:', 'DEBUG_LAYER='))]}
             print(name + ': ' + results[name]['status'], flush=True)
-        sources = ['OptiScaler/inputs/FG/Streamline_Inputs.cpp', 'OptiScaler/framegen/dlssg/DLSSG_Dx12.cpp',
+        sources = ['OptiScaler/inputs/FG/Streamline_Inputs.cpp', 'OptiScaler/framegen/dlssg/DLSSG_Common.cpp',
                    'OptiScaler/framegen/IFGFeature_Dx12.h', 'retoque/framegen/dlssg/GameCamera.h',
                    'tests/fg-inputs-d3d12/harness.cpp', 'tests/fg-inputs-d3d12/camera.h',
                    'tests/fg-inputs-d3d12/run.py', 'tests/fg-tag-extents/fakes.h']

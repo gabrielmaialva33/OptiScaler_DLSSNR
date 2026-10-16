@@ -2,12 +2,15 @@
 #include "SysUtils.h"
 #include "IFGFeature.h"
 
+#include <shaders/ui_unblend/UiUnblend_Vk.h>
+
 #include <vulkan/vulkan.h>
 
 struct VkFGResource
 {
     FG_ResourceType type;
     VkImage image = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE; // Sampled view of the image, if the input or a copy has one
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     uint32_t imageWidth = 0; // Whole image
@@ -34,6 +37,8 @@ class IFGFeature_Vk : public virtual IFGFeature
 
   private:
     ImageCopy _copies[BUFFER_COUNT][ResourceTypeCOUNT] {};
+
+    std::unique_ptr<UiUnblend_Vk> _uiUnblend;
 
     std::vector<VkDeviceQueueCreateInfo> _queueCreateInfos;
     std::vector<std::vector<float>> _queuePriorities;
@@ -79,11 +84,15 @@ class IFGFeature_Vk : public virtual IFGFeature
     void DestroyCopy(ImageCopy& copy);
 
   public:
-    // Called around vkCreateDevice to add the extra queues to the game's device
-    void ReserveQueues(VkPhysicalDevice physicalDevice, VkDeviceCreateInfo& createInfo);
-    void OnDeviceCreated(VkDevice device);
+    static VkFormat WithoutSrgb(VkFormat format);
+
+    // Called around vkCreateDevice to add what the output needs, like the extra queues, to the game's device
+    virtual void PrepareDevice(VkPhysicalDevice physicalDevice, VkDeviceCreateInfo& createInfo);
+    virtual void OnDeviceCreated(VkDevice device);
 
     bool HasSwapchain() const { return _swapchain != VK_NULL_HANDLE; }
+    VkFormat SwapchainFormat() const { return _swapchainFormat; }
+    VkExtent2D SwapchainExtent() const { return _swapchainExtent; }
     bool OwnsSwapchain(VkSwapchainKHR swapchain) const
     {
         return swapchain != VK_NULL_HANDLE && swapchain == _swapchain;
@@ -106,6 +115,10 @@ class IFGFeature_Vk : public virtual IFGFeature
     virtual void EvaluateState(FG_Constants& fgConstants) = 0;
 
     bool SetResource(VkFGResource* inputResource);
+
+    // Removes the current frame's UI copy from its hudless copy, for games blending a UI texture on the frame
+    void RemoveUiFromHudless(VkCommandBuffer cmdBuffer, bool premultiplied);
+
     bool HasResource(FG_ResourceType type, int index = -1) override final;
 
     IFGFeature_Vk() = default;

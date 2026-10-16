@@ -71,7 +71,7 @@ constexpr size_t kTargets = 4;
 std::mutex g_installMutex;  // the detour bookkeeping; held across Detours, never across a call into Vulkan
 std::mutex g_registryMutex; // the records; never held across a call into Vulkan or the log
 Registry g_registry;
-bool g_installed = false; // under g_installMutex
+std::atomic<bool> g_installed { false }; // published after installation; writes under g_installMutex
 HMODULE g_module = nullptr;
 std::unordered_set<void*> g_attached; // every address detoured here, whatever function it was taken for
 
@@ -3055,6 +3055,9 @@ VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInf
     if (info == nullptr)
         return next(queue, info);
 
+    const PresentCallScope<VkQueue, VkSwapchainKHR> presentScope(queue, info->swapchainCount, info->pSwapchains,
+                                                                 info->pImageIndices);
+
     // Stage 4's pacer trace times the present from here, end to end; read once, so a present is traced whole or not.
     const bool traced = g_traceOn.load(std::memory_order_relaxed);
     const auto entered = traced ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
@@ -3069,7 +3072,7 @@ VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInf
         activity.scope.Hold(kLockPresent, true);
     }
 
-    const CallerInfo& who = WhoCalled(returnAddress);
+    const CallerInfo who = WhoCalled(returnAddress);
 
     PresentCall call;
     call.nowMs = PresentNowMs();
@@ -3792,6 +3795,17 @@ void* DlssNr::VkPresentHost::OriginalPresentCaller(void* returnAddress)
     return t_presentCaller != nullptr ? t_presentCaller : returnAddress;
 }
 
+VkResult DlssNr::VkPresentHost::PresentFromFG(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInfoKHR* info,
+                                              void* returnAddress)
+{
+    if (info == nullptr || !PresentCallScope<VkQueue, VkSwapchainKHR>::ShouldObserve(
+                               g_installed.load(std::memory_order_acquire), queue, info->swapchainCount,
+                               info->pSwapchains, info->pImageIndices))
+        return next(queue, info);
+
+    return OnPresent(next, queue, info, returnAddress);
+}
+
 void DlssNr::VkPresentHost::Install(HMODULE vulkan1)
 {
     // Off -- the default -- ends here, before any lookup, detour or record (tests/nr-vk-present-host holds this).
@@ -3801,7 +3815,7 @@ void DlssNr::VkPresentHost::Install(HMODULE vulkan1)
 
     std::lock_guard lock(g_installMutex);
 
-    if (g_installed)
+    if (g_installed.load(std::memory_order_relaxed))
     {
         // The loader hook hands vulkan-1.dll to VulkanHooks::Hook again on a later load; once is enough to say so.
         static bool reported = false;
@@ -3887,8 +3901,8 @@ void DlssNr::VkPresentHost::Install(HMODULE vulkan1)
         return;
     }
 
-    g_installed = true;
     g_module = vulkan1;
+    g_installed.store(true, std::memory_order_release);
 
     // The stall watchdog: every half second, an activity inside the host for longer than its allowance is logged with
     // its stage, the locks it holds and, for a lock it waits on, the holder. It reads the table with atomics only and

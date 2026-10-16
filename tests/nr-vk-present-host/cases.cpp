@@ -33,6 +33,61 @@ static int failures = 0;
 
 static bool Has(const std::string& line, const std::string& part) { return line.find(part) != std::string::npos; }
 
+static void FgPresentBridge()
+{
+    using Scope = PresentCallScope<uint64_t, uint64_t>;
+    const uint64_t proxy[] = { 100, 101 }, real[] = { 200, 201 }, sameProxy[] = { 100, 101 };
+    const uint32_t images[] = { 0, 1 }, otherImages[] = { 0, 2 };
+    int observed = 0, rawCalls = 0;
+    const auto raw = [&]()
+    {
+        ++rawCalls;
+        return 37;
+    };
+    const auto bridge = [&](bool installed, uint64_t queue, uint32_t count, const uint64_t* swapchains,
+                            const uint32_t* indices, auto&& observe)
+    { return Scope::ShouldObserve(installed, queue, count, swapchains, indices) ? observe() : raw(); };
+    const auto unexpected = [&]()
+    {
+        ++observed;
+        return -1;
+    };
+
+    CHECK(bridge(false, 7, 2, proxy, images, unexpected) == 37);
+    CHECK(observed == 0 && rawCalls == 1);
+    CHECK(!Scope::ShouldObserve(true, 7, 2, nullptr, images));
+    CHECK(!Scope::ShouldObserve(true, 7, 2, proxy, nullptr));
+    {
+        Scope exportedPresent(7, 2, proxy, images);
+        // The same tuple, even in copied arrays and with different present waits, is observed only once.
+        CHECK(bridge(true, 7, 2, sameProxy, images, unexpected) == 37);
+        CHECK(observed == 0 && rawCalls == 2);
+        CHECK(Scope::ShouldObserve(true, 8, 2, proxy, images));
+        CHECK(Scope::ShouldObserve(true, 7, 1, proxy, images));
+        CHECK(Scope::ShouldObserve(true, 7, 2, proxy, otherImages));
+        // FFX's real present nested beneath the game's proxy is still observed, then forwarded once.
+        CHECK(bridge(true, 7, 2, real, images,
+                     [&]()
+                     {
+                         ++observed;
+                         Scope realPresent(7, 2, real, images);
+                         CHECK(!Scope::ShouldObserve(true, 7, 2, proxy, images)); // an outer scope also matches
+                         return bridge(true, 7, 2, real, images, unexpected);
+                     }) == 37);
+        CHECK(observed == 1 && rawCalls == 3);
+        CHECK(Scope::ShouldObserve(true, 7, 2, real, images)); // nested scope restored the proxy's scope
+        auto otherThread =
+            std::async(std::launch::async, [&]() { return Scope::ShouldObserve(true, 7, 2, proxy, images); });
+        CHECK(otherThread.get());
+    }
+    CHECK(Scope::ShouldObserve(true, 7, 2, proxy, images));
+    {
+        Scope empty(7, 0, nullptr, nullptr);
+        CHECK(!Scope::ShouldObserve(true, 7, 0, nullptr, nullptr));
+        CHECK(Scope::ShouldObserve(true, 8, 0, nullptr, nullptr));
+    }
+}
+
 static void CheckHas(const std::string& line, const std::string& part, int at)
 {
     if (!Has(line, part))
@@ -1125,8 +1180,8 @@ static void SynthMotionDecisions()
     CHECK(NrText(s.nr) == "NR: evaluated 3, refused 0, history resets 0, motion synthesized 2, pass GPU not measured");
 }
 
-// Stage 4 (DlssNr_VkPresentFg.h): which presents frame generation makes or takes, what the host does with them until the
-// pacer experiment is run, Streamline's messages, and the pacer trace.
+// Stage 4 (DlssNr_VkPresentFg.h): which presents frame generation makes or takes, what the host does with them until
+// the pacer experiment is run, Streamline's messages, and the pacer trace.
 static void FrameGeneration()
 {
     // Nothing on: the stages before, unchanged.
@@ -1224,8 +1279,10 @@ static void FrameGeneration()
     if (!lines.empty())
     {
         const std::string& line = lines[0];
-        CheckHas(line, "DLSS-NR Vulkan present host (trace): swapchain 0x55 #5 on device #3, 10.0 s: 1248 presents", __LINE__);
-        CheckHas(line, "; threads tid 1234 \"vkd3d_queue\" (caller d3d12core.dll) 1000, tid 5678 (caller sl.dlss_g.dll) 248;",
+        CheckHas(line, "DLSS-NR Vulkan present host (trace): swapchain 0x55 #5 on device #3, 10.0 s: 1248 presents",
+                 __LINE__);
+        CheckHas(line,
+                 "; threads tid 1234 \"vkd3d_queue\" (caller d3d12core.dll) 1000, tid 5678 (caller sl.dlss_g.dll) 248;",
                  __LINE__);
         CheckHas(line, "; queues 0x99 1248; waits 1-1 (1248), host signals 1248, untouched 0;", __LINE__);
         CheckHas(line, "; present ids 5..", __LINE__);
@@ -1243,8 +1300,8 @@ static void FrameGeneration()
     s.nowUs += 8000;
     CHECK(!trace.Add(s, now).has_value());
     const auto flushed = trace.Flush(0xD3, 0x55, now);
-    CHECK(flushed.has_value() && Has(*flushed, "(destroyed): ") &&
-          Has(*flushed, "host signals 52, untouched 1") && Has(*flushed, "frame generation none 52, game DLSS-G 1") &&
+    CHECK(flushed.has_value() && Has(*flushed, "(destroyed): ") && Has(*flushed, "host signals 52, untouched 1") &&
+          Has(*flushed, "frame generation none 52, game DLSS-G 1") &&
           Has(*flushed, "; Streamline fence timeouts 1, pacer 0, warnings 0, errors 0 (last: Wait on gpu fence timed "
                         "out after 500ms)"));
     CHECK(trace.Swapchains() == 0 && !trace.Flush(0xD3, 0x55, now).has_value());
@@ -1283,8 +1340,9 @@ static void FrameGeneration()
     elsewhere.deviceId = 5;
     trace.Add(elsewhere, now);
     auto made = trace.FlushOnCreate(0xD3, 0x99, now);
-    CHECK(made.size() == 1 && Has(made[0], "swapchain 0x77 (not on record) on device #3, 0.0 s (a swapchain made on its "
-                                           "device): 1 presents;") &&
+    CHECK(made.size() == 1 &&
+          Has(made[0], "swapchain 0x77 (not on record) on device #3, 0.0 s (a swapchain made on its "
+                       "device): 1 presents;") &&
           Has(made[0], "frame generation FSR-FG input 1") && Has(made[0], "frame time none") &&
           Has(made[0], "present ids none") && Has(made[0], "Streamline fence timeouts 0,"));
     CHECK(trace.Swapchains() == 2);
@@ -1299,7 +1357,8 @@ static void FrameGeneration()
     trace.Add(proxy, now);
     auto gone = trace.FlushDevice(0xD3, now);
     CHECK(gone.size() == 2 && trace.Swapchains() == 1);
-    CHECK(std::any_of(gone.begin(), gone.end(), [](const std::string& l) { return Has(l, "swapchain 0x66 (not on record), 0.0 s (device destroyed)"); }));
+    CHECK(std::any_of(gone.begin(), gone.end(), [](const std::string& l)
+                      { return Has(l, "swapchain 0x66 (not on record), 0.0 s (device destroyed)"); }));
     CHECK(trace.FlushDevice(0xD5, now).size() == 1 && trace.Swapchains() == 0);
 
     // Streamline's counts as two presents hand them in out of order: an older copy adds nothing, and never wraps.
@@ -1833,6 +1892,7 @@ static void StallWatch()
 
 int main()
 {
+    FgPresentBridge();
     Constants();
     Callers();
     Plans();

@@ -25,8 +25,22 @@ class VulkanHooks
         lowLatencySwapchain.compare_exchange_strong(swapchain, VK_NULL_HANDLE);
     }
 
+    // Set while the FG output shows a surface the game created to its Streamline, whose vkCreateWin32SurfaceKHR gets
+    // this one instead of a new one
+    inline static thread_local VkSurfaceKHR existingSurface = VK_NULL_HANDLE;
+
+    // The window a surface was created for
+    static HWND SurfaceWindow(VkSurfaceKHR surface);
+
     // vkGetDeviceProcAddr without OptiScaler's hooks
     static PFN_vkVoidFunction GetDeviceProcAddr(VkDevice device, const char* pName);
+
+    // vkGetInstanceProcAddr without OptiScaler's hooks
+    static PFN_vkVoidFunction GetInstanceProcAddr(VkInstance instance, const char* pName);
+
+    // The driver's swapchain function behind OptiScaler's hook, below hooks others put on the same function.
+    // vkQueuePresentKHR's also times the presented frames for the menu. nullptr when it isn't hooked.
+    static PFN_vkVoidFunction OriginalSwapchainFunction(const char* pName);
 
     static void Hook(HMODULE vulkan1);
     static void Unhook();

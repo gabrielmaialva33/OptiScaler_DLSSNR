@@ -1,6 +1,7 @@
 #pragma once
 
 #include <windows.h>
+#include <vulkan/vulkan.h>
 
 // The Vulkan present host, stages 1 to 3: coverage, the submission-only control, and cold NR
 // (docs/dlssnr/design/nr-vulkan-present-host.md, "What settles the marker question" items 1 to 3, "A narrow NR-only
@@ -53,4 +54,8 @@ void NoteStreamline(int level, const char* message);
 // with this host's present detour on top, its own return address lies in OptiScaler. Inside a present that went
 // through this host, the application's return address; otherwise -- the host off, or not installed -- `returnAddress`.
 void* OriginalPresentCaller(void* returnAddress);
+
+// FG outputs bypass external overlays through the bundle's private driver trampoline. Observe that route too,
+// exactly once per queue/swapchains/images, without an additional detour. Off, forwards directly to next.
+VkResult PresentFromFG(PFN_vkQueuePresentKHR next, VkQueue queue, const VkPresentInfoKHR* info, void* returnAddress);
 } // namespace DlssNr::VkPresentHost

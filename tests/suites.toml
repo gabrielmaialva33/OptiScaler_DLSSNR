@@ -347,3 +347,8 @@ summary = "Streamline camera validation and exact-frame lifetime through product
 tier = "wine"
 timeout = 1200
 summary = "MSVC/DirectXMath camera preservation and temporal projection; real D3D12 texture-tag crop/readback; three required failing mutation controls. No game or DLSS-G inference."
+
+[fg-dlssg-options]
+tier = "host"
+timeout = 120
+summary = "Production common DLSS-G option caching, failed-write retries, generation invalidation, MFG restart and menu interlock with real SDK types."

@@ -28,6 +28,7 @@ struct ID3D12GraphicsCommandList
 {
 };
 using VkImage = uintptr_t;
+using VkImageView = uintptr_t;
 using VkFormat = unsigned;
 using VkImageLayout = unsigned;
 using VkCommandBuffer = void*;
@@ -48,6 +49,7 @@ struct VkFGResource
 {
     FG_ResourceType type;
     VkImage image {};
+    VkImageView view {};
     VkFormat format {};
     VkImageLayout layout {};
     uint32_t imageWidth {}, imageHeight {}, width {}, height {};

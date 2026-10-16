@@ -137,8 +137,14 @@ hook = code(function(hooks, 'void VulkanHooks::Hook(HMODULE vulkan1)'))
 statements = [s.strip() for s in hook.strip('{} \n').split(';') if s.strip()]
 assert statements[0] == 'DlssNr::VkPresentHost::Install(vulkan1)', statements[0]
 assert hook.index('VkPresentHost::Install') < hook.index('vulkanHooksSkipped')
-# The include, the call, and one read in the bundle's present hook: nothing else of the bundle changed for it.
-assert code(hooks).count('VkPresentHost') == 3, code(hooks).count('VkPresentHost')
+# The include, install, original caller lookup, and the FG bypass's explicit forwarding into the host.
+assert code(hooks).count('VkPresentHost') == 4, code(hooks).count('VkPresentHost')
+fg_present = code(function(hooks, 'static VkResult FGOutputQueuePresent('))
+assert 'PresentFromFG(o_QueuePresentKHR, queue, pPresentInfo, _ReturnAddress())' in fg_present
+fg_bridge = code(function(host, 'VkResult DlssNr::VkPresentHost::PresentFromFG('))
+assert 'g_installed.load(std::memory_order_acquire)' in fg_bridge
+assert 'PresentCallScope<VkQueue, VkSwapchainKHR>::ShouldObserve(' in fg_bridge
+assert 'return next(queue, info);' in fg_bridge and 'return OnPresent(next, queue, info, returnAddress);' in fg_bridge
 # That read: the bundle tells a DXVK/vkd3d-proton present from a native one by its caller, which with the host's detour
 # on top is OptiScaler; the host hands it the application's. Off, it is the address it was given.
 bundle_present = code(function(hooks, 'VALIDATE_HOOK(hkvkQueuePresentKHR, PFN_vkQueuePresentKHR)'))
@@ -191,7 +197,7 @@ for call, times in (('o_CreateInstance(info, allocator, instance)', 1), ('o_Dest
                     ('next(device, info, allocator, swapchain)', 1), ('next(device, down, allocator, swapchain)', 1),
                     ('next(device, swapchain, allocator)', 2), ('next(device, swapchain, count, images)', 1),
                     ('next(device, swapchain, timeout, semaphore, fence, index)', 1), ('next(device, info, index)', 1),
-                    ('next(queue, info)', 2), ('next(queue, &local)', 1), ('next(queue, args...)', 2)):
+                    ('next(queue, info)', 3), ('next(queue, &local)', 1), ('next(queue, args...)', 2)):
     assert body.count(call) == times, f'expected the pass-through {call} {times}x, found {body.count(call)}'
 for hook_name in ('OnPresent', 'OnCreateSwapchain', 'OnGetQueue', 'OnGetQueue2', 'OnDestroyDevice',
                   'OnDestroySwapchain', 'OnGetImages', 'OnAcquire', 'OnAcquire2'):
@@ -600,7 +606,8 @@ assert re.search(r'if \(dev\.model->DeviceLost\(\)\)\s*MarkLost\(dev\);', decide
 # The stall watchdog: started only once Install is past its gate and installed; it reads the activity table and logs,
 # and takes no lock.
 install_body = code(function(host, 'void DlssNr::VkPresentHost::Install(HMODULE vulkan1)'))
-assert install_body.index('DlssNrVulkanPresentHost.value_or_default()') < install_body.index('g_installed = true;') < \
+assert install_body.index('DlssNrVulkanPresentHost.value_or_default()') < \
+    install_body.index('g_installed.store(true, std::memory_order_release);') < \
     install_body.index('std::thread(')
 watchdog = install_body[install_body.index('std::thread('):]
 for forbidden in ('lock', 'Lock', 'Mutex', 'mutex'):
@@ -718,6 +725,8 @@ for needed in ('state.dlssgLastSetMode != sl::DLSSGMode::eOff', 'state.dlssgDete
 # Inert when off: the trace in the present, destroy-swapchain and destroy-device hooks only under the key, Streamline's
 # note returning first thing; the two keys read at Install, after the gate.
 present_body = code(function(host, 'VkResult OnPresent(PFN_vkQueuePresentKHR next, VkQueue queue, '))
+assert 'const PresentCallScope<VkQueue, VkSwapchainKHR> presentScope(' in present_body
+assert 'const CallerInfo who = WhoCalled(returnAddress);' in present_body
 assert 'const bool traced = g_traceOn.load(std::memory_order_relaxed);' in present_body
 assert 'const auto entered = traced ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};' \
     in present_body

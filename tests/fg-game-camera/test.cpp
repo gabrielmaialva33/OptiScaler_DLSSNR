@@ -7,6 +7,7 @@
 #include <thread>
 #include <atomic>
 #include <map>
+#include <algorithm>
 #if __has_include(<framegen/dlssg/GameCamera.h>)
 #include <framegen/dlssg/GameCamera.h>
 #define HAVE_CAMERA 1
@@ -54,6 +55,7 @@ struct Backend
     DlssgGameCamera<4> _gameCamera;
 #endif
     bool IsInfiniteDepth() { return false; }
+    bool IsInvertedDepth() { return false; }
     sl::Constants Dispatch(uint64_t willDispatchFrame)
     {
         auto fIndex = willDispatchFrame % 4;

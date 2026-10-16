@@ -40,6 +40,7 @@ The `fork-compat` suite exercises NGX signature redirects and independent custom
 `fg-locks` exercises the actual resize/release lock scopes when settings or the current FG change.
 `fg-tag-extents` checks D3D12 tag origins and bounds; `fg-game-camera` checks validated camera
 forwarding and its frame identity through delayed input, ring reuse and FG restart.
+`fg-dlssg-options` checks common option caching, failed-write retries, generation invalidation, MFG restart and menu interlock.
 
 For automated validation of those changes without a game, run
 `python3 tests/fg-inputs-d3d12/run.py`. It combines both host suites with real DirectXMath camera
@@ -48,7 +49,7 @@ wine tier. See [its README](fg-inputs-d3d12/README.md) for coverage and the SDK-
 
 ## What the suites cover
 
-**Host tier.** Fifty-six suites. All but `nr-invariants`, `nr-ab-compare`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
+**Host tier.** Fifty-seven suites. All but `nr-invariants`, `nr-ab-compare`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
 code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-ab-compare` — stdlib offline Stage 0/1 capture analysis: synthetic PNG/PFM/raw pairs, detail/noise/colour/temporal controls, provenance and invalid-input rejection. No GPU or image-quality claim.

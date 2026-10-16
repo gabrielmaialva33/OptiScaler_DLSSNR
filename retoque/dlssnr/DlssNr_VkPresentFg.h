@@ -26,6 +26,50 @@
 
 namespace DlssNr::VkPresentHost
 {
+// The FG overlay bypass can call the host directly while an export detour is already observing that present.
+// Borrow the caller's arrays only while its synchronous call is on the stack. A proxy swapchain's nested real
+// present, another image, or another queue is a distinct call; changed wait semaphores alone are not.
+template <typename Queue, typename Swapchain> class PresentCallScope
+{
+    Queue _queue;
+    uint32_t _count;
+    const Swapchain* _swapchains;
+    const uint32_t* _images;
+    const PresentCallScope* _previous;
+    inline static thread_local const PresentCallScope* _current = nullptr;
+
+    bool Matches(Queue queue, uint32_t count, const Swapchain* swapchains, const uint32_t* images) const
+    {
+        if (_queue != queue || _count != count || (count != 0 && (_swapchains == nullptr || _images == nullptr)))
+            return false;
+        for (uint32_t i = 0; i < count; ++i)
+            if (_swapchains[i] != swapchains[i] || _images[i] != images[i])
+                return false;
+        return true;
+    }
+
+  public:
+    PresentCallScope(Queue queue, uint32_t count, const Swapchain* swapchains, const uint32_t* images)
+        : _queue(queue), _count(count), _swapchains(swapchains), _images(images), _previous(_current)
+    {
+        _current = this;
+    }
+    ~PresentCallScope() { _current = _previous; }
+    PresentCallScope(const PresentCallScope&) = delete;
+    PresentCallScope& operator=(const PresentCallScope&) = delete;
+
+    static bool ShouldObserve(bool installed, Queue queue, uint32_t count, const Swapchain* swapchains,
+                              const uint32_t* images)
+    {
+        if (!installed || (count != 0 && (swapchains == nullptr || images == nullptr)))
+            return false;
+        for (auto scope = _current; scope != nullptr; scope = scope->_previous)
+            if (scope->Matches(queue, count, swapchains, images))
+                return false;
+        return true;
+    }
+};
+
 // --- Which presents frame generation makes or takes -----------------------------------------------------------
 
 // What the host knows at one present, read from OptiScaler's state by the host.

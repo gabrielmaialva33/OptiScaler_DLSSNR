@@ -6,7 +6,8 @@ import tempfile
 
 here = Path(__file__).resolve().parent
 repo = here.parents[1]
-source = (repo / 'OptiScaler/framegen/dlssg/DLSSG_Dx12.cpp').read_text()
+source = (repo / 'OptiScaler/framegen/dlssg/DLSSG_Common.cpp').read_text()
+dx12 = (repo / 'OptiScaler/framegen/dlssg/DLSSG_Dx12.cpp').read_text()
 
 
 def function(signature, text):
@@ -46,7 +47,7 @@ for signature in ('void Sl_Inputs::CheckForFrame(', 'int Sl_Inputs::IndexForFram
     mapping += function(signature, inputs) + '\n'
 harness = harness.replace('// @mapping@', mapping)
 for name, tail in [('Deactivate', '    if (_isActive)'), ('ReleaseObjects', '    for (size_t')]:
-    body = function('void DLSSG_Dx12::' + name + '()', source)
+    body = function('void DLSSG_' + ('Common' if name == 'Deactivate' else 'Dx12') + '::' + name + '()', source if name == 'Deactivate' else dx12)
     body = body[body.index('{') + 1:body.index(tail)]
     harness = harness.replace('// @' + name + '@', body)
 assert 'CaptureGameCamera(fgOutput, frameId, data, dataFound);' in inputs
@@ -55,7 +56,7 @@ harness = harness.replace('// @camera@', camera + '''
     constData.reset = sl::Boolean::eTrue;
     constData.motionVectorsDilated = sl::Boolean::eTrue;
 ''' + extra + '''
-    Token token; auto* frameToken = &token; int viewport = 0;
+    Token token; auto* _frameToken = &token; int _viewport = 0;
 ''' + forward + '\n    (void)result; return received;')
 with tempfile.TemporaryDirectory(prefix='retoque-fg-camera-') as directory:
     cpp = Path(directory) / 'test.cpp'

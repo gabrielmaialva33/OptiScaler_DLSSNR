@@ -6,12 +6,13 @@
 
 #include "NVNGX_DLSS.h"
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <inputs/FG/Upscaler_Inputs_Vk.h>
 #include "NVNGX_Parameter.h"
 #include "proxies/NVNGX_Proxy.h"
 
 #include "upscalers/FeatureProvider_Vk.h"
 
-#include <vulkan/vulkan.hpp>
+#include <vulkan/vulkan.h>
 #include <ankerl/unordered_dense.h>
 #include <imgui/ImGuiNotify.hpp>
 #include <misc/IdentifyGpu.h>
@@ -187,16 +188,17 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Init_Ext2(
     if (InFeatureInfo != nullptr && InSDKVersion > 0x0000013)
         State::Instance().NVNGX_Logger = InFeatureInfo->LoggingInfo;
 
+    // Streamline initializes NGX for DLSSG with the device the game's DLSS already did
+    if (State::Instance().activeFgNvngx != FGNvngxReplacement::None)
+    {
+        Nvngx_FG::VULKAN_Init_Ext2(InApplicationId, InApplicationDataPath, InInstance, InPD, InDevice, InGIPA, InGDPA,
+                                   InSDKVersion, &localFeatureInfo);
+    }
+
     if (State::Instance().nvngxVkInited && InInstance == vkInstance && InDevice == vkDevice && InPD == vkPD)
     {
         LOG_WARN("NVNGX already inited");
         return NVSDK_NGX_Result_Success;
-    }
-
-    if (State::Instance().activeFgInput == FGInput::NvngxFG)
-    {
-        Nvngx_FG::VULKAN_Init_Ext2(InApplicationId, InApplicationDataPath, InInstance, InPD, InDevice, InGIPA, InGDPA,
-                                   InSDKVersion, &localFeatureInfo);
     }
 
     LOG_INFO("AppId: {0}", InApplicationId);
@@ -1072,9 +1074,16 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
     deviceContext = VkContexts[handleId].feature.get();
     state.currentFeature = deviceContext;
 
+    UpscalerInputsVk::UpscaleStart(InCmdList, InParameters, deviceContext);
+
+    NVSDK_NGX_Resource_VK* output = nullptr;
+    InParameters->Get(NVSDK_NGX_Parameter_Output, (void**) &output);
+
     auto upscaleResult = deviceContext->Evaluate(InCmdList, InParameters);
 
-    if (!upscaleResult)
+    if (upscaleResult)
+        UpscalerInputsVk::UpscaleEnd(InCmdList, output);
+    else
         ImGui::InsertNotification({ ImGuiToastType::Error, 10000, "Upscaler failed to run!" });
 
     if ((!upscaleResult || !deviceContext->IsInited()) &&

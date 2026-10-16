@@ -4,7 +4,7 @@
 
 #include "CommandBuffer_StateTracker.h"
 
-#include <vulkan/vulkan.hpp>
+#include <vulkan/vulkan.h>
 #include <vulkan/vulkan_beta.h>
 
 #ifdef VK_USE_PLATFORM_WIN32_KHR
@@ -33,6 +33,7 @@ class Vulkan_wDx12
     static void CancelPendingSubmission(VkCommandBuffer commandBuffer);
     static bool RegisterVirtualCommandBuffer(VkCommandBuffer commandBuffer, VkCommandBuffer virtualCommandBuffer);
     static VkCommandBuffer RemoveVirtualCommandBuffer(VkCommandBuffer commandBuffer);
+    static VkCommandBuffer GetVirtualCommandBuffer(VkCommandBuffer commandBuffer);
 
   private:
     static VkResult hk_vkQueueSubmit(VkQueue queue, uint32_t submitCount, const VkSubmitInfo* pSubmits, VkFence fence);
@@ -58,7 +59,6 @@ class Vulkan_wDx12
     static PFN_vkVoidFunction GetAddress(const PFN_vkVoidFunction original, const char* pName);
     static void InitializeStateTrackerFunctionTable();
     static bool TakePendingSubmission(VkCommandBuffer commandBuffer, PendingSubmission& submission);
-    static VkCommandBuffer GetVirtualCommandBuffer(VkCommandBuffer commandBuffer);
 
     inline static std::mutex pendingSubmissionMutex;
     inline static std::unordered_map<VkCommandBuffer, PendingSubmission> pendingSubmissions;

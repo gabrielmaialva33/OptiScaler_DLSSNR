@@ -32,6 +32,7 @@ struct CameraOutput
     bool Dispatch(uint64_t willDispatchFrame)
     {
         auto fIndex = willDispatchFrame % 4;
+        const auto mvWidth = motion.width, mvHeight = motion.height;
 #include "camera_production.inc"
     }
     sl::Constants Evaluate(uint64_t frame)

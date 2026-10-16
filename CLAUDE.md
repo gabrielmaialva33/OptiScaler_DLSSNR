@@ -31,6 +31,9 @@ URLs redirect), which adds Linux/Proton overlay patches on top.
     and FSR-FG output, the Vulkan menu queue fix, the FG ratio slider, the Streamline inputs move. Upstream's
     own per-thread `creatingD3DDevice` (`2d91b8e3`) replaced the port of janblade's we took that morning;
     `vulkanSkipHooks` keeps our per-thread `ScopedSkipVulkanHooks`, since upstream's is still a shared bool.
+  - The fourth is on `merge/optiscaler-20261016` (19 commits, to `0e42d595`): Vulkan FG inputs/output and HUDfix,
+    common DLSS-G factoring, Streamline initialization, Quirks/ASI status and x64-only project configurations.
+    Resolution and validation boundaries: `docs/linux-proton/upstream-20261016.md`.
   - Conflicts resolve as upstream's structure first, with our changes re-applied on top. Where one
     of our commits was a port of upstream work that later landed there (reprojection, the
     FGPreserveSwapChain factoring), take upstream's.
@@ -89,8 +92,8 @@ URLs redirect), which adds Linux/Proton overlay patches on top.
 ## Build
 
 Windows-only C++ (`stdcpplatest`, MSVC), built from `OptiScaler.sln`. Two projects: `OptiScaler` (the
-DLL) and `dlssnr_forwarder` (a ~115 KB shim, see below). Real target is `x64`; Win32 configurations
-exist in the solution but CI and every script build only x64. Configurations: `Debug`, `Release`,
+DLL) and `dlssnr_forwarder` (a ~115 KB shim, see below). Target is `x64`; upstream removed the unused
+Win32 configurations in the 2026-10-16 merge. Configurations: `Debug`, `Release`,
 `ReleaseDebug`.
 
 ### Local, on this Linux workstation (msvc-wine)
@@ -250,13 +253,13 @@ before committing C++, because nothing local enforces it and it had drifted by 5
 
 ### Tests
 
-`tests/README.md` is the index; read it before adding or changing a suite. Sixty-two directories under
+`tests/README.md` is the index; read it before adding or changing a suite. Sixty-eight directories under
 `tests/`, each self-contained with its own `run.py` and README, registered in `tests/suites.toml`.
 
 ```bash
-python3 tests/run_all.py            # host tier, the default; 52 suites, ~60 s
+python3 tests/run_all.py            # host tier, the default; 57 suites
 python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
-python3 tests/run_all.py --tier all # adds the ten wine suites
+python3 tests/run_all.py --tier all # adds the eleven wine suites
 python3 tests/<name>/run.py         # one suite, unchanged
 ```
 
