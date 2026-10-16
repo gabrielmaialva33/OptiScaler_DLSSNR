@@ -2,6 +2,7 @@
 #include "Streamline_Inputs.h"
 #include <Config.h>
 #include <resource_tracking/ResTrack_dx12.h>
+#include <framegen/dlssg/DLSSG_Dx12.h>
 #include <magic_enum.hpp>
 
 void Sl_Inputs::CheckForFrame(IFGFeature* fg, uint32_t frameId)
@@ -23,6 +24,9 @@ void Sl_Inputs::CheckForFrame(IFGFeature* fg, uint32_t frameId)
         _currentIndex = fg->GetIndex();
         _currentFrameId++;
         _frameIdIndex[_currentIndex] = _currentFrameId;
+        _cameraFrameIndex[_currentIndex] = fg->FrameCount();
+        if (auto dlssg = dynamic_cast<DLSSG_Dx12*>(fg))
+            dlssg->BeginGameCameraFrame(_cameraFrameIndex[_currentIndex]);
     }
     else if (frameId != 0 && frameId > _currentFrameId)
     {
@@ -36,6 +40,9 @@ void Sl_Inputs::CheckForFrame(IFGFeature* fg, uint32_t frameId)
         _currentIndex = fg->GetIndex();
         _currentFrameId = frameId;
         _frameIdIndex[_currentIndex] = _currentFrameId;
+        _cameraFrameIndex[_currentIndex] = fg->FrameCount();
+        if (auto dlssg = dynamic_cast<DLSSG_Dx12*>(fg))
+            dlssg->BeginGameCameraFrame(_cameraFrameIndex[_currentIndex]);
     }
 }
 
@@ -48,6 +55,22 @@ int Sl_Inputs::IndexForFrameId(uint32_t frameId) const
     }
 
     return -1;
+}
+
+void Sl_Inputs::CaptureGameCamera(IFGFeature* fg, uint32_t frameId, const sl::Constants& data, bool valid)
+{
+    auto dlssg = dynamic_cast<DLSSG_Dx12*>(fg);
+    if (dlssg == nullptr)
+        return;
+
+    std::scoped_lock lock(_frameBoundaryMutex);
+    const int index = IndexForFrameId(frameId == 0 ? _currentFrameId : frameId);
+    if (index < 0)
+        return;
+
+    // Keep the external SL ID separate from the counter actually used by GetDispatchIndex.
+    // Delayed constants can update only their registered frame, never today's current slot.
+    dlssg->SetGameCamera(_cameraFrameIndex[index], data, valid && engineType != sl::EngineType::eUnreal);
 }
 
 bool Sl_Inputs::setConstants(const sl::Constants& values, uint32_t frameId)
@@ -80,6 +103,8 @@ bool Sl_Inputs::setConstants(const sl::Constants& values, uint32_t frameId)
 
         dataFound = true;
     }
+
+    CaptureGameCamera(fgOutput, frameId, data, dataFound);
 
     if (dataFound)
     {
@@ -389,6 +414,14 @@ bool Sl_Inputs::reportResource(const sl::ResourceTag& tag, void* cmdBuffer, uint
     uint64_t width = tag.extent ? tag.extent.width : (isVulkan ? tag.resource->width : desc.Width);
     uint32_t height = tag.extent ? tag.extent.height : (isVulkan ? tag.resource->height : desc.Height);
 
+    if (!isVulkan && tag.extent &&
+        (tag.extent.left > desc.Width || width > desc.Width - tag.extent.left || tag.extent.top > desc.Height ||
+         height > desc.Height - tag.extent.top))
+    {
+        LOG_WARN("Streamline resource extent exceeds the D3D12 texture bounds");
+        return false;
+    }
+
     if (type == FG_ResourceType::Velocity)
     {
         // Track locally for dispatch logic
@@ -433,6 +466,8 @@ bool Sl_Inputs::reportResource(const sl::ResourceTag& tag, void* cmdBuffer, uint
         res.type = type.value();
         res.resource = d3dRes;
         res.cmdList = (ID3D12GraphicsCommandList*) cmdBuffer; // Critical for eOnlyValidNow
+        res.left = tag.extent ? tag.extent.left : 0;
+        res.top = tag.extent ? tag.extent.top : 0;
         res.width = width;
         res.height = height;
         res.state = (D3D12_RESOURCE_STATES) tag.resource->state;

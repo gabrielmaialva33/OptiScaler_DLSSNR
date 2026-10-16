@@ -17,6 +17,7 @@ here or beside the code it describes.
 - [CLAUDE.md](../CLAUDE.md): "Linux / Proton patches" lists the fork's overlay patches over upstream.
 
 - [linux-proton/fork-fixes-20261016.md](linux-proton/fork-fixes-20261016.md): NGX/library compatibility, menu GPU completion and FG lock-pairing fixes from the fork audit.
+- [linux-proton/streamline-game-camera.md](linux-proton/streamline-game-camera.md): preserve valid game camera matrices by frame and D3D12 resource-tag origins.
 
 ## DLSS Neural Rendering design
 

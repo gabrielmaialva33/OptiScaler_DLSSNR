@@ -18,12 +18,14 @@ class Sl_Inputs
     uint32_t _currentIndex = -1;
     uint32_t _lastPresentFrameId = UINT32_MAX;
     uint32_t _frameIdIndex[BUFFER_COUNT] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
+    uint64_t _cameraFrameIndex[BUFFER_COUNT] = {};
 
     uint64_t mvsWidth = 0;
     uint32_t mvsHeight = 0;
 
     void CheckForFrame(IFGFeature* fg, uint32_t frameId);
     int IndexForFrameId(uint32_t frameId) const;
+    void CaptureGameCamera(IFGFeature* fg, uint32_t frameId, const sl::Constants& data, bool valid);
 
   public:
     bool setConstants(const sl::Constants& constants, uint32_t frameId);

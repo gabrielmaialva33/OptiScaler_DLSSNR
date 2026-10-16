@@ -38,10 +38,12 @@ build is running. `CLAUDE.md` has the stall signature and the recovery.
 
 The `fork-compat` suite exercises NGX signature redirects and independent custom library paths;
 `fg-locks` exercises the actual resize/release lock scopes when settings or the current FG change.
+`fg-tag-extents` checks D3D12 tag origins and bounds; `fg-game-camera` checks validated camera
+forwarding and its frame identity through delayed input, ring reuse and FG restart.
 
 ## What the suites cover
 
-**Host tier.** Fifty-four suites. All but `nr-invariants`, `nr-ab-compare`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
+**Host tier.** Fifty-six suites. All but `nr-invariants`, `nr-ab-compare`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
 code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 - `nr-ab-compare` — stdlib offline Stage 0/1 capture analysis: synthetic PNG/PFM/raw pairs, detail/noise/colour/temporal controls, provenance and invalid-input rejection. No GPU or image-quality claim.

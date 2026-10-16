@@ -264,6 +264,8 @@ void DLSSG_Dx12::Deactivate()
 {
     LOG_DEBUG("");
 
+    _gameCamera.Clear();
+
     if (_isActive)
     {
         sl::DLSSGOptions options {};
@@ -597,6 +599,8 @@ bool DLSSG_Dx12::Dispatch()
     constData.motionVectorsDilated = IsLowResMV() ? sl::Boolean::eFalse : sl::Boolean::eTrue;
     constData.motionVectorsJittered = IsJitteredMVs() ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 
+    _gameCamera.Apply(willDispatchFrame, constData);
+
     auto frameId = static_cast<uint32_t>(willDispatchFrame);
 
     auto tokenResult = StreamlineProxy::GetNewFrameToken()(frameToken, &frameId);
@@ -709,6 +713,8 @@ void DLSSG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
 
 void DLSSG_Dx12::ReleaseObjects()
 {
+    _gameCamera.Clear();
+
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
         SAFE_RELEASE(_uiCommandAllocator[i]);

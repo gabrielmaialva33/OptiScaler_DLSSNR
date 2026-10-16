@@ -3,6 +3,7 @@
 #include <framegen/IFGFeature_Dx12.h>
 
 #include <proxies/Streamline_Proxy.h>
+#include <framegen/dlssg/GameCamera.h>
 
 class DLSSG_Dx12 : public virtual IFGFeature_Dx12
 {
@@ -18,6 +19,8 @@ class DLSSG_Dx12 : public virtual IFGFeature_Dx12
     // changes we set this so the next Dispatch sends one eOff frame (below) and the
     // frame after re-enters eOn with the new count, forcing the feature to rebuild.
     bool _mfgReinitPending = false;
+
+    DlssgGameCamera<BUFFER_COUNT> _gameCamera;
 
     sl::ViewportHandle viewport { 0 };
     sl::FrameToken* frameToken = nullptr;
@@ -49,6 +52,9 @@ class DLSSG_Dx12 : public virtual IFGFeature_Dx12
     void CreateObjects(ID3D12Device* InDevice) override final;
 
   public:
+    void BeginGameCameraFrame(uint64_t frame) { _gameCamera.BeginFrame(frame); }
+    void SetGameCamera(uint64_t frame, const sl::Constants& data, bool allow) { _gameCamera.Store(frame, data, allow); }
+
     // IFGFeature
     const char* Name() override final { return "DLSSG"; };
     feature_version Version() override final;

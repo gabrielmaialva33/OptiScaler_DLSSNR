@@ -332,3 +332,13 @@ summary = "Actual NGX signature hooks and independent XeSS/XeFG/XeLL library con
 tier = "host"
 timeout = 120
 summary = "Production resize/release FG lock pairing through mutable settings, FG replacement, null inputs and exceptions."
+
+[fg-tag-extents]
+tier = "host"
+timeout = 120
+summary = "Streamline D3D12 tag origins, full-texture fallback and overflow-safe bounds; Vulkan unchanged."
+
+[fg-game-camera]
+tier = "host"
+timeout = 120
+summary = "Streamline camera validation and exact-frame lifetime through production input and DLSS-G dispatch slices."
