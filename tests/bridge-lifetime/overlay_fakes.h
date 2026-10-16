@@ -6,8 +6,12 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <algorithm>
+#include <thread>
 using HRESULT = int32_t;
 using UINT = unsigned;
+using UINT64 = uint64_t;
 using ULONG = unsigned;
 using DXGI_FORMAT = int;
 constexpr HRESULT S_OK = 0, DXGI_ERROR_INVALID_CALL = -6;
@@ -17,6 +21,9 @@ constexpr int D3D12_RTV_DIMENSION_TEXTURE2D = 4;
 #define LOG_TRACE(...) ((void) 0)
 #define LOG_INFO(...) ((void) 0)
 #define LOG_ERROR(...) ((void) 0)
+#define LOG_WARN(...) ((void) 0)
+#define FAILED(hr) ((hr) < 0)
+#define SUCCEEDED(hr) ((hr) >= 0)
 #define SAFE_RELEASE(p)                                                                                                \
     do                                                                                                                 \
     {                                                                                                                  \
@@ -27,12 +34,15 @@ constexpr int D3D12_RTV_DIMENSION_TEXTURE2D = 4;
         }                                                                                                              \
     } while (0)
 
+inline bool overlayGpuPending = false;
+
 struct Ref
 {
     int refs = 1;
     ULONG AddRef() { return ++refs; }
     ULONG Release()
     {
+        assert(!overlayGpuPending && "overlay released a resource still used by the GPU");
         assert(refs > 0);
         return --refs;
     }
@@ -46,12 +56,35 @@ struct ID3D12DescriptorHeap : Ref
 };
 struct ID3D12CommandAllocator : Ref
 {
+    int resets = 0;
+    HRESULT resetResult = S_OK;
+    HRESULT Reset()
+    {
+        ++resets;
+        return resetResult;
+    }
 };
 struct ID3D12GraphicsCommandList : Ref
 {
 };
+using ID3D12CommandList = ID3D12GraphicsCommandList;
+struct ID3D12Fence;
 struct ID3D12CommandQueue : Ref
 {
+    int executes = 0, signals = 0;
+    HRESULT signalResult = S_OK;
+    std::function<void()> onExecute;
+    void ExecuteCommandLists(UINT, ID3D12CommandList* const*)
+    {
+        ++executes;
+        if (onExecute)
+            onExecute();
+    }
+    HRESULT Signal(ID3D12Fence*, UINT64)
+    {
+        ++signals;
+        return signalResult;
+    }
 };
 struct D3D12_CPU_DESCRIPTOR_HANDLE
 {
@@ -62,8 +95,18 @@ struct D3D12_RENDER_TARGET_VIEW_DESC
     DXGI_FORMAT Format = 0;
     int ViewDimension = 0;
 };
+struct ID3D12Fence : Ref
+{
+    UINT64 completed = 0;
+    UINT64 GetCompletedValue() { return completed; }
+};
+inline UINT64 clockTicks = 0;
+inline UINT64 GetTickCount64() { return clockTicks; }
+inline void Sleep(unsigned ms) { clockTicks += ms; }
 struct ID3D12Device : Ref
 {
+    HRESULT removed = S_OK;
+    HRESULT GetDeviceRemovedReason() { return removed; }
     int views = 0;
     void CreateRenderTargetView(ID3D12Resource*, const D3D12_RENDER_TARGET_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE)
     {
@@ -109,6 +152,12 @@ static int GetCorrectDXGIFormat(int format) { return format; }
 
 // menu_overlay_dx.cpp's statics, with the same names and meanings.
 static int const NUM_BACK_BUFFERS = 8;
+static std::recursive_mutex g_dx12OverlayMutex;
+static ID3D12Fence* g_menuFence = nullptr;
+static ID3D12CommandQueue* g_menuSubmitQueue = nullptr;
+static UINT64 g_menuFenceValue = 0;
+static UINT64 g_allocatorFenceValues[NUM_BACK_BUFFERS] = {};
+static bool g_menuFenceUnproven = false;
 static bool _dx12Device = false;
 static bool _isInited = false;
 static ID3D12Device* g_pd3dDeviceParam = nullptr;
@@ -126,8 +175,29 @@ struct DescriptorHeapAllocator
 };
 static DescriptorHeapAllocator g_pd3dSrvDescHeapAlloc;
 
+struct FakeFg
+{
+    std::function<void()> onDeactivate;
+    void* FrameGenerationContext() { return this; }
+    bool IsActive() { return true; }
+    void UpdateTarget() {}
+    void Deactivate()
+    {
+        if (onDeactivate)
+            onDeactivate();
+    }
+};
+using HWND = int;
+static bool _dx11Device = false;
+static void CleanupRenderTargetDx11(bool) {}
+namespace MenuOverlayDx
+{
+void CleanupRenderTarget(bool, HWND);
+}
 struct State
 {
+    FakeFg* currentFG = nullptr;
+    bool fgChanged = false;
     bool isShuttingDown = false;
     static State& Instance()
     {

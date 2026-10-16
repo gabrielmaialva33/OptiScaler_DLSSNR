@@ -361,3 +361,9 @@ Twenty mutations of the fix were each confirmed to fail a case, in this suite or
 
 What these fakes cannot show is that Windows frees the window once the presenter's last reference goes, so that the
 retry succeeds. That needs the game on native Windows.
+
+The D3D12 overlay cases also execute its production submission, allocator preparation and bounded fence wait:
+allocators wait for their own slot, queue changes drain the previous overlay submission, failed signals keep
+resources, and teardown refuses while GPU completion is unproven. A removed device permits retirement but never
+allocator reuse. Public cleanup is tested with a simulated FG present thread to keep deactivation outside the
+overlay mutex. No D3D12 API or real GPU is exercised by these host cases.

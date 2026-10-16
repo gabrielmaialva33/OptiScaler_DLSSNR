@@ -5,6 +5,7 @@
 #include <Util.h>
 #include <Logger.h>
 #include <Config.h>
+#include <mutex>
 
 #include <imgui/imgui_impl_dx11.h>
 #include <imgui/imgui_impl_dx12.h>
@@ -37,6 +38,76 @@ static ID3D12CommandAllocator* g_commandAllocators[NUM_BACK_BUFFERS] = {};
 static ID3D12Resource* g_mainRenderTargetResource[NUM_BACK_BUFFERS] = {};
 static D3D12_CPU_DESCRIPTOR_HANDLE g_mainRenderTargetDescriptor[NUM_BACK_BUFFERS] = {};
 static std::unique_ptr<MenuBlur_Dx12> g_menuBlur;
+
+// Only this overlay's work: a teardown must not wait on later FG work on the same queue.
+static std::recursive_mutex g_dx12OverlayMutex;
+static ID3D12Fence* g_menuFence = nullptr;
+static ID3D12CommandQueue* g_menuSubmitQueue = nullptr;
+static UINT64 g_menuFenceValue = 0;
+static UINT64 g_allocatorFenceValues[NUM_BACK_BUFFERS] = {};
+static bool g_menuFenceUnproven = false;
+
+static bool WaitForMenuGpu(UINT64 value, bool allowRemoved = false)
+{
+    if (value == 0 && !g_menuFenceUnproven)
+        return true;
+    if (g_pd3dDeviceParam == nullptr)
+        return false;
+
+    const auto start = GetTickCount64();
+    do
+    {
+        const auto completed = g_menuFence != nullptr ? g_menuFence->GetCompletedValue() : 0;
+        const bool removed = completed == UINT64_MAX || FAILED(g_pd3dDeviceParam->GetDeviceRemovedReason());
+        if (removed)
+            return allowRemoved;
+        if (!g_menuFenceUnproven && completed >= value)
+            return true;
+        // A failed Signal proves nothing about the submitted draw. Keep its objects until device loss.
+        if (g_menuFenceUnproven)
+            break;
+        Sleep(1);
+    } while (GetTickCount64() - start < 2000);
+
+    LOG_WARN("Menu GPU completion unproven; keeping resources and skipping this draw/cleanup");
+    return false;
+}
+
+static bool PrepareMenuAllocator(UINT slot)
+{
+    if (slot >= NUM_BACK_BUFFERS || g_menuFence == nullptr || g_menuFenceValue >= UINT64_MAX - 1 ||
+        !WaitForMenuGpu(g_allocatorFenceValues[slot]))
+        return false;
+    const auto result = g_commandAllocators[slot]->Reset();
+    if (FAILED(result))
+        LOG_ERROR("Menu command allocator Reset failed: {:X}", (unsigned long) result);
+    return SUCCEEDED(result);
+}
+
+// The retained queue identity prevents out-of-order signals when a different presenter queue draws the menu.
+static bool SubmitMenuDraw(ID3D12CommandQueue* queue, UINT slot, ID3D12CommandList* const* lists)
+{
+    if (queue == nullptr || g_menuFence == nullptr || slot >= NUM_BACK_BUFFERS || g_menuFenceValue >= UINT64_MAX - 1)
+        return false;
+    if (queue != g_menuSubmitQueue)
+    {
+        if (!WaitForMenuGpu(g_menuFenceValue))
+            return false;
+        SAFE_RELEASE(g_menuSubmitQueue);
+        g_menuSubmitQueue = queue;
+        queue->AddRef();
+    }
+    const auto value = ++g_menuFenceValue;
+    g_allocatorFenceValues[slot] = value;
+    g_menuFenceUnproven = true;
+    queue->ExecuteCommandLists(1, lists);
+    const auto result = queue->Signal(g_menuFence, value);
+    if (SUCCEEDED(result))
+        g_menuFenceUnproven = false;
+    else
+        LOG_ERROR("Menu fence Signal failed: {:X}; retaining submitted resources", (unsigned long) result);
+    return SUCCEEDED(result);
+}
 
 // current command queue for dx12 swapchain
 static IUnknown* currentSCCommandQueue = nullptr;
@@ -120,10 +191,11 @@ static void CreateRenderTargetDx12(ID3D12Device* device, IDXGISwapChain* pSwapCh
     LOG_INFO("done!");
 }
 
-static void CleanupRenderTargetDx12(bool clearQueue)
+static bool CleanupRenderTargetDx12(bool clearQueue)
 {
-    if (State::Instance().isShuttingDown)
-        return;
+    std::lock_guard lock(g_dx12OverlayMutex);
+    if (State::Instance().isShuttingDown || !WaitForMenuGpu(g_menuFenceValue, true))
+        return false;
 
     // The swapchain's buffers go whatever the init state says. A present on another thread can take them
     // (CreateRenderTargetDx12) after a cleanup released them and before it cleared _isInited; returning on
@@ -133,9 +205,6 @@ static void CleanupRenderTargetDx12(bool clearQueue)
     {
         SAFE_RELEASE(g_mainRenderTargetResource[i]);
     }
-
-    if (!_isInited || !_dx12Device)
-        return;
 
     LOG_TRACE("clearQueue: {}", clearQueue);
 
@@ -161,6 +230,11 @@ static void CleanupRenderTargetDx12(bool clearQueue)
         }
 
         SAFE_RELEASE(g_pd3dCommandList);
+        SAFE_RELEASE(g_menuFence);
+        SAFE_RELEASE(g_menuSubmitQueue);
+        g_menuFenceValue = 0;
+        g_menuFenceUnproven = false;
+        std::fill(std::begin(g_allocatorFenceValues), std::end(g_allocatorFenceValues), 0);
 
         if (g_pd3dCommandQueue != nullptr)
             g_pd3dCommandQueue = nullptr;
@@ -172,6 +246,7 @@ static void CleanupRenderTargetDx12(bool clearQueue)
         _dx12Device = false;
         _isInited = false;
     }
+    return true;
 }
 
 static void CreateRenderTargetDx11(IDXGISwapChain* pSwapChain)
@@ -437,6 +512,16 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
             return;
         }
 
+        result = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_menuFence));
+        if (FAILED(result))
+        {
+            LOG_ERROR("Menu CreateFence failed: {:X}", (unsigned long) result);
+            MenuOverlayBase::HideMenu();
+            CleanupRenderTargetDx12(true);
+            pSwapChain->Release();
+            return;
+        }
+
         DXGI_SWAP_CHAIN_DESC scDesc;
         pSwapChain->GetDesc(&scDesc);
 
@@ -501,14 +586,13 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                 const bool blurMenu = blurReady && MenuCommon::BackgroundBlurUsed();
                 ID3D12CommandAllocator* commandAllocator = g_commandAllocators[backBufferIdx];
 
-                auto result = commandAllocator->Reset();
-                if (result != S_OK)
+                if (!PrepareMenuAllocator(backBufferIdx))
                 {
-                    LOG_ERROR("commandAllocator->Reset: {0:X}", (unsigned long) result);
-                    CleanupRenderTargetDx12(false);
+                    MenuOverlayBase::HideMenu();
                     pSwapChain->Release();
                     return;
                 }
+                HRESULT result;
 
                 D3D12_RESOURCE_BARRIER barrier = {};
                 barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -557,7 +641,10 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                 }
 
                 ID3D12CommandList* ppCommandLists[] = { g_pd3dCommandList };
-                ((ID3D12CommandQueue*) currentSCCommandQueue)->ExecuteCommandLists(1, ppCommandLists);
+                // The ticket is recorded before submission, so a failed Signal cannot mark this allocator idle.
+                if (!SubmitMenuDraw(static_cast<ID3D12CommandQueue*>(currentSCCommandQueue), backBufferIdx,
+                                    ppCommandLists))
+                    MenuOverlayBase::HideMenu();
             }
         }
         else
@@ -587,6 +674,8 @@ void MenuOverlayDx::CleanupRenderTarget(bool clearQueue, HWND hWnd)
         fg->Deactivate();
     }
 
+    // Deactivation can wait for FG's present thread, which also enters this overlay.
+    std::lock_guard lock(g_dx12OverlayMutex);
     if (_dx11Device)
         CleanupRenderTargetDx11(false);
     else
@@ -596,6 +685,7 @@ void MenuOverlayDx::CleanupRenderTarget(bool clearQueue, HWND hWnd)
 void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
                             const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP)
 {
+    std::lock_guard lock(g_dx12OverlayMutex);
     if (!Config::Instance()->OverlayMenu.value_or_default())
     {
         MenuOverlayBase::Present();
@@ -670,7 +760,14 @@ void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             if (g_pd3dDeviceParam != nullptr && device12 == nullptr)
                 device12 = g_pd3dDeviceParam;
 
-            CleanupRenderTargetDx12(true);
+            if (!CleanupRenderTargetDx12(true))
+            {
+                if (cq != nullptr)
+                    cq->Release();
+                if (device12 != nullptr)
+                    device12->Release();
+                return;
+            }
 
             g_pd3dCommandQueue = cq;
             g_pd3dDeviceParam = device12;

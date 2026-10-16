@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <optional>
 
 #include "FSRFG_Dx12.h"
 
@@ -653,12 +654,6 @@ bool FSRFG_Dx12::Dispatch()
         }
     }
 
-    if (config->FGUseMutexForSwapchain.value_or_default() && Mutex.getOwner() == 1)
-    {
-        LOG_TRACE("Releasing FG->Mutex: {}", Mutex.getOwner());
-        Mutex.unlockThis(1);
-    };
-
     return dispatchResult;
 }
 
@@ -1227,6 +1222,7 @@ bool FSRFG_Dx12::ReleaseSwapchain(HWND hwnd)
 
     LOG_DEBUG("");
 
+    std::optional<OwnedLockGuard> swapchainLock;
     if (Config::Instance()->FGUseMutexForSwapchain.value_or_default())
     {
         if (Mutex.getOwner() == 1)
@@ -1236,7 +1232,7 @@ bool FSRFG_Dx12::ReleaseSwapchain(HWND hwnd)
         }
 
         LOG_TRACE("Waiting Mutex 1, current: {}", Mutex.getOwner());
-        Mutex.lock(1);
+        swapchainLock.emplace(Mutex, 1);
         LOG_TRACE("Accuired Mutex: {}", Mutex.getOwner());
     }
 
@@ -1256,12 +1252,6 @@ bool FSRFG_Dx12::ReleaseSwapchain(HWND hwnd)
         _swapChainContext = nullptr;
         State::Instance().currentFGSwapchain = nullptr;
         Lsfg::OnSwapchainReleased(); // LSFG study: FFX has drained its queues
-    }
-
-    if (Config::Instance()->FGUseMutexForSwapchain.value_or_default())
-    {
-        LOG_TRACE("Releasing Mutex: {}", Mutex.getOwner());
-        Mutex.unlockThis(1);
     }
 
     return true;

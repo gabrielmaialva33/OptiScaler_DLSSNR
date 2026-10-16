@@ -16,6 +16,8 @@ here or beside the code it describes.
 - [linux-proton/vulkan-overlay-nongraphics-present.md](linux-proton/vulkan-overlay-nongraphics-present.md): decision record for the Vulkan overlay on a non-graphics present family.
 - [CLAUDE.md](../CLAUDE.md): "Linux / Proton patches" lists the fork's overlay patches over upstream.
 
+- [linux-proton/fork-fixes-20261016.md](linux-proton/fork-fixes-20261016.md): NGX/library compatibility, menu GPU completion and FG lock-pairing fixes from the fork audit.
+
 ## DLSS Neural Rendering design
 
 - [dlssnr/README.md](dlssnr/README.md): topic index of the design notes in [dlssnr/design/](dlssnr/design/), with a reading order for the present hosts.

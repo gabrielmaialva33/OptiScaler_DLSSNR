@@ -322,3 +322,13 @@ summary = "Production D3D12 HDR conversion: exact HDR10/scRGB GPU identity, know
 tier = "host"
 timeout = 120
 summary = "Offline Stage 0/1 capture metrics on synthetic PNG/PFM/raw pairs, temporal controls, provenance validation and CLI refusals; stdlib only."
+
+[fork-compat]
+tier = "host"
+timeout = 120
+summary = "Actual NGX signature hooks and independent XeSS/XeFG/XeLL library config read/save behavior."
+
+[fg-locks]
+tier = "host"
+timeout = 120
+summary = "Production resize/release FG lock pairing through mutable settings, FG replacement, null inputs and exceptions."

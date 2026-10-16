@@ -33,7 +33,7 @@ static LONG hkWinVerifyTrust(HWND hwnd, GUID* pgActionID, LPVOID pWVTData)
 
     // This generally isn't needed but for some reason, when using SpecialK, our hooked CreateFileW doesn't get called
     // and WinVerifyTrust fails as nvngx.dll doesn't exist
-    if (path.contains("nvngx.dll") && State::Instance().nvngxReplacement.has_value())
+    if (path.substr(path.find_last_of("\\/") + 1) == "nvngx.dll" && State::Instance().nvngxReplacement.has_value())
     {
         WINTRUST_DATA newData = *data;
         WINTRUST_FILE_INFO_ newFile = *newData.pFile;

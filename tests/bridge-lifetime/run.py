@@ -99,15 +99,19 @@ with tempfile.TemporaryDirectory(prefix='optiscaler-bridge-lifetime-') as direct
 # whose public reference counts decide a vkd3d-proton-style ResizeBuffers.
 overlay_source = (root / 'OptiScaler/menu/menu_overlay_dx.cpp').read_text()
 overlay_unit = ((here / 'overlay_fakes.h').read_text() +
+                function('static bool WaitForMenuGpu(', overlay_source) +
+                function('static bool SubmitMenuDraw(', overlay_source) +
+                function('static bool PrepareMenuAllocator(', overlay_source) +
                 function('static void CreateRenderTargetDx12(', overlay_source) +
-                function('static void CleanupRenderTargetDx12(', overlay_source) +
+                function('static bool CleanupRenderTargetDx12(', overlay_source) +
+                function('void MenuOverlayDx::CleanupRenderTarget(', overlay_source) +
                 (here / 'overlay_cases.cpp').read_text())
 with tempfile.TemporaryDirectory(prefix='optiscaler-overlay-targets-') as directory:
     cpp = Path(directory) / 'overlay.cpp'
     binary = Path(directory) / 'overlay'
     cpp.write_text(overlay_unit)
     subprocess.run(['g++', '-std=c++20', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
-                    '-Wno-unused-parameter', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                    '-Wno-unused-parameter', '-pthread', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                     str(cpp), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
 
