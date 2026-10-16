@@ -27,5 +27,8 @@ overflow. An absent or empty extent retains the full-texture fallback with a zer
 The Vulkan adapter is unchanged.
 
 Host tests exercise the actual SDK types and production input/dispatch slices. They establish the
-forwarding and lifetime contract, not visual quality or native Windows/GPU behavior. A Streamline
-D3D12 title with camera motion and FG still needs an in-game comparison before integration.
+forwarding and lifetime contract. `python3 tests/fg-inputs-d3d12/run.py` adds an automated MSVC
+fixture with real DirectXMath projections, temporal reprojection and 64 GPU texture crops/readbacks,
+plus failing camera/origin mutation controls. No game is needed for those regression checks.
+It does not execute the complete DLL or real DLSS-G provider and does not establish generated-frame
+quality. Representative game validation and native Windows debug validation remain release checks.

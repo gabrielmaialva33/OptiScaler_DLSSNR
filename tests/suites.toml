@@ -342,3 +342,8 @@ summary = "Streamline D3D12 tag origins, full-texture fallback and overflow-safe
 tier = "host"
 timeout = 120
 summary = "Streamline camera validation and exact-frame lifetime through production input and DLSS-G dispatch slices."
+
+[fg-inputs-d3d12]
+tier = "wine"
+timeout = 1200
+summary = "MSVC/DirectXMath camera preservation and temporal projection; real D3D12 texture-tag crop/readback; three required failing mutation controls. No game or DLSS-G inference."
