@@ -29,7 +29,7 @@ entry, or the next run tells you.
 | Tier | Needs | Suites |
 |---|---|---|
 | `host` | Python, `g++`, `clang++` | the `nr-*` suites, `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`, `mfg-patch-plan`, `mfg-probe`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy`, `deploy-safety`, `windows-installer`, `lsfg-shader-library`, `lsfg-integration` and `lsfg-presenter` |
-| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session, and they and `synth-motion-vk` a working Vulkan loader | `nr-gpu-timing-d3d12`, `nr-session-exit`, `synth-motion-d3d12`, `synth-motion-vk`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback`, `nr-present-guide-identity-msvc`, `nr-hdr-d3d12`, `dx11-guides-transport` |
+| `wine` | msvc-wine prefix; `vulkan-overlay` and `vulkan-present-host` also need a graphical session, and they and `synth-motion-vk` a working Vulkan loader | `nr-gpu-timing-d3d12`, `nr-session-exit`, `synth-motion-d3d12`, `synth-motion-vk`, `vulkan-overlay`, `vulkan-present-host`, `dlssnr-loopback`, `nr-present-guide-identity-msvc`, `nr-hdr-d3d12`, `dx11-guides-transport`, `fg-inputs-d3d12` and `fg-provider-d3d12` |
 | `wip` | registered, no runner yet | — |
 
 The wine tier is serial on purpose. These suites compile through the single msvc-wine
@@ -47,10 +47,20 @@ For automated validation of those changes without a game, run
 cases, 64 D3D12 GPU crop/readback checks and failing mutation controls. It is registered in the
 wine tier. See [its README](fg-inputs-d3d12/README.md) for coverage and the SDK-consumer boundary.
 
+For the complete serial rendering regression, including a Release build and both real
+model/plugin paths, run `tools/test-rendering.sh`. `--host-only` runs the portable
+tier; `--no-build` uses the existing DLL. The full command requires the locally supplied
+NR model and DLSS-G kit and fails if coverage cannot run. See the individual GPU
+suite READMEs for artifact paths and limits.
+
 ## What the suites cover
 
-**Host tier.** Fifty-seven suites. All but `nr-invariants`, `nr-ab-compare`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
+**Host tier.** Fifty-nine suites. All but `nr-invariants`, `nr-ab-compare`, `nr-moving-evidence`, `fg-provider-evidence`, `repo-privacy`, `deploy-safety` and `windows-installer` build real production
 code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
+
+- `fg-provider-evidence` — the real DLSS-G provider evidence judge rejects incomplete records and missing interpolated presentation surplus. No GPU.
+
+- `nr-moving-evidence` — independent moving-scene analyzer against known geometric motion, rejected zero/nonfinite guides, processing/repeatability checks and timing percentiles. No GPU.
 
 - `nr-ab-compare` — stdlib offline Stage 0/1 capture analysis: synthetic PNG/PFM/raw pairs, detail/noise/colour/temporal controls, provenance and invalid-input rejection. No GPU or image-quality claim.
 
@@ -263,6 +273,11 @@ code with local fakes under AddressSanitizer and UndefinedBehaviorSanitizer.
   two-heap clear contract.
 
 **Wine tier.**
+
+- `fg-provider-d3d12` — synthetic D3D12 game through the full production DLL and the
+  installed real Streamline/DLSS-G plugin. The runtime oracle must observe actual
+  interpolated presentation surplus, rather than counting application presents alone.
+  See [its README](fg-provider-d3d12/README.md) for supported phases and prerequisites.
 
 - `dx11-guides-transport` — the native D3D11 guide transport's API sequence (`dx11-native-dlss-guides.md`, step 3)
   on real devices under a local Proton, DXVK and vkd3d-proton as a game gets them: depth and motion formats cross

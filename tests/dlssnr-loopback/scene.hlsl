@@ -7,10 +7,10 @@
 
 cbuffer Frame : register(b0)
 {
-    float4x4 gViewProj;      // current frame, jittered
-    float4x4 gViewProjPrev;  // previous frame, jittered with the previous frame's offset
-    float4x4 gModel;
-    float4x4 gModelPrev;
+    row_major float4x4 gViewProj;      // current frame, jittered
+    row_major float4x4 gViewProjPrev;  // previous frame, jittered with the previous frame's offset
+    row_major float4x4 gModel;
+    row_major float4x4 gModelPrev;
     float2   gJitter;        // in NDC, already divided by render extent
     float2   gJitterPrev;
     float2   gRenderExtent;
@@ -51,6 +51,7 @@ struct PSOut
 {
     float4 colour : SV_TARGET0;
     float2 motion : SV_TARGET1;
+    float depth : SV_TARGET2;
 };
 
 PSOut PSMain(VSOut i)
@@ -69,6 +70,7 @@ PSOut PSMain(VSOut i)
     float3 lit    = albedo * (0.08 + 0.92 * ndotl) + spec * 0.6;
 
     o.colour = float4(lit, 1.0);
+    o.depth = i.pos.z;
 
     // NDC -> UV, then the difference. Sign convention matches NVSDK_NGX motion vectors:
     // the vector points from the current pixel back to where it was in the previous frame.

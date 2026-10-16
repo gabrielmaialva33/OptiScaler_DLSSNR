@@ -18,6 +18,25 @@ Outputs go to `x64/<Config>/` and `x64/out/`. `./build-local.sh` at the repo roo
 `exec`s this script; it exists because that path is in muscle memory and in old notes.
 Do not pipe its output; redirect it to a file (see `CLAUDE.md`, "Build").
 
+## test-rendering.sh
+
+Runs the host tier with four workers, builds Release, then runs D3D12 camera/texture
+regressions, the moving-scene production NR A/B fixture and the complete production
+DLSS-G provider fixture, in that order. Wine/GPU work is serial. Any failed check stops
+the command; missing DLSS-G prerequisites fail the combined run too.
+
+```bash
+tools/test-rendering.sh              # complete sequence, without opening a game
+tools/test-rendering.sh --host-only  # portable host policy checks
+tools/test-rendering.sh --no-build   # use the already built x64/out DLL
+```
+
+Each GPU suite retains its own ignored `artifacts/` directory with logs and results.
+The model and plugin must already be available locally; the fixtures never download
+them or deploy to game directories. A passing run covers the synthetic scenarios;
+image metrics and GPU timings are measurements, not a claim of better quality or FPS.
+See [the tests index](../tests/README.md) for the individual boundaries.
+
 ## deploy-to-game.sh
 
 Copies the built `x64/out/OptiScaler.dll` and forwarder into a game directory under a proxy DLL

@@ -14,8 +14,49 @@ changes and shutdown. Evaluation counts include initialization and skipped NR wo
 
 Passing the default sweep establishes neither image quality, deterministic pixels nor an FPS
 improvement. `--present-nr` adds a separate deterministic, static image/readback experiment below.
-Analytic motion and controlled A/B timing remain future work. Visual acceptance also requires
+`--moving-scene` adds analytic motion and controlled A/B timing through the production DLL. Visual acceptance also requires
 testing representative content; the synthetic present fixture cannot establish emulator quality.
+
+## Automated moving scene
+
+```bash
+python3 tests/dlssnr-loopback/run.py --runtime proton --moving-scene
+python3 tests/dlssnr-loopback/test_moving.py  # Host evidence/negative-control checks only.
+```
+
+`--moving-scene` wires the existing camera/model transforms and `scene.hlsl` into a
+real graphics pass and calls the built **production OptiScaler NGX exports**. Native
+DLAA writes 640x360 output; NR runs at HookMethod=1 and WorkingScale=1. Four fresh
+processes run NR off/on/on/off with identical 64-frame warmup and sixteen measured
+frames each. No game is launched or modified. It needs installed Proton/MSVC,
+`x64/out/OptiScaler.dll` plus its matching forwarder, the user-supplied NR model in
+`~/.local/opt/dlssnr-kit`, and an existing `nvngx_dlss.dll` from `LOOPBACK_DONOR`
+(or the existing Divinity fallback). Dependencies are local; none is downloaded.
+
+The shared compiler/GPU fixture lock and `/proc` mappings guard run before staging;
+an active Steam application or mapped older fixture refuses the run. A timeout or
+interruption kills the fixture process group. Reports are invalidated at entry and
+published after all trials complete. `--skip-build` reuses only the existing harness.
+
+`artifacts/moving-run/moving-report.json` records fixed-frame raw readback hashes,
+inverse-depth motion-oracle checks, production NR composition coverage, repeated-on
+error, NR-on/off pixel MAE, a motion-compensated temporal difference of the NR edit,
+and **p50/p95 of public EvaluateFeature GPU time**, with every sample and provenance.
+The two automatic negative controls reject zero motion and processing-disabled
+output. The host tests also reject malformed readbacks, nonfinite projection data,
+invalid timings and incorrect jitter. Source/depth/motion must be byte-identical in
+all four processes, and the disabled outputs must repeat exactly.
+
+Timing includes DLAA plus optional NR; rendering, readbacks and warmup are excluded.
+Clocks are left as configured. Different clocks or concurrent GPU use can change
+the numbers substantially, so timing has no improvement threshold. The temporal
+metric is descriptive and limited to reprojected opaque surface matches. Passing
+this test establishes processing and guide correctness for this scene, with no
+perceptual quality, game compatibility or FPS claim. See
+[the design](../../docs/dlssnr/design/automated-moving-scene.md).
+Raw captures are about 340 MiB for all four trials; Python analysis peaks around
+2.5 GiB because it keeps decoded samples. First/last output PPM previews accompany
+each trial. All generated evidence stays under ignored `artifacts/`.
 
 ## Status
 

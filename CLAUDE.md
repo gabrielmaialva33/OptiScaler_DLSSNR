@@ -253,19 +253,22 @@ before committing C++, because nothing local enforces it and it had drifted by 5
 
 ### Tests
 
-`tests/README.md` is the index; read it before adding or changing a suite. Sixty-eight directories under
+`tests/README.md` is the index; read it before adding or changing a suite. Seventy-one directories under
 `tests/`, each self-contained with its own `run.py` and README, registered in `tests/suites.toml`.
 
 ```bash
-python3 tests/run_all.py            # host tier, the default; 57 suites
+python3 tests/run_all.py            # host tier, the default; 59 suites
 python3 tests/run_all.py --list     # registry, tiers, and what is runnable here
-python3 tests/run_all.py --tier all # adds the eleven wine suites
+python3 tests/run_all.py --tier all # adds the twelve wine suites
 python3 tests/<name>/run.py         # one suite, unchanged
 ```
 
+`tools/test-rendering.sh` runs the host tier, Release build and the D3D12 input, moving NR and real DLSS-G
+regressions serially, without a game. See `tools/README.md` for prerequisites and individual test limits.
+
 The `nr-ab-compare` suite is stdlib Python and tests the offline PNG/PFM/raw A/B metrics and provenance checks.
 
-Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the thirty-eight
+Three tiers. **host** needs only Python plus `g++`/`clang++` and runs in parallel: the 39
 `nr-*` suites plus `bridge-lifetime`, `bridge-window`, `vulkan-query-readiness`, `mfg-pattern`,
 `mfg-patch-plan`, `mfg-probe`, `fg-synth-policy`, `sl-log-repeat`, `repo-privacy` (no home path, LAN/tailnet address or token in
 a tracked file; the tree is public), `deploy-safety` (`tools/deploy-to-game.sh` on fake game directories),
@@ -280,7 +283,8 @@ device), `nr-present-guide-identity-msvc` (the present guides' identity cases co
 `synth-motion-vk` (the same estimator on Vulkan), `vulkan-overlay` (which also needs a graphical session and a working
 Vulkan loader), `vulkan-present-host` (the production DLL's Vulkan present host, the round trip and, under a local
 Proton with the model kit, cold NR, HDR and synthesized motion), `dx11-guides-transport` (a D3D11 game's depth and
-motion crossing to the D3D12 bridge under GE-Proton) and `dlssnr-loopback` (real NGX/NR under Proton).
+motion crossing to the D3D12 bridge under GE-Proton), `fg-inputs-d3d12` (camera and GPU crop regression),
+`dlssnr-loopback` (real NGX/NR under Proton) and `fg-provider-d3d12` (the production DLL and real DLSS-G interpolation).
 There are currently no **wip** suites.
 
 `suites.toml` is a drift guard, not just a config file. A directory with no entry, or an entry with

@@ -1,6 +1,6 @@
 // D3D12 lifetime/extent driver for the production Neural Rendering exports.
-// Submits real work and waits on queue fences. The planned scene and analytic motion are not
-// wired yet, so this is not a deterministic image fixture or a performance benchmark.
+// Submits real work and waits on queue fences. --moving-scene adds deterministic images and analytic
+// motion; the legacy lifetime sweep is not an image benchmark.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -310,6 +310,7 @@ static void PumpMessages()
 #include "../../retoque/dlssnr/DlssNr_Identity.h"
 #include "cold_nr.h"
 #include "present_nr.h"
+#include "moving_scene.h"
 
 int main(int argc, char** argv)
 {
@@ -342,8 +343,7 @@ int main(int argc, char** argv)
         const std::string argument = argv[i];
 
         // --cold-size takes a value, which is not a DLL path either.
-        if (argument == "--cold-size" || argument == "--cold-ui-correction" ||
-            argument == "--cold-core-sdk")
+        if (argument == "--cold-size" || argument == "--cold-ui-correction" || argument == "--cold-core-sdk")
         {
             ++i;
             continue;
@@ -492,10 +492,18 @@ int main(int argc, char** argv)
         Require(fenceEvent != nullptr, "CreateEvent");
         UINT64 fenceValue = 0;
 
+        if (hasFlag("--moving-scene"))
+        {
+            MovingScene::Run(dllPath, device, queue, alloc, list, fence, fenceEvent);
+            DestroyWindow(window);
+            CloseHandle(fenceEvent);
+            return 0;
+        }
+
         if (presentNr)
         {
-            PresentNr::Run(factory, window, device, queue, alloc, list, fence, fenceEvent, hudAb, compositionAb,
-                           maskAb, transferAb, resetCost, uiProtectAb);
+            PresentNr::Run(factory, window, device, queue, alloc, list, fence, fenceEvent, hudAb, compositionAb, maskAb,
+                           transferAb, resetCost, uiProtectAb);
             DestroyWindow(window);
             CloseHandle(fenceEvent);
             return 0;

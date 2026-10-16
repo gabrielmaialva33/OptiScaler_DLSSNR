@@ -352,3 +352,18 @@ summary = "MSVC/DirectXMath camera preservation and temporal projection; real D3
 tier = "host"
 timeout = 120
 summary = "Production common DLSS-G option caching, failed-write retries, generation invalidation, MFG restart and menu interlock with real SDK types."
+
+[fg-provider-d3d12]
+tier = "wine"
+timeout = 1200
+summary = "Synthetic D3D12 application through the production OptiScaler DLL and real DLSS-G plugin, requiring actual interpolated presentation counters."
+
+[nr-moving-evidence]
+tier = "host"
+timeout = 60
+summary = "Moving-scene evidence analyzer: independent depth/projection motion oracle, processing coverage, repeatability and timing percentiles. No GPU."
+
+[fg-provider-evidence]
+tier = "host"
+timeout = 60
+summary = "Real DLSS-G evidence judge rejects missing interpolation, incomplete phase/frame records and unverified plugin coverage. No GPU."

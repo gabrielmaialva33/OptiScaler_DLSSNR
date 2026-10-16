@@ -138,7 +138,7 @@ def check_present_coverage(harness):
 def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_ab=False, cold_size=None,
                      cold_ui=None, cold_sdk=None, cold_load_opti=False, cold_from_d3d11=False,
                      cold_siblings=False, mask_ab=False, transfer_ab=False, reset_cost=False,
-                     ui_protect_ab=False):
+                     ui_protect_ab=False, moving_scene=False, dll=None):
     """Run the harness the way a Steam game runs: through Proton, in a compatdata prefix of its own.
 
     Hand-mirroring what Proton provides (vkd3d-proton, dxvk-nvapi, the driver's nvngx pair and the
@@ -163,6 +163,9 @@ def run_under_proton(cold_nr=False, present_nr=False, hud_ab=False, composition_
                # Proton refuses to create its per-process log without SteamGameId. Zero
                # labels this standalone harness without opting into a game's compatibility fixes.
                SteamGameId='0', PROTON_LOG='1', PROTON_LOG_DIR=str(OUT))
+    if moving_scene:
+        import run_moving
+        return run_moving.run_trials(sys.modules[__name__], proton, env, dll)
     for stale in ('OptiScaler.log', 'dlssnr-loopback.log'):
         (RUN / stale).unlink(missing_ok=True)
     if present_nr:
@@ -296,6 +299,9 @@ def main():
     ap.add_argument('--skip-build', action='store_true',
                     help='reuse the selected mode\'s artifacts/{run,cold-run,present-run}/dlssnr-loopback.exe')
     modes = ap.add_mutually_exclusive_group()
+    modes.add_argument('--moving-scene', action='store_true',
+                       help='deterministic graphics scene through production NGX exports; NR off/on/on/off '
+                            'GPU timing, guide oracle, captures and temporal metrics; requires Proton')
     modes.add_argument('--cold-nr', action='store_true',
                     help='probe core cold defaults and NR feature 18 through the production forwarder; '
                          'no OptiScaler Init, DLSS or RR feature; isolated artifacts/cold-run')
@@ -324,6 +330,8 @@ def main():
         ap.error('--transfer-ab requires --present-nr')
     if args.reset_cost and not args.present_nr:
         ap.error('--reset-cost requires --present-nr')
+    if args.moving_scene and args.runtime != 'proton':
+        ap.error('--moving-scene requires --runtime proton')
     if args.present_nr and args.runtime != 'proton':
         ap.error('--present-nr requires --runtime proton')
     if args.hud_ab or args.composition_ab or args.mask_ab or args.transfer_ab or args.ui_protect_ab:
@@ -339,6 +347,8 @@ def main():
                      'hud-run' if args.hud_ab else 'present-run')
     if args.cold_nr:
         RUN = OUT / 'cold-run'
+    if args.moving_scene:
+        RUN = OUT / 'moving-run'
 
     dll = Path(args.dll)
     if not dll.exists():
@@ -377,10 +387,13 @@ def main():
          '/I' + str(ROOT / 'external/nvngx_dlss_sdk'), HERE / 'harness.cpp',
          '/Fo' + str(OUT / 'harness.obj'),
          '/Fe' + str(RUN / 'dlssnr-loopback.exe'),
-         '/link', 'd3d12.lib', 'd3d11.lib', 'dxgi.lib', 'user32.lib'],
+         '/link', 'd3d12.lib', 'd3d11.lib', 'dxgi.lib', 'user32.lib', 'd3dcompiler.lib'],
         env=dict(env, WINE_MSVC_RAW_STDOUT='1'), log=OUT / 'build.log')
     if not (RUN / 'dlssnr-loopback.exe').exists():
         raise SystemExit('no harness binary; run without --skip-build first')
+
+    if args.moving_scene:
+        shutil.copy2(HERE / 'scene.hlsl', RUN / 'scene.hlsl')
 
     # NR needs the forwarder beside the DLL (the NVIDIA snippet rejects callers whose module path
     # lacks "nvngx.dll") and the model itself. Both come from the local kit, symlinked rather than
@@ -392,12 +405,14 @@ def main():
         'LOOPBACK_DONOR',
         str(Path.home() / '.local/share/Steam/steamapps/common/Crimson Desert/bin64')))
     if donor.is_dir() and not standalone:
-        for src in sorted(donor.glob('sl.*.dll')) + [donor / 'nvngx_dlss.dll']:
+        for src in ([] if args.moving_scene else sorted(donor.glob('sl.*.dll'))) + [donor / 'nvngx_dlss.dll']:
             if src.exists():
                 link = RUN / src.name
                 link.unlink(missing_ok=True)
                 link.symlink_to(src)
     names = ['nvngx.dll_dlssnr.dll', 'nvngx_dlssnr.dll', '_nvngx.dll']
+    if args.moving_scene:
+        names += ['nvngx_dlss.dll']
     if args.cold_sibling_snippets:
         # The other feature snippets a game folder carries. They are only staged so that
         # LoadLibrary can find them; nothing calls into them, which is also true in production.
@@ -408,13 +423,15 @@ def main():
         # Cold bring-up should test the installed driver, not a possibly stale kit copy.
         # Leave the legacy sweep's dependency selection unchanged.
         installed_core = Path('/usr/lib/nvidia/wine/_nvngx.dll')
-        if standalone and name == '_nvngx.dll' and installed_core.exists():
+        if (standalone or args.moving_scene) and name == '_nvngx.dll' and installed_core.exists():
             src = installed_core
         # Test the forwarder built alongside this DLL. The kit remains a fallback
         # for external builds that do not ship their matching forwarder.
         if name == 'nvngx.dll_dlssnr.dll' and (dll.parent / name).exists():
             src = (dll.parent / name).resolve()
         siblings = ('nvngx_dlss.dll', 'nvngx_dlssd.dll', 'nvngx_dlssg.dll')
+        if not src.exists() and name == 'nvngx_dlss.dll' and args.moving_scene and (donor / name).is_file():
+            src = donor / name
         if not src.exists() and name in siblings:
             # The kit may not carry them; a game folder does. Fall back to the one we know has them.
             game = Path.home() / ('.local/share/Steam/steamapps/common/Divinity Original Sin 2/DefEd/bin') / name
@@ -422,6 +439,8 @@ def main():
                 src = game
 
         if not src.exists():
+            if args.moving_scene:
+                raise SystemExit(f'SETUP FAILURE: moving scene dependency missing: {name}')
             if standalone and name not in siblings:
                 raise SystemExit(f'SETUP FAILURE: missing cold NR dependency {src}; no NGX result')
             if name in siblings:
@@ -446,7 +465,7 @@ def main():
                                 args.cold_ui_correction, args.cold_core_sdk, args.cold_load_optiscaler,
                                 args.cold_device_from_d3d11, args.cold_sibling_snippets, mask_ab=args.mask_ab,
                                 transfer_ab=args.transfer_ab, reset_cost=args.reset_cost,
-                                ui_protect_ab=args.ui_protect_ab)
+                                ui_protect_ab=args.ui_protect_ab, moving_scene=args.moving_scene, dll=dll)
 
     # A separate runtime prefix: the compiler prefix is configured for MSVC, not for graphics, and
     # running the app there conflates "the harness is wrong" with "this prefix has no D3D12".
@@ -490,4 +509,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    if '--moving-scene' in sys.argv and '--help' not in sys.argv:
+        import run_moving
+        with run_moving.lease(OUT / 'moving-run'):
+            main()
+    else:
+        main()
