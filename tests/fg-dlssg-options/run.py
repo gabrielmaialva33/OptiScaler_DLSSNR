@@ -30,7 +30,8 @@ unit += '\n' + function('void StreamlineHooks::applyMenuDlssgInterlock(', hooks)
 unit += '\n' + function('bool DLSSG_Common::SetOptions(', source)
 unit += '\n' + (here / 'cases.cpp').read_text()
 cases = ('unchanged', 'dlssg-retry', 'reflex-retry', 'generations', 'dlssg-generation-retry',
-         'reflex-generation-retry', 'mfg-transition', 'menu', 'dynamic-reflex')
+         'reflex-generation-retry', 'mfg-transition', 'mfg-off-retry', 'mfg-count-reversal', 'mfg-latest-count-retry',
+         'mfg-menu-transition', 'menu', 'dynamic-reflex')
 with tempfile.TemporaryDirectory(prefix='retoque-fg-dlssg-options-') as directory:
     cpp, binary = Path(directory) / 'test.cpp', Path(directory) / 'test'
     cpp.write_text(unit)

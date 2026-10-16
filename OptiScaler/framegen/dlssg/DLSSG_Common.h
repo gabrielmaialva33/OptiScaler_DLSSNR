@@ -13,7 +13,7 @@ class DLSSG_Common : public virtual IFGFeature
     // transition ("DLSS-G interpolation state changed" / NGX ReportOverrideStates).
     // Changing the multiplier while FG stays eOn is ignored by the plugin, so 3x/4x
     // would silently keep generating at the original count. When the requested count
-    // changes we set this so the next Dispatch sends one eOff frame (below) and the
+    // changes we set this so Dispatch retries eOff until accepted (below), then the
     // frame after re-enters eOn with the new count, forcing the feature to rebuild.
     bool _mfgReinitPending = false;
 
@@ -43,7 +43,7 @@ class DLSSG_Common : public virtual IFGFeature
     void QueryState();
 
     // DLSSG and Reflex options for the next present, Reflex optimizes with the game's markers when it has them
-    // False for the single eOff frame needed when changing the MFG count.
+    // False while disabling MFG for a count change, including failed eOff retries.
     bool SetOptions(bool gameMarkersReachStreamline);
 
     // Fills _frameToken and sends the frame's constants, pauses FG when Streamline refuses them

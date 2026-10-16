@@ -73,6 +73,85 @@ static void mfgTransition()
     require(StreamlineProxy::dlssgCalls.size() == 3, "successful MFG restart was not cached");
 }
 
+static void mfgOffRetry()
+{
+    DLSSG_Common output;
+    output.SetOptions(true);
+    Config::Instance()->FGDLSSGInterpolationCount = 3;
+    StreamlineProxy::dlssgResult = sl::Result::eErrorNotInitialized;
+    for (int attempt = 0; attempt < 2; ++attempt)
+    {
+        require(!output.SetOptions(true), "failed MFG disable must keep dispatch paused");
+        require(StreamlineProxy::dlssgCalls.back().mode == sl::DLSSGMode::eOff,
+                "failed MFG disable must retry eOff, not resume eOn");
+    }
+    StreamlineProxy::dlssgResult = sl::Result::eOk;
+    require(!output.SetOptions(true), "successful disable still needs one off frame");
+    require(StreamlineProxy::dlssgCalls.size() == 4 && StreamlineProxy::dlssgCalls.back().mode == sl::DLSSGMode::eOff,
+            "MFG disable was not retried until accepted");
+    require(output.SetOptions(true), "MFG must resume after accepted disable");
+    require(StreamlineProxy::dlssgCalls.size() == 5 && StreamlineProxy::dlssgCalls.back().mode == sl::DLSSGMode::eOn &&
+                StreamlineProxy::dlssgCalls.back().numFramesToGenerate == 3,
+            "MFG resume must send the requested count");
+    output.SetOptions(true);
+    require(StreamlineProxy::dlssgCalls.size() == 5, "resumed options must stay cached");
+}
+
+static void mfgCountReversal()
+{
+    DLSSG_Common output;
+    output.SetOptions(true);
+    Config::Instance()->FGDLSSGInterpolationCount = 3;
+    require(!output.SetOptions(true), "count change must disable MFG");
+    Config::Instance()->FGDLSSGInterpolationCount = 1;
+    require(!output.SetOptions(true), "second count change must complete its disable");
+    require(output.SetOptions(true), "MFG must resume at the latest count");
+    require(StreamlineProxy::dlssgCalls.size() == 4 && StreamlineProxy::dlssgCalls.back().mode == sl::DLSSGMode::eOn &&
+                StreamlineProxy::dlssgCalls.back().numFramesToGenerate == 1,
+            "returning to the cached count must re-enable MFG after forced eOff");
+}
+
+static void mfgLatestCountRetry()
+{
+    DLSSG_Common output;
+    output.SetOptions(true);
+    Config::Instance()->FGDLSSGInterpolationCount = 3;
+    StreamlineProxy::dlssgResult = sl::Result::eErrorNotInitialized;
+    require(!output.SetOptions(true), "failed disable must pause dispatch");
+    Config::Instance()->FGDLSSGInterpolationCount = 2;
+    StreamlineProxy::dlssgResult = sl::Result::eOk;
+    require(!output.SetOptions(true), "new count must still finish the pending disable");
+    require(StreamlineProxy::dlssgCalls.back().mode == sl::DLSSGMode::eOff, "latest count must not skip the disable");
+    StreamlineProxy::dlssgResult = sl::Result::eErrorNotInitialized;
+    output.SetOptions(true);
+    StreamlineProxy::dlssgResult = sl::Result::eOk;
+    output.SetOptions(true);
+    require(StreamlineProxy::dlssgCalls.size() == 5 && StreamlineProxy::dlssgCalls.back().mode == sl::DLSSGMode::eOn &&
+                StreamlineProxy::dlssgCalls.back().numFramesToGenerate == 2,
+            "failed resume must retry the latest requested count");
+    output.SetOptions(true);
+    require(StreamlineProxy::dlssgCalls.size() == 5, "successful latest-count resume must be cached");
+}
+
+static void mfgMenuTransition()
+{
+    DLSSG_Common output;
+    output.SetOptions(true);
+    MenuOverlayBase::visible = true;
+    Config::Instance()->FGDLSSGInterpolationCount = 3;
+    require(!output.SetOptions(true), "count change under the menu must disable MFG");
+    output.SetOptions(true);
+    require(StreamlineProxy::dlssgCalls.back().mode == sl::DLSSGMode::eOff &&
+                (StreamlineProxy::dlssgCalls.back().flags & sl::DLSSGFlags::eRetainResourcesWhenOff),
+            "menu must apply retain-resources after the forced count-change disable");
+    MenuOverlayBase::visible = false;
+    output.SetOptions(true);
+    require(StreamlineProxy::dlssgCalls.back().mode == sl::DLSSGMode::eOn &&
+                StreamlineProxy::dlssgCalls.back().numFramesToGenerate == 3 &&
+                StreamlineProxy::dlssgCalls.back().flags == sl::DLSSGFlags {},
+            "closing the menu must enable the latest count and clear retain-resources");
+}
+
 static void menu()
 {
     DLSSG_Common output;
@@ -136,6 +215,14 @@ int main(int argc, char** argv)
             retry(false, true);
         else if (name == "mfg-transition")
             mfgTransition();
+        else if (name == "mfg-off-retry")
+            mfgOffRetry();
+        else if (name == "mfg-count-reversal")
+            mfgCountReversal();
+        else if (name == "mfg-latest-count-retry")
+            mfgLatestCountRetry();
+        else if (name == "mfg-menu-transition")
+            mfgMenuTransition();
         else if (name == "menu")
             menu();
         else if (name == "dynamic-reflex")

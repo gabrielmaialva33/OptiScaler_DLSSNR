@@ -119,12 +119,24 @@ bool DLSSG_Common::SetOptions(bool gameMarkersReachStreamline)
 
     if (_mfgReinitPending)
     {
-        _mfgReinitPending = false;
-
         sl::DLSSGOptions off {};
         off.mode = sl::DLSSGMode::eOff;
         off.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
-        StreamlineProxy::DLSSGSetOptions()(_viewport, off);
+        const auto result = StreamlineProxy::DLSSGSetOptions()(_viewport, off);
+        if (result != sl::Result::eOk)
+        {
+            LOG_ERROR("Couldn't disable DLSSG for MFG count change, error: {}", magic_enum::enum_name(result));
+            return false;
+        }
+
+        _mfgReinitPending = false;
+        // This write also changes the plugin's cached state. In particular, returning to the
+        // previous count before resuming must not mistake the old eOn options for current ones.
+        _lastDlssgMode = off.mode;
+        _lastDlssgFrames = off.numFramesToGenerate;
+        _lastDlssgDynamicTarget = off.dynamicTargetFrameRate;
+        _lastDlssgFlags = off.flags;
+        _lastDlssgGeneration = StreamlineHooks::dlssgOptionsGeneration();
         LOG_INFO(
             "DLSSG MFG count change: sent eOff to force a feature rebuild; next frame resumes eOn at the new count");
         return false;
